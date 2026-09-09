@@ -101,6 +101,982 @@ It must:
 No agent may invent the verifier during execution. Astra LOW must review its
 literal bytes, SHA-256, invocations, and controls before Luna runs it.
 
+## Frozen verifier authorization checkpoint
+
+Astra LOW returned DRAFT PASS for the following exact LF-terminated verifier at
+SHA-256 `2b40e3dae5425a62e888991ecdd11bd0f63b19cfa826b070a70062183b54cc2d`
+(54,436 bytes). Its built-in self-test returned 0 and ended with
+`PASS self-test CLI/changed-byte/fourth-overlay/extra-root/76-78/sdk-symlink/artifact-dir/dependency-symlink/mode/lineage/traversal`.
+Historical compiled-output hashes are stability anchors rather than reconstructed
+contemporaneous provenance; the evidence verdict must preserve that limitation.
+
+The only authorized retained-evidence invocation of these bytes is:
+
+```text
+python3 -B /tmp/issue679-verifier-2b40e3dae5425a62e888991ecdd11bd0f63b19cfa826b070a70062183b54cc2d.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue672-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+```
+
+Before that invocation, require the verifier path to be an ordinary file with
+mode `0444`, size 54,436, and the exact approved SHA-256. The approved bytes are
+included verbatim below so the stateless issue remains the durable authority.
+
+```python
+#!/usr/bin/env python3
+"""Read-only disposition verifier for the retained #678 export.
+
+CLI: verifier.py REPO COMMIT PRISTINE CANDIDATE ARTIFACT GATE7_EVIDENCE
+     verifier.py --self-test
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+AUTHORITY_COMMIT = "8708c9b998a484d49ccb17a803e79540ca13fcd6"
+FROZEN_AUTHORITY_COMMIT = AUTHORITY_COMMIT
+NEW_COMMIT = AUTHORITY_COMMIT
+NEW_WASM = "93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531"
+OLD_COMMIT = "70899de287c23b70c17b3e41a5b2921801ae8052"
+OLD_WASM = "580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10"
+
+PIN = "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+RESULTS = "hosts/host-web/qualification/results.json"
+MATRIX = "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md"
+OVERLAYS = {PIN, RESULTS, MATRIX}
+ALLOWED_ROOTS = {
+    "sdk/node_modules",
+    "hosts/host-web/qualification/node_modules",
+    "sdk/dist",
+}
+ROOT_CENSUS = (
+    ("candidate-artifact", "/tmp/issue672-attempt3-candidate-artifact"),
+    ("candidate-pristine", "/tmp/issue672-attempt2-candidate-pristine"),
+    ("candidate-source", "/tmp/issue672-attempt2-candidate-source"),
+    ("main-artifact", "/tmp/issue672-main-artifact"),
+    ("issue672-evidence", "/tmp/issue672-attempt3-evidence"),
+    ("issue678-evidence", "/tmp/issue678-evidence"),
+    ("issue678-attempt2-evidence", "/tmp/issue678-attempt2-evidence"),
+    ("issue678-attempt3-evidence", "/tmp/issue678-attempt3-evidence"),
+    ("issue678-attempt3-target", "/tmp/issue678-attempt3-target"),
+)
+PRESERVED_TARGET = pathlib.Path("/tmp/issue672-attempt2-candidate-source/target")
+TARGET_DIGEST = "420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151"
+SOURCE_CANDIDATE = pathlib.Path("/tmp/issue678-attempt2-candidate-source")
+RETAINED_EVIDENCE = pathlib.Path("/tmp/issue678-attempt3-evidence")
+EXPECTED_TRACKED_COUNT = 12195
+TARGET_ENV = "/tmp/issue678-attempt3-target"
+PACKAGE_MANIFEST_HASHES = {
+    "/tmp/issue678-attempt2-candidate-source/sdk/package.json":
+    "62641970eb223ab6c81b97a077e44c3b9d1aa2179513df2f00d235a5546509c0",
+    "/tmp/issue678-attempt2-candidate-source/sdk/package-lock.json":
+    "dee524dd698d40dbcc99fced7e55e651fd5d96b0957a2ddb1cd59c7c486c03d4",
+    "/tmp/issue678-attempt2-candidate-source/hosts/host-web/qualification/package.json":
+    "81a76f3233a35f3d387981087a4172fdafe81cee2be6f43417d1a3b3fbfebd6d",
+    "/tmp/issue678-attempt2-candidate-source/hosts/host-web/qualification/package-lock.json":
+    "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069",
+}
+PLAYWRIGHT_COMMAND = (
+    "node - <<'NODE\n"
+    "const fs = require('node:fs');\n"
+    "const pw = require('./hosts/host-web/qualification/node_modules/playwright');\n"
+    "const pkg = require('./hosts/host-web/qualification/node_modules/playwright/package.json');\n"
+    "if (pkg.version !== '1.62.1') process.exit(1);\n"
+    "for (const [name, browser] of [['chromium', pw.chromium], ['firefox', pw.firefox], ['webkit', pw.webkit]]) {\n"
+    "  const executable = browser.executablePath();\n"
+    "  fs.accessSync(executable, fs.constants.X_OK);\n"
+    "  console.log(`${name}\\t${executable}`);\n"
+    "}\n"
+    "NODE\n"
+)
+GATE_SPECS = (
+    ("07-gate1-resources", "python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue672-attempt3-candidate-artifact"),
+    ("08-gate2-web-test", "bash scripts/test-web-audioworklet.sh"),
+    ("09-gate3-sdk-deletions", "python3 -B scripts/check-sdk-deletions.py"),
+    ("10-gate4-sdk-deletions-selftest", "python3 -B scripts/check-sdk-deletions.py --self-test"),
+    ("11-gate5-sdk-types", "bash scripts/check-sdk-types.sh"),
+    ("12-gate6-sdk-headless", "bash scripts/check-sdk-headless.sh /tmp/issue672-attempt3-candidate-artifact"),
+    ("13-gate7-sdk-package", "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact"),
+    ("14-gate8-qualification", "npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue672-attempt3-candidate-artifact --browser all --check-matrix --self-test-mutations"),
+)
+POSTCHECK_COMMAND = "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target /tmp/issue678-attempt2-evidence/postcheck.sh"
+OVERLAY_COMMAND = "python3 -B /tmp/issue672-attempt2-export-verifier.py /home/bl/misofm/engine-cp8-mapping-delivery 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue678-attempt2-candidate-source overlay"
+ARTIFACT_NAMES = {
+    "miso-engine-v1-abi-layout.json",
+    "miso-engine-v1-audio-worklet-host.d.ts",
+    "miso-engine-v1-audio-worklet-host.js",
+    "miso-engine-v1-audio-worklet.js",
+    "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-parameter-metadata.json",
+}
+ARTIFACT_HASHES = {
+    "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+    "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+    "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+    "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+    "miso-engine-v1-audio-worklet.simd128.wasm": "93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531",
+    "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d",
+}
+FROZEN_ARTIFACT_HASHES = ARTIFACT_HASHES
+# These output SHA-256 values were acquired after the successful retained gate-7
+# package command. They are stability anchors for this disposition, not a claim
+# that this verifier reproduces TypeScript or esbuild output bytes. The adjacent
+# producer labels classify how each path was produced from the authoritative SDK
+# inputs and staging script.
+DIST_EXPECTATIONS = {
+    'sdk/dist/LICENSE': ('stage-repository-copy', 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30', 436),
+    'sdk/dist/NOTICE': ('stage-repository-copy', 'b7a2d82a4d67900cd09ddd95d27a20fe9acb964c133328c1c95ea5a44d9655d1', 436),
+    'sdk/dist/assets.d.ts': ('typescript-compiler-declaration', 'e4ff336584eaad1794858fc3381b281bc92b23818c7f57bcc11e6c0baab93f2f', 436),
+    'sdk/dist/assets.js': ('typescript-compiler-javascript', 'e4afaa81432389c85a1f91a4fe1ba4bfe812f23a302e188818f21b3075bd258b', 436),
+    'sdk/dist/assets/miso-engine-v1-abi-layout.json': ('stage-artifact-copy', '40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919', 436),
+    'sdk/dist/assets/miso-engine-v1-audio-worklet-host.d.ts': ('stage-artifact-copy', '445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf', 436),
+    'sdk/dist/assets/miso-engine-v1-audio-worklet-host.js': ('stage-artifact-copy', '21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a', 436),
+    'sdk/dist/assets/miso-engine-v1-audio-worklet.js': ('stage-artifact-copy', '225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb', 436),
+    'sdk/dist/assets/miso-engine-v1-audio-worklet.simd128.wasm': ('stage-artifact-copy', '93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531', 509),
+    'sdk/dist/assets/miso-engine-v1-parameter-metadata.json': ('stage-artifact-copy', '6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d', 436),
+    'sdk/dist/assets/miso-engine-v1-pcm-feed-worklet.js': ('stage-source-copy', 'a4826b08bb0392fdcd0a4d0db05c000de446973f7d7ebaca16fc26677b756135', 436),
+    'sdk/dist/assets/miso-engine-v1-sdk-manifest.json': ('stage-package-manifest', 'e868a28a78f3854187d9bf21a2659ed8c32ee063ee0397d340f257e46d0302fb', 436),
+    'sdk/dist/browser/console.d.ts': ('typescript-compiler-declaration', '2c7a4e2a704c3dd8513dd81f092ecc61a3fcea4495bf77bd1cd54b545037189d', 436),
+    'sdk/dist/browser/console.js': ('typescript-compiler-javascript', '81e8107d051d69080d745c1d76a2f3191a31773b7a9b685331fc86572528e9aa', 436),
+    'sdk/dist/browser/default-host.d.ts': ('typescript-compiler-declaration', '80712c0167485831ce6a68c25ecb084a488572def085047c319fa99a515002b9', 436),
+    'sdk/dist/browser/default-host.js': ('typescript-compiler-javascript', 'fa774a56e85075a039e8a3af7bf19e1cfd513a1dceeb7350aca531dc9e02b8cf', 436),
+    'sdk/dist/browser/engine.d.ts': ('typescript-compiler-declaration', '7325af6884edc9d53d42644e39ff0644cb9d247390a37c4b059f3a779b82df47', 436),
+    'sdk/dist/browser/engine.js': ('typescript-compiler-javascript', 'cf24811ea6110a1dedcfd2a613cb5897d9284e9feeccdf8bc6b00392fd69d098', 436),
+    'sdk/dist/browser/host-mirror.d.ts': ('typescript-compiler-declaration', 'b11868a19cec3a233751a2907c036df2c7565ccb6a0318ec7c8a303b78cfdb9c', 436),
+    'sdk/dist/browser/host-mirror.js': ('typescript-compiler-javascript', '198022132d87eff0a7d9f144b9a5202301dd22f75768effee69a08cc3186ef43', 436),
+    'sdk/dist/browser/index.d.ts': ('typescript-compiler-declaration', 'a66dbf369d84cc292873df9c4586f0381676adc7083324f3181b9de953321b32', 436),
+    'sdk/dist/browser/index.js': ('typescript-compiler-javascript', '484a0f115da6457a57549ec93f69979d3b98c64a9ca2e2e87592337e005d3ac7', 436),
+    'sdk/dist/browser/pcm-feed.d.ts': ('typescript-compiler-declaration', '68c89e8ed58905b881747205a39e88bd7c38057d1921e48893a6387d52ecd7c1', 436),
+    'sdk/dist/browser/pcm-feed.js': ('typescript-compiler-javascript', 'af54f5adace60dd74606df797fbf2fb55782ab19acf9e7b81f4eb307fde22149', 436),
+    'sdk/dist/browser/pcm-ring.d.ts': ('typescript-compiler-declaration', '40b1ba9c0980f38b4c6d98bc31732d3b996651d7cbb1654ba4fb15a73597b66b', 436),
+    'sdk/dist/browser/pcm-ring.js': ('typescript-compiler-javascript', '9412b1578929f2832495a2020f1bb4d455c4f0019cc4eab050ba69ac048e9cd3', 436),
+    'sdk/dist/browser/policy.d.ts': ('typescript-compiler-declaration', '951e16db813e79937adfaf2126501feb20885862de43cfd04ee7c779e0764242', 436),
+    'sdk/dist/browser/policy.js': ('typescript-compiler-javascript', 'b3ccb790722c584e7a3b4dd2b448182a02f15a123b28d87210604d2bb3de604e', 436),
+    'sdk/dist/browser/scratch-worker.d.ts': ('typescript-compiler-declaration', '8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881', 436),
+    'sdk/dist/browser/scratch-worker.js': ('stage-esbuild-bundle', '94611b2459cfe5bc13cb5604ec5d77308cf458c42816122f3f001b8a48734363', 436),
+    'sdk/dist/browser/scratch.d.ts': ('typescript-compiler-declaration', '208fcf12c13cea2f6c2710cf6e1cedb6d6d1330fa57a2bc37bc5055bf4cc31a8', 436),
+    'sdk/dist/browser/scratch.js': ('typescript-compiler-javascript', '6069bbe6d383dcada3960f82220fd0fddcf4d77fe094ee641ce4b161cabd7b1a', 436),
+    'sdk/dist/browser/shipped-host.d.ts': ('stage-source-copy', '445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf', 436),
+    'sdk/dist/cli/session-request.d.ts': ('typescript-compiler-declaration', 'ba151b3b7d0f655c3560f41f3911a685660c2472b0159ff9d9f6a03c85e9b095', 436),
+    'sdk/dist/cli/session-request.js': ('typescript-compiler-javascript', 'c3ce3b7955eea454b2966cd129a21f84a68f976bc5394765833502f24fa649d3', 436),
+    'sdk/dist/core/abi.d.ts': ('typescript-compiler-declaration', '6c04f851b95cdb17679d85858d7aa6c4b09fb548015e5385e7f0120550b57b20', 436),
+    'sdk/dist/core/abi.js': ('typescript-compiler-javascript', '1b25ff5a4563fd32316d80ffa02363dfeebe245bb3b2882a27831bab1735da95', 436),
+    'sdk/dist/core/agent.d.ts': ('typescript-compiler-declaration', '36794bcc079dbf1e2793767e8519ac8359f0a28661937157c50d64592aa6aa57', 436),
+    'sdk/dist/core/agent.js': ('typescript-compiler-javascript', '64a9d683bc3579c8cf784b2c30703f1c0140a004536d05a80470eb923d039cb4', 436),
+    'sdk/dist/core/asset.d.ts': ('typescript-compiler-declaration', '77cb291d2670af87a48352e47e0a462c2b3a43e2e99636834b88d2271741f01f', 436),
+    'sdk/dist/core/asset.js': ('typescript-compiler-javascript', '30a86bdbecd0c00cca83d5a9a9812ae4cbe96131b1c4ecb2b2de92f662ece5fd', 436),
+    'sdk/dist/core/boundary.d.ts': ('typescript-compiler-declaration', '0e33997c0dd9e844aba3faac8ef5bd9ed87f91fe7231937f8a302bd35d1244e7', 436),
+    'sdk/dist/core/boundary.js': ('typescript-compiler-javascript', '77709ff5004711186ae16dbca7baafcbc75ef1bccf3eda71328614f4f193ceb8', 436),
+    'sdk/dist/core/console.d.ts': ('typescript-compiler-declaration', '8dfaa0e54ce1a20eb347ec1b4871d176a415a65f84df94cd9d291a557b84a4ce', 436),
+    'sdk/dist/core/console.js': ('typescript-compiler-javascript', '7c77845d7768b980ef0cc92548564a6fbb5e1a1fe8c34c78f6a9959f17ba6e69', 436),
+    'sdk/dist/core/decimal.d.ts': ('typescript-compiler-declaration', '7879354d818227436120bde2e84b4cd0a30379f630de8756bd54bd5f7ff29183', 436),
+    'sdk/dist/core/decimal.js': ('typescript-compiler-javascript', '0670d35ed9a2a9d460b15f696d04a3305093cb03eda65ec5d4ebdb125551c6af', 436),
+    'sdk/dist/core/errors.d.ts': ('typescript-compiler-declaration', '18f6dcdf9a78a6887abc946a9eead28c0b55331d982648576a6078297efe8255', 436),
+    'sdk/dist/core/errors.js': ('typescript-compiler-javascript', 'e4fde804fd34dc33335960c7c6d3927bbedd9356e0e5b7278426a1d4e8657226', 436),
+    'sdk/dist/core/hex.d.ts': ('typescript-compiler-declaration', 'b6fa36fc54fabbb1259dd8da7ef20ee24eb5fef6bc621e14f39cc6803c0af201', 436),
+    'sdk/dist/core/hex.js': ('typescript-compiler-javascript', '6e7a8f8b4b01d7dff632ef3c8686d529a40d5c8fac7db3d80f1367f639342529', 436),
+    'sdk/dist/core/lattice.d.ts': ('typescript-compiler-declaration', 'bd8bc30dc74c929e33b22eda53510e9ebfb4b32bc5bc827f8e9394d7255ac02b', 436),
+    'sdk/dist/core/lattice.js': ('typescript-compiler-javascript', '0e0f56af712b6b0799082ab736f6abcdfafe303bd0c701feb7065fe13b662015', 436),
+    'sdk/dist/core/session.d.ts': ('typescript-compiler-declaration', 'e2c03e4ec668be11b0877e410d2163004416dac68783be020aa01608ef66c12d', 436),
+    'sdk/dist/core/session.js': ('typescript-compiler-javascript', 'cab13fb6a195576bffc825c4713b73f90e58a24f9703af62e23a6dc52d4f962b', 436),
+    'sdk/dist/core/types.d.ts': ('typescript-compiler-declaration', 'f1e4b15a8c01b9ac1c96f96f95f8dab1ff8c3214430a2b82bd0d383f83ff0fa1', 436),
+    'sdk/dist/core/types.js': ('typescript-compiler-javascript', '8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881', 436),
+    'sdk/dist/core/writer.d.ts': ('typescript-compiler-declaration', '7f17c6f973c9e87d703e4b7415e53d20ac9d8821c0b2e40409dadc70f16a51ac', 436),
+    'sdk/dist/core/writer.js': ('typescript-compiler-javascript', 'a3c87384ce21681706df7d4c92ca9a7fd67696913fa5ed52110bc1a7d8d189c6', 436),
+    'sdk/dist/enginectl.d.ts': ('typescript-compiler-declaration', '43e818adf60173644896298637f47b01d5819b17eda46eaa32d0c7d64724d012', 436),
+    'sdk/dist/enginectl.js': ('typescript-compiler-javascript', 'c642c6e4d638213abe71ec031f56fd574e44afbbe87f524cc01e1e240831fe4a', 509),
+    'sdk/dist/generated/abi.d.ts': ('typescript-compiler-declaration', '9f05c4603ba99915ae71edfee78d17f26d2268dcf13f6f02d32335b043924efa', 436),
+    'sdk/dist/generated/abi.js': ('typescript-compiler-javascript', '22c0b1b96a5fa055a8a325c63bce5c30f3c5302571f69c7fa988f95083a9f266', 436),
+    'sdk/dist/generated/catalog.d.ts': ('typescript-compiler-declaration', '7192f15c3d0cfdf4e404da86ec6896f08a01379c7ca096bfddba96e15caf60d2', 436),
+    'sdk/dist/generated/catalog.js': ('typescript-compiler-javascript', 'e931783bca4bd40beded82aa2de09c811db480d71ae854add97a5af528902839', 436),
+    'sdk/dist/generated/provenance.d.ts': ('typescript-compiler-declaration', '2ca0b05367d31a261eafd8a720cd09999b5705ae37ffb3b4fcbf0610f50bb419', 436),
+    'sdk/dist/generated/provenance.js': ('typescript-compiler-javascript', '3ae3c2109c7cc470fc6c5c9a275d6baa217d69f510d67875fc4617d46b670d7b', 436),
+    'sdk/dist/headless/assets.d.ts': ('typescript-compiler-declaration', '2cf2e9f674b43b10d0c42b37353cfa83095eb7122b137848b7c3ec294e16c00b', 436),
+    'sdk/dist/headless/assets.js': ('typescript-compiler-javascript', '4707acae4e1923b749a16d544e39971300007e9fbfe16c3d3dc2de43bdde1cf4', 436),
+    'sdk/dist/headless/engine.d.ts': ('typescript-compiler-declaration', '53acff6ab25df2d9f1779e31ce35c2ebab60c90d0fcd5e71d146bd7db87746aa', 436),
+    'sdk/dist/headless/engine.js': ('typescript-compiler-javascript', '48b261915fbebfe0ac7b05bd5fb6e84316bf53df28e7ee626462898c53778214', 436),
+    'sdk/dist/headless/index.d.ts': ('typescript-compiler-declaration', 'c9865dec5068768d8c2eae7610324f187584dfeb79eeecb42aa9b533ca4c6f05', 436),
+    'sdk/dist/headless/index.js': ('typescript-compiler-javascript', '1bd256d6ef58c7808c5e351ec546df6f73918a6e012dfad48dd6d3181c79505b', 436),
+    'sdk/dist/index.d.ts': ('typescript-compiler-declaration', 'ae89e56e7db8b99c31a2bebde3f076684006cb76b6839acd940a2aa9e720c1f0', 436),
+    'sdk/dist/index.js': ('typescript-compiler-javascript', '12a52d7ee018d751ea7f5b41faf33b42e8ef55bec31a5a261fbeba46de9f3128', 436),
+    'sdk/dist/internal/session-json.d.ts': ('typescript-compiler-declaration', '9c619cccd5d2c9578f0906c06d45556ba683a3c59c1ca53839a73a4d0061ac98', 436),
+    'sdk/dist/internal/session-json.js': ('typescript-compiler-javascript', '7f4dba589ab98d3e0d6ae8d062ef95f4d74c407c10fedee3212570015c7ea8ee', 436),
+}
+FROZEN_DIST_EXPECTATIONS = DIST_EXPECTATIONS
+TARGET_DIGEST = "420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151"
+
+OLD_SENTENCE = (
+    "This matrix is generated from the pinned Playwright 1.62.1 headless Linux "
+    "qualification run over candidate `70899de287c23b70c17b3e41a5b2921801ae8052` "
+    "and the single shipped simd128 AudioWorklet artifact "
+    "`580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`. The "
+    "version shown is the lowest version qualified by this run; older versions "
+    "are unqualified, not implicitly supported."
+)
+NEW_SENTENCE = (
+    "This matrix is generated from the pinned Playwright 1.62.1 headless Linux "
+    "qualification run over candidate `8708c9b998a484d49ccb17a803e79540ca13fcd6` "
+    "and the single shipped simd128 AudioWorklet artifact "
+    "`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`. The "
+    "version shown is the lowest version qualified by this run; older versions "
+    "are unqualified, not implicitly supported."
+)
+
+
+class VerificationError(RuntimeError):
+    pass
+
+
+def git(repo: pathlib.Path, *args: str) -> bytes:
+    if not all(isinstance(arg, str) for arg in args):
+        raise VerificationError("git arguments must be strings")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise VerificationError(f"git command failed: {args!r}") from error
+    return result.stdout
+
+
+def tracked_inventory(repo: pathlib.Path, ref: str) -> dict[str, tuple[str, str]]:
+    if not isinstance(ref, str):
+        raise VerificationError("commit/tree authority must be a string")
+    try:
+        kind = git(repo, "cat-file", "-t", ref).decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise VerificationError("authority type is not ASCII") from error
+    if kind == "commit":
+        git(repo, "cat-file", "-e", f"{ref}^{{tree}}")
+    elif kind != "tree":
+        raise VerificationError("authority is not a commit/tree")
+    out: dict[str, tuple[str, str]] = {}
+    for row in git(repo, "ls-tree", "-rz", "-r", "--full-tree", ref).split(b"\0"):
+        if not row:
+            continue
+        try:
+            meta, raw_path = row.split(b"\t", 1)
+            mode, entry_kind, oid = meta.split()
+            path = raw_path.decode("utf-8")
+            mode_text = mode.decode("ascii")
+            entry_kind_text = entry_kind.decode("ascii")
+            oid_text = oid.decode("ascii")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise VerificationError("malformed tracked inventory row") from error
+        if entry_kind_text != "blob":
+            raise VerificationError("authority contains a non-blob tracked entry")
+        if path in out:
+            raise VerificationError("duplicate tracked path")
+        out[path] = (mode_text, oid_text)
+    if len(out) != EXPECTED_TRACKED_COUNT and ref == FROZEN_AUTHORITY_COMMIT:
+        raise VerificationError(f"tracked path count mismatch: {len(out)}")
+    return out
+
+
+def expected_dirs(paths: set[str]) -> set[str]:
+    result: set[str] = set()
+    for name in paths:
+        parent = pathlib.PurePosixPath(name).parent
+        while str(parent) != ".":
+            result.add(str(parent))
+            parent = parent.parent
+    return result
+
+
+def ignored(name: str, roots: set[str]) -> bool:
+    return any(name == root or name.startswith(root + "/") for root in roots)
+
+
+def ordinary_directory(path: pathlib.Path, label: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise VerificationError(f"missing {label}: {path}") from error
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise VerificationError(f"{label} is not an ordinary directory: {path}")
+
+
+def ordinary_file(path: pathlib.Path, label: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise VerificationError(f"missing {label}: {path}") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise VerificationError(f"{label} is not an ordinary file: {path}")
+
+
+def walk_export(root: pathlib.Path, ignored_roots: set[str]) -> tuple[set[str], set[str]]:
+    ordinary_directory(root, "export root")
+    files: set[str] = set()
+    dirs: set[str] = set()
+
+    def visit(base: pathlib.Path, relbase: str) -> None:
+        try:
+            entries = sorted(os.scandir(base), key=lambda entry: entry.name)
+        except OSError as error:
+            raise VerificationError(f"export traversal failed: {base}") from error
+        for entry in entries:
+            rel = f"{relbase}/{entry.name}".strip("/")
+            if ignored(rel, ignored_roots):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise VerificationError(f"export entry cannot be stated: {rel}") from error
+            if stat.S_ISDIR(info.st_mode):
+                dirs.add(rel)
+                visit(pathlib.Path(entry.path), rel)
+            else:
+                files.add(rel)
+
+    visit(root, "")
+    return files, dirs
+
+
+def check_entry_bytes(
+    repo: pathlib.Path,
+    root: pathlib.Path,
+    path: str,
+    mode: str,
+    oid: str,
+    compare_bytes: bool,
+) -> None:
+    item = root / path
+    try:
+        info = item.lstat()
+    except OSError as error:
+        raise VerificationError(f"missing tracked path: {path}") from error
+    blob = git(repo, "cat-file", "blob", oid)
+    if mode == "120000":
+        if not stat.S_ISLNK(info.st_mode) or os.fsencode(os.readlink(item)) != blob:
+            raise VerificationError(f"symlink mismatch: {path}")
+        return
+    if mode not in {"100644", "100755"} or not stat.S_ISREG(info.st_mode):
+        raise VerificationError(f"regular-file mode mismatch: {path}")
+    if bool(info.st_mode & 0o111) != (mode == "100755"):
+        raise VerificationError(f"executable mode mismatch: {path}")
+    if compare_bytes:
+        try:
+            if item.read_bytes() != blob:
+                raise VerificationError(f"tracked bytes mismatch: {path}")
+        except OSError as error:
+            raise VerificationError(f"tracked file cannot be read: {path}") from error
+
+
+def verify_export(
+    repo: pathlib.Path,
+    ref: str,
+    root: pathlib.Path,
+    overlays: bool,
+    artifact_dir: pathlib.Path,
+    artifact_hashes: dict[str, str],
+    evidence: pathlib.Path,
+    emit_inventory: bool,
+    dist_expectations: dict[str, tuple[str, str, int]],
+    require_authority: bool,
+) -> None:
+    if require_authority and ref != AUTHORITY_COMMIT:
+        raise VerificationError("wrong frozen authority commit")
+    expected = tracked_inventory(repo, ref)
+    expected_set = set(expected)
+    ignored_roots = ALLOWED_ROOTS if overlays else set()
+    if overlays:
+        for name in sorted(ALLOWED_ROOTS):
+            ordinary_directory(root / name, f"allowed root {name}")
+        if os.path.lexists(root / "target"):
+            raise VerificationError("source-local target exists")
+    actual, dirs = walk_export(root, ignored_roots)
+    if actual != expected_set:
+        raise VerificationError("missing or extra tracked path")
+    if dirs != expected_dirs(expected_set):
+        raise VerificationError("missing or extra tracked directory")
+    if os.path.lexists(root / ".git"):
+        raise VerificationError("export contains .git")
+    for path, (mode, oid) in expected.items():
+        compare = not (overlays and path in OVERLAYS)
+        check_entry_bytes(repo, root, path, mode, oid, compare)
+    if overlays:
+        verify_dist_and_artifacts(
+            repo, root, artifact_dir, artifact_hashes, emit_inventory,
+            dist_expectations, require_authority,
+        )
+
+def verify_candidate_lineage(
+    pristine: pathlib.Path,
+    candidate: pathlib.Path,
+    lineage: tuple[str, str, str],
+) -> None:
+    new_commit, new_wasm, new_sentence = lineage
+    if (candidate / PIN).read_bytes() != (new_wasm + "\n").encode():
+        raise VerificationError("pin bytes mismatch")
+    pristine_results = json.loads((pristine / RESULTS).read_text())
+    candidate_results = json.loads((candidate / RESULTS).read_text())
+    expected_results = copy.deepcopy(pristine_results)
+    expected_results["candidateCommit"] = new_commit
+    expected_results["wasmSha256"] = new_wasm
+    if candidate_results != expected_results:
+        raise VerificationError("results changed beyond the two lineage fields")
+    pristine_matrix = (pristine / MATRIX).read_text()
+    candidate_matrix = (candidate / MATRIX).read_text()
+    if pristine_matrix.count(OLD_SENTENCE) != 1:
+        raise VerificationError("pristine matrix lineage sentence is ambiguous")
+    if candidate_matrix != pristine_matrix.replace(OLD_SENTENCE, new_sentence):
+        raise VerificationError("matrix changed beyond lineage sentence")
+
+
+def verify_dist_and_artifacts(
+    repo: pathlib.Path,
+    candidate: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    artifact_hashes: dict[str, str],
+    emit_inventory: bool,
+    dist_expectations: dict[str, tuple[str, str, int]],
+    require_authority: bool,
+) -> None:
+    if require_authority and dist_expectations is FROZEN_DIST_EXPECTATIONS:
+        verify_taxonomy_sources(candidate)
+    dist = candidate / "sdk/dist"
+    regular: list[pathlib.Path] = []
+    seen_dirs: set[str] = set()
+    def onerror(error: OSError) -> None:
+        raise error
+    try:
+        for base, names, filenames in os.walk(dist, followlinks=False, onerror=onerror):
+            relbase = pathlib.Path(base).relative_to(dist).as_posix()
+            if relbase != ".":
+                seen_dirs.add(relbase)
+            for name in names:
+                item = pathlib.Path(base) / name
+                if item.is_symlink() or not item.is_dir():
+                    raise VerificationError("sdk/dist contains a symlink or special directory")
+                seen_dirs.add((pathlib.Path(relbase) / name).as_posix().removeprefix("./"))
+            for name in filenames:
+                item = pathlib.Path(base) / name
+                if item.is_symlink() or not stat.S_ISREG(item.lstat().st_mode):
+                    raise VerificationError("sdk/dist contains a symlink or special file")
+                regular.append(item)
+    except OSError as error:
+        raise VerificationError(f"sdk/dist traversal failed: {error}") from error
+    expected_dist_dirs: set[str] = set()
+    for dist_path in dist_expectations:
+        parent = pathlib.PurePosixPath(dist_path.removeprefix("sdk/dist/")).parent
+        while str(parent) != ".":
+            expected_dist_dirs.add(str(parent))
+            parent = parent.parent
+    if seen_dirs != expected_dist_dirs:
+        raise VerificationError("sdk/dist directory inventory mismatch")
+    actual_names = {p.relative_to(candidate).as_posix() for p in regular}
+    if actual_names != set(dist_expectations) or len(actual_names) != 77:
+        raise VerificationError("sdk/dist names do not match frozen producer taxonomy")
+    for item in sorted(regular, key=lambda p: p.relative_to(candidate).as_posix()):
+        raw = item.read_bytes()
+        rel = item.relative_to(candidate).as_posix()
+        mode = stat.S_IMODE(item.stat().st_mode)
+        producer, expected_hash, expected_mode = dist_expectations[rel]
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if mode != expected_mode:
+            raise VerificationError(f"sdk/dist mode mismatch for {rel} ({producer})")
+        if actual_hash != expected_hash:
+            raise VerificationError(f"sdk/dist bytes mismatch for {rel} ({producer})")
+        if emit_inventory:
+            print(f"{rel}\t{mode:04o}\t{len(raw)}\t{actual_hash}\t{producer}")
+    if dist_expectations is FROZEN_DIST_EXPECTATIONS:
+        direct_copies = {
+            dist / "LICENSE": candidate / "LICENSE",
+            dist / "NOTICE": candidate / "NOTICE",
+            dist / "assets/miso-engine-v1-pcm-feed-worklet.js":
+                candidate / "sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js",
+            dist / "browser/shipped-host.d.ts": candidate / "sdk/src/browser/shipped-host.d.ts",
+        }
+        for packaged, source in direct_copies.items():
+            if packaged.read_bytes() != source.read_bytes():
+                raise VerificationError(f"direct staged copy differs: {packaged.relative_to(candidate)}")
+    if not artifact_dir.is_dir() or artifact_dir.is_symlink():
+        raise VerificationError("retained artifact root is not an ordinary directory")
+    artifact_entries = list(artifact_dir.iterdir())
+    if any(p.is_symlink() or not p.is_file() for p in artifact_entries):
+        raise VerificationError("retained artifact root contains a non-regular entry")
+    artifact_names = {p.name for p in artifact_entries}
+    if artifact_names != set(artifact_hashes):
+        raise VerificationError("retained candidate artifact does not have exactly six files")
+    assets = candidate / "sdk/dist/assets"
+    for name, expected_hash in artifact_hashes.items():
+        source = artifact_dir / name
+        packaged = assets / name
+        if not packaged.is_file() or packaged.is_symlink():
+            raise VerificationError(f"missing packaged artifact: {name}")
+        if hashlib.sha256(source.read_bytes()).hexdigest() != expected_hash:
+            raise VerificationError(f"retained artifact hash mismatch: {name}")
+        if packaged.read_bytes() != source.read_bytes():
+            raise VerificationError(f"packaged artifact differs: {name}")
+    if dist_expectations is FROZEN_DIST_EXPECTATIONS:
+        manifest_path = assets / "miso-engine-v1-sdk-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        expected_manifest = {
+            "schema": "miso.sdk.package-assets.v1",
+            "abiVersion": 65536,
+            "catalogSchema": "miso.web.parameter-metadata.v1",
+            "abiLayoutSchema": "miso.web.abi-layout.v1",
+            "artifacts": {
+                name: {
+                    "bytes": (artifact_dir / name).stat().st_size,
+                    "sha256": hashlib.sha256((artifact_dir / name).read_bytes()).hexdigest(),
+                }
+                for name in sorted(artifact_hashes)
+            },
+        }
+        if manifest != expected_manifest:
+            raise VerificationError("SDK manifest does not match authoritative artifact inputs")
+
+
+def verify_taxonomy_sources(candidate: pathlib.Path) -> None:
+    """Cross-check the frozen 77-name table against the SDK's current producers."""
+    package = json.loads((candidate / "sdk/package.json").read_text())
+    tsconfig = json.loads((candidate / "sdk/tsconfig.build.json").read_text())
+    options = tsconfig.get("compilerOptions", {})
+    if package.get("files") != ["dist"]:
+        raise VerificationError("SDK package does not publish only dist")
+    if options.get("outDir") != "./dist" or options.get("rootDir") != "./src":
+        raise VerificationError("SDK TypeScript output roots changed")
+    if options.get("declaration") is not True:
+        raise VerificationError("SDK declarations are not enabled")
+    generated: dict[str, str] = {}
+    for source in sorted((candidate / "sdk/src").rglob("*.ts")):
+        rel = source.relative_to(candidate / "sdk/src").as_posix()
+        if rel.endswith(".d.ts"):
+            continue
+        generated[f"sdk/dist/{pathlib.Path(rel).with_suffix('.js').as_posix()}"] = "typescript-compiler-javascript"
+        generated[f"sdk/dist/{pathlib.Path(rel).with_suffix('.d.ts').as_posix()}"] = "typescript-compiler-declaration"
+    generated["sdk/dist/browser/scratch-worker.js"] = "stage-esbuild-bundle"
+    for name in ARTIFACT_NAMES:
+        generated[f"sdk/dist/assets/{name}"] = "stage-artifact-copy"
+    generated.update({
+        "sdk/dist/assets/miso-engine-v1-sdk-manifest.json": "stage-package-manifest",
+        "sdk/dist/assets/miso-engine-v1-pcm-feed-worklet.js": "stage-source-copy",
+        "sdk/dist/browser/shipped-host.d.ts": "stage-source-copy",
+        "sdk/dist/LICENSE": "stage-repository-copy",
+        "sdk/dist/NOTICE": "stage-repository-copy",
+    })
+    if generated != {name: producer for name, (producer, _, _) in DIST_EXPECTATIONS.items()}:
+        raise VerificationError("SDK producer taxonomy differs from authoritative inputs")
+    stage = (candidate / "sdk/codegen/stage-package.mjs").read_text()
+    for marker in (
+        "miso-engine-v1-sdk-manifest.json", "miso-engine-v1-pcm-feed-worklet.js",
+        "shipped-host.d.ts", "resolve(repoRoot, \"LICENSE\")", "resolve(repoRoot, \"NOTICE\")",
+        "scratch-worker.js",
+    ):
+        if marker not in stage:
+            raise VerificationError(f"SDK staging producer marker missing: {marker}")
+
+
+def verify_gate7_evidence(
+    evidence: pathlib.Path,
+    artifact_hashes: dict[str, str],
+) -> None:
+    names = (
+        "13-gate7-sdk-package.command",
+        "13-gate7-sdk-package.meta",
+        "13-gate7-sdk-package.stdout",
+        "13-gate7-sdk-package.stderr",
+        "13-gate7-sdk-package.status",
+        "13-gate7-postcheck.command",
+        "13-gate7-postcheck.stdout",
+        "13-gate7-postcheck.stderr",
+        "13-gate7-postcheck.status",
+    )
+    for name in names:
+        item = evidence / name
+        if not item.is_file() or item.is_symlink():
+            raise VerificationError(f"missing gate-7 evidence: {name}")
+    if (evidence / "13-gate7-sdk-package.status").read_text().strip() != "0":
+        raise VerificationError("gate-7 package command was not status 0")
+    if (evidence / "13-gate7-postcheck.status").read_text().strip() != "0":
+        raise VerificationError("gate-7 postcheck was not status 0")
+    command = (evidence / "13-gate7-sdk-package.command").read_text().strip()
+    expected_command = "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact"
+    if command != expected_command:
+        raise VerificationError("gate-7 command or artifact argument mismatch")
+    post_command = (evidence / "13-gate7-postcheck.command").read_text().strip()
+    if post_command != "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target /tmp/issue678-attempt2-evidence/postcheck.sh":
+        raise VerificationError("gate-7 postcheck command mismatch")
+    meta: dict[str, str] = {}
+    for line in (evidence / "13-gate7-sdk-package.meta").read_text().splitlines():
+        if "=" not in line:
+            raise VerificationError("malformed gate-7 metadata")
+        key, value = line.split("=", 1)
+        if key in meta:
+            raise VerificationError("duplicate gate-7 metadata key")
+        meta[key] = value
+    if meta.get("cwd") != "/tmp/issue678-attempt2-candidate-source":
+        raise VerificationError("gate-7 cwd mismatch")
+    if meta.get("CARGO_TARGET_DIR") != "/tmp/issue678-attempt3-target":
+        raise VerificationError("gate-7 target mismatch")
+    if meta.get("status") != "0":
+        raise VerificationError("gate-7 metadata status mismatch")
+    try:
+        start = datetime.datetime.fromisoformat(meta["start_utc"].replace("Z", "+00:00"))
+        finish = datetime.datetime.fromisoformat(meta["finish_utc"].replace("Z", "+00:00"))
+    except (KeyError, ValueError) as error:
+        raise VerificationError("malformed gate-7 timestamps") from error
+    if not start < finish:
+        raise VerificationError("gate-7 timestamps are not ordered")
+    stdout = (evidence / "13-gate7-sdk-package.stdout").read_text()
+    if "SDK publishable-tarball gate passed" not in stdout:
+        raise VerificationError("gate-7 output lacks package success verdict")
+    if "staged 6 Engine V1 artifacts and package manifest" not in stdout:
+        raise VerificationError("gate-7 output lacks artifact staging result")
+    if "SDK generated surface is the engine's current output" not in stdout:
+        raise VerificationError("gate-7 output lacks generated-surface result")
+    post_stdout = (evidence / "13-gate7-postcheck.stdout").read_text()
+    for marker in (
+        "source_target=absent",
+        "artifact_hashes:",
+        "target_identity=",
+    ):
+        if marker not in post_stdout:
+            raise VerificationError(f"gate-7 postcheck lacks {marker}")
+    for digest in artifact_hashes.values():
+        if digest not in post_stdout:
+            raise VerificationError(f"gate-7 postcheck lacks artifact identity {digest}")
+    if TARGET_DIGEST not in (evidence / "13-gate7-postcheck.stderr").read_text():
+        raise VerificationError("gate-7 postcheck lacks streamed target identity")
+
+
+def verify_all(
+    repo: pathlib.Path,
+    ref: str,
+    pristine: pathlib.Path,
+    candidate: pathlib.Path,
+    artifact: pathlib.Path,
+    evidence: pathlib.Path,
+    lineage: tuple[str, str, str] = (NEW_COMMIT, NEW_WASM, NEW_SENTENCE),
+    artifact_hashes: dict[str, str] = ARTIFACT_HASHES,
+    dist_expectations: dict[str, tuple[str, str, int]] = DIST_EXPECTATIONS,
+    require_authority: bool = True,
+    emit_inventory: bool = True,
+) -> None:
+    if require_authority and ref != AUTHORITY_COMMIT:
+        raise VerificationError("wrong authority")
+    verify_export(
+        repo, ref, pristine, False, artifact, artifact_hashes,
+        evidence, False, dist_expectations, require_authority,
+    )
+    verify_export(
+        repo, ref, candidate, True, artifact, artifact_hashes,
+        evidence, emit_inventory, dist_expectations, require_authority,
+    )
+    verify_candidate_lineage(pristine, candidate, lineage)
+    verify_gate7_evidence(evidence, artifact_hashes)
+    print("PASS authority/pristine/candidate/artifact/gate7")
+
+
+def assert_reject(action) -> None:
+    try:
+        action()
+    except VerificationError:
+        return
+    raise AssertionError("negative control unexpectedly passed")
+
+
+def synthetic_self_test() -> None:
+    with tempfile.TemporaryDirectory(prefix="issue679-selftest-") as temp:
+        base = pathlib.Path(temp)
+        repo = base / "repo"
+        pristine = base / "pristine"
+        candidate = base / "candidate"
+        artifact = base / "artifact"
+        evidence = base / "evidence"
+        repo.mkdir()
+        artifact.mkdir()
+        evidence.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        tracked = {
+            "plain.txt": b"plain\n",
+            PIN: b"old-wasm\n",
+            RESULTS: json.dumps({"candidateCommit": OLD_COMMIT, "wasmSha256": OLD_WASM, "rows": [1]}).encode(),
+            MATRIX: (OLD_SENTENCE + "\n").encode(),
+            "sdk/package.json": b"{}\n",
+            "hosts/host-web/qualification/package.json": b"{}\n",
+            "link": b"plain.txt",
+        }
+        for name, data in tracked.items():
+            item = repo / name
+            item.parent.mkdir(parents=True, exist_ok=True)
+            if name == "link":
+                item.symlink_to(data.decode().strip())
+            else:
+                item.write_bytes(data)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        ref = git(repo, "write-tree").decode().strip()
+        # write-tree is a tree object; use the same helpers in non-authority mode.
+        pristine.mkdir()
+        archive = subprocess.run(
+            ["git", "-C", str(repo), "archive", "--format=tar", ref],
+            check=True, stdout=subprocess.PIPE,
+        ).stdout
+        subprocess.run(["tar", "-xf", "-", "-C", str(pristine)], input=archive, check=True)
+        shutil.copytree(pristine, candidate, symlinks=True)
+        (candidate / PIN).write_bytes((NEW_WASM + "\n").encode())
+        result = json.loads((candidate / RESULTS).read_text())
+        result["candidateCommit"] = NEW_COMMIT
+        result["wasmSha256"] = NEW_WASM
+        (candidate / RESULTS).write_text(json.dumps(result, sort_keys=True).encode().decode())
+        (candidate / MATRIX).write_text((candidate / MATRIX).read_text().replace(OLD_SENTENCE, NEW_SENTENCE))
+        (candidate / "sdk/node_modules").mkdir(parents=True)
+        (candidate / "hosts/host-web/qualification/node_modules").mkdir(parents=True)
+        dist = candidate / "sdk/dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        for name in ARTIFACT_NAMES:
+            data = ("artifact:" + name).encode()
+            (artifact / name).write_bytes(data)
+            (assets / name).write_bytes(data)
+        for index in range(71):
+            (dist / f"generated/{index:02d}.js").parent.mkdir(parents=True, exist_ok=True)
+            (dist / f"generated/{index:02d}.js").write_bytes(f"generated-{index}\n".encode())
+        (evidence / "13-gate7-sdk-package.command").write_text(
+            "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact\n"
+        )
+        (evidence / "13-gate7-sdk-package.meta").write_text(
+            "cwd=/tmp/issue678-attempt2-candidate-source\n"
+            "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target\n"
+            "start_utc=2026-01-01T00:00:00Z\n"
+            "finish_utc=2026-01-01T00:00:01Z\n"
+            "status=0\n"
+        )
+        (evidence / "13-gate7-sdk-package.stdout").write_text(
+            "SDK publishable-tarball gate passed\n"
+            "staged 6 Engine V1 artifacts and package manifest\n"
+            "SDK generated surface is the engine's current output\n"
+        )
+        (evidence / "13-gate7-sdk-package.stderr").write_text("")
+        (evidence / "13-gate7-sdk-package.status").write_text("0\n")
+        (evidence / "13-gate7-postcheck.command").write_text(
+            "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target "
+            "/tmp/issue678-attempt2-evidence/postcheck.sh\n"
+        )
+        (evidence / "13-gate7-postcheck.stdout").write_text(
+            "source_target=absent\nartifact_hashes:\ntarget_identity=\n"
+        )
+        (evidence / "13-gate7-postcheck.stderr").write_text("")
+        (evidence / "13-gate7-postcheck.status").write_text("0\n")
+        synthetic_lineage = (NEW_COMMIT, NEW_WASM, NEW_SENTENCE)
+        synthetic_hashes = {
+            name: hashlib.sha256((artifact / name).read_bytes()).hexdigest()
+            for name in ARTIFACT_NAMES
+        }
+        (evidence / "13-gate7-postcheck.stdout").write_text(
+            "source_target=absent\n"
+            "artifact_hashes:\n"
+            + "\n".join(synthetic_hashes.values())
+            + "\ntarget_identity=\n"
+        )
+        (evidence / "13-gate7-postcheck.stderr").write_text(f"{TARGET_DIGEST}  -\n")
+        synthetic_expectations = {
+            p.relative_to(candidate).as_posix():
+            ("synthetic", hashlib.sha256(p.read_bytes()).hexdigest(), stat.S_IMODE(p.stat().st_mode))
+            for p in (candidate / "sdk/dist").rglob("*")
+            if p.is_file()
+        }
+        global AUTHORITY_COMMIT, ARTIFACT_HASHES, DIST_EXPECTATIONS
+        saved_authority = AUTHORITY_COMMIT
+        saved_artifacts = ARTIFACT_HASHES
+        saved_dist = DIST_EXPECTATIONS
+        saved_argv = sys.argv
+        try:
+            AUTHORITY_COMMIT = ref
+            ARTIFACT_HASHES = synthetic_hashes
+            DIST_EXPECTATIONS = synthetic_expectations
+            sys.argv = [
+                str(pathlib.Path(__file__).resolve()), str(repo), ref,
+                str(pristine), str(candidate), str(artifact), str(evidence),
+            ]
+            if main() != 0:
+                raise AssertionError("CLI self-test returned nonzero")
+        finally:
+            AUTHORITY_COMMIT = saved_authority
+            ARTIFACT_HASHES = saved_artifacts
+            DIST_EXPECTATIONS = saved_dist
+            sys.argv = saved_argv
+        verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                   synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False)
+        package_stdout_path = evidence / "13-gate7-sdk-package.stdout"
+        original_package_stdout = package_stdout_path.read_bytes()
+        package_stdout_path.write_text(
+            original_package_stdout.decode().replace("SDK publishable-tarball gate passed\n", "", 1)
+        )
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        package_stdout_path.write_bytes(original_package_stdout)
+        post_stdout_path = evidence / "13-gate7-postcheck.stdout"
+        original_post_stdout = post_stdout_path.read_bytes()
+        for marker in (
+            "target_identity=\n",
+            *[f"{digest}\n" for digest in synthetic_hashes.values()],
+        ):
+            current = original_post_stdout.decode()
+            assert marker in current
+            post_stdout_path.write_text(current.replace(marker, "", 1))
+            assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                              synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+            post_stdout_path.write_bytes(original_post_stdout)
+        post_stderr_path = evidence / "13-gate7-postcheck.stderr"
+        original_post_stderr = post_stderr_path.read_bytes()
+        post_stderr_path.write_bytes(b"")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        post_stderr_path.write_bytes(original_post_stderr)
+        (candidate / "plain.txt").write_bytes(b"changed\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        (candidate / "plain.txt").write_bytes(b"plain\n")
+        (candidate / "fourth-overlay").write_text("bad\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        (candidate / "fourth-overlay").unlink()
+        (candidate / "extra-root").mkdir()
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        (candidate / "extra-root").rmdir()
+        dist_files = sorted((candidate / "sdk/dist").rglob("*"))
+        dist_files = [p for p in dist_files if p.is_file()]
+        removed = dist_files[-1]
+        removed_data = removed.read_bytes()
+        removed.unlink()
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        removed.write_bytes(removed_data)
+        extra = candidate / "sdk/dist/generated/extra.js"
+        extra.write_text("extra\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        extra.unlink()
+        symlinked = dist_files[0]
+        symlink_data = symlinked.read_bytes()
+        symlinked.unlink()
+        symlinked.symlink_to("assets/" + next(iter(ARTIFACT_NAMES)))
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        symlinked.unlink()
+        symlinked.write_bytes(symlink_data)
+        packaged = assets / next(iter(ARTIFACT_NAMES))
+        packaged.write_bytes(b"changed artifact\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        packaged.write_bytes((artifact / packaged.name).read_bytes())
+        artifact_extra_dir = artifact / "extra-dir"
+        artifact_extra_dir.mkdir()
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        artifact_extra_dir.rmdir()
+        artifact_link = artifact / "extra-link"
+        artifact_link.symlink_to(next(iter(ARTIFACT_NAMES)))
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        artifact_link.unlink()
+        dependency = candidate / "sdk/node_modules"
+        dependency.rmdir()
+        dependency.symlink_to(candidate / "hosts/host-web/qualification/node_modules")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        dependency.unlink()
+        dependency.mkdir()
+        mode_file = candidate / "sdk/dist/generated/00.js"
+        original_mode = stat.S_IMODE(mode_file.stat().st_mode)
+        mode_file.chmod(original_mode | 0o111)
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        mode_file.chmod(original_mode)
+        original_results = (candidate / RESULTS).read_bytes()
+        changed_results = json.loads(original_results)
+        changed_results["rows"] = [2]
+        (candidate / RESULTS).write_text(json.dumps(changed_results, sort_keys=True))
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        (candidate / RESULTS).write_bytes(original_results)
+        original_matrix = (candidate / MATRIX).read_bytes()
+        (candidate / MATRIX).write_bytes(original_matrix + b"unexpected\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        (candidate / MATRIX).write_bytes(original_matrix)
+        original_scandir = os.scandir
+        def broken_scandir(*args, **kwargs):
+            raise OSError("synthetic traversal failure")
+        os.scandir = broken_scandir
+        try:
+            assert_reject(lambda: walk_export(candidate, set()))
+        finally:
+            os.scandir = original_scandir
+        command_path = evidence / "13-gate7-sdk-package.command"
+        original_command = command_path.read_bytes()
+        command_path.write_text("placeholder\n")
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        command_path.write_bytes(original_command)
+        meta_path = evidence / "13-gate7-sdk-package.meta"
+        original_meta = meta_path.read_bytes()
+        meta_path.write_text(original_meta.decode().replace("status=0", "status=1"))
+        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
+                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        meta_path.write_bytes(original_meta)
+    print(
+        "PASS self-test CLI/changed-byte/fourth-overlay/extra-root/76-78/"
+        "sdk-symlink/artifact-dir/dependency-symlink/mode/lineage/traversal"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("paths", nargs="*")
+    args = parser.parse_args()
+    if args.self_test:
+        if args.paths:
+            parser.error("--self-test takes no paths")
+        synthetic_self_test()
+        return 0
+    if len(args.paths) != 6:
+        parser.error("REPO COMMIT PRISTINE CANDIDATE ARTIFACT GATE7_EVIDENCE required")
+    repo = pathlib.Path(args.paths[0])
+    ref = args.paths[1]
+    pristine, candidate, artifact, evidence = map(pathlib.Path, args.paths[2:])
+    if ref != AUTHORITY_COMMIT:
+        raise SystemExit("wrong authority commit")
+    # The production constants are checked independently before any inventory is emitted.
+    if set(ARTIFACT_HASHES) != ARTIFACT_NAMES:
+        raise SystemExit("internal artifact table mismatch")
+    artifact_hashes = ARTIFACT_HASHES
+    dist_expectations = DIST_EXPECTATIONS
+    verify_all(repo, ref, pristine, candidate, artifact, evidence,
+               artifact_hashes=artifact_hashes,
+               dist_expectations=dist_expectations,
+               require_authority=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except VerificationError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+```
+
 Independently inspect `/tmp/issue678-attempt3-evidence` and require:
 
 - all eight named gate status files contain numeric 0;
