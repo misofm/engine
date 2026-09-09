@@ -532,3 +532,74 @@ enter Git. No original finding starts.
 
 This is preparation scope only. The published brief and actual E1 require final
 read-only Astra XHIGH scope review before any execution lease is issued.
+
+## Attempt 4 procedural preflight FAIL — consumed with zero credit
+
+Astra XHIGH executor `/root/issue705_a4_astra_exec` dispatched preflight session
+`55275`, launch chunk `6bc163`, and terminal chunk `b94590`. Actual exit was 1 at
+`2026-09-09T23:39:20.114497Z`. The executor invented a main-checkout role for
+stale primary checkout `/home/bl/misofm/engine` and compared its HEAD `7d16d9c9`
+with leased main `898bdc94`. E1's remote-tracking main and live remote main both
+remain `898bdc94`; no main-reference drift was established.
+
+No builder, root creation, workload, retry, repository mutation, or GitHub
+mutation occurred. All nine A4 roots remain absent. Preparation/E1 remain clean
+at `a5e330eb`; tracker remains clean at `ac7fbfc1`. Preserve:
+
+```text
+failure  809d3978471414d393b602723c77a0c5d42ba93f58bbd62947214befcf435fd4
+manifest 4c0a7b83cb3befdf1bbf63c636c0c3194880ff046888fca94ddd81e8babe68a5
+release  5b32f4f0203cf13e3e38d6f91960369a7cbfec84597a475eca9b60dd6340e797
+```
+
+Independent Astra XHIGH review authenticated the failure and evidence. Attempt 4
+is consumed with zero credit. CP1 and delivery accounting remain unchanged.
+
+## Final Attempt 5 rebrief
+
+Attempts 1–4 are consumed failures with zero credit. Attempt 5 is final. Preserve
+A4's source, two-phase contract, objective gates, models, and delivery
+requirements. Use fresh A5 paths:
+
+```text
+E1: /home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe
+Overlay branch: codex/qualify-pdc-artifact-overlay-705-a5
+Overlay: /home/bl/misofm/engine-cp1-pdc-artifact-overlay-705-a5
+E2: /home/bl/misofm/engine-cp1-pdc-artifact-705-a5-qualify
+
+/tmp/cp1-pdc-artifact-705-a5-probe-evidence
+/tmp/cp1-pdc-artifact-705-a5-probe-tmp
+/tmp/cp1-pdc-artifact-705-a5-probe-output
+/tmp/cp1-pdc-artifact-705-a5-probe-target
+/tmp/cp1-pdc-artifact-705-a5-qualify-evidence
+/tmp/cp1-pdc-artifact-705-a5-qualify-tmp
+/tmp/cp1-pdc-artifact-705-a5-artifact
+/tmp/cp1-pdc-artifact-705-a5-qualify-target
+/tmp/cp1-pdc-artifact-705-a5-hermetic-target
+```
+
+Root prepares the exact short preflight commands before final scope review. The
+executor runs them unchanged; it writes no new preflight logic, creates no
+generic runner, and adds no assertions.
+
+Main identity means only these two observations, run from leased E1 with
+`login:true`:
+
+```text
+git rev-parse refs/remotes/origin/main
+git ls-remote --exit-code origin refs/heads/main
+```
+
+Compare their commit values with parsed `main_head`. The primary checkout and
+local `refs/heads/main` are outside this check. Do not infer additional checkout
+roles. Every shell call, including initial authority loading, uses literal E1.
+Retain inert lease parsing, programmatically generated identities, exact body
+parity without heading/title checks, prescribed path checks, one builder
+invocation, and first-failure stop. Replace A4 with A5 in the existing nine
+literal roots and frozen commands. Preserve original tool receipts and required
+phase evidence; add no whole-repository snapshot ledger.
+
+Astra XHIGH executes and a separate Astra XHIGH reviews. Luna HIGH handles only
+the post-probe overlay. Any dispatched A5 failure hard-stops #705; there is no
+sixth attempt. This rebrief grants no execution authority until the exact
+preflight commands, E1, and lease receive final Astra XHIGH scope PASS.
