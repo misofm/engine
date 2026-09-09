@@ -3003,6 +3003,36 @@ browser, install, Cargo, npm, or Node workload may run; no predecessor or prior-
 attempt byte may change; no cleanup or promotion is authorized. Any attempt-3
 failure exhausts #679 without a fourth or renamed retry.
 
+## Final hard stop
+
+#679 is **FINAL FAIL / EXHAUSTED** at exact clean pushed head
+`7c163dc6b56e7c1f3b4b8f371c4bd8b044875a60`. The authorized final self-test
+command named `/tmp/issue679-verifier-attempt3-draft.py`, but the executor
+checked and invoked nonexistent `/tmp/issue679-attempt3-verifier-draft.py` with
+the two middle words swapped. Python returned status 2 without loading verifier
+code. Preserve:
+
+- `/tmp/issue679-attempt3-draft-selftest.stdout`, empty, SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+- `/tmp/issue679-attempt3-draft-selftest.stderr`, SHA-256
+  `d12eda2962834523ea43a885b8974c661d8a146b0700b5aa5ba93358ab46ca35`;
+- `/tmp/issue679-attempt3-draft-selftest.status`, containing numeric 2,
+  SHA-256 `53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3`.
+
+The correct static-reviewed draft remains unchanged at
+`/tmp/issue679-verifier-attempt3-draft.py`, SHA-256
+`d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b`,
+72,262 bytes, mode `0600`. The attempt-3 control, preflight, production evidence,
+and manifest paths remain absent. No verifier logic, retained evidence, product
+gate, or promotion ran in the final attempt.
+
+Astra LOW returned FINAL FAIL / EXHAUSTED. Close #679 without qualification or
+CP8 delivery credit. Preserve its worktree, branch, all three attempt records,
+correct draft, and predecessor evidence. No retry, correction, or renamed fourth
+attempt belongs to #679. A separately numbered, freshly briefed successor may
+review preserved evidence and own correct command execution without rerunning
+the already successful product gates.
+
 ## Review, promotion, and delivery
 
 Astra LOW must return EVIDENCE PASS before any repository edit. PASS only means
