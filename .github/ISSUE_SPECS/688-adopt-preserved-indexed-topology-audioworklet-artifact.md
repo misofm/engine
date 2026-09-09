@@ -85,3 +85,18 @@ Failure after three attempts hard-stops this successor. Do not weaken gates or
 create another continuation. CP1 stays partial until the source and artifact pin
 are merged, post-main qualification passes, #685 and this issue are synchronized
 and closed, and clean delivered worktrees are removed.
+
+## Attempt-1 scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed brief `a1a32425`,
+tracker `7808e2ec`, and unchanged main/source/product. GitHub parity held, all
+six preserved hashes matched ordinary files, and all four issue-688 scratch
+paths were absent. The successor owns fresh qualification of fixed existing
+bytes without rebuilding or inheriting #687 credit. External targets, the
+three-file scratch overlay, ordered commands, and permanent stop rule are
+coherent.
+
+One Luna HIGH executor may run the frozen attempt-1 sequence exactly once and
+preserve the records for Astra LOW evidence review. No rebuild, artifact
+mutation, promotion, pin delivery, PR, merge, or predecessor repair is
+authorized.
