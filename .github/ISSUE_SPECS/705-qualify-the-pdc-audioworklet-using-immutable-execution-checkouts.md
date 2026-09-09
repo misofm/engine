@@ -7,10 +7,11 @@ credit; it supplies no inherited probe, artifact, pin, or delivery authority.
 The only active slots are #703 and this materially changed artifact successor;
 no original finding may start. CP1 remains partial.
 
-Sol HIGH coordinates. Astra XHIGH scopes and verifies. Luna HIGH performs the
-assigned non-delicate mechanical artifact and pin work. Astra HIGH performs
-delicate audio/DSP implementation only if separately rescoped. Agents are
-bounded assignees and do not own issues.
+Sol HIGH coordinates. Astra XHIGH scopes, executes the probe/qualification, and
+returns a separate adversarial evidence verdict. Luna HIGH performs only the
+non-delicate mechanical pin/results/matrix overlay. Astra HIGH performs delicate
+audio/DSP implementation only if separately rescoped. Agents are bounded
+assignees and do not own issues.
 
 The source introduction is `a722fb40cf5bb309ac67d09ade6c3943f872ebab`; the
 qualified source is `6a61bf14fd6bad10d76c62a06a3ae3845c70f097`; the #703 PASS
@@ -149,8 +150,8 @@ commit.
 
 ## Phase 1: identity probe on E1
 
-After fresh synchronized Astra XHIGH exact-head SCOPE PASS, the named Luna
-executor performs one identity probe on detached E1. First verify the checkout
+After fresh synchronized Astra XHIGH exact-head SCOPE PASS, the named Astra
+XHIGH executor performs one identity probe on detached E1. First verify the checkout
 is clean, detached at E1, the source and main identities match, the branch and
 tracker are synchronized, all tools are executable, no relevant process exists,
 and all nine attempt roots are absent. Check `cargo` is executable at
@@ -316,6 +317,8 @@ Attempt 2 roots, all absent including dangling symlinks before preparation:
 ```
 
 The unchanged lease discipline, two-phase gates, exact command order, receipt
-requirements, no-mutation rule, and three-attempt hard stop apply. Any
-dispatched Attempt 2 preflight failure consumes it, even before roots or
-workload; no inherited A1 credit or artifact authority exists.
+requirements, no-mutation rule, and three-attempt hard stop apply. Astra XHIGH
+executes the Attempt 2 probe and qualification and returns a separate verdict;
+Luna HIGH is limited to the post-probe overlay. Any dispatched Attempt 2
+preflight failure consumes it, even before roots or workload; no inherited A1
+credit or artifact authority exists.
