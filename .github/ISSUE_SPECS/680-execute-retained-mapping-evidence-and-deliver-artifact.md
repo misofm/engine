@@ -187,6 +187,55 @@ the file still defines and enforces `AUTHORIZATION_HEAD=ad042156...`, accepts no
 tracker-head argument, and makes the synthetic status-0 case expect rejection;
 therefore it does not yet satisfy the current revision brief.
 
+Astra LOW returned **DRAFT FAIL** for the sealed revision-1 bytes. Preserve them
+unchanged and never invoke them. In addition to the coordinator findings, the
+runner checks neither a tracker argument nor live remote main/tracker/lease;
+tests an imitation rather than the production orchestration; retains tautological
+dispatch checks; deletes partial captures; omits terminal preflight, separate
+self-test, launch-error, and manifest-verification metadata; permits ambiguous
+manifest path spellings; tests literal backslash-x-zero instead of a NUL byte;
+records a target-hash cwd not supplied to `Popen`; and serially drains stderr
+after stdout, which can deadlock. The explicit executor check, relevant-process
+filter, streamed target digest, final-line PASS check, and most traversal checks
+are retained design credit only, not execution credit.
+
+Only Luna HIGH `/root/issue583_luna_impl` may prepare one bounded correction at
+fresh external `/tmp/issue680-attempt2-runner-revision2.py`. Preparation may read
+only this spec and the two sealed runner drafts. It must not import, compile, or
+invoke any runner or verifier; inspect retained evidence; create an attempt-2 or
+control path; or edit Git. Revision 2 must satisfy every current runner
+requirement and additionally:
+
+- remove every embedded feature/tracker authorization and require both external
+  full lowercase SHA arguments, plus the exact explicit executor claim;
+- query live remote main and tracker refs, compare feature/tracker HEAD and
+  upstream, validate the operative lease text, and do all boundary checks before
+  output creation;
+- route synthetic observations through the same orchestration and dispatch
+  boundary as production, with a positive status-0 flow that succeeds and
+  negative head/path/symlink/verifier/command/status/launch/manifest flows that
+  fail without output;
+- preserve every exclusively created partial capture, append phase/failure/
+  finish/status records where possible, and retain separate command, metadata,
+  stdout, stderr, and status files for verifier self-test, production, and
+  manifest verification;
+- restrict manifest paths to an exact unambiguous ASCII spelling, reject newline,
+  backslash, non-ASCII, empty, absolute, dot, and dot-dot components, require a
+  nonempty inventory, and validate the actual checked rows;
+- launch the target archive with the recorded actual cwd and stream stdout to
+  SHA-256 while draining stderr concurrently or directly into its durable capture,
+  never buffering or copying archive bytes.
+
+Freeze revision 2 by exact SHA-256, size, and mode. Astra LOW must review its
+literal bytes before any static-control invocation. No execution is authorized
+by this correction brief.
+
+The proposed revision-2 control invocation is
+`python3 -B /tmp/issue680-attempt2-runner-revision2.py --self-test`. Its proposed
+production invocation is
+`python3 -B /tmp/issue680-attempt2-runner-revision2.py --authorization-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
+The exact heads are supplied only by a later synchronized SCOPE PASS.
+
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
 failure sequencing, and the exact verifier self-test, production, manifest, and
