@@ -273,9 +273,9 @@ environment, cwd/head, start/finish, complete streams, numeric status, source
 porcelain, and output census after each; stop permanently at the first failure:
 
 ```text
-CARGO_TARGET_DIR=/tmp/issue687-stage2-target bash scripts/build-web-audioworklet.sh /tmp/issue687-stage2-artifact
-bash scripts/check-web-audioworklet.sh /tmp/issue687-stage2-artifact
-python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue687-stage2-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue687-stage2-target bash scripts/build-web-audioworklet.sh /tmp/issue687-stage2-artifact
+CARGO_TARGET_DIR=/tmp/issue687-stage2-target bash scripts/check-web-audioworklet.sh /tmp/issue687-stage2-artifact
+CARGO_TARGET_DIR=/tmp/issue687-stage2-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue687-stage2-artifact
 CARGO_TARGET_DIR=/tmp/issue687-stage2-hermetic-target bash scripts/test-web-audioworklet.sh
 npm --prefix sdk ci --ignore-scripts
 bash scripts/sdk-package.sh check /tmp/issue687-stage2-artifact
@@ -299,3 +299,18 @@ stream, node_modules, binary, or generated candidate. A PASS qualifies the
 candidate bytes only; repository promotion and a post-pin ordinary rebuild need
 a separately pushed scope amendment and Astra PASS. Failure hard-stops #687
 without retry or a disguised fourth attempt.
+
+## Hard-final stage-2 scope review — FAIL; bounded correction
+
+Astra LOW reviewed exact clean pushed brief `dc6fe23a`, tracker `61698737`,
+unchanged main/source/product, the six authority hashes, the pinned reconciliation
+record, and all five absent stage-2 paths. It returned **SCOPE FAIL** without
+creating a path or consuming attempt 3 because the static gate invokes native
+parameter-metadata Cargo work and the expected-resource gate invokes the native
+resource witness, but neither command carried an external Cargo target.
+
+The command block above is corrected only by assigning the existing
+`/tmp/issue687-stage2-target` to both Cargo-bearing gates and explicitly removing
+`MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` from the ordinary candidate build. Every
+other frozen command, input, hash, stop rule, output, and ownership boundary is
+unchanged. Fresh Astra LOW scope PASS is required before Luna execution.
