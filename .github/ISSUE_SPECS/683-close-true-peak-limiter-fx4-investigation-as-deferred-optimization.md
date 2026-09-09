@@ -107,3 +107,29 @@ accounting does not increase. Any future capture or implementation requires a
 genuinely new weekly/performance issue with a measured budget or owner-approved
 justification. The reciprocal substitution remains a separate class-B owner
 ruling. Preserve #668 and all named softclip failed state.
+
+## Evidence verdict and PR readiness
+
+Astra LOW returned **EVIDENCE PASS** at exact clean pushed feature
+`83fbdd304bd3e279f5321a559cb227930e5eeea9`, tracker
+`3556a423dcd85e16737878044b3299cccb6338d5`, and unchanged main
+`8999def5ac8aea06a0082df2b4764878e0b13dc8`. GitHub/spec parity held. The
+feature changes only this spec; the tracker checkpoint changes only #559/#560;
+the product-source diff is empty; branch-wide whitespace passes; and #668's
+failed worktree, branch, three records, and twelve temporary roots remain
+present. Historical byte immutability of unmanifested temporary payloads is not
+claimed.
+
+The reviewed disposition closes only this investigation as deferred optimization
+while applicability and any residual remain unresolved. It gives no capture,
+mapping, qualification, implementation, performance, budget, or delivered-
+optimization credit. Future work and the separate reciprocal class-B question
+remain governed by the limits above.
+
+The final delivery diff from main contains only this numbered spec. Root must
+push and synchronize this amendment, then obtain Astra LOW exact-head/current-
+main PR-readiness review. A PASS authorizes one pull request from
+`codex/dispose-limiter-fx4-investigation` to `main`. Required `qualification`
+must succeed on the immutable PR head before a guarded live head/base review and
+merge. Post-main qualification, issue/tracker synchronization, closure, and
+removal only of this clean delivered worktree remain mandatory.
