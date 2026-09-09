@@ -135,3 +135,9 @@ excluding manifest. Stop on the first failure. Mechanical formatting may not
 relax the byte-transform gate. Root alone edits trackers and commits. No source
 behavior, API, arithmetic, allocation, scheduling, artifact, AudioWorklet, pin,
 or retained-state cleanup is authorized.
+
+## Luna HIGH attempt 1 result
+
+- Preflight was clean at `8c9df9b774830bcc25af12800eec2b539bb63041`; original `program.rs` and the ordered 13-test inventory were persisted under `/tmp/issue671-graph-program-tests-evidence` after confirming the path was absent and non-symlink.
+- Gate 1, `python3 /tmp/issue671-graph-program-tests-evidence/exact-transform.py`: status `1` (the persisted proof path contained generated output rather than executable script text, producing a Python `SyntaxError`).
+- Gates 2–8 were not run because the frozen sequence stops on the first failure. No same-attempt correction or rerun was performed.
