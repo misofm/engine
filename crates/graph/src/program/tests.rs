@@ -385,8 +385,7 @@ fn taps_are_not_readers_so_an_alias_chain_still_folds_into_its_producer() {
     }
 
     // The fader is the effect buffer's only real reader, so it consumes it in place.
-    let fader_index =
-        node_index(&spec, &stage_node(track, TrackStage::PostFader)).expect("fader");
+    let fader_index = node_index(&spec, &stage_node(track, TrackStage::PostFader)).expect("fader");
     let fader_op = program.node_op[fader_index as usize].expect("fader keeps its op");
     assert!(
         program.ops[fader_op as usize].in_place,
@@ -424,8 +423,7 @@ fn evaluate_spec(
         let index = node_index(spec, id).expect("node") as usize;
         let mut operands = Vec::new();
         for edge in &spec.edges {
-            if &edge.destination.node != id || edge.destination.kind != GraphPortKind::MainInput
-            {
+            if &edge.destination.node != id || edge.destination.kind != GraphPortKind::MainInput {
                 continue;
             }
             let source = node_index(spec, &edge.source.node).expect("node") as usize;
@@ -975,8 +973,7 @@ fn runs_in_runtime_order(
             unit_of_op[*op] = Some(index);
         }
     }
-    let mut successor: std::collections::BTreeMap<usize, usize> =
-        std::collections::BTreeMap::new();
+    let mut successor: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     for (earlier, ops) in units.iter().enumerate() {
         if !lanes.contains_key(&program.ops[ops[0]].node) {
             continue;
@@ -1023,9 +1020,7 @@ fn gather_source_model(program: &ExecutionProgram, op: &Op) -> Option<u32> {
         return None;
     }
     match program.inputs_of(op) {
-        [single] if single.delay.is_none() && single.buffer != op.output => {
-            Some(single.buffer.0)
-        }
+        [single] if single.delay.is_none() && single.buffer != op.output => Some(single.buffer.0),
         _ => None,
     }
 }
@@ -1150,10 +1145,8 @@ fn divergence_in_runtime_order(
             let value = arena[input.buffer.0 as usize].clone();
             match input.delay {
                 Some(delay) => {
-                    let staged = Expr::Delayed(
-                        Box::new(value),
-                        program.delays[delay.line as usize].samples,
-                    );
+                    let staged =
+                        Expr::Delayed(Box::new(value), program.delays[delay.line as usize].samples);
                     arena[delay.staging.0 as usize] = staged.clone();
                     operands.push(staged);
                 }
@@ -1340,9 +1333,11 @@ fn a_bank_window_never_recycles_a_physical_slot() {
     let mut edges = Vec::new();
     for (index, track) in ["t00", "t01", "t02"].iter().enumerate() {
         let (track_nodes, track_edges) = dynamic_track(track, &format!("r{index:02}"));
-        nodes.extend(track_nodes.into_iter().filter(|candidate| {
-            !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
-        }));
+        nodes.extend(
+            track_nodes.into_iter().filter(|candidate| {
+                !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
+            }),
+        );
         edges.extend(track_edges);
     }
     let (spec, schedule, levels) = build(nodes, edges);
@@ -1408,9 +1403,11 @@ fn no_slot_is_recycled_inside_a_merged_bank_window() {
     let mut edges = Vec::new();
     for (index, track) in ["t00", "t01", "t02", "t03"].iter().enumerate() {
         let (track_nodes, track_edges) = dynamic_track(track, &format!("r{index:02}"));
-        nodes.extend(track_nodes.into_iter().filter(|candidate| {
-            !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
-        }));
+        nodes.extend(
+            track_nodes.into_iter().filter(|candidate| {
+                !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
+            }),
+        );
         edges.extend(track_edges);
     }
     let (spec, schedule, levels) = build(nodes, edges);

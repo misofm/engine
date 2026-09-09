@@ -335,3 +335,9 @@ the production prefix, module/test identity, all prior evidence, and excluded
 paths. No credit carries and no artifact or pin action applies. Any prerequisite,
 transform, hash, or gate failure exhausts #671 without a fourth attempt or renamed
 retry. Root owns commits and trackers.
+
+## Luna HIGH attempt 3 result
+
+- Final preflight passed at `7d7d7ec39f0371a940e6aadcd62325270d33b8d9`; the worktree was clean, `program.rs` and its production prefix were preserved, prior manifests verified, and `/tmp/issue671-graph-program-tests-attempt3-evidence` was absent and non-symlink before creation.
+- The seven frozen hunks applied with before-block counts `1/1/1/1/1/2`. The amended proof passed with `program/tests.rs` exactly 74,216 bytes at SHA-256 `a833f25da41f1c44b5d00469713789d9b8edbfeca6dad64b02328d621362de49`, production prefix SHA-256 `2645901c7b3339e7f924b53ceffd37a48580c58027e01aa3349ea51b5a37c368`, and all 13 tests preserved.
+- All eight frozen gates passed once in order with numeric statuses `0`; source and literal-script identities matched before and after every gate. The self-excluding manifest verifies at `/tmp/issue671-graph-program-tests-attempt3-evidence/manifest.sha256`.
