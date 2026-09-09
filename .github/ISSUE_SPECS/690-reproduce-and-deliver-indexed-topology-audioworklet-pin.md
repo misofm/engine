@@ -186,7 +186,7 @@ Astra LOW returned **SCOPE PASS** at exact clean pushed issue
 six authority hashes, the preserved attempt-1 record hashes, the three
 promotion-file identities, clean worktrees, two-slot boundary, and absence of
 the three attempt-2 paths and relevant processes all passed. The explicitly
-named Luna HIGH executor is `/root/issue583_luna_impl`. After this PASS record is
+named Luna HIGH executor is `/root/issue683_luna_docs`. After this PASS record is
 pushed and synchronized, that executor alone may perform the frozen attempt-2
 sequence once. Stop at the first failure and preserve every record. Root retains
 coordination only; this grants no retroactive credit, promotion, or merge.
