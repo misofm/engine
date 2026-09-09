@@ -379,3 +379,24 @@ qualification cannot carry. Do not repin or open a pull request. A separately
 numbered artifact-qualification successor must inherit this source chain after
 one of the two active issue slots (#670/#671) clears. Astra LOW must first review
 this drift disposition.
+
+## Artifact drift review — EVIDENCE FAIL
+
+Astra LOW confirmed the artifact drift at exact clean feature
+`013b131e9f27e04efe45a61e7b3d5e786dacd7c3`, tracker
+`a7458dc435d5b44ca0d721b13e8aca63c31b3c88`, and invocation
+`49f4161fc6e4b1f5d2c2107ca36353aebcd89dc4`. The 13-entry manifest
+verifies; status 0, the valid 65-byte digest record, normal Cargo completion,
+current empty non-symlink output, unchanged tree/pin, and absence of committed
+generated/compiler payload support the observed identity change.
+
+Evidence completeness is **FAIL**. The retained preflight omitted source hashes,
+live-main identity, pin newline/byte shape, and an explicit record of fresh-path
+absence. Several postflight values are unlabeled and a later
+`postflight_record_correction` is present. These omissions are not reconstructed
+as contemporaneous evidence, and the probe must not be rerun. Preserve every
+record and the observed candidate digest. Prior artifact qualification cannot
+carry; no repin or pull request is authorized. After an active issue slot clears,
+a separately numbered qualification successor may use this digest only as its
+expected candidate, with fresh scope review and an explicit disposition of this
+incomplete probe record.
