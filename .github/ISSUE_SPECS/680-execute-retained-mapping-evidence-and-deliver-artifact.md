@@ -2141,3 +2141,20 @@ the already preserved three-file commit, producing fresh exclusive post-pin
 evidence under new paths, and guarded delivery. It must not rerun verifier,
 browser, SDK, or retained qualification, repair #680 evidence, recreate product
 edits, or call the recovery a continuation of #680's consumed execution.
+
+## Controlling disposition correction
+
+The immediately preceding concurrent hard-stop conclusion is superseded by the
+later controlling Astra LOW ruling on these exact facts. That ruling forbids a
+replacement build and immediate comparison, but explicitly permits a pushed
+evidence-disposition amendment followed by separately reviewed read-only
+attribution and comparison of the preserved outputs. The amendment already
+appears above and creates only
+`/tmp/issue680-postpin-review-attribution.txt` and
+`/tmp/issue680-postpin-review-compare.txt`; it cannot modify or rerun any
+existing source, evidence, builder, verifier, browser, SDK, or product gate.
+
+Keep #680 open and create no successor. The three-file commit remains
+unapproved for delivery until Astra LOW reviews those two records and returns a
+technical post-pin verdict with the provenance limitation. No merge or delivery
+credit attaches to this correction.
