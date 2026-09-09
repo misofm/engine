@@ -1590,14 +1590,16 @@ The new verifier bytes are frozen below as:
 - required mode/type: ordinary non-symlink file, mode `0444`.
 
 The prior isolated self-test covered only the attempt-1 bytes and cannot
-authorize these changed bytes. A fresh isolated attempt-2 self-test is therefore
-required before production classification. This preparation tranche
-intentionally omits that execution; Astra LOW must decide exact-hash DRAFT PASS
-and authorize the fresh self-test before any attempt-2 verifier command runs.
-The attempt-2 self-test, when separately authorized, must use only
+authorize these changed bytes. Astra LOW returned exact-hash **DRAFT PASS** for
+these attempt-2 bytes at clean pushed feature head
+`824eac608421dac15b3f47641da40147dcbd6257`. Its fresh isolated self-test
+returned 0, removed its control directory, and left the sealed hash unchanged.
+This draft verdict authorizes no retained-evidence execution. The attempt-2
+self-test used only
 `/tmp/issue679-attempt2-verifier-control`, with the same literal creation,
 containment, mode, freshness, and cleanup rules, and must leave that path
-absent. Production must use only the hash-named mode-0444 path above.
+absent. Production may use only the hash-named mode-0444 path above after fresh
+exact-head scope PASS.
 
 The complete attempt-2 verifier bytes follow verbatim; no runner may
 reconstruct or edit them:
