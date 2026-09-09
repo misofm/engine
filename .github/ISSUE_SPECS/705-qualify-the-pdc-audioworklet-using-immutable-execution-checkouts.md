@@ -396,3 +396,34 @@ two-phase gates, exact order, real exit propagation, one probe, directory order,
 first-failure stop, and one matrix regeneration during overlay preparation;
 qualification only checks committed lineage. CP1 and original-finding
 accounting remain unchanged after this bounded delivery.
+
+## Final Attempt 3 PROCEDURAL PREFLIGHT FAIL — exhausted hard stop
+
+Fresh Astra XHIGH executor `/root/issue705_astra_exec` parsed the lease and
+dispatched preflight call `call_dJIEESz2F87dC6ecWalkDLjN`, chunk `521b89`,
+from `20:31:15.934Z` through `20:31:20.021Z`; actual exit was 1. The frozen
+#559 local/GitHub body equality passed. The executor then applied an extra
+heading-equals-GitHub-title assertion that was outside the lease, contradicted
+the scope review's known tracker-heading distinction, and failed at recorded
+time `20:31:19.891348Z`.
+
+No builder, root, persistent session, poll, retry, overlay, repository mutation,
+or GitHub mutation followed. All 12,212 recorded tracked-file hashes matched and
+all nine A3 roots remained absent. Preserve the original executor rollout
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T20-28-57-01a087dc-0006-77e3-a14d-51e1d407cc1d.jsonl`,
+the seven-entry self-excluding failure manifest and every receipt. Evidence
+identities are:
+
+```text
+failure  d6f2781048e8b0f066a528e39edaa597eda5f9c1e5dc5cb105e02afb83aa99fb
+manifest ba9c8fdfb68c31b20d133ff7edd06cddd8b417ac1c799f86b416b2328912a97a
+release  74f271f459ccbd40930941e8eba6caf48464904c109076fa1f17cd87df567629
+```
+
+Independent Astra XHIGH review authenticated the request, response, identities,
+root absence, unchanged checkouts/tracker, and evidence manifest. Attempt 3 is
+consumed with zero probe, digest, artifact, qualification, product, or delivery
+credit. All three #705 attempts are exhausted. #705 is a procedural hard stop:
+there is no fourth attempt, successor, overlay, Phase 2, pin update, PR, or merge
+authority. Close it as `not_planned`; keep #703 open at SOURCE PASS. CP1 remains
+partial and accounting is unchanged.
