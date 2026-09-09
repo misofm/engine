@@ -187,6 +187,40 @@ in the frozen order. Stop on every preflight, setup, launch, assertion, or gate
 failure. No checkout creation, source edit, inherited credit, retry, artifact,
 PR, or merge is authorized.
 
+## SOURCE PASS
+
+Astra XHIGH records **SOURCE/EVIDENCE PASS** for Attempt 3 at exact source head
+`6a61bf14fd6bad10d76c62a06a3ae3845c70f097`. Attempts 1 and 2 remain
+procedural failures with zero qualification credit. The candidate stays
+clean/pushed with `pdc.rs` SHA-256
+`2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e`;
+the prepared baseline stays clean/detached at
+`ebf404d73d58b72acad8d67ca70759940e034f36` with source SHA-256
+`b33b90388248c137baf18210fd0dbfb98339568f562b80844c1825e83ac0ed10`.
+
+The fresh baseline and all twelve candidate gates ran once in order with no
+retry and final structured exit 0. Debug and release-unwind library suites each
+passed 66/66; the exact track-delay test passed 1/1; baseline and candidate
+manifests are byte-identical at 699 bytes and SHA-256
+`aadac13d362410308ea3b7e7068ab68bce10daa1e86b92d9abf2fbfca3a0decb`.
+Formatting, committed main-to-head path/hunk/hash review, strict Clippy, graph
+policy, workspace policy, explicit committed diff check, scalar Wasm, and SIMD
+Wasm all passed. All 15 clean-state records are empty; no relevant process
+remains and the lease is released.
+
+External evidence is `/tmp/cp1-pdc-incoming-final-a3-evidence`. Its finite
+self-excluding manifest covers 130 unchanged files in sorted relative-name
+order, is 11,907 bytes, and has SHA-256
+`b2bb2e8c19be27d50a76d976ee9d691862fabd6fd94695b82e2e51320254fd30`.
+The original execution authority is
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T14-49-19-01a086a5-0f2a-7c13-8290-187cb9a4d7ed.jsonl`.
+
+Evidence supports representative native tests, exact fixture identity, and
+scalar/SIMD Wasm compilation. It supports no performance, allocation,
+listening, universal PCM-equivalence, browser-artifact, or sound-quality claim.
+#703 remains open pending its separately numbered artifact applicability/pin
+peer and final delivery workflow. CP1 remains partial.
+
 ## Attempt 2 FAIL and final attempt 3
 
 Astra XHIGH records **Attempt 2 FAIL — command-environment failure; second
