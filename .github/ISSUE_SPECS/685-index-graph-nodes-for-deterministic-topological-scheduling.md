@@ -187,3 +187,27 @@ A final PASS may qualify the already-reviewed product source with the
 documentation-concurrency limit explicit. Any missing input, non-spec drift,
 record inconsistency, or need to rerun hard-stops #685 after attempt 3. #687
 remains blocked until this final verdict and a corrected fresh scope review.
+
+## Hard-final attempt 3 source/evidence verdict — PASS
+
+Astra LOW completed the authorized read-only adjudication at exact clean pushed
+feature `52e75dac5b62e10656ba782ccfd45db33f24936a`, tracker
+`6c64424dc963a5a201396f9d34cb5edbe0225bc8`, and unchanged main
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`. GitHub/spec parity held.
+
+The concurrent `f89f81df..b3fe4c9c` change contains only this spec. Every
+snapshotted non-spec file still matches its preflight hash. The 102 existing
+command records—strict Clippy, fixture build, and 100 fixture processes—have
+consistent ordered timestamps and status 0; all fixture outputs have exact
+SHA-256 `e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+The failed final clean-tree assertion is attributable to the observed concurrent
+spec edit. Its later failure record's empty porcelain reflects the subsequent
+checkpoint, not a clean tree at the assertion. Endpoint hash equality does not
+claim continuous write monitoring.
+
+Astra returned **SOURCE/EVIDENCE PASS** for hard-final attempt 3 without rerun or
+reconstruction. Attempts 1 and 2 remain consumed failures. Frozen product
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb` is source-qualified only for a
+corrected, separately reviewed #687 artifact-applicability scope. No allocation,
+timing, performance, artifact execution, pin, PR, merge, or delivery authority
+attaches.
