@@ -237,18 +237,19 @@ One explicitly named Luna HIGH executor, `/root/issue690_luna_attempt3`, owns
 execution. Fresh Astra LOW SCOPE PASS is required against the exact clean pushed
 rebrief, matching GitHub/tracker bodies, current main and branch identities,
 both preserved failed-attempt namespaces, the six authority hashes, and absence
-of the three attempt-3 paths and relevant processes. The PASS must be recorded,
-pushed, and synchronized before any attempt-3 path is created.
+of the three attempt-3 paths and relevant processes. Astra's PASS against this
+exact pushed head is execution authority; do not append another authorization
+commit before Luna's preflight.
 
-After authorization, Luna must establish all three paths absent in memory,
-exclusively create the evidence directory first, and durably record the
-preceding absence and creation. Luna next exclusively creates the artifact path
-as an empty ordinary non-symlink directory and records that fact. Leave target
-absent for Cargo. Before requesting the builder session, record and require both
-`pwd -P` and `git rev-parse --show-toplevel` to equal exactly
+Before creating any path, Luna must record and require both `pwd -P` and
+`git rev-parse --show-toplevel` to equal exactly
 `/home/bl/misofm/engine-cp1-indexed-topo-reproduction`; recheck clean exact
-HEAD/upstream, tracker identity, and no relevant process. The builder tool call
-must use that literal absolute path as its `workdir`.
+HEAD/upstream, tracker identity, all three paths absent in memory, and no
+relevant process. Every tool call must use that literal absolute path as its
+`workdir`. Luna then exclusively creates the evidence directory first and
+durably records the preceding validation, absence, and creation. Luna next
+exclusively creates the artifact path as an empty ordinary non-symlink directory
+and records that fact. Leave target absent for Cargo.
 
 Run the same frozen five-command sequence from attempt 2 exactly once, in order.
 Launch each potentially long command directly through a unified persistent
