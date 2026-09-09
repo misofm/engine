@@ -368,6 +368,16 @@ or touch product/promotion files. Root must seal and hash the result and Astra L
 must statically review its exact bytes. No further reduced-launcher correction is
 authorized by this record. Attempt 2 remains unconsumed.
 
+The final inert correction completed and root sealed its ordinary file mode
+`0444`: 15,975 bytes, SHA-256
+`a6cdc89037e365a78d495551101061bb731b10b135025b8d9ad79f7e8511ec10`.
+Nothing ran and all attempt-2/control paths remain absent. Astra LOW must review
+these exact bytes. Coordinator inspection finds a regression of the already
+required base64-only self-test capture: revision 2 again passes the raw
+`self_record` bytes to `append_json`. It also makes manifest-creation metadata
+durable only after successful creation, so a creation failure still has no
+external creation record. No exact-head or execution authority attaches.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
