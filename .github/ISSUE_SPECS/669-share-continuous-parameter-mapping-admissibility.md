@@ -311,3 +311,81 @@ buildable production checkpoint. The failed source-file hashes were
 `01db0ea4a14c6a070ad6c81d8b6ecbe1a17132c28f9513cffe9b9ec82154341b`.
 Astra LOW must review the failure and rule on the final bounded attempt before
 any test correction occurs.
+
+## Astra LOW attempt 2 review — FAIL; annotation-only final scope rejected
+
+Astra LOW confirmed **ATTEMPT-2 FAIL** at clean record
+`67275524c8f7a6b4971c4135b9f43f94f7cfc30a` and preserved patch SHA-256
+`aaa52b34a78d7a4dab05eb4011c708dd2835bc2430927b1a8f6d4ffeed46ac50`.
+Gate 1 returned 0 and gate 2 stopped at compile status 101; no later
+qualification credit exists. Attempts 1–2 are consumed.
+
+A final attempt limited to a type annotation did not pass scope. The proposed
+36-case borrowed matrix still called the private semantic predicate, while its
+public cases covered only a subset. A nominally accepted `minimum = 0.25` kept
+default `0.0` and therefore triggered an unrelated range rejection. The typed
+harness used an independently invalid empty-port/empty-quality descriptor and
+inferred mapping success only from absence of one error. The identity comparison
+used the production identity implementation on both sides rather than an
+independent digest oracle.
+
+## Final attempt 3 scope
+
+Production remains byte-frozen at the attempt-1 hashes. Only inline tests in the
+two owned source files and their mechanical formatting may change. Attempt 2's
+failed patch/evidence remain immutable; Luna may independently rederive its
+useful test structure but must not alter the preserved files.
+
+The typed public harness must construct an otherwise-valid descriptor with the
+required main input/output ports, complete launch-rate Normal quality rows,
+valid link modes, and one continuous parameter. Use coherent maximum and default
+values for each minimum. Call public `validate_descriptor` for all 36 literal
+`ParameterMapping`/minimum cases. Assert the exact presence or absence of the
+`parameters`/`Parameter` diagnostic independently of any coupled lattice result,
+and require `Ok(())` for every mapping-admissible case whose lattice is also
+valid. Never treat an independently invalid descriptor as an accepted witness.
+
+The borrowed projection must use only public `verify_effect_descriptor_wire` for
+the same 36 cases; it must not call `semantic_test_view`,
+`parameter_semantics_valid`, or another private semantic shortcut. Give every
+literal numeric binding an explicit `f32` type. Keep minimum, maximum, default,
+mapping, and zero-word derived lattice spelling mutually coherent. Assert these
+public outcomes:
+
+- nonfinite and negative-zero minima stop in the parser with `Code::Float` at
+  `HEADER_BYTES + 36`, record index 0, regardless of mapping;
+- canonical finite minima rejected by the mapping law stop with
+  `Code::Semantic` at `HEADER_BYTES + 4`, record index 0;
+- mapping-admissible cases with a valid lattice return a verified view whose
+  bytes exactly equal the frozen input;
+- `f32::from_bits(1)` and `f32::MIN_POSITIVE` are mapping-admissible for Linear,
+  Logarithmic, and Exponential but cannot satisfy the separate decimal-lattice
+  spelling rule, so they must reach the later `Code::Semantic` diagnostic at
+  `HEADER_BYTES + 72`, record index 0 rather than the parameter-semantic offset;
+- a combined nonfinite-minimum and mapping-law failure still returns the earlier
+  `Code::Float` minimum diagnostic.
+
+For every fully accepted case, compute the expected identity independently with
+`Sha256` over the frozen `IDENTITY_DOMAIN`, little-endian byte length, and exact
+input bytes, then compare that digest to `verified.identity()`. Do not call
+`effect_descriptor_identity` to derive the expected value. Continue to exercise
+the five named existing diagnostic, phase, differential, roundtrip, and binding
+controls from attempt 2.
+
+Before any edit, use fresh absent/non-symlink paths
+`/tmp/issue669-attempt3-evidence`, `/tmp/issue669-attempt3-target`,
+`/tmp/issue669-attempt3-manifest-record.txt`,
+`/tmp/issue669-attempt3-manifest-verify.stdout`, and
+`/tmp/issue669-attempt3-manifest-verify.status`. Record the same immediate clean
+pre-edit provenance, source hashes, safe environment fields, preserved attempt-1
+and attempt-2 paths, and numeric 0/1 capture controls. Run the same frozen eleven
+commands once in order with the attempt-3 target path. Stop at the first
+unexpected status without correction, retry, or later gate. Finalize all files
+inside the evidence directory before producing its self-excluding manifest;
+write every manifest completion/verification record only to the three sibling
+paths. Current manifest verification must pass every entry.
+
+Attempt 3 remains unauthorized until this amendment is clean, pushed,
+synchronized, and receives Astra LOW final scope PASS. Any attempt-3 failure
+hard-stops #669; no fourth correction is allowed. No artifact, pin, PR, merge,
+or committed compiler payload is authorized.
