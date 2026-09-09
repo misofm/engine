@@ -142,9 +142,10 @@ Astra XHIGH SCOPE FAIL at preparation head `cc2effdc` consumed no attempt; all
 other preconditions passed. The existing detached checkout at that head is
 preserved as a failed scope observation with no authority. The corrected
 Attempt 1 E1 path is
-`/home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe-final`; Sol prepares it
-only after this corrected spec is published and a final Astra scope/lease names
-the containing brief commit verbatim.
+`/home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe-final`. Sol prepares E1
+after this corrected spec is published. Final Astra scope verifies the already
+prepared checkout, and the subsequent lease records its exact containing-brief
+commit.
 
 ## Phase 1: identity probe on E1
 
