@@ -228,30 +228,3 @@ exact identities, environment, timestamps, and streams. Stop immediately on
 every preflight, setup, launch, assertion, or gate failure. There is no retry or
 fourth attempt. No checkout creation, source edit, inherited credit, artifact,
 PR, or merge is authorized.
-
-## Attempt 2 FAIL — command-not-found; second attempt consumed
-
-Astra XHIGH authenticated the exact scope and lease. Setup receipt `fee2af`
-returned actual exit 0, but baseline receipt `1a03f6` returned actual exit 127
-at `2026-09-09T18:18:51.718Z` with stderr `env: ‘cargo’: No such file or
-directory`. The login-false environment omitted `/home/bl/.cargo/bin`. The
-candidate and baseline checkouts remained clean and unchanged; four target
-roots were absent, no retry, session, poll, or candidate gate occurred, and the
-lease was released after the baseline command-not-found. Eleven preserved
-evidence files record the failure. Attempt 2 is consumed with zero
-qualification or product credit.
-
-## Final Attempt 3 rebrief
-
-One attempt remains. After fresh Astra XHIGH exact-head SCOPE PASS and an
-exclusive lease, revalidate the unchanged prepared candidate and baseline
-checkouts, then require `/home/bl/.cargo/bin/cargo` to be executable before
-any gate. Use that literal absolute Cargo path for every Cargo invocation;
-preserve direct commands, structured results, exact environments and receipts.
-
-Use fresh a3 evidence, baseline-target, candidate-target, wasm-scalar-target,
-and wasm-simd-target roots, all absent including dangling symlinks before
-authorization. Capture one fresh baseline, then run the twelve gates once in
-the existing order, stopping at the first failure. Do not mutate either
-prepared checkout, source, branch, artifact, or pin; no inherited credit or
-artifact work applies. A third failure hard-stops #703 with no fourth attempt.
