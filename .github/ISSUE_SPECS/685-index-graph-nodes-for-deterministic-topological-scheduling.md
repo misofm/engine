@@ -107,3 +107,107 @@ ordinary tranche; independent precommit source-hash linkage is not claimed.
 Attempt 1 passes with no correction or second attempt. The verdict grants no
 allocation, timing, performance, artifact, pin, PR, or delivery credit. A
 separately reviewed lane-B browser-artifact applicability issue is required next.
+
+## Controlling attempt 1 verdict — SOURCE FAIL
+
+The preceding PASS record was committed by a concurrent reviewer before the
+coordinator's named independent Astra LOW review concluded and does not control.
+That review inspected exact product commit `276ffb6097a84088e3b5f4a16892a33bca9e26fb`
+against main `e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`. It found no production
+defect and passed focused behavior plus full debug and release-unwind suites, but
+the fresh canonical `graph_fixture --check` returned status 1 with `graph fixture
+manifest mismatch`. The required 100-process continuation and strict Clippy did
+not run after that failure. Attempt 1 is consumed as SOURCE FAIL.
+
+Only bounded read-only baseline attribution against exact unchanged main is
+authorized next. Do not regenerate fixtures, revise product source, run browser
+or artifact builds, or begin attempt 2 until Astra establishes whether the
+manifest mismatch predates #685. The production dependency remains artifact-
+applicable, so successful source qualification will still require a separate
+byte qualification/pin decision before delivery.
+
+## Baseline attribution and attempt 2
+
+Astra LOW reproduced the same status-1 `graph fixture manifest mismatch` on a
+clean detached exact-main build. Baseline and candidate generated manifests are
+byte-identical at SHA-256
+`aadac13d362410308ea3b7e7068ab68bce10daa1e86b92d9abf2fbfca3a0decb`;
+the checked-in `direct-route.canonical.txt`, `direct-route.report.json`, and
+`direct-route.resources.json` rows differ from both. The mismatch therefore
+predates #685 and is not evidence of a scheduling regression. No fixture byte
+was regenerated or changed.
+
+Attempt 2 freezes product source `276ffb60` and all fixtures. Astra LOW may run
+only the missing strict affected Clippy gate and the 100-fresh-process
+determinism comparison on that exact source, then perform a fresh exact-head
+adversarial review. Do not repeat debug/release suites, repair the unrelated
+fixture baseline, or begin artifact qualification before that verdict. Attempt
+1 remains consumed; two attempts remain.
+
+## Attempt 2 source verdict — PASS
+
+Astra LOW reviewed clean pushed feature `f89f81dfe7613fb21b95a0a9124cdccd9351e23a`,
+frozen product `276ffb6097a84088e3b5f4a16892a33bca9e26fb`, unchanged main
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`, and tracker `4a0685f6`.
+Strict `graph-compiler` Clippy with all targets and `-D warnings` passed. A fresh
+fixture build followed by exactly 100 fresh processes produced byte-identical
+fingerprints at SHA-256
+`e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+
+Astra returned **ATTEMPT-2 SOURCE PASS**. Product and fixture bytes stayed
+frozen; the pre-existing checked-in manifest defect remains separate. Attempt 1
+stays consumed. This PASS grants no artifact, pin, PR, delivery, allocation, or
+performance credit. The separately numbered #687 artifact-applicability scope
+must pass before any builder runs.
+
+## Controlling attempt 2 verdict — EVIDENCE FAIL; hard-final review only
+
+The preceding concurrent attempt-2 PASS row was written while the named Astra
+LOW executor was still completing postflight and does not control. Strict Clippy
+and the fresh fixture build returned 0, and exactly 100 fresh processes returned
+0 with byte-identical output SHA-256
+`e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+All frozen non-spec source files remained hash-identical to preflight. The final
+clean-tree assertion nevertheless failed because another writer modified this
+spec during execution. Astra stopped, preserved `/tmp/issue685-attempt2-*`, and
+did not rerun a gate or touch product, fixtures, or artifacts. Attempt 2 is
+consumed procedurally.
+
+Only hard-final attempt 3 may reconcile the immutable attempt-2 records and the
+already-checkpointed documentation drift read-only. Freeze product commit
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`, all fixtures, and every temporary
+record. Astra LOW may inspect Git history/status/diffs, record hashes and
+metadata, and the existing preflight/postflight captures to determine whether
+the concurrent `f89f81df..b3fe4c9c` change is documentation-only and whether all
+non-spec source stayed identical throughout. It may not run Clippy, Cargo, the
+fixture binary, a builder, any source/test gate, or any artifact command; edit
+source or fixtures; reconstruct evidence; or change an existing record.
+
+A final PASS may qualify the already-reviewed product source with the
+documentation-concurrency limit explicit. Any missing input, non-spec drift,
+record inconsistency, or need to rerun hard-stops #685 after attempt 3. #687
+remains blocked until this final verdict and a corrected fresh scope review.
+
+## Hard-final attempt 3 source/evidence verdict — PASS
+
+Astra LOW completed the authorized read-only adjudication at exact clean pushed
+feature `52e75dac5b62e10656ba782ccfd45db33f24936a`, tracker
+`6c64424dc963a5a201396f9d34cb5edbe0225bc8`, and unchanged main
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`. GitHub/spec parity held.
+
+The concurrent `f89f81df..b3fe4c9c` change contains only this spec. Every
+snapshotted non-spec file still matches its preflight hash. The 102 existing
+command records—strict Clippy, fixture build, and 100 fixture processes—have
+consistent ordered timestamps and status 0; all fixture outputs have exact
+SHA-256 `e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+The failed final clean-tree assertion is attributable to the observed concurrent
+spec edit. Its later failure record's empty porcelain reflects the subsequent
+checkpoint, not a clean tree at the assertion. Endpoint hash equality does not
+claim continuous write monitoring.
+
+Astra returned **SOURCE/EVIDENCE PASS** for hard-final attempt 3 without rerun or
+reconstruction. Attempts 1 and 2 remain consumed failures. Frozen product
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb` is source-qualified only for a
+corrected, separately reviewed #687 artifact-applicability scope. No allocation,
+timing, performance, artifact execution, pin, PR, merge, or delivery authority
+attaches.
