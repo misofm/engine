@@ -32,8 +32,8 @@ pub(crate) fn resource_estimate(
     let materialized_edges = logical_edges.checked_add(timing.delay_count)?;
     let schedule_items = count(schedule.len())?.checked_add(timing.delay_count)?;
     let dependency_levels = count(levels.len())?;
-    let mut input_counts: BTreeMap<_, u64> =
-        nodes.iter().map(|node| (node.id.clone(), 0_u64)).collect();
+    let mut input_counts: BTreeMap<&GraphNodeId, u64> =
+        nodes.iter().map(|node| (&node.id, 0_u64)).collect();
     for edge in edges {
         let count = input_counts.get_mut(&edge.destination.node)?;
         *count = count.checked_add(1)?;
