@@ -427,3 +427,17 @@ credit. All three #705 attempts are exhausted. #705 is a procedural hard stop:
 there is no fourth attempt, successor, overlay, Phase 2, pin update, PR, or merge
 authority. Close it as `not_planned`; keep #703 open at SOURCE PASS. CP1 remains
 partial and accounting is unchanged.
+
+## Superseding five-attempt policy authority — 2026-09-09
+
+Issue #707 delivered the five-attempt policy through PR #708: reviewed commit
+`3f1a45cb958d4ff6c7fdb6b2c677de0ffbafc22f` merged as
+`898bdc94b0143288049397629f3afeded384f8c2`; PR qualification run
+`34415327076` and post-main run `34415817254` succeeded, and #707 is closed.
+This current authority supersedes the preceding prospective three-attempt
+policy language while retaining every prior historical record verbatim. #705
+A1–A3 are consumed with zero credit. A4–A5 are available only under newly
+reviewed briefs, with one adversarial verdict each; A5 is the hard stop. The
+policy provides no execution lease or retroactive credit.
+#705 may reopen after pushed exact issue-body parity is verified. Do not write an
+Attempt 4 execution brief yet.
