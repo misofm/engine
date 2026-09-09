@@ -341,3 +341,28 @@ retry. Root owns commits and trackers.
 - Final preflight passed at `7d7d7ec39f0371a940e6aadcd62325270d33b8d9`; the worktree was clean, `program.rs` and its production prefix were preserved, prior manifests verified, and `/tmp/issue671-graph-program-tests-attempt3-evidence` was absent and non-symlink before creation.
 - The seven frozen hunks applied with before-block counts `1/1/1/1/1/2`. The amended proof passed with `program/tests.rs` exactly 74,216 bytes at SHA-256 `a833f25da41f1c44b5d00469713789d9b8edbfeca6dad64b02328d621362de49`, production prefix SHA-256 `2645901c7b3339e7f924b53ceffd37a48580c58027e01aa3349ea51b5a37c368`, and all 13 tests preserved.
 - All eight frozen gates passed once in order with numeric statuses `0`; source and literal-script identities matched before and after every gate. The self-excluding manifest verifies at `/tmp/issue671-graph-program-tests-attempt3-evidence/manifest.sha256`.
+
+## Source verdict and artifact applicability
+
+Astra LOW returned **SOURCE PASS** at exact clean pushed head
+`dc6e3476cbeef5973b562b6af05627e9eb4a2324`, unchanged main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and synchronized tracker
+`fa7463cb542060594a08fae42ae070f1aa954b5e`. The three-path branch scope,
+seven replacements, 74,216-byte hash, unchanged production prefix and
+`program.rs`, 13-test identity, literal script readbacks, all command statuses,
+16 before/after source captures, and manifest independently reproduce. Attempts
+1-2 remain failed without carried credit; attempt 3 supplies fresh qualification.
+
+The final census script uses unchecked assertions under `set -u`, so its zero
+status alone is not proof of each assertion. Independent review reproduced the
+required source, path, identity and preflight facts. The precreation testimony is
+persisted separately at
+`/tmp/issue671-graph-program-tests-attempt3-precreate.txt`, predates the source
+transformation, and is outside the directory manifest; preserve and cite it with
+that limitation.
+
+Root records **no artifact applicability**. The production prefix is byte-
+identical and all relocated implementation remains exclusively under `cfg(test)`;
+ordinary native and Wasm artifact inputs are unchanged. No AudioWorklet command,
+qualification, or pin action is required or authorized. Exact-head/current-main
+PR-readiness review is next.
