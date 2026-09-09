@@ -107,3 +107,39 @@ ordinary tranche; independent precommit source-hash linkage is not claimed.
 Attempt 1 passes with no correction or second attempt. The verdict grants no
 allocation, timing, performance, artifact, pin, PR, or delivery credit. A
 separately reviewed lane-B browser-artifact applicability issue is required next.
+
+## Controlling attempt 1 verdict — SOURCE FAIL
+
+The preceding PASS record was committed by a concurrent reviewer before the
+coordinator's named independent Astra LOW review concluded and does not control.
+That review inspected exact product commit `276ffb6097a84088e3b5f4a16892a33bca9e26fb`
+against main `e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`. It found no production
+defect and passed focused behavior plus full debug and release-unwind suites, but
+the fresh canonical `graph_fixture --check` returned status 1 with `graph fixture
+manifest mismatch`. The required 100-process continuation and strict Clippy did
+not run after that failure. Attempt 1 is consumed as SOURCE FAIL.
+
+Only bounded read-only baseline attribution against exact unchanged main is
+authorized next. Do not regenerate fixtures, revise product source, run browser
+or artifact builds, or begin attempt 2 until Astra establishes whether the
+manifest mismatch predates #685. The production dependency remains artifact-
+applicable, so successful source qualification will still require a separate
+byte qualification/pin decision before delivery.
+
+## Baseline attribution and attempt 2
+
+Astra LOW reproduced the same status-1 `graph fixture manifest mismatch` on a
+clean detached exact-main build. Baseline and candidate generated manifests are
+byte-identical at SHA-256
+`aadac13d362410308ea3b7e7068ab68bce10daa1e86b92d9abf2fbfca3a0decb`;
+the checked-in `direct-route.canonical.txt`, `direct-route.report.json`, and
+`direct-route.resources.json` rows differ from both. The mismatch therefore
+predates #685 and is not evidence of a scheduling regression. No fixture byte
+was regenerated or changed.
+
+Attempt 2 freezes product source `276ffb60` and all fixtures. Astra LOW may run
+only the missing strict affected Clippy gate and the 100-fresh-process
+determinism comparison on that exact source, then perform a fresh exact-head
+adversarial review. Do not repeat debug/release suites, repair the unrelated
+fixture baseline, or begin artifact qualification before that verdict. Attempt
+1 remains consumed; two attempts remain.
