@@ -560,3 +560,16 @@ unexecuted candidate/downstream sequence once. Do not rebuild exports or the
 baseline, clean tar streams, promote repository pins, or run post-pin work. Any
 unexpected failure exhausts #672; PRE-PIN PASS and a separate promotion scope
 review remain required before repository edits.
+
+Luna HIGH stopped conservatively before creating any attempt-3 path or running
+any verifier, overlay, build, install, browser, or gate after observing PID
+`2125555`, another repository's Node/Prettier check. Astra LOW independently
+verified clean pushed authorization `7822a9d2`, current main `df0b9b93`, all six
+fresh paths absent, and that the vanished process owned no #672 path or shared
+qualification resource. It returned **PRECONDITION STOP / NO ATTEMPT**; do not
+reconstruct process evidence. Attempt 3 remains unstarted. Luna HIGH is
+reauthorized for the identical sequence after fresh identity/path checks and an
+actual-interference check limited to processes owning #672's source, target,
+dependency, artifact, browser, or evidence resources. Unrelated repository
+formatters/builds are not competing workloads. All prior stop, preservation,
+hard-stop, and promotion boundaries remain unchanged.
