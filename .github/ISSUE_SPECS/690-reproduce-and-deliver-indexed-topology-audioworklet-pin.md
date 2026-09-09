@@ -93,75 +93,33 @@ If three attempts fail, follow AGENTS.md: preserve evidence, rebrief the bounded
 failure cause, and restart the workflow under the owner's instruction to finish
 the audit. Do not weaken a gate or count an unmerged checkpoint as delivery.
 
-## Attempt-1 evidence verdict — FAIL
+## Attempt-1 verdict — FAIL
 
-Astra LOW returned **EVIDENCE FAIL** at exact clean pushed head `5114dd2c`.
-The persistent session returned exit 143, consistent with SIGTERM, though the
-sender and cause are unproved. Complete stderr records successful host-web Wasm
-compilation without a compiler diagnostic failure; the process terminated after
-four matching files and before ABI-layout and parameter-metadata JSON. No later
-gate ran. Builder record SHA-256 is
-`b35ffd0ab935fe5bcd67b29bdb92729ce9776f975a8bc3182fd01798bdfaa03d`,
-stderr is `0db705ac70725a1282d58a3eeb0668f247bdc5977ce6837d635cd11baaa24e1e`,
-and terminal manifest is
-`c54a61a885866aecf16609c17fb1232a768c0bcf3b297c8fb904ec336de02164`.
-Attempt 1 is consumed. Preserve all issue-690 attempt-1 paths without mutation.
+Astra LOW's controlling review records a procedural and evidence failure. The
+branch advanced to the execution-identity correction `5114dd2c`, and the first
+brief did not explicitly require creation of the builder's empty artifact
+directory. A concurrent Luna execution then started after that scope failure.
+The coordinator stopped the unauthorized process group. Its persistent session
+returned actual status 143, consistent with SIGTERM; the sender and cause are
+unproved.
 
-## Attempt 2: root-owned persistent execution
-
-The root coordinator owns artifact execution and pin qualification under the
-original handoff. Luna performs no long-running command in attempt 2. After
-Astra LOW passes this exact pushed amendment, root may use only these fresh,
-initially absent paths:
-
-```text
-/tmp/issue690-attempt2-artifact
-/tmp/issue690-attempt2-target
-/tmp/issue690-attempt2-evidence
-```
-
-Root must recheck exact clean HEAD/upstream, current main, frozen product/pin,
-six authority hashes, all three paths absent including symlinks, and no relevant
-process. It then exclusively creates the paths and a preflight record. Run the
-same ordinary builder and four ordered gates from attempt 1, substituting the
-attempt-2 paths.
-
-Each yielding command must be launched directly by root through
-`exec_command`. If it returns a session ID, root records that ID and polls the
-same live handle with `write_stdin` until an exit code is returned. A polling
-timeout triggers another poll of the same handle. Do not delegate the handle,
-use a shell timeout, interrupt it, start a monitor process, or begin another
-command while it is live. Redirect complete stdout/stderr to the attempt-2
-evidence path and record actual start, finish, and exit status.
-
-Status zero, exactly six ordinary files byte-identical to the authority, four
-status-zero post-build gates, clean Git, and absent source-local `target/` are
-required. Preserve a concise final manifest for Astra LOW review. No predecessor
-path, tracked file, compiler capture, generated artifact, or pin may change.
-
-## Attempt-1 verdict — PROCEDURAL FAIL
-
-Astra LOW returned SCOPE FAIL before execution because the branch had advanced
-to the sound execution-identity correction `5114dd2c` and the brief did not
-explicitly create the builder's required empty artifact directory. All three
-fresh paths were absent at that review.
-
-A concurrent Luna then created the attempt-1 evidence, artifact, and target
-paths and started the ordinary builder after SCOPE FAIL. The coordinator stopped
-the unauthorized process group. Its persistent session terminated with actual
-status 143, produced four of six candidate files, and ran no later gate. Attempt
-1 is consumed with no qualification or delivery credit. Preserve all three
-paths and records. Key SHA-256 identities are:
+Complete stderr records successful host-web Wasm compilation without a compiler
+diagnostic failure. Four matching files exist; ABI-layout and parameter-metadata
+JSON are absent. No later gate ran. Attempt 1 is consumed and its three paths
+remain preserved. Key SHA-256 identities are:
 
 ```text
 bd64cf95e7162df92bb31ad28d266ad6a97dfc26dda10a3af28b735c68ac5aa8  00-preflight.json
 1448b99c2340b09004f3b6cb792f30da6d8d1268cdff6406fc3ec12480c34eeb  01-path-creation.json
 b35ffd0ab935fe5bcd67b29bdb92729ce9776f975a8bc3182fd01798bdfaa03d  02-builder.json
+0db705ac70725a1282d58a3eeb0668f247bdc5977ce6837d635cd11baaa24e1e  02-builder.stderr
 c54a61a885866aecf16609c17fb1232a768c0bcf3b297c8fb904ec336de02164  99-terminal-manifest.json
 ```
 
-## Attempt 2: corrected fresh reproduction
+## Attempt 2: root-owned persistent reproduction
 
+Root owns artifact qualification and the long-lived command. Luna performs no
+attempt-2 execution. This section supersedes the earlier Luna ownership wording.
 Attempt 2 owns only these new paths, initially absent including dangling
 symlinks:
 
@@ -172,19 +130,17 @@ symlinks:
 ```
 
 Fresh Astra LOW SCOPE PASS is required against the exact clean pushed rebrief,
-matching GitHub/tracker bodies, current main and branch identities, all preserved
-attempt-1 records, and the three absent attempt-2 paths. No attempt-2 path may be
-created before that PASS is itself recorded and pushed.
+matching GitHub/tracker bodies, current main and branch identities, preserved
+attempt-1 records, six authority hashes, and the three absent paths. No
+attempt-2 path may be created before that PASS is recorded and pushed.
 
-One named Luna HIGH executor may then observe all paths absent in memory,
+Root must then recheck the same identities and absence of relevant processes,
 exclusively create the evidence directory, and durably record the preceding
-absence plus successful exclusive creation. It must next exclusively create
-`/tmp/issue690-attempt2-artifact` as an empty ordinary directory, verify it is
-not a symlink and has no entries, and durably record that result. Leave the
-target absent for Cargo to create. Recheck the exact clean upstream-equal branch
-and absence of relevant processes immediately before dispatch.
+three-path absence plus successful creation. Root next exclusively creates the
+artifact path as an empty ordinary directory, verifies it is not a symlink and
+has no entries, and records that result. Leave the target absent for Cargo.
 
-Run the same frozen sequence once with only the namespace changed:
+Run this frozen sequence once:
 
 ```text
 env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue690-attempt2-target bash scripts/build-web-audioworklet.sh /tmp/issue690-attempt2-artifact
@@ -194,11 +150,17 @@ node hosts/host-web/qualification/generate-matrix.mjs --check
 git diff --check
 ```
 
-Every potentially long command uses one persistent unified session and the same
-handle is polled until its actual exit result. No fixed timeout, restart, or
-retry is allowed. Keep exclusive, complete, synchronized, read-back records and
-one terminal self-excluding manifest. Stop permanently at the first nonzero
-status or identity/output mismatch. The original six hashes, byte-equality,
-clean-worktree, no-source-local-target, no-generated-Git-output, Astra evidence
-review, PR/CI/merge/post-main, synchronization, and cleanup requirements remain
-unchanged.
+Root launches each potentially long command directly with `exec_command`. When
+it returns a session ID, root records the ID and polls that same handle with
+`write_stdin` until an exit code is returned. A poll timeout triggers another
+poll of the same handle. Do not delegate or interrupt the handle, use a shell
+timeout, start a monitor process, retry a command, or run another command while
+the handle is live.
+
+Redirect complete stdout/stderr to the attempt-2 evidence path and record actual
+start, finish, exit status, exact argv/environment/cwd/head, worktree porcelain,
+and artifact census. Require status zero, exactly six ordinary files
+byte-identical to the frozen authority, four later status-zero gates, clean Git,
+and absent source-local `target/`. Preserve non-overwriting synchronized records
+and one terminal self-excluding manifest for Astra LOW review. No predecessor
+path, tracked file, compiler capture, generated artifact, or pin may change.
