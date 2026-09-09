@@ -118,9 +118,9 @@ literal bytes, SHA-256, invocations, and controls before Luna runs it.
 ## Frozen verifier authorization checkpoint
 
 The exact LF-terminated verifier prepared for Astra LOW review is
-/tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py, SHA-256
-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc
-(63,444 bytes). It has not been executed in this preparation tranche. Astra
+/tmp/issue679-verifier-a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38.py, SHA-256
+a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38
+(69,436 bytes). It has not been executed in this preparation tranche. Astra
 must review these literal bytes before Luna runs either control or production
 invocation. The verifier is read-only: it only reads Git objects, retained
 exports, retained evidence, and the nine census roots, and streams the
@@ -129,7 +129,7 @@ preserved target through tar and sha256 without writing them.
 The self-test control, run once only after preflight, is exactly:
 
 ```text
-TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py --self-test
+TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38.py --self-test
 ```
 
 Immediately before that command, `/tmp/issue679-verifier-control` must be
@@ -146,11 +146,11 @@ Passing the self-test does not qualify retained evidence. The production
 invocation, after the self-test review, is exactly:
 
 ```text
-python3 -B /tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+python3 -B /tmp/issue679-verifier-a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
 ```
 
 Require the script to be an ordinary non-symlink file at that path with mode
-`0444`, size 63,444, and the reviewed SHA-256 before either invocation. The
+`0444`, size 69,436, and the reviewed SHA-256 before either invocation. The
 production preflight supplies the external `AUTHORIZATION_HEAD` literal
 described above; the verifier's own commit/ref table remains independent of
 that authorization value. The production command must return 0 and its final
@@ -249,14 +249,14 @@ PLAYWRIGHT_COMMAND = (
     "NODE\n"
 )
 GATE_SPECS = (
-    ("07-gate1-resources", "python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue672-attempt3-candidate-artifact"),
-    ("08-gate2-web-test", "bash scripts/test-web-audioworklet.sh"),
-    ("09-gate3-sdk-deletions", "python3 -B scripts/check-sdk-deletions.py"),
-    ("10-gate4-sdk-deletions-selftest", "python3 -B scripts/check-sdk-deletions.py --self-test"),
-    ("11-gate5-sdk-types", "bash scripts/check-sdk-types.sh"),
-    ("12-gate6-sdk-headless", "bash scripts/check-sdk-headless.sh /tmp/issue672-attempt3-candidate-artifact"),
-    ("13-gate7-sdk-package", "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact"),
-    ("14-gate8-qualification", "npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue672-attempt3-candidate-artifact --browser all --check-matrix --self-test-mutations"),
+    ("07-gate1-resources", "07-gate1-postcheck", "python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue672-attempt3-candidate-artifact"),
+    ("08-gate2-web-test", "08-gate2-postcheck", "bash scripts/test-web-audioworklet.sh"),
+    ("09-gate3-sdk-deletions", "09-gate3-postcheck", "python3 -B scripts/check-sdk-deletions.py"),
+    ("10-gate4-sdk-deletions-selftest", "10-gate4-postcheck", "python3 -B scripts/check-sdk-deletions.py --self-test"),
+    ("11-gate5-sdk-types", "11-gate5-postcheck", "bash scripts/check-sdk-types.sh"),
+    ("12-gate6-sdk-headless", "12-gate6-postcheck", "bash scripts/check-sdk-headless.sh /tmp/issue672-attempt3-candidate-artifact"),
+    ("13-gate7-sdk-package", "13-gate7-postcheck", "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact"),
+    ("14-gate8-qualification", "14-gate8-postcheck", "npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue672-attempt3-candidate-artifact --browser all --check-matrix --self-test-mutations"),
 )
 POSTCHECK_COMMAND = "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target /tmp/issue678-attempt2-evidence/postcheck.sh"
 OVERLAY_COMMAND = "python3 -B /tmp/issue672-attempt2-export-verifier.py /home/bl/misofm/engine-cp8-mapping-delivery 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue678-attempt2-candidate-source overlay"
@@ -823,13 +823,13 @@ def parse_meta(path: pathlib.Path, expected_keys: set[str], expected_cwd: str | 
 
 
 def verify_postcheck(evidence: pathlib.Path, prefix: str, artifact_hashes: dict[str, str]) -> None:
-    if strict_text(evidence / f"{prefix}-postcheck.command", "postcheck command") != POSTCHECK_COMMAND + "\n":
+    if strict_text(evidence / f"{prefix}.command", "postcheck command") != POSTCHECK_COMMAND + "\n":
         raise VerificationError(f"postcheck command mismatch: {prefix}")
-    strict_text(evidence / f"{prefix}-postcheck.stdout", "postcheck stdout")
-    strict_text(evidence / f"{prefix}-postcheck.stderr", "postcheck stderr")
-    strict_status(evidence / f"{prefix}-postcheck.status", "0")
-    stdout = strict_text(evidence / f"{prefix}-postcheck.stdout", "postcheck stdout")
-    stderr = strict_text(evidence / f"{prefix}-postcheck.stderr", "postcheck stderr")
+    strict_text(evidence / f"{prefix}.stdout", "postcheck stdout")
+    strict_text(evidence / f"{prefix}.stderr", "postcheck stderr")
+    strict_status(evidence / f"{prefix}.status", "0")
+    stdout = strict_text(evidence / f"{prefix}.stdout", "postcheck stdout")
+    stderr = strict_text(evidence / f"{prefix}.stderr", "postcheck stderr")
     for marker in ("source_target=absent", "artifact_hashes:", "target_identity=manifests:"):
         if marker not in stdout:
             raise VerificationError(f"postcheck lacks {marker}: {prefix}")
@@ -845,7 +845,7 @@ def verify_postcheck(evidence: pathlib.Path, prefix: str, artifact_hashes: dict[
 
 def verify_gate_evidence(evidence: pathlib.Path, artifact_hashes: dict[str, str]) -> None:
     ordinary_directory(evidence, "retained evidence")
-    for prefix, expected_command in GATE_SPECS:
+    for prefix, postcheck_prefix, expected_command in GATE_SPECS:
         if strict_text(evidence / f"{prefix}.command", "gate command") != expected_command + "\n":
             raise VerificationError(f"gate command mismatch: {prefix}")
         strict_text(evidence / f"{prefix}.stdout", "gate stdout")
@@ -857,7 +857,7 @@ def verify_gate_evidence(evidence: pathlib.Path, artifact_hashes: dict[str, str]
             str(SOURCE_CANDIDATE),
             "0",
         )
-        verify_postcheck(evidence, prefix, artifact_hashes)
+        verify_postcheck(evidence, postcheck_prefix, artifact_hashes)
     qualification = strict_text(evidence / "14-gate8-qualification.stdout", "gate-8 stdout")
     for marker in (
         "session identities: 3 qualification documents declare their fed PCM",
@@ -870,6 +870,7 @@ def verify_gate_evidence(evidence: pathlib.Path, artifact_hashes: dict[str, str]
             raise VerificationError(f"gate-8 output lacks {marker}")
     package_output = strict_text(evidence / "13-gate7-sdk-package.stdout", "gate-7 stdout")
     for marker in (
+        "SDK publishable-tarball gate passed",
         "staged 6 Engine V1 artifacts and package manifest",
         "SDK generated surface is the engine's current output",
     ):
@@ -981,12 +982,14 @@ def census_root(root: pathlib.Path) -> list[str]:
     return rows
 
 
-def preserved_target_identity() -> str:
-    ordinary_directory(PRESERVED_TARGET, "preserved target")
+def preserved_target_identity(
+    root: pathlib.Path = PRESERVED_TARGET,
+    expected_digest: str | None = TARGET_DIGEST,
+) -> str:
+    ordinary_directory(root, "preserved target")
     command = [
         "tar", "--sort=name", "--mtime=@0", "--owner=0", "--group=0",
-        "--numeric-owner", "-C", str(PRESERVED_TARGET.parent), "-cf", "-",
-        PRESERVED_TARGET.name,
+        "--numeric-owner", "-C", str(root.parent), "-cf", "-", root.name,
     ]
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1004,7 +1007,7 @@ def preserved_target_identity() -> str:
     if status != 0:
         raise VerificationError(f"target identity command failed: {stderr[:200]!r}")
     value = digest.hexdigest()
-    if value != TARGET_DIGEST:
+    if expected_digest is not None and value != expected_digest:
         raise VerificationError(f"preserved target digest mismatch: {value}")
     return value
 
@@ -1022,7 +1025,7 @@ def capture_nine_root_census(phase: str) -> tuple[tuple[tuple[str, tuple[str, ..
     print(f"{phase} PRESERVED_TARGET {PRESERVED_TARGET}")
     for row in target_rows:
         print(row)
-    target_digest = preserved_target_identity()
+    target_digest = preserved_target_identity(PRESERVED_TARGET, TARGET_DIGEST)
     print(f"{phase} PRESERVED_TARGET_TAR_SHA256 {target_digest}")
     return tuple(roots), target_rows, target_digest
 
@@ -1057,7 +1060,9 @@ def verify_all(
         final_census = capture_nine_root_census("FINAL")
         if final_census != initial_census:
             raise VerificationError("retained-input census changed during verification")
-    print("PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census")
+        print("PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census")
+    else:
+        print("PASS authority/pristine/candidate/artifact")
 
 
 def assert_reject(action) -> None:
@@ -1097,6 +1102,7 @@ def exact_self_test_control():
 
 
 def synthetic_self_test() -> None:
+    global ROOT_CENSUS, PRESERVED_TARGET, TARGET_DIGEST
     with exact_self_test_control() as control, tempfile.TemporaryDirectory(
         prefix="run-", dir=str(control)
     ) as temp:
@@ -1173,6 +1179,108 @@ def synthetic_self_test() -> None:
             ("synthetic", file_sha256(p), stat.S_IMODE(p.stat().st_mode))
             for p in dist.rglob("*") if p.is_file() and not p.is_symlink()
         }
+        gate_meta = (
+            f"cwd={SOURCE_CANDIDATE}\n"
+            f"CARGO_TARGET_DIR={TARGET_ENV}\n"
+            "start_utc=2026-01-01T00:00:00Z\n"
+            "finish_utc=2026-01-01T00:00:01Z\n"
+            "status=0\n"
+        )
+        postcheck_stdout = (
+            "source_target=absent\nartifact_hashes:\n"
+            + "\n".join(synthetic_hashes.values())
+            + "\ntarget_identity=manifests:\n"
+            + "\n".join(
+                f"{digest}  {path}" for path, digest in PACKAGE_MANIFEST_HASHES.items()
+            )
+            + "\n"
+        )
+        for gate_prefix, postcheck_prefix, command in GATE_SPECS:
+            (evidence / f"{gate_prefix}.command").write_text(command + "\n")
+            (evidence / f"{gate_prefix}.meta").write_text(gate_meta)
+            gate_output = "gate passed\n"
+            if gate_prefix == "13-gate7-sdk-package":
+                gate_output = (
+                    "SDK publishable-tarball gate passed\n"
+                    "staged 6 Engine V1 artifacts and package manifest\n"
+                    "SDK generated surface is the engine's current output\n"
+                )
+            elif gate_prefix == "14-gate8-qualification":
+                gate_output = (
+                    "session identities: 3 qualification documents declare their fed PCM\n"
+                    "artifact set: the exact 6-file shipped set is pinned\n"
+                    "chromium: all qualification gates passed (151.0.7922.34)\n"
+                    "firefox: all qualification gates passed (153.0)\n"
+                    "webkit: all qualification gates passed (26.5)\n"
+                )
+            (evidence / f"{gate_prefix}.stdout").write_text(gate_output)
+            (evidence / f"{gate_prefix}.stderr").write_text("")
+            (evidence / f"{gate_prefix}.status").write_text("0\n")
+            (evidence / f"{postcheck_prefix}.command").write_text(POSTCHECK_COMMAND + "\n")
+            (evidence / f"{postcheck_prefix}.stdout").write_text(postcheck_stdout)
+            (evidence / f"{postcheck_prefix}.stderr").write_text(f"{TARGET_DIGEST}\n")
+            (evidence / f"{postcheck_prefix}.status").write_text("0\n")
+        (evidence / "05-playwright-api.command").write_text(PLAYWRIGHT_COMMAND)
+        (evidence / "05-playwright-api.meta").write_text(
+            f"cwd={SOURCE_CANDIDATE}\n"
+            "start_utc=2026-01-01T00:00:00Z\n"
+            "finish_utc=2026-01-01T00:00:01Z\n"
+            "status=0\n"
+        )
+        (evidence / "05-playwright-api.stdout").write_text(
+            "chromium\t/tmp/chromium\nfirefox\t/tmp/firefox\nwebkit\t/tmp/webkit\n"
+        )
+        (evidence / "05-playwright-api.stderr").write_text("")
+        (evidence / "05-playwright-api.status").write_text("0\n")
+        (evidence / "04-overlay-verifier.command").write_text(OVERLAY_COMMAND + "\n")
+        (evidence / "04-overlay-verifier.stdout").write_text("PASS paths=12195 overlay=1\n")
+        (evidence / "04-overlay-verifier.stderr").write_text("")
+        (evidence / "04-overlay-verifier.status").write_text("0\n")
+        (evidence / "04-overlay-verifier.meta").write_text(
+            "start_utc=2026-01-01T00:00:00Z\n"
+            "finish_utc=2026-01-01T00:00:01Z\n"
+            "status=0\n"
+        )
+        (evidence / "15-final-overlay-verifier.command").write_text(OVERLAY_COMMAND + "\n")
+        (evidence / "15-final-overlay-verifier.stdout").write_text("")
+        (evidence / "15-final-overlay-verifier.stderr").write_text("missing or extra tracked path\n")
+        (evidence / "15-final-overlay-verifier.status").write_text("1\n")
+        (evidence / "15-final-overlay-verifier.meta").write_text(
+            f"cwd={RETAINED_VERIFIER_CWD}\n"
+            "start_utc=2026-01-01T00:00:00Z\n"
+            "finish_utc=2026-01-01T00:00:01Z\n"
+            "status=1\n"
+        )
+        verify_retained_evidence(evidence, synthetic_hashes)
+        missing_postcheck = evidence / "08-gate2-postcheck.command"
+        missing_postcheck.unlink()
+        assert_reject(lambda: verify_retained_evidence(evidence, synthetic_hashes))
+        missing_postcheck.write_text(POSTCHECK_COMMAND + "\n")
+        saved_roots, saved_target, saved_digest = ROOT_CENSUS, PRESERVED_TARGET, TARGET_DIGEST
+        synthetic_roots = tuple(
+            (f"synthetic-{index}", str(base / f"census-{index}")) for index in range(9)
+        )
+        for _, raw_root in synthetic_roots:
+            root = pathlib.Path(raw_root)
+            root.mkdir()
+            (root / "record").write_text("synthetic\n")
+        synthetic_target = base / "target"
+        synthetic_target.mkdir()
+        (synthetic_target / "record").write_text("target\n")
+        ROOT_CENSUS = synthetic_roots
+        PRESERVED_TARGET = synthetic_target
+        TARGET_DIGEST = preserved_target_identity(synthetic_target, None)
+        initial_census = capture_nine_root_census("INITIAL")
+        final_census = capture_nine_root_census("FINAL")
+        if final_census != initial_census:
+            raise AssertionError("synthetic census changed without mutation")
+        missing_root = pathlib.Path(synthetic_roots[-1][1]) / "record"
+        missing_root.unlink()
+        changed_census = capture_nine_root_census("CHANGED")
+        if changed_census == initial_census:
+            raise AssertionError("synthetic census mutation was not observed")
+        missing_root.write_text("synthetic\n")
+        ROOT_CENSUS, PRESERVED_TARGET, TARGET_DIGEST = saved_roots, saved_target, saved_digest
         verify_all(repo, commit, pristine, candidate, artifact, evidence,
                    (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
                    synthetic_expectations, False, False)
@@ -1265,7 +1373,10 @@ def synthetic_self_test() -> None:
         )
         if bad_args.returncode == 0:
             raise AssertionError("--self-test accepted positional paths")
-    print("PASS self-test commit/arguments/overlay-file/overlay-directory/76-78/sdk-symlink/artifact-special/JSON")
+    print(
+        "PASS self-test commit/arguments/overlays/all-eight-gates/nine-root-census/"
+        "76-78/sdk-symlink/artifact-special/JSON"
+    )
 
 
 def main() -> int:
