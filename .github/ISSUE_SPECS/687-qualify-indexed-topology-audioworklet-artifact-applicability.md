@@ -3,7 +3,7 @@
 GitHub: https://github.com/misofm/engine/issues/687
 
 Parent/delivery peer: #685. Audit parent: #560 CP1. Coordination: #559.
-Frozen source predecessor: `f89f81dfe7613fb21b95a0a9124cdccd9351e23a`
+Frozen source predecessor: `c9ccf6acf4030a0b567b5c18cbb0f52126aa16f5`
 (product commit `276ffb6097a84088e3b5f4a16892a33bca9e26fb`).
 Current delivered AudioWorklet pin:
 `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`,
@@ -11,9 +11,12 @@ delivered through #680/PR #682 at main `8999def5`.
 
 ## Problem
 
-#685 received Astra LOW ATTEMPT-2 SOURCE PASS for its bounded topological-
-scheduling implementation after attempt 1 failed on a pre-existing stale graph
-fixture manifest. `graph-compiler` is in the shipped
+#685 received hard-final Astra LOW SOURCE/EVIDENCE PASS for its bounded
+topological-scheduling implementation. Attempt 1 failed on a pre-existing stale
+graph fixture manifest. Attempt 2's technical gates passed, but a concurrent
+spec edit failed its final clean-tree assertion. Read-only attempt 3 verified the
+documentation-only drift, frozen non-spec hashes, and all 102 preserved status-0
+command records without rerunning a gate. `graph-compiler` is in the shipped
 `host-web -> host-core -> graph-compiler` dependency closure, so source PASS does
 not establish that the currently pinned AudioWorklet artifact represents the
 accepted source. Lane B alone must decide applicability and own any later
@@ -23,37 +26,58 @@ This issue begins with one identity probe. It does not assume drift and does not
 reuse, repair, or rerun #644/#680 artifact evidence. All prior failed and retained
 state remains preserved.
 
-The earlier artifact brief inherited a concurrent, premature attempt-1 PASS and
-granted no execution. This corrected brief relies only on the controlling
-attempt-2 PASS at `f89f81df`, with product frozen at `276ffb60`. No stage-1 path
-exists and no builder has run.
+The earlier artifact brief inherited premature concurrent PASS rows and granted
+no execution. This corrected brief relies only on #685's controlling hard-final
+PASS at `c9ccf6ac`, with product frozen at `276ffb60`. No stage-1 path exists and
+no builder has run.
 
 ## Stage 1: one repin-report identity probe
 
 One designated Luna HIGH or XHIGH executor may run the builder once in repin-
-report mode from an exact clean pushed branch after Astra LOW passes the numbered
-brief. Before creating anything, record and read back:
+report mode from a fresh detached worktree at exact source `c9ccf6ac` after Astra
+LOW passes the corrected numbered brief. The Astra PASS record must state literal
+reviewed #687 brief and tracker checkpoints. Execution preflight must compare
+against those literal checkpoints, exact main
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`, source
+`c9ccf6acf4030a0b567b5c18cbb0f52126aa16f5`, and product
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`; recording whatever identities happen
+to be live is insufficient.
+
+Before creating anything, observe in memory and verify:
 
 - executor identity and UTC start;
-- cwd, exact HEAD/upstream equality, merge base and frozen #685 product commit
-  `276ffb6097a84088e3b5f4a16892a33bca9e26fb`;
-- empty repository porcelain including untracked files;
+- coordinator cwd, exact #687 HEAD/upstream equality, tracker identity, main,
+  source/product ancestry and empty coordinator porcelain including untracked
+  files;
 - `rustc -Vv`, `cargo -V`, literal command and complete relevant environment;
 - current delivered pin; and
-- absence, including dangling symlinks, of both predeclared paths:
-  `/tmp/issue687-repin-output` and `/tmp/issue687-repin-evidence`.
+- absence, including dangling symlinks, of all three predeclared paths:
+  `/tmp/issue687-repin-source`, `/tmp/issue687-repin-output`, and
+  `/tmp/issue687-repin-evidence`.
 
 Stop before creation on any mismatch or concurrent Cargo/rustc builder activity.
-Create the output as an empty non-symlink directory and the evidence directory
-once without overwrite. Run exactly once:
+Then perform this persistence order once:
+
+1. Exclusively create `/tmp/issue687-repin-evidence`.
+2. Persist the pre-creation observations to `00-preflight.json` using a flushed
+   and file-synchronized write, synchronize the evidence directory entry, read
+   the file back, and verify its SHA-256 before any source/output path creation.
+3. Create `/tmp/issue687-repin-source` once as a detached worktree at exact
+   `c9ccf6ac`; require exact HEAD, clean porcelain, and no untracked files.
+4. Create `/tmp/issue687-repin-output` once as an empty non-symlink directory,
+   persist/read back its creation record, then dispatch from the detached source.
+
+Run exactly once:
 
 ```text
-MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue687-repin-output
+(cd /tmp/issue687-repin-source && MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue687-repin-output)
 ```
 
 Capture the exact argv/environment/cwd/head, start/finish, complete stdout and
-stderr, numeric status, postflight porcelain, output census, delivered pin, and
-SHA-256/size/mode of every record. Stop on nonzero status, anything other than
+stderr, numeric status, detached-source and coordinator postflight porcelain,
+output census, delivered pin, and SHA-256/size/mode of every record. Each record
+must be written without overwrite, synchronized, read back, and included in a
+terminal self-excluding manifest. Stop on nonzero status, anything other than
 one lowercase 64-hex digest plus LF on stdout, a nonempty output directory, tree
 drift, or changed source/authority. Do not retry, run the ordinary builder,
 inspect compiler payloads, retain a Cargo target intentionally, edit a pin or
