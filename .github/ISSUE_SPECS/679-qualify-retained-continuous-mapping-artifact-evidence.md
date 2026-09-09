@@ -2938,18 +2938,30 @@ The retained Playwright metadata is immutable at SHA-256
 Its start and finish are both `2026-09-09T04:20:27Z`; equal second-resolution
 timestamps are compatible with a successful subsecond command. Astra LOW
 confirmed that requiring strictly positive elapsed time is an unsupported
-verifier assumption.
+verifier assumption. The terminal audit also found that the retained gate-7
+stdout marker is case-sensitive lowercase `sdk generated surface is the
+engine's current output`, while the attempt-2 verifier required uppercase
+`SDK generated surface is the engine's current output`; this mismatch receives
+no qualification credit and is corrected only in attempt 3.
 
 Attempt 3 is the third and final attempt. It may change only timestamp ordering
 to require timezone-aware values and accept `finish >= start`, add synthetic
-equal-time acceptance and descending-time rejection controls, and move the
-isolated self-test control to its fresh attempt-3 path. All malformed, missing,
-status, schema, command, census, and identity checks remain unchanged. Luna HIGH
-may prepare and run the synthetic self-test only at the fresh control path, then
-must seal new content-addressed verifier bytes. Astra LOW exact-hash DRAFT PASS
-is required before those literal bytes enter this spec. Root then freezes an
-external exact feature authorization head in #559/#560 and obtains Astra LOW
-exact-head SCOPE PASS before any retained-evidence command.
+equal-time acceptance, descending-time rejection, and timezone-free rejection
+controls, correct the exact lowercase gate-7 marker, add exact-lowercase
+acceptance and wrong-case rejection controls, and move the isolated self-test
+control to its fresh attempt-3 path. All malformed, missing, status, schema,
+command, census, and identity checks remain unchanged.
+
+Luna HIGH may prepare only the external attempt-3 draft at the fresh control
+path; it must not execute or embed those bytes in this preparation tranche.
+Astra LOW must first complete technical exact-hash DRAFT review of that
+external draft. After DRAFT PASS, a separately authorized isolated self-test
+may run once; Astra LOW must review its terminal result and exact bytes. Only
+after that self-test review may the sealed hash-named verifier bytes enter this
+spec. Root then freezes an external exact feature authorization head in
+#559/#560 and obtains fresh Astra LOW exact-head SCOPE PASS before any retained-
+evidence command. This ordering is mandatory because standing review requires
+verifier review before Luna executes its bytes.
 
 Attempt-3 fresh paths are:
 
@@ -2960,6 +2972,12 @@ Attempt-3 fresh paths are:
 - `/tmp/issue679-attempt3-manifest-verify.stderr`;
 - `/tmp/issue679-attempt3-manifest-verify.status`;
 - `/tmp/issue679-attempt3-verifier-control`.
+
+The external preparation draft is `/tmp/issue679-verifier-attempt3-draft.py`.
+Its content hash and size are reported to Astra LOW for technical DRAFT review;
+the attempt-3 verifier bytes are intentionally not embedded in this spec until
+the separately authorized self-test has completed and Astra LOW has reviewed
+its terminal result.
 
 All seven must be absent including dangling symlinks before preparation and
 again before production. Recheck every attempt-1 and attempt-2 hash. After exact-
