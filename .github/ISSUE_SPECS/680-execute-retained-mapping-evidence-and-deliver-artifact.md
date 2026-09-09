@@ -2158,3 +2158,49 @@ Keep #680 open and create no successor. The three-file commit remains
 unapproved for delivery until Astra LOW reviews those two records and returns a
 technical post-pin verdict with the provenance limitation. No merge or delivery
 credit attaches to this correction.
+
+## Technical post-pin verdict and PR-readiness amendment
+
+The separately reviewed read-only attribution completed without invoking a build
+or modifying preserved bytes. Attribution record SHA-256
+`011c5d1b552ee25deecbe9eabf834fdde83a3e9cc5cf46df6de14581cec0065e`,
+5,408 bytes, mode `0444`, preserves `actor=unknown-concurrent-process` and states
+that exact invocation count and sole-executor provenance remain unproved.
+Comparison record SHA-256
+`4e795b2129dc0d6bd0df65e9457b309c54251cdc202e26244d7adc434c28f453`,
+1,595 bytes, mode `0444`, records six bytewise-ordered `cmp` statuses of 0 and
+the exact qualified hashes. Astra LOW returned **EVIDENCE PASS — limited
+technical post-pin byte identity accepted**. This does not retroactively certify
+the failed lifecycle capture; retain that limitation in delivery reporting.
+
+The exact feature diff from current main is limited to these 11 paths:
+
+- `.github/ISSUE_SPECS/669-share-continuous-parameter-mapping-admissibility.md`;
+- `.github/ISSUE_SPECS/670-qualify-frozen-continuous-mapping-extraction.md`;
+- `.github/ISSUE_SPECS/672-qualify-and-pin-continuous-mapping-audioworklet-artifact.md`;
+- `.github/ISSUE_SPECS/678-complete-continuous-mapping-artifact-delivery.md`;
+- `.github/ISSUE_SPECS/679-qualify-retained-continuous-mapping-artifact-evidence.md`;
+- `.github/ISSUE_SPECS/680-execute-retained-mapping-evidence-and-deliver-artifact.md`;
+- `crates/effect-contract/src/lib.rs` at SHA-256
+  `be709c2293b108feccfe14b0049c08e32d09ce61188a865dca59fa6cee185f98`;
+- `crates/effect-package/src/wire.rs` at SHA-256
+  `9a4e833512ab8f70bf4804fc149bfe21e2cb568eb6f53a707c212529e7e66818`;
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` at SHA-256
+  `a913e6da85d292d48608da542e7b1c76abe97fc31df1760da2cd7a3e692d385d`;
+- `hosts/host-web/qualification/results.json` at SHA-256
+  `d0c07f89799d0f6ab8053a9a97fc84fa79fb7d2d306d921453c75237b6e9bfb8`;
+- `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` at SHA-256
+  `83e98455f1f9868ab264e0e2b89a416240891fb05e415f2af2a633643b0a627b`.
+
+No generated SDK file, Wasm artifact, Cargo target, compiler capture, `.ll`,
+`.s`, binary, or raw qualification payload is tracked. Root must push and
+synchronize this amendment, then Astra LOW performs exact-head/current-main PR-
+readiness review of the full diff, commit ancestry, accepted retained evidence,
+limited post-pin verdict, issue parity, and GitHub branch state. A PASS authorizes
+root to open one pull request from `codex/execute-retained-mapping-delivery` to
+`main`. The PR must require `.github/workflows/qualification.yml`'s
+`qualification` verdict on its immutable head. No merge occurs until that check
+succeeds and a guarded live head/base review passes. After merge, root waits for
+the post-main `qualification` result, synchronizes #669/#670/#672/#678/#679/#680,
+#559/#560, and #349 accounting, then closes delivered issues and removes only
+clean delivered worktrees.
