@@ -250,17 +250,60 @@ exact bytes. Coordinator inspection flags one likely impossible self-reference:
 `validate_lease_rows` requires the supplied tracker commit SHA to occur inside
 both tracker files committed by that same SHA.
 
-The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
-status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
-failure sequencing, and the exact verifier self-test, production, manifest, and
-manifest-verification commands below. It must provide isolated synthetic controls
-that reject a changed authorization head without output, a pre-existing regular
-path, a dangling symlink, a verifier identity mismatch, and a command mismatch.
-Root must embed or otherwise freeze its exact bytes, SHA-256, size, mode, and
-literal invocations in a pushed synchronized amendment. Astra LOW must review
-the runner's syntax and controls before any isolated runner self-test, then review
-that terminal self-test before fresh exact-head production SCOPE PASS. No
-attempt-2 execution is authorized by this amendment.
+Astra LOW returned **STATIC FAIL** on revision 2. Its shared flow creates the
+evidence directory and then requires that same directory absent, the tracker
+lease check is self-referential and conflates historical rows, the live feature
+branch is not queried, target stderr draining can still block, `sha256sum`
+stdout rows are not parsed, manifest creation metadata is incomplete, and a
+duplicate lease helper remains. No runner or verifier byte ran.
+
+## Attempt 2 reduced launcher
+
+Two consecutive runner revisions failed without advancing an executable gate.
+The throughput and ceremony-boundary rules now stop that general-runner shape.
+The content-addressed verifier already owns target identity, the 77-file SDK
+classification, all eight retained gates, and the nine-root census. Repeating
+those checks and a general synthetic framework in another program adds failure
+surface without strengthening the artifact claim. All earlier clauses that call
+for another general runner or runner self-test are superseded; preserve the three
+sealed runner candidates outside Git and create no `revision3`.
+
+Only Luna HIGH `/root/issue583_luna_impl` may prepare a small single-purpose
+launcher at fresh external `/tmp/issue680-attempt2-launcher.py`. Preparation
+creates that ordinary file only and invokes nothing. The launcher must:
+
+- require full lowercase `--feature-head`, `--tracker-head`, and exact
+  `--executor-id /root/issue583_luna_impl`; before output, compare those heads
+  with clean local HEAD/upstream and live feature/tracker remote refs, require
+  live/local main and merge bases at the pinned main, verify the clean preserved
+  authority head, verifier hash/size/mode, old preflight hash, and all seven fresh
+  paths, and acquire a nonblocking advisory lock on its own ordinary file;
+- exclusively create the preflight, invoke the exact verifier self-test once,
+  and append literal argv/cwd/start/finish/status plus complete stdout/stderr;
+  on launch error, nonzero status, missing final self-test PASS, or control
+  residue, append the failure and stop;
+- recheck all identities and remaining paths, create the evidence directory,
+  invoke the exact production verifier once, preserve the five flat
+  `00-production.{command,meta,stdout,stderr,status}` captures, and require status
+  0 plus the exact production PASS as the final nonempty stdout line;
+- create `SHA256SUMS` over those five explicitly named ordinary files only,
+  bytewise sorted, with lowercase digest, two spaces, and `./filename`; reject
+  any extra/symlink/special entry, then never write inside evidence again;
+- directly dispatch `sha256sum -c SHA256SUMS` once, capture exact argv/cwd/
+  timestamps/status/streams in the four external manifest paths, and require
+  empty stderr plus the exact five `./filename: OK` stdout rows and matching
+  manifest/name/count sets.
+
+Use one dispatch function that compares actual argv with the frozen verifier
+arrays immediately before `subprocess.Popen`, maps launch errors to status 127,
+and never deletes a partial record. No target archive, retained census, tracker-
+body parsing, process scan, general traversal, dependency injection, or launcher
+self-test belongs in the reduced program; those are verifier or exact-head scope
+responsibilities. Root freezes the launcher hash/size/mode, Astra LOW reviews the
+literal bytes once, and a later exact-head SCOPE PASS supplies the sole execution
+command:
+`python3 -B /tmp/issue680-attempt2-launcher.py --feature-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
+No launcher or verifier execution is authorized by this amendment.
 
 Fresh production paths are:
 
@@ -300,8 +343,8 @@ Astra LOW already returned STATIC DRAFT PASS on these exact bytes under #679;
 #680 requires fresh exact-head scope review of the embedded bytes and all paths
 before any command.
 
-After the separately frozen runner, its reviewed isolated controls, and a fresh
-exact-head production SCOPE PASS, run the isolated verifier self-test exactly
+After the reduced launcher is frozen, statically reviewed, and receives a fresh
+exact-head production SCOPE PASS, it runs the isolated verifier self-test exactly
 once:
 
 ```text
@@ -1705,7 +1748,7 @@ worktrees. Failed predecessor worktrees remain until delivery evidence is secure
 ## Attempt and acceptance rules
 
 Attempt 1 is consumed by its exclusive partial preflight and receives no credit.
-Attempt 2 gets one reviewed runner-control flow, one verifier self-test, one
+Attempt 2 gets one reviewed launcher flow, one verifier self-test, one
 production invocation, and one manifest flow. Any failure stops it and requires
 Astra LOW adversarial review plus a pushed, synchronized amendment before final
 attempt 3. After three failed attempts, stop and rescope; never weaken a gate,
