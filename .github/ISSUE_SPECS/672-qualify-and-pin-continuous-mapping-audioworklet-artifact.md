@@ -493,3 +493,57 @@ the repository remained clean. Preserve all attempt-2 paths unchanged. Attempt 2
 is consumed. Astra LOW failure review and a frozen final-attempt scope are
 required before further execution. No promotion or compiler/generated payload
 commit is authorized.
+
+## Attempt 2 review and final-attempt rescope
+
+Astra LOW confirmed **ATTEMPT-2 FAIL** at exact clean pushed
+`be6e4fe02ede8b4b472d7dd0e8aa74a4f6f0697e`. Both retained exports have
+status-0 exact verification of 12,195 paths and their tar hashes match
+`1dc665c502ab20e215597ce8e93db80c30a11e8f58f99f2e8a9cba7eeb434d75`.
+The failed cleanup has no retained command/status record and remains executor-
+attributed; do not reconstruct it. No final manifest exists. Attempt 2 is
+consumed, while its successful export records remain usable.
+
+Root integrated delivered #675 main
+`df0b9b93636de36a7143da15b83444f280b65e6b` conflict-free at pushed
+checkpoint `755f3b70395d1498c76d8ef1d2851cf54151e46d`. The merge parents are
+attempt-2 disposition then current main. #675 changes exactly its issue record,
+`crates/builtins/src/lib.rs`, and new `crates/builtins/src/tests.rs`; Astra LOW's
+delivered #675 SOURCE PASS proves the moved body remains behind `cfg(test)` and
+the production input/artifact applicability is unchanged. The two accepted CP8
+source hashes, host-web/SDK/config/lock/pin bytes, and retained artifact source
+checkpoint `8708c9b9` remain unchanged.
+
+Final attempt 3 uses only these fresh paths:
+
+- `/tmp/issue672-attempt3-candidate-artifact`
+- `/tmp/issue672-attempt3-target`
+- `/tmp/issue672-attempt3-evidence`
+- `/tmp/issue672-attempt3-manifest-record.txt`
+- `/tmp/issue672-attempt3-manifest-verify.stdout`
+- `/tmp/issue672-attempt3-manifest-verify.status`
+
+Require all six absent including dangling symlinks before creation. Record fresh
+feature/upstream/main/merge identities, toolchains/environment, all frozen source/
+config/pin byte shapes, exact #675 three-path applicability, complete attempt-1/2
+path census and hashes, and harmless captured status-0/status-1 controls. Preserve
+all prior bytes, exports, artifacts, tar streams, and failed attribution.
+
+Use retained `/tmp/issue672-attempt2-candidate-pristine` and
+`/tmp/issue672-attempt2-candidate-source` without re-exporting. Re-run the frozen
+verifier in exact mode against `8708c9b9` before any overlay; require both 12,195-
+path results and the retained tar hashes, but do not delete either tar. Then
+continue the original candidate steps 3 through 8 once, substituting only the
+attempt-3 artifact/target/evidence/manifest paths. Apply the same exact three
+scratch overlays to the retained candidate source, build the candidate once,
+require expected digest `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`, compare its five non-Wasm files to
+the immutable attempt-1 baseline, run every frozen structural/resource/PCM/SDK/
+three-browser gate, verify final overlay state, and finalize the self-excluding
+manifest. Omit all tar cleanup from the qualification path; cleanup is deferred
+until delivered-worktree cleanup.
+
+Stop on the first failure without correction or retry. Any failure exhausts #672
+and requires a genuinely rescoped successor under the repository hard stop. No
+repository promotion, post-pin execution, PR, merge, compiler dump, or generated
+payload commit is authorized until this pushed amendment receives Astra LOW
+FINAL-ATTEMPT SCOPE PASS and the completed evidence receives PRE-PIN PASS.
