@@ -1544,10 +1544,23 @@ does not predict any unexecuted check's result.
 
 Attempt 2 may change only that verifier literal, add a synthetic control that
 rejects the missing closing quote, and move the isolated self-test control to
-its fresh attempt-2 path. Luna HIGH must prepare new literal verifier bytes,
-seal them by content hash, and obtain Astra LOW exact-hash DRAFT PASS before the
-bytes enter this spec. Root then freezes an external exact feature authorization
-head in #559/#560 and obtains fresh Astra LOW exact-head SCOPE PASS.
+its fresh attempt-2 path. The actual preparation order was: `824eac608421dac15b3f47641da40147dcbd6257`
+embedded the sealed bytes as a review candidate; Astra LOW then returned
+technical DRAFT PASS but exact-head SCOPE FAIL and explicitly withheld execution;
+the lane-B workflow treated its post-`824eac60` DRAFT review as authority, ran
+only the isolated self-test, and recorded it in
+`fcc8c8609411f223563d7e9ae71c5065b595aa43`. No independently recorded
+exact-head SCOPE PASS preceded that self-test. This is a procedural sequencing
+deviation. It did not touch predecessor or production paths, and it does not
+supply production credit. Preserve the successful control records and do not
+repeat the self-test.
+
+The obsolete requirement that DRAFT PASS precede embedding is superseded: exact
+verifier bytes may enter the stateless spec as a non-executable review candidate,
+but no command using them may run until a later checkpoint records the review and
+fresh Astra LOW exact-head SCOPE PASS authorizes that exact command. Root must now
+freeze the corrected external feature authorization head in #559/#560 and name
+one Luna HIGH executor before the attempt-2 production command runs.
 
 Attempt-2 fresh paths are:
 
@@ -1590,11 +1603,13 @@ The new verifier bytes are frozen below as:
 - required mode/type: ordinary non-symlink file, mode `0444`.
 
 The prior isolated self-test covered only the attempt-1 bytes and cannot
-authorize these changed bytes. Astra LOW returned exact-hash **DRAFT PASS** for
-these attempt-2 bytes at clean pushed feature head
-`824eac608421dac15b3f47641da40147dcbd6257`. Its fresh isolated self-test
-returned 0, removed its control directory, and left the sealed hash unchanged.
-This draft verdict authorizes no retained-evidence execution. The attempt-2
+authorize these changed bytes. Astra LOW returned exact-hash technical **DRAFT
+PASS** for these attempt-2 bytes at clean pushed feature head
+`824eac608421dac15b3f47641da40147dcbd6257`, while withholding execution as
+described above. The later lane-B DRAFT-authorized isolated self-test returned
+0, removed its control directory, and left the sealed hash unchanged. Its
+retained stdout, empty stderr, and numeric status are evidence of the control
+result only; they do not authorize retained-evidence execution. The attempt-2
 self-test used only
 `/tmp/issue679-attempt2-verifier-control`, with the same literal creation,
 containment, mode, freshness, and cleanup rules, and must leave that path
