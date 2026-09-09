@@ -237,3 +237,32 @@ records in the named evidence path and preserve all outputs through Astra LOW
 review. Commit no artifact, binary, compiler stream, target, SDK output, browser
 dependency, or evidence capture. PR/merge remains blocked until final Astra LOW
 evidence PASS. Any failure hard-stops #688 without retry or successor.
+
+## Final attempt-3 verdict — FAIL; hard stop
+
+Astra LOW independently reproduced the attempt-2 disposition at exact SHA-256
+`fe263bf681dca977b924c63683e403ee2d0f48f3d960d902a3e5aa429379dfc5`
+and accepted only its limited technical-applicability conclusion. Attempt 1
+remains failed; every freshness, dispatch, exclusivity, historical-immutability,
+and exact-invocation-count limitation remains controlling.
+
+The first attempt-3 scope review returned **SCOPE FAIL** because all three
+promotion files were already modified before review. It expressly withheld
+retroactive authority and required preservation. A competing actor then committed
+and pushed those exact bytes as `2cc6fff5cc21bcca96ebeb106fa3827b47f043fd`
+after the failure. The commit is clean, changes only the pin, results, and matrix,
+and matches `/tmp/issue688-source`, but it receives no qualification, promotion,
+PR, merge, or delivery credit.
+
+The competing execution continued after the scope failure by creating all three
+attempt-3 paths and starting the ordinary builder. Astra LOW ruled that the
+unauthorized copy/commit/build sequence consumed final attempt 3. The coordinator
+stopped its process group while the builder was still running. Preserve the
+partial artifact, target, evidence, and commit exactly as found. The evidence
+directory contains only `00-preflight.json` and its sidecar; no builder result,
+static/resource result, terminal manifest, or complete six-file output exists.
+
+#688 is hard-stopped after three attempts. Do not repair, rerun, adopt, merge,
+rewrite, reset, clean, or create a successor. The explicit no-successor boundary
+requires new owner instruction to change. #685 remains an undelivered partial;
+no original open finding may begin while that inherited partial remains.
