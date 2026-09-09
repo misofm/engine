@@ -251,7 +251,16 @@ durably records the preceding validation, absence, and creation. Luna next
 exclusively creates the artifact path as an empty ordinary non-symlink directory
 and records that fact. Leave target absent for Cargo.
 
-Run the same frozen five-command sequence from attempt 2 exactly once, in order.
+Run these five commands exactly once, in order:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue690-attempt3-target bash scripts/build-web-audioworklet.sh /tmp/issue690-attempt3-artifact
+CARGO_TARGET_DIR=/tmp/issue690-attempt3-target bash scripts/check-web-audioworklet.sh /tmp/issue690-attempt3-artifact
+CARGO_TARGET_DIR=/tmp/issue690-attempt3-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue690-attempt3-artifact
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
 Launch each potentially long command directly through a unified persistent
 session, record its session ID, and poll only that handle until it returns an
 actual exit code. A poll timeout triggers another poll of the same handle. Stop
