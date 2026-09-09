@@ -197,3 +197,73 @@ for `effect-package/src/wire.rs`. Failed-checkpoint hashes are
 and `a9284433c1ee5a802cd99bbcdd911d48d8c099c6627774f397541a69d81a57e0`
 respectively. Attempt 1 is consumed. Astra LOW must review this failure record
 and source before any bounded attempt-2 correction is authorized.
+
+## Astra LOW attempt 1 review — FAIL
+
+Astra LOW confirmed **ATTEMPT-1 FAIL** at exact clean pushed checkpoint
+`ca5c1224b2afdc3eb255ffa66abbaf86cd31f0c7`. The production extraction is
+semantically correct and buildable: both callers retain their preceding checks
+and the helper preserves the original mapping law. Attempt 1 remains
+unqualified because formatting failed, later policies did not run, preflight
+did not durably prove the clean pre-edit state, and the final evidence directory
+does not match its manifest. The reviewer also found that `f32::MIN_POSITIVE` is
+only the smallest positive normal value; the required subnormal boundary is
+`f32::from_bits(1)`. Typed coverage omitted the mapping matrix, borrowed coverage
+omitted nonfinite minima, and the borrowed test used a private semantic helper
+instead of proving the public diagnostic, precedence, and canonical-byte
+boundary. Attempt 1 is consumed.
+
+## Attempt 2 correction scope
+
+Production logic is frozen byte-for-byte at failed checkpoint hashes
+`dfe5ba9b47e65998e997f7485e6b8bccbab666cc02c2e1b0f5a6036d0509d8b1` and
+`a9284433c1ee5a802cd99bbcdd911d48d8c099c6627774f397541a69d81a57e0`.
+Attempt 2 may change only inline tests in the two owned source files and apply
+`cargo fmt`'s mechanical formatting to those tests. No helper, caller, import,
+production statement, diagnostic implementation, or other path may change.
+
+Replace the incomplete tests with one independently expected case table shared
+in meaning by the typed and borrowed test projections. Across all four mappings,
+cover a negative finite minimum, negative zero, positive zero,
+`f32::from_bits(1)`, `f32::MIN_POSITIVE`, an ordinary positive minimum, NaN,
+negative infinity, and positive infinity. The expected table must be literal:
+Linear and Exponential accept canonical finite minima, Logarithmic accepts only
+canonical finite positive minima, and Stepped accepts none. Both public typed
+validation and public borrowed-wire verification must match those results.
+
+For every accepted borrowed case, assert the verified view preserves the exact
+input bytes and identity/canonical encoding remains unchanged. For every
+rejected borrowed case, assert the exact public diagnostic code, byte offset,
+record index, and precedence: nonfinite and negative-zero minimum spellings are
+`Float` rejections at the minimum field; canonical mapping-law failures are
+`Semantic` rejections at the parameter semantic field. Keep and explicitly
+exercise the existing `diagnostic_phase_order_and_wire_only_rejections_are_frozen`,
+`field_overflow_offsets_and_within_phase_tie_breaks_are_exact`,
+`safe_constructor_semantic_differential_parity_is_exact`,
+`representative_layout_roundtrip_and_identity_are_exact`, and
+`bound_descriptor_comparison_reports_earliest_semantic_wire_field` controls.
+
+Attempt 2 must preserve all attempt-1 temporary paths unchanged. Before any
+source edit, record a clean exact HEAD/upstream, merge-base/live main, cwd,
+toolchain, safe environment fields, source hashes, and absent/non-symlink checks
+for fresh `/tmp/issue669-attempt2-evidence`,
+`/tmp/issue669-attempt2-target`,
+`/tmp/issue669-attempt2-manifest-record.txt`,
+`/tmp/issue669-attempt2-manifest-verify.stdout`, and
+`/tmp/issue669-attempt2-manifest-verify.status`. Create only the two directories,
+then prove and read back the same numeric 0/1 capture controls.
+
+Run the exact eleven commands already frozen in objective gate 5, once and in
+that order, using only `CARGO_TARGET_DIR=/tmp/issue669-attempt2-target` for every
+Cargo invocation. Record each command's finalized separate stdout, stderr, and
+numeric status under the evidence directory. Stop at the first unexpected
+status without correction, retry, or later gate. If all pass, finalize every
+file in the evidence directory, generate the self-excluding `SHA256SUMS`, and
+write the manifest command, completion, verification stdout, and numeric status
+only to the three declared sibling files outside that directory. A current
+`sha256sum -c` must pass every manifest entry. Commit no temporary evidence,
+target output, `.ll`, `.s`, or full compiler stream.
+
+Attempt 2 remains unauthorized until this amendment is clean, pushed,
+synchronized to GitHub and the trackers, and receives fresh Astra LOW scope
+PASS. No artifact, pin, PR, or merge work is included.
