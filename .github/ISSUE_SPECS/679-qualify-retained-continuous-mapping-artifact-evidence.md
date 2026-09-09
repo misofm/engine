@@ -1510,6 +1510,62 @@ external record, then verify once with stdout/stderr/numeric status in the three
 declared external paths. Require status 0 and equal manifest/check row counts.
 Nothing inside the covered evidence directory may change after manifest creation.
 
+## Attempt 1 result and bounded attempt 2 amendment
+
+Attempt 1 is **FAIL / consumed** at exact clean feature and external
+authorization head `4f2ac1241a6a818cb24643a56ae0e3e943cdd8cc`, tracker
+`d284e82f4683e92252180ddf54f9d0ae68a4dac0`, and main
+`df0b9b93636de36a7143da15b83444f280b65e6b`. Preflight passed and the
+isolated verifier self-test returned 0. The exact production verifier ran once
+from `2026-09-09T05:31:07Z` through `2026-09-09T05:33:01Z`, emitted all 77
+SDK inventory rows, and returned 1 with `FAIL: Playwright API command mismatch`.
+It stopped before later retained-evidence checks or any manifest action.
+
+Preserve these attempt-1 files byte-for-byte:
+
+- `/tmp/issue679-preflight.txt`, SHA-256
+  `037185e632a1c0d615c784171748bd9ac25965419bed9e989d50fe2b2fdceb9c`;
+- `/tmp/issue679-evidence/00-production.command`, SHA-256
+  `4ddd304f118d2c24ec744de251ad2c7b6ee9400646a13b2d65d50e348acef369`;
+- `/tmp/issue679-evidence/00-production.meta`, SHA-256
+  `66b93021305aa65df28172f9ae775b52744dc0dc3060d2bc430209a00bb2be4f`;
+- `/tmp/issue679-evidence/00-production.stdout`, SHA-256
+  `e5a68f0ca762879e483d19bf3f6de9551258cb9ad4b9cc7bcded05dfd1069d04`;
+- `/tmp/issue679-evidence/00-production.stderr`, SHA-256
+  `9bc5388ec9c24d96eed3727da3f66c8c56dd74be7341e7c89230da4e895db62c`;
+- `/tmp/issue679-evidence/00-production.status`, SHA-256
+  `4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865`,
+  containing numeric 1.
+
+Astra LOW confirmed the sole reached defect: the verifier expected the 515-byte
+first-line spelling `node - <<'NODE`, while the retained 516-byte command
+correctly contains `node - <<'NODE'`; every later command line matches. This
+does not predict any unexecuted check's result.
+
+Attempt 2 may change only that verifier literal, add a synthetic control that
+rejects the missing closing quote, and move the isolated self-test control to
+its fresh attempt-2 path. Luna HIGH must prepare new literal verifier bytes,
+seal them by content hash, and obtain Astra LOW exact-hash DRAFT PASS before the
+bytes enter this spec. Root then freezes an external exact feature authorization
+head in #559/#560 and obtains fresh Astra LOW exact-head SCOPE PASS.
+
+Attempt-2 fresh paths are:
+
+- `/tmp/issue679-attempt2-preflight.txt`;
+- `/tmp/issue679-attempt2-evidence`;
+- `/tmp/issue679-attempt2-manifest-record.txt`;
+- `/tmp/issue679-attempt2-manifest-verify.stdout`;
+- `/tmp/issue679-attempt2-manifest-verify.stderr`;
+- `/tmp/issue679-attempt2-manifest-verify.status`;
+- `/tmp/issue679-attempt2-verifier-control`.
+
+All seven must be absent including dangling symlinks before attempt 2. Recheck
+all attempt-1 hashes, then repeat the same read-only preflight, isolated
+self-test, production verifier, initial/final census, and manifest protocol once
+at fresh paths. Stop on first failure. No retained gate, builder, package,
+browser, install, Cargo, npm, or Node workload may run; no predecessor or
+attempt-1 byte may change; no cleanup or promotion is authorized.
+
 ## Review, promotion, and delivery
 
 Astra LOW must return EVIDENCE PASS before any repository edit. PASS only means
