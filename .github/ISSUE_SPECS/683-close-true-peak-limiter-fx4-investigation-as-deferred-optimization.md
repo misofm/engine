@@ -101,12 +101,15 @@ upstream-equal. The disposition is deferred optimization: #668 attempts 1, 2,
 and 3 failed with no inherited qualification. Attempt 3's status-zero raw
 captures and working decode provide no mapping or residual credit; limiter FX4
 applicability and any residual remain unresolved, not eliminated or qualified.
-Product source is unchanged. No capture, decode, repair, benchmark, timing,
-cycle, improvement, or budget claim was made, and delivered-optimization
-accounting does not increase. Any future capture or implementation requires a
-genuinely new weekly/performance issue with a measured budget or owner-approved
-justification. The reciprocal substitution remains a separate class-B owner
-ruling. Preserve #668 and all named softclip failed state.
+Product source is unchanged. The deferred-optimization disposition gives no
+qualification, implementation, performance, or delivered-optimization credit;
+limiter FX4 applicability and any lowering residual remain unresolved. No
+compiler evidence was committed, and no capture, decode, repair, benchmark,
+timing, cycle, improvement, or budget claim was made. Any future capture or
+implementation requires a genuinely new weekly/performance issue with a
+measured budget or owner-approved justification. The reciprocal substitution
+remains a separate class-B owner ruling. Preserve all failed #668 state and the
+named soft-clip recovery state.
 
 ## Evidence verdict and PR readiness
 
