@@ -194,3 +194,47 @@ qualification, GitHub synchronization and closure, #559/#560/#349 accounting,
 and eligible clean delivered-worktree cleanup. No artifact, pin, or source claim
 is delivered before those remote steps. No performance or sound-quality claim is
 authorized.
+
+## Astra XHIGH final verdict
+
+FINAL SOURCE/EVIDENCE PASS at exact clean pushed head
+`13017d468754c916a768210a3c3e15ef25776012`. Phase 1 contains 36 manifest
+records with manifest SHA-256
+`e3bca0c919a8c2222beab5463ab998d34f96f909123dd685570e685436bdadae`.
+Phase 2 contains 60 manifest records with manifest SHA-256
+`a1ae87d30c38b1035c4b8f2f38fd0439ad1aa5fbbefc18d7197f81d89278d6fa`.
+
+The qualified six-file artifact hashes are:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a  miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+6745de399c56e322303e2da55d69a5cbd538e075f0fd480c6620b1896d566645  miso-engine-v1-audio-worklet.simd128.wasm
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d  miso-engine-v1-parameter-metadata.json
+```
+
+The ordinary builder, six-file/hash validation, AudioWorklet checker, browser
+resource check, hermetic test, SDK install and package check, qualification
+install, all-browser qualification with matrix and mutation checks, frozen
+matrix check, and `git diff --check` all passed. Chromium, Firefox, and WebKit
+all passed qualification. Tracker reconciliation authority is
+`origin/codex/audit-349-priority-handoff` at
+`701020f41972b170c64102067b94bf891f41874a`.
+
+PR authority is limited to the exact pushed source/artifact branch and head
+above for the combined #694/#695 delivery PR. No restart branch or unreviewed
+head supersedes it, and this verdict does not authorize merge. Merge remains
+gated by required PR qualification, guarded live-head/base checks, post-main
+qualification, GitHub synchronization and closure, and eligible clean
+worktree cleanup.
+
+The original command receipts remain authoritative. The saved poll list omits
+the intermediate receipt `4f57f6`; there is no full inherited-environment
+snapshot. Phase 1 retains its documented limitations: the six-path
+absence/creation record was retrospective, the later `probe-environment` file
+was reconstructed rather than authoritative, and the probe ran before the
+later documentation-only head drift. These limitations do not become new
+execution credit. No performance, allocation, timing, or sound-quality claim
+is made.
