@@ -256,3 +256,72 @@ directory may change. Only Luna HIGH `/root/issue583_luna_impl` may execute the
 frozen sequence once after fresh preflight. Stop at the first unexpected failure
 without correction or retry. Candidate rebuild, repository promotion, post-pin
 work, PR, and merge remain unauthorized.
+
+## Attempt 1 failure and bounded attempt 2
+
+Luna HIGH stopped attempt 1 at the first failed qualification command on clean
+authorization `c68f3c617b3987e122ec1cd752e842d470d40d9d`. Capture controls,
+the frozen verifier self-test, and pristine exact verification returned 0; the
+last reported 12,195 tracked paths. The target census then ran from the feature
+worktree rather than the required preserved candidate-source directory, returned
+1, and recorded `find: 'target': No such file or directory`. No rsync, fresh
+source, dependency install, or remaining gate ran. Preserve all 20 files under
+`/tmp/issue678-evidence` unchanged. The repository and every #672 path remained
+unchanged.
+
+Astra LOW independently returned **ATTEMPT-1 FAIL**. Attempt 1 is consumed. Its
+command records use shorthand and omit per-command cwd, so the wrong-cwd detail
+retains executor attribution; preflight also omitted tool versions and an
+explicit eight-path absence record. The status-0 verifier observations remain
+usable with those provenance limits, while no downstream qualification credit
+carries.
+
+Attempt 2 uses only these fresh paths:
+
+- `/tmp/issue678-attempt2-candidate-source`;
+- `/tmp/issue678-attempt2-evidence`;
+- `/tmp/issue678-attempt2-target`;
+- `/tmp/issue678-attempt2-manifest-record.txt`;
+- `/tmp/issue678-attempt2-manifest-verify.stdout`;
+- `/tmp/issue678-attempt2-manifest-verify.stderr`;
+- `/tmp/issue678-attempt2-manifest-verify.status`.
+
+Require all seven absent including dangling symlinks. Record complete fresh
+preflight, including literal head/upstream/main/merge-base, all relevant tool
+versions and environment values, explicit state of all seven fresh paths, exact
+census and SHA-256 of every attempt-1 evidence file, all preserved #672 paths,
+the frozen verifier, accepted sources, and candidate six-file artifact. Exercise
+fresh captured status-0/status-1 controls. Every attempt-2 command record must
+contain its literal argv, actual cwd, start/finish timestamps, and numeric status,
+with separate complete temporary stdout and stderr.
+
+Do not repeat the verifier self-test or pristine verification. Reconcile their
+attempt-1 status/output and the 12,195-path claim with the stated provenance
+limits, then refresh only direct read-only verifier/source/candidate hashes.
+Continue at the first unfinished target-classification step. From any cwd run the
+census with this checked directory transition exactly:
+
+`bash -o pipefail -c 'cd "$1" && LC_ALL=C find target -printf "%y %m %s %p %l\n" | LC_ALL=C sort' target-census /tmp/issue672-attempt2-candidate-source`
+
+Require status 0 and record actual cwd after the checked `cd`. Run the original
+streamed tar identity exactly and require status 0. Preserve both results and
+recompute them after every later command.
+
+Continue the original attempt-1 procedure without other change, substituting
+`/tmp/issue678-attempt2-candidate-source`,
+`/tmp/issue678-attempt2-evidence`,
+`/tmp/issue678-attempt2-target`, and the four attempt-2 external manifest paths
+for their attempt-1 counterparts. The sole rsync still excludes only anchored
+`/target/`; any other extra path must copy and fail the overlay verifier. Require
+both dependency roots absent including symlinks before temporary verifier setup,
+remove them before install, then use the external attempt-2 Cargo target before
+every remaining Cargo consumer. Run only the unexecuted source/overlay,
+dependency, resource/PCM, SDK/package, all-three-browser, final-verifier, target-
+preservation, and manifest stages.
+
+Finish all evidence-directory writes before generating its self-excluding
+manifest. Only the four declared external manifest record/verification files may
+be written afterward. Stop at the first failure without correction or retry. No
+candidate/baseline build, Git export, cleanup, repository promotion, post-pin
+work, PR, or merge is authorized. Fresh Astra LOW attempt-2 scope PASS is
+required before Luna execution.
