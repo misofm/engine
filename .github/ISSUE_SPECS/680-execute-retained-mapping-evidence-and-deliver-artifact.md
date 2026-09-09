@@ -315,6 +315,23 @@ before any invocation. Coordinator inspection already finds that
 that `exclusive_bytes` deletes a partial file on write failure despite the
 reduced launcher's preservation rule.
 
+Astra LOW returned **STATIC FAIL** on the sealed reduced launcher with five
+bounded corrections; its verifier argv/markers and exact five-file manifest are
+otherwise coherent. Preserve it without execution. Only Luna HIGH
+`/root/issue583_luna_impl` may create fresh ordinary
+`/tmp/issue680-attempt2-launcher-revision1.py`, reading only the sealed launcher
+and this spec and invoking nothing. The revision must serialize the self-test
+capture from metadata plus existing base64 streams without raw `bytes`, preserve
+every partial exclusive write, remove the unsupported OS-uid gate, append the
+final pre-production `boundaries()` observation instead of discarding it, and
+catch both `OSError` and `LauncherError` while always emitting stderr if an
+after-preflight diagnostic append fails. Do not otherwise expand or generalize
+the launcher. Root must seal its exact hash/size/mode and Astra LOW must review
+the literal bytes. The earlier launcher invocation is superseded; eventual
+execution will use
+`python3 -B /tmp/issue680-attempt2-launcher-revision1.py --feature-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
+No correction or execution command is authorized beyond inert file creation.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
