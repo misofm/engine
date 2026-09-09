@@ -111,6 +111,22 @@ authorization-head, upstream, main, merge-base, executor lease, verifier,
 preserved-authority, process-owner, and all fresh-path checks. A rejected head or
 path must leave every attempt-2 path absent.
 
+A concurrent preparation already issued to Luna HIGH `/root/issue583_luna_impl`
+under feature `ad042156` completed after checkpoint `b7806a90` transferred the
+preparer lease. It exclusively created the sole draft path and ran nothing. Root
+sealed those exact bytes mode `0444`: 22,402 bytes, SHA-256
+`856394652e028095f3b94b4c7e82f86d79a209a8861ff58ff768004ab5cc49f0`.
+The proposed runner-control invocation is exactly
+`python3 -B /tmp/issue680-attempt2-runner-draft.py --self-test`; the proposed
+production invocation is exactly
+`ISSUE680_EXECUTOR=/root/issue583_luna_impl python3 -B /tmp/issue680-attempt2-runner-draft.py`.
+Neither is authorized yet. All attempt-2 and control paths remain absent.
+Because the exclusive draft now exists, the transferred preparer must not
+overwrite or append to it. Astra LOW must review this sealed candidate first.
+Coordinator static inspection already flags two possible blockers for that
+review: `AUTHORIZATION_HEAD` is hard-coded to pre-amendment `ad042156`, and
+`target_identity` repeats the `tar` argument sequence.
+
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
 failure sequencing, and the exact verifier self-test, production, manifest, and
