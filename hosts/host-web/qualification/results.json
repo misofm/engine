@@ -1,7 +1,7 @@
 {
   "schema": "miso.web.qualification.matrix.v1",
-  "candidateCommit": "8708c9b998a484d49ccb17a803e79540ca13fcd6",
-  "wasmSha256": "93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531",
+  "candidateCommit": "276ffb6097a84088e3b5f4a16892a33bca9e26fb",
+  "wasmSha256": "31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b",
   "playwrightVersion": "1.62.1",
   "platform": "linux-headless",
   "artifact": "single shipped simd128 AudioWorklet artifact",
