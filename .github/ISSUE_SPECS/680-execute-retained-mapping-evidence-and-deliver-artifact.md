@@ -146,6 +146,12 @@ attempt/control path. The replacement must:
 
 - require `--authorization-head` as a full lowercase Git SHA for production and
   compare it with live HEAD/upstream; never embed a feature head;
+- require `--tracker-head` as a full lowercase Git SHA, compare it with the
+  tracker worktree's clean HEAD/upstream and live remote tracker branch, and
+  validate that the operative #559/#560 rows name the supplied feature head and
+  sole executor lease;
+- query live remote `main` and require it, local `origin/main`, and merge base to
+  equal the issue's pinned main; a cached remote-tracking ref alone is not proof;
 - require `--executor-id /root/issue583_luna_impl` and reject omission or any
   other value, without making OS uid an acceptance condition;
 - stream the one exact deterministic target-archive subprocess into SHA-256,
@@ -167,9 +173,9 @@ attempt/control path. The replacement must:
 The proposed static-control invocation is
 `python3 -B /tmp/issue680-attempt2-runner-revision1.py --self-test`. Production
 will use
-`python3 -B /tmp/issue680-attempt2-runner-revision1.py --authorization-head <reviewed-full-feature-sha> --executor-id /root/issue583_luna_impl`;
-the exact full SHA is supplied only by a later synchronized exact-head SCOPE PASS.
-Neither invocation is authorized by this revision brief.
+`python3 -B /tmp/issue680-attempt2-runner-revision1.py --authorization-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`;
+the exact full SHAs are supplied only by a later synchronized exact-head SCOPE
+PASS. Neither invocation is authorized by this revision brief.
 
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
@@ -245,17 +251,23 @@ marker, all three browsers, initial/final nine-root equality, preserved target,
 and terminal `PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census`.
 
 After production PASS, finish all evidence writes and create a self-excluding
-manifest exactly once from the evidence directory:
+manifest exactly once with the reviewed runner's direct Python traversal and
+streaming hash implementation. This supersedes the historical shell `bash -c`,
+`find`, and `xargs` command. Before creation require `SHA256SUMS` absent including
+symlink and the evidence root ordinary, non-symlink, and nonempty. Reject every
+traversal error, symlink, special entry, nested directory, duplicate, or path
+that cannot be encoded exactly; sort the ASCII relative paths bytewise and write
+one lowercase digest/two-space/`./path` row per ordinary file through exclusive
+creation. The manifest excludes only itself.
 
-```text
-bash -o pipefail -c 'LC_ALL=C find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS'
-```
-
-Before it require `SHA256SUMS` absent including symlink. After it, permit no
-write inside the evidence directory. Record the command and completion only in
-the external manifest record. Verify exactly once with `sha256sum -c
-SHA256SUMS`, writing complete stdout/stderr/status to the three external paths.
-Require status 0 and equal checked-file/manifest-row counts.
+After creation, permit no write inside the evidence directory. Record operation,
+cwd, start/finish, numeric status, and complete stdout/stderr in the external
+manifest records. Verify exactly once by dispatching direct argv
+`sha256sum -c SHA256SUMS` from the evidence directory, with no shell, and capture
+its literal argv/cwd/timestamps/status/streams. Strictly parse the manifest and
+verification rows, require every covered file and manifest ordinary and non-
+symlink, require status 0 and empty stderr, and require exact path sets plus equal
+checked-file/manifest-row counts. Preserve every partial record on failure.
 
 The complete reviewed verifier bytes follow verbatim:
 
