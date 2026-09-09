@@ -127,6 +127,50 @@ Coordinator static inspection already flags two possible blockers for that
 review: `AUTHORIZATION_HEAD` is hard-coded to pre-amendment `ad042156`, and
 `target_identity` repeats the `tar` argument sequence.
 
+Astra LOW returned **STATIC FAIL** on the sealed `85639465...5cc49f0`
+candidate; it must remain immutable and must not be invoked. The stale hard-coded
+authorization creates an amendment cycle, executor identity defaults instead of
+being required, target hashing buffers and base64-records the archive, failures
+after preflight creation escape the evidence record, manifest behavior is not a
+fail-closed equivalent of the frozen command, controls exercise helpers instead
+of the execution flow, the process check rejects unrelated Node/npm work, command
+checks are tautologies, and production accepts the PASS marker away from the
+final nonempty line.
+
+Only Luna HIGH `/root/issue583_luna_impl` may create one replacement candidate at
+`/tmp/issue680-attempt2-runner-revision1.py`, which must be fresh under `lexists`.
+This is still inert preparation and does not consume attempt 2. It may read the
+sealed predecessor runner and this issue spec, but must not invoke either runner,
+the verifier, retained evidence, or any product command, and it must create no
+attempt/control path. The replacement must:
+
+- require `--authorization-head` as a full lowercase Git SHA for production and
+  compare it with live HEAD/upstream; never embed a feature head;
+- require `--executor-id /root/issue583_luna_impl` and reject omission or any
+  other value, without making OS uid an acceptance condition;
+- stream the one exact deterministic target-archive subprocess into SHA-256,
+  retaining only argv/cwd/timestamps/status/stderr/digest and never archive bytes;
+- append phase, finish time, numeric status, failed assertion or launch error to
+  the preflight after it exists, and leave explicit separate command captures;
+- implement the self-excluding manifest with Python file APIs using bytewise
+  relative-path order, reject symlinks/special entries/path names it cannot encode
+  exactly and all traversal errors, then record and run direct
+  `sha256sum -c SHA256SUMS` with argv/cwd/timestamps/status/streams and checked rows;
+- use isolated dependency-injected execution-flow controls proving changed-head,
+  pre-existing regular path, dangling symlink, verifier mismatch, command
+  mutation, status 0/1, subprocess launch error, and manifest failure behavior;
+- detect only processes whose argv names this runner, the sealed verifier, or an
+  attempt-2 path, excluding itself, instead of rejecting unrelated tools;
+- validate actual command arrays at the dispatch boundary and require the
+  production PASS marker to equal the final nonempty stdout line.
+
+The proposed static-control invocation is
+`python3 -B /tmp/issue680-attempt2-runner-revision1.py --self-test`. Production
+will use
+`python3 -B /tmp/issue680-attempt2-runner-revision1.py --authorization-head <reviewed-full-feature-sha> --executor-id /root/issue583_luna_impl`;
+the exact full SHA is supplied only by a later synchronized exact-head SCOPE PASS.
+Neither invocation is authorized by this revision brief.
+
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
 failure sequencing, and the exact verifier self-test, production, manifest, and
