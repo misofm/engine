@@ -78,9 +78,13 @@ Fresh paths are:
 - `/tmp/issue678-candidate-source`;
 - `/tmp/issue678-evidence`;
 - `/tmp/issue678-target`;
-- `/tmp/issue678-verifier-control`.
+- `/tmp/issue678-verifier-control`;
+- `/tmp/issue678-manifest-record.txt`;
+- `/tmp/issue678-manifest-verify.stdout`;
+- `/tmp/issue678-manifest-verify.stderr`;
+- `/tmp/issue678-manifest-verify.status`.
 
-Require all four absent including dangling symlinks, the feature clean at its
+Require all eight absent including dangling symlinks, the feature clean at its
 pushed authorization head, live `origin/main` exactly
 `df0b9b93636de36a7143da15b83444f280b65e6b`, and no process owning the named
 source, target, artifact, dependency, browser, or evidence resources. Unrelated
@@ -94,15 +98,18 @@ Before any dependency install or gate, require the retained frozen verifier
 `2bd12b45cc916faacbb75cda3ae7df48d228022e121da5288f81e46b566f049c`.
 Run its already-reviewed self-test with exactly
 `TMPDIR=/tmp/issue678-verifier-control python3 -B /tmp/issue672-attempt2-export-verifier.py --self-test`,
-then verify the preserved pristine export in exact mode against `8708c9b9`.
+after first creating `/tmp/issue678-verifier-control` as an ordinary mode-0700
+directory. Then verify the preserved pristine export with exactly
+`python3 -B /tmp/issue672-attempt2-export-verifier.py /home/bl/misofm/engine-cp8-mapping-delivery 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine exact`.
 
 Require the preserved candidate source's `target` to be an ordinary non-symlink
 directory. Record its deterministic content identity twice: a sorted
 path/type/mode/size census and the SHA-256 of a streamed tar made with sorted
 names, normalized mtime/owner/group, and numeric ownership. Retain only the
-census and digest, never the tar stream or target payload. Use exactly
-`LC_ALL=C find target -printf '%y %m %s %p %l\n' | LC_ALL=C sort` from the
-preserved candidate source for the census, and exactly
+census and digest, never the tar stream or target payload. From the preserved
+candidate source use exactly
+`bash -o pipefail -c "LC_ALL=C find target -printf '%y %m %s %p %l\n' | LC_ALL=C sort"`
+for the census, and exactly
 `bash -o pipefail -c 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$1" -cf - target | sha256sum' target-census /tmp/issue672-attempt2-candidate-source`
 for the streamed identity; require both pipeline statuses 0. Create the fresh
 candidate source by running exactly once:
@@ -112,17 +119,33 @@ candidate source by running exactly once:
 This copy deliberately excludes only the classified generated target. Any other
 extra path is copied and must make verification fail. Create empty ordinary
 `sdk/node_modules` and `hosts/host-web/qualification/node_modules` directories,
-run the frozen verifier in overlay mode against `8708c9b9`, and require PASS for
-all 12,195 tracked paths with only its three frozen overlay files and two named
-dependency roots allowed. Then remove those two still-empty directories and
-require them absent before install.
+but first require both paths absent including dangling symlinks. Run exactly
+`python3 -B /tmp/issue672-attempt2-export-verifier.py /home/bl/misofm/engine-cp8-mapping-delivery 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue678-candidate-source overlay`
+and require PASS for all 12,195 tracked paths with only its three frozen overlay
+files and two named dependency roots allowed. Then remove those two still-empty
+directories and require them absent including symlinks before install.
 
-Independently require the pin to equal the expected digest plus LF. Parse both
-results documents and require that replacing only pristine `candidateCommit`
-with `8708c9b9...` and pristine `wasmSha256` with `93108e94...` produces exact
-candidate semantic equality, including every browser row. Require the candidate
-matrix bytes to equal the pristine bytes after replacing only that one lineage
-sentence, and run exactly
+Independently require the pin to equal
+`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531\n`.
+Parse both results documents and require that replacing only pristine
+`candidateCommit` with
+`8708c9b998a484d49ccb17a803e79540ca13fcd6` and pristine `wasmSha256` with
+`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`
+produces exact candidate semantic equality, including every browser row. Require
+the candidate matrix bytes to equal the pristine bytes after replacing only this
+full old lineage sentence:
+
+```text
+This matrix is generated from the pinned Playwright 1.62.1 headless Linux qualification run over candidate `70899de287c23b70c17b3e41a5b2921801ae8052` and the single shipped simd128 AudioWorklet artifact `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`. The version shown is the lowest version qualified by this run; older versions are unqualified, not implicitly supported.
+```
+
+with this full new sentence:
+
+```text
+This matrix is generated from the pinned Playwright 1.62.1 headless Linux qualification run over candidate `8708c9b998a484d49ccb17a803e79540ca13fcd6` and the single shipped simd128 AudioWorklet artifact `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`. The version shown is the lowest version qualified by this run; older versions are unqualified, not implicitly supported.
+```
+
+Then run exactly
 `node hosts/host-web/qualification/generate-matrix.mjs --check` with status 0.
 Recompute the preserved target census/digest and require exact equality.
 
@@ -158,13 +181,25 @@ unchanged, and the preserved target census unchanged. At the end, require the
 fresh external Cargo target exists only outside the source export and retain a
 compact census/hash conclusion; do not retain or commit its payload.
 
-Final evidence is a compact command/status/hash record in `/tmp/issue678-evidence`.
-Do not create a recursive evidence ledger or copy compiler/browser/generated
-payloads into Git. The frozen verifier must pass one final time on the fresh
-source with only the three tracked overlays and two dependency roots; require the
-source-local `target/` absent, the external target outside the source, and the
-preserved #672 target census unchanged. Astra LOW then performs PRE-PIN review.
-A failure stops the attempt and earns no missing-gate credit.
+Every executed command writes separate complete temporary stdout and stderr plus
+a numeric status and command/cwd/start/finish record under
+`/tmp/issue678-evidence`; these raw captures never enter Git. After the last
+successful source/artifact/target check, create a self-excluding `SHA256SUMS`
+covering every other evidence file by running exactly once from that directory:
+`bash -o pipefail -c 'LC_ALL=C find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS'`.
+Write that exact manifest command and completion time to
+`/tmp/issue678-manifest-record.txt`, then run `sha256sum -c SHA256SUMS` once from
+the evidence directory with stdout, stderr, and numeric status written
+respectively to the three named external verification paths. Require status 0
+and an independently counted checked-file total equal to the manifest row count.
+
+The frozen verifier must pass one final time using the same full repository,
+commit, source path, and `overlay` arguments above, with only the three tracked
+overlays and two dependency roots. Require the source-local `target/` absent, the
+external target outside the source, and the preserved #672 target census
+unchanged. Astra LOW then performs PRE-PIN review. A failure stops the attempt
+and earns no missing-gate credit. Do not create a recursive evidence ledger or
+copy compiler/browser/generated payloads into Git.
 
 ## Promotion and delivery boundary
 
@@ -198,3 +233,15 @@ worktrees. Preserve failed #672 evidence until delivery is complete.
 - Required PR and post-main qualification succeed on immutable reviewed heads.
 - Git contains only compact decisions and the three intended pin/lineage edits,
   with no compiler or generated artifact payload.
+
+## Initial scope review — FAIL and correction
+
+Astra LOW returned **SCOPE FAIL** at exact clean pushed feature `421ecc66` and
+tracker `f98bb87f`. The successor boundary, anchored rsync exclusion, external
+Cargo target, retained candidate reuse, remaining gate list, and separate
+promotion review passed. No workload ran. This amendment adds `pipefail` to the
+target census, explicitly creates the verifier-control directory, freezes full
+verifier authority/commit/path/mode arguments and exact lineage bytes, requires
+dependency roots absent before their temporary creation, and names complete
+temporary stdout/stderr/status plus self-excluding manifest verification paths.
+Fresh Astra LOW scope PASS remains required.
