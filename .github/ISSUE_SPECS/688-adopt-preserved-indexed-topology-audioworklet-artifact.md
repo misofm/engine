@@ -266,3 +266,20 @@ static/resource result, terminal manifest, or complete six-file output exists.
 rewrite, reset, clean, or create a successor. The explicit no-successor boundary
 requires new owner instruction to change. #685 remains an undelivered partial;
 no original open finding may begin while that inherited partial remains.
+
+## Final preserved-evidence correction
+
+The executor durably finalized the interrupted state after the earlier snapshot.
+The authoritative record set now includes preflight SHA-256
+`b60aeff7c35e398ab1f5d171f7d7575b4dfd7db8b1b9502a5717061efb72c64e`,
+hard-stop SHA-256
+`d286af65e87fdb7bd1950b94b85ed8aaa3aabc6c339147d09160ba1db70388bf`,
+and terminal-manifest SHA-256
+`f1c43b244888475256c259f9c5b60c6ad4ee0372d0fd972270910fa3bd02325d`.
+No durable builder status, streams, or timestamps exist. Exactly four output
+files remain and match their authority hashes; ABI-layout and parameter-metadata
+JSON are absent. No later gate ran and no relevant process remains.
+
+Astra LOW returned **FINAL ATTEMPT-3 FAIL** against this complete preserved set.
+The exhaustion, no-retry/no-successor boundary, unmerged promotion checkpoint,
+and absence of delivery credit remain unchanged.
