@@ -277,6 +277,33 @@ Do not mutate any predecessor path, tracked file, compiler capture, generated
 predecessor artifact, or pin. No timing, improvement, or budget claim is in
 scope. A third failure hard-stops this issue under the three-attempt rule.
 
+## Attempt-3 evidence verdict — FAIL and hard stop
+
+Astra LOW returned **EVIDENCE/PROCEDURAL FAIL** at exact clean pushed feature
+`dd8a93ca`, tracker `c43b36b8`, and unchanged main `e4dfe353`. The named Luna
+reported a correct read-only preflight followed by a failed evidence-creation
+tool request whose workdir mistakenly contained `indexed-topology` rather than
+`indexed-topo`; it reported no created namespace and no retry. Subsequent
+read-only review contradicted that account: the fresh evidence, artifact, and
+Cargo target directories existed, with records naming the same executor and
+correct worktree, a builder command/start, and compiler stderr. No terminal
+status or manifest existed and no relevant process was observed. The record
+cannot establish who launched the builder, how many invocations occurred, or
+its terminal result.
+
+At the final read-only snapshot, the artifact directory contained all six
+ordinary files byte-identical to `/tmp/issue687-stage2-artifact`, but no later
+gate or complete synchronized evidence record existed. That technical snapshot
+does not cure the procedural or evidence failure and earns no artifact,
+qualification, promotion, performance, or delivery credit. Preserve all
+`/tmp/issue690-attempt3-*` paths and every executor transcript unchanged. The
+checked predecessor identities remained unchanged, without a claim of
+continuous exclusivity.
+
+Attempts 1, 2, and 3 are consumed. Issue #690 is hard-stopped without retry,
+continuation gate, promotion, merge, or disguised fourth attempt. #685 remains
+the sole inherited partial.
+
 The proposed fresh canonical task `/root/issue690_luna_attempt3` completed only
 a read-only readiness check and created no path. The available preserved Luna
 HIGH executor above is bound to final execution; this identity choice changes
