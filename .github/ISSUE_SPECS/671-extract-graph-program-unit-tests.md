@@ -316,3 +316,22 @@ Luna HIGH `issue671_luna_impl` begins. Any precondition, transform, source-hash,
 or gate failure exhausts #671 without a fourth attempt or renamed retry. No
 production behavior, performance, benchmark, artifact, AudioWorklet, pin, or
 cleanup action is authorized.
+
+## Final-attempt authorization
+
+Astra LOW returned **FINAL-ATTEMPT SCOPE PASS** at exact clean pushed feature
+`f9ae04936a469b216d33f302a62e793110556344`, unchanged main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and synchronized tracker
+`1590db2bf338e72d4aa256deb1460c6623ce37ff`. GitHub/spec parity holds.
+The frozen replacement counts independently reproduce as `1/1/1/1/1/2`, the
+74,216-byte post-format hash matches, and the attempt-3 path is absent including
+symlinks.
+
+Only Luna HIGH `issue671_luna_impl` may perform attempt 3: persist clean
+identities and freshness evidence before edits; apply the seven frozen hunks;
+read back and hash literal proof/capture scripts; and run all eight gates fresh
+once in order with frozen source hashes checked around each. Preserve `program.rs`,
+the production prefix, module/test identity, all prior evidence, and excluded
+paths. No credit carries and no artifact or pin action applies. Any prerequisite,
+transform, hash, or gate failure exhausts #671 without a fourth attempt or renamed
+retry. Root owns commits and trackers.
