@@ -399,10 +399,15 @@ LOW then performs a fresh exact-head SCOPE review of clean feature/tracker heads
 live feature/tracker/main refs, both merge bases, GitHub body parity, preserved
 authority `de542050094f20150f7ec4f106e32f4074798626`, exact verifier and old
 attempt-1-preflight identities, absence of every old launcher output, and absence
-under both `test -e` and `test -L` of fresh
-`/tmp/issue680-attempt2-direct-evidence` and
-`/tmp/issue680-attempt2-direct-manifest-{stdout,stderr,status}`. No launcher file
-may be opened for execution.
+under both `test -e` and `test -L` of all five fresh paths:
+
+- `/tmp/issue680-attempt2-direct-evidence`;
+- `/tmp/issue680-attempt2-direct-manifest.stdout`;
+- `/tmp/issue680-attempt2-direct-manifest.stderr`;
+- `/tmp/issue680-attempt2-direct-manifest.status`;
+- `/tmp/issue679-attempt3-verifier-control`.
+
+No launcher file may be opened for execution.
 
 Only Luna HIGH `/root/issue583_luna_impl` may execute after that SCOPE PASS. It
 must use separate tool calls, stopping on the first failure or unexpected output:
@@ -456,28 +461,6 @@ than pinned current main `df0b9b93`. No command ran. Root merged current
 `df0b9b93636de36a7143da15b83444f280b65e6b`. Fresh Astra LOW exact-head scope
 review remains mandatory and is the only possible source of execution authority.
 
-Fresh production paths are:
-
-- `/tmp/issue680-attempt2-preflight.txt`;
-- `/tmp/issue680-attempt2-evidence`;
-- `/tmp/issue680-attempt2-manifest-record.txt`;
-- `/tmp/issue680-attempt2-manifest-verify.stdout`;
-- `/tmp/issue680-attempt2-manifest-verify.stderr`;
-- `/tmp/issue680-attempt2-manifest-verify.status`;
-
-The isolated control uses `/tmp/issue679-attempt3-verifier-control`, which is an
-inherited but never-created path: #679's status-2 command named a different,
-nonexistent path, and this control remained absent. Treat it as a seventh fresh
-path. Require all seven absent under both `test -e` and `test -L`, the #680
-feature clean and upstream-equal at the exact external `AUTHORIZATION_HEAD`
-frozen in #559/#560, live main exactly
-`df0b9b93636de36a7143da15b83444f280b65e6b`, all #679 attempt-record hashes
-exact, the repository source-local target absent, and no competing writer.
-Exclusively create the preflight only after freshness checks. Record literal
-argv, cwd, start/finish/status, complete stdout/stderr, heads/upstreams/merge-
-base, tools/environment, the nine-root initial census, all predecessor and
-attempt hashes, verifier identity, and preserved target identity.
-
 The #680 worktree is the execution cwd and supplies the external authorization
 head. The frozen verifier separately requires
 `/home/bl/misofm/engine-cp8-mapping-evidence` as its read-only Git-object
@@ -494,9 +477,8 @@ Astra LOW already returned STATIC DRAFT PASS on these exact bytes under #679;
 #680 requires fresh exact-head scope review of the embedded bytes and all paths
 before any command.
 
-After the reduced launcher is frozen, statically reviewed, and receives a fresh
-exact-head production SCOPE PASS, it runs the isolated verifier self-test exactly
-once:
+After the direct flow receives a fresh exact-head production SCOPE PASS, Luna
+runs the isolated verifier self-test exactly once:
 
 ```text
 TMPDIR=/tmp/issue679-attempt3-verifier-control python3 -B /tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py --self-test
@@ -518,23 +500,21 @@ marker, all three browsers, initial/final nine-root equality, preserved target,
 and terminal `PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census`.
 
 After production PASS, finish all evidence writes and create a self-excluding
-manifest exactly once with the reviewed runner's direct Python traversal and
-streaming hash implementation. This supersedes the historical shell `bash -c`,
-`find`, and `xargs` command. Before creation require `SHA256SUMS` absent including
-symlink and the evidence root ordinary, non-symlink, and nonempty. Reject every
-traversal error, symlink, special entry, nested directory, duplicate, or path
-that cannot be encoded exactly; sort the ASCII relative paths bytewise and write
-one lowercase digest/two-space/`./path` row per ordinary file through exclusive
-creation. The manifest excludes only itself.
+manifest exactly once by directly invoking `sha256sum` once for each of the 14
+frozen input files in the bytewise filename order listed above and appending its
+output to an exclusively created `SHA256SUMS`. Before creation require
+`SHA256SUMS` absent including symlink and the evidence root ordinary,
+non-symlink, and nonempty. Reject every traversal error, symlink, special entry,
+nested directory, duplicate, extra file, or filename outside that exact set.
+Require every emitted row to contain a lowercase digest, two spaces, and the
+literal `./filename`. The manifest excludes only itself.
 
-After creation, permit no write inside the evidence directory. Record operation,
-cwd, start/finish, numeric status, and complete stdout/stderr in the external
-manifest records. Verify exactly once by dispatching direct argv
-`sha256sum -c SHA256SUMS` from the evidence directory, with no shell, and capture
-its literal argv/cwd/timestamps/status/streams. Strictly parse the manifest and
-verification rows, require every covered file and manifest ordinary and non-
-symlink, require status 0 and empty stderr, and require exact path sets plus equal
-checked-file/manifest-row counts. Preserve every partial record on failure.
+After creation, permit no write inside the evidence directory. Verify exactly
+once with `sha256sum -c SHA256SUMS` from the evidence directory and no shell
+indirection. Capture its complete stdout, stderr, and tool-reported numeric status
+in the three external manifest paths. Require every covered file and the manifest
+ordinary and non-symlink, status 0, empty stderr, exact path sets, 14 manifest
+rows, and 14 verification rows. Preserve every partial record on failure.
 
 The complete reviewed verifier bytes follow verbatim:
 
