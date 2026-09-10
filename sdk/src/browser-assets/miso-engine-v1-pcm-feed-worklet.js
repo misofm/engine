@@ -346,8 +346,12 @@ function wrapEngineProcessor(Base) {
       const staging = this.sourcePcm
       const quantumFrames = this.quantumFrames
       let read = control[CONTROL_READ_INDEX]
+      let accepted = 0
+      let remaining = ring.capacity
 
-      while (read !== write) {
+      // Fill internal queues gradually. Complete shared runways must not turn
+      // one startup/seek callback into thousands of source submissions.
+      while (read !== write && accepted < 2 && remaining-- > 0) {
         const slot = read & capacityMask
         const word = slot * (SLOT_HEADER_BYTES / 4)
         if (ring.headers[word + SLOT_SEQUENCE] !== read) {
@@ -404,6 +408,7 @@ function wrapEngineProcessor(Base) {
             ring.headers[word + SLOT_GENERATION_TAG]
           )
           control[CONTROL_SUBMITTED] += 1
+          accepted += 1
           ring.depth += 1
           if ((flags & FLAG_END_OF_REGION) !== 0) {
             ring.finished = true

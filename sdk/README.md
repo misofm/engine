@@ -210,6 +210,20 @@ and `createDefaultHost` imports and invokes the shipped host with `toWebBootOpti
 `scratchBootInWorker` remains the low-level primitive for custom Worker entries. The browser
 helpers install no PCM feed or storage service.
 
+`prepareBrowserSessionWithWorker` additionally rehearses 64 fixed quanta of synthetic PCM in the
+throwaway instance and returns `{ shape, module }`. The instance is disposed and Worker terminated
+before the result resolves. Retain `module` while resolving and fully verifying real source data,
+then pass it as `preparedModule` to `createEngine`, with `scratchBoot: async () => shape`. The live
+host reuses that compiled module without a second Wasm fetch or compilation, and boots fresh DSP
+state at sample 0. Keep the same owned document and policy snapshot across preparation and live
+creation; the helpers copy inputs at each call boundary. `prepareBrowserSessionInWorker` is the
+corresponding primitive for custom Worker entries. This preparation proves no real source ready
+and performs no source delivery. The existing shape-only defaults and URL-only host remain valid.
+
+The SDK PCM feed accepts at most two fresh submissions per source per render callback and scans
+at most that source ring's capacity. Shared source runways remain available while internal queues
+fill gradually, avoiding a first-callback burst proportional to every queued source quantum.
+
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
 It resolves the browser session map once, then submits the same whole-batch edits over MessagePort.
 All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;

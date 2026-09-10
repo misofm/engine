@@ -659,6 +659,7 @@ export interface CreateMisoAudioWorkletHostOptions {
   document: Uint8Array;
   options: MisoWebBootOptions;
   simd128ModuleUrl: string;
+  preparedModule?: WebAssembly.Module;
   workletModuleUrl: string;
 }
 

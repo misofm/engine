@@ -1,5 +1,5 @@
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
-import { scratchBootInWorker } from "./engine.ts";
+import { scratchBootInWorker, prepareBrowserSessionInWorker } from "./engine.ts";
 
 import type { ScratchBootReply, ScratchBootRequest } from "./scratch.ts";
 
@@ -11,7 +11,10 @@ const scope = ((globalThis as unknown as { readonly self?: Scope }).self ?? glob
 
 scope.onmessage = (event) => {
   const request = event.data;
-  void run(request).then((reply) => scope.postMessage(reply));
+  void run(request).then((reply) => {
+    try { scope.postMessage(reply); }
+    catch (error) { scope.postMessage(failureReply(request, error)); }
+  }).catch(() => { /* A failed error post is bounded by the client deadline. */ });
 };
 scope.postMessage({ type: "worker-ready" });
 
@@ -19,13 +22,19 @@ async function run(request: ScratchBootRequest): Promise<ScratchBootReply> {
   try {
     const response = await fetch(request.moduleUrl);
     if (!response.ok) throw new Error(`Engine Wasm fetch failed with HTTP ${response.status}`);
-    const shape = await scratchBootInWorker({
+    const bootRequest = {
       moduleBytes: new Uint8Array(await response.arrayBuffer()),
       document: request.document,
       options: request.options,
-    });
-    return { type: "scratch-result", requestId: request.requestId, ok: true, shape };
-  } catch (error) {
+    };
+    const result = request.type === "prepare"
+      ? await prepareBrowserSessionInWorker(bootRequest)
+      : { shape: await scratchBootInWorker(bootRequest) };
+    return { type: "scratch-result", requestId: request.requestId, ok: true, ...result };
+  } catch (error) { return failureReply(request, error); }
+}
+
+function failureReply(request: ScratchBootRequest, error: unknown): ScratchBootReply {
     return {
       type: "scratch-result", requestId: request.requestId, ok: false,
       error: {
@@ -37,5 +46,4 @@ async function run(request: ScratchBootRequest): Promise<ScratchBootReply> {
         } : error instanceof MisoUsageError ? { kind: "usage" as const } : {}),
       },
     };
-  }
 }

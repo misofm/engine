@@ -181,3 +181,161 @@ test("actual scratch entry and client retain real Wasm refusal and usage error t
     globalThis.fetch = oldFetch;
   }
 });
+
+import { prepareBrowserSessionWithWorker, prepareBrowserSessionInWorker } from "../src/browser/index.ts";
+import { sessionDocument, effectEntry, ramp } from "./support.mjs";
+import { WasmBoundary } from "../src/core/boundary.ts";
+import { CATALOG } from "../src/generated/catalog.ts";
+
+test("prepared worker snapshots inputs and retains the exact module after termination", async () => {
+  const worker = new FakeWorker(); const document = new Uint8Array([4]); const options = { console: { meterBlocks: 2 } };
+  const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+  const pending = prepareBrowserSessionWithWorker({ document, options, moduleUrl: "wasm", createWorker: () => worker });
+  document[0] = 9; options.console.meterBlocks = 99;
+  worker.emit("message", { type: "worker-ready" });
+  assert.equal(worker.requests[0].type, "prepare"); assert.equal(worker.requests[0].document[0], 4);
+  assert.equal(worker.requests[0].options.console.meterBlocks, 2);
+  worker.emit("message", { ...result, module });
+  assert.equal((await pending).module, module); worker.assertClosed();
+});
+
+for (const fault of ["post", "missing-module", "abort-before-reply", "reply-before-abort", "messageerror"]) {
+  test(`prepared worker lifecycle ${fault}`, async () => {
+    const worker = new FakeWorker(); const controller = new AbortController();
+    const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+    const pending = prepareBrowserSessionWithWorker({ document: new Uint8Array(), options: {}, moduleUrl: "wasm", createWorker: () => worker, signal: controller.signal });
+    if (fault === "post") worker.onPost = () => { throw new DOMException("clone", "DataCloneError"); };
+    worker.emit("message", { type: "worker-ready" });
+    if (fault === "abort-before-reply") controller.abort();
+    if (fault === "messageerror") worker.emit("messageerror", {});
+    worker.emit("message", fault === "missing-module" ? result : { ...result, module });
+    if (fault === "reply-before-abort") { controller.abort(); assert.equal((await pending).module, module); }
+    else await assert.rejects(pending);
+    worker.emitHistorical("message", { ...result, module }); worker.assertClosed();
+  });
+}
+
+test("createEngine snapshots document and nested policy before scratch awaits and forwards prepared identity", async () => {
+  const document = new Uint8Array([3]); const policy = { console: { meterBlocks: 2 } };
+  const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+  const engine = await createEngine({ document, policy, preparedModule: module, createContext: context,
+    scratchBoot: async request => { document[0] = 8; policy.console.meterBlocks = 9; assert.equal(request.document[0], 3); return shape; },
+    createHost: async request => { assert.equal(request.document[0], 3); assert.equal(request.options.console.meterBlocks, 2); assert.equal(request.preparedModule, module); return { async dispose() {} }; },
+  });
+  await engine.close();
+});
+
+test("preparation compiles once, disposes scratch, and yields fresh stateful live DSP and meter origins", async () => {
+  const effects = ["miso.parametric-eq", "miso.compressor", "miso.delay"].map((id, index) => {
+    const row = CATALOG.effects.find(effect => effect.id === id);
+    const values = id === "miso.parametric-eq" ? { 1: 1, 3: 1000, 4: 6 }
+      : id === "miso.delay" ? { 1: 5, 2: 0.5, 4: 0.5 } : {};
+    return effectEntry(`fx${index}`, id, row.parameters.map(parameter => ({ id: parameter.id, unit: parameter.unitName, value: values[parameter.id] ?? parameter.default })));
+  });
+  const bytes = await moduleBytes();
+  const document = new TextEncoder().encode(sessionDocument({ effects: { simd1: effects }, frames: 16384 }));
+  const options = { console: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 } };
+  let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
+  WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };
+  WasmBoundary.prototype.dispose = function () { disposals++; return dispose.call(this); };
+  let prepared;
+  try { prepared = await prepareBrowserSessionInWorker({ moduleBytes: bytes, document, options }); }
+  finally { WebAssembly.compile = compile; WasmBoundary.prototype.dispose = dispose; }
+  assert.equal(compiles, 1); assert.equal(disposals, 1);
+  const referenceModule = await compile(bytes);
+  const boot = module => WasmBoundary.boot({ instantiate: () => WebAssembly.instantiate(module, {}) }, document, options);
+  const live = await boot(prepared.module), reference = await boot(referenceModule);
+  try {
+    assert.equal(live.renderedQuanta(), 0n); assert.deepEqual(live.shape(), prepared.shape);
+    live.meterLease(true); reference.meterLease(true);
+    let meterWindows = 0, delayedEnergy = 0;
+    for (let block = 0; block < 8; block++) {
+      // Excite the effects once, then observe their history while the source is silent.
+      const pcm = block === 0 ? ramp(128, 1) : new Float32Array(128);
+      for (const boundary of [live, reference]) assert.equal(boundary.submitSource({ sourceId: "s", generation: 1n, startFrame: BigInt(block * 128), planes: [pcm, pcm], endOfRegion: false }).ok, true);
+      const output = live.render(128);
+      assert.deepEqual(output, reference.render(128));
+      if (block === 0) assert.notDeepEqual(output.left, pcm, "active processing changes unaffected input");
+      if (block >= 2) for (const value of output.left) delayedEnergy += value * value;
+      const meter = live.pollMeters();
+      assert.deepEqual(meter, reference.pollMeters());
+      if (meter !== undefined) {
+        assert.equal(meter.firstSample, BigInt(meterWindows * 256));
+        assert.equal(meter.endSample, BigInt((meterWindows + 1) * 256));
+        meterWindows++;
+      }
+    }
+    assert.equal(meterWindows, 4, "live meter windows originate at sample zero");
+    assert.ok(delayedEnergy > 0.001, "short wet feedback delay produces a nontrivial tail within eight quanta");
+  } finally { live.dispose(); reference.dispose(); }
+});
+
+for (const frames of [0, 1, 129]) for (const channels of [1, 2]) {
+  test(`preparation handles ${frames} frames and ${channels} channels without console`, async () => {
+    const pending = prepareBrowserSessionInWorker({ moduleBytes: await moduleBytes(), document: new TextEncoder().encode(sessionDocument({ frames, channels })), options: {} });
+    if (frames === 0) { await assert.rejects(pending, error => error instanceof MisoEngineError && error.diagnosticCode === "capacity.zero"); return; }
+    const prepared = await pending;
+    assert.equal(prepared.shape.sources[0].frames, BigInt(frames));
+  });
+}
+
+test("current shipped host sends prepared module to worklet without fetch or compile", async () => {
+  const { createMisoAudioWorkletHost } = await import("../../hosts/host-web/web/miso-engine-v1-audio-worklet-host.js");
+  const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+  const previous = { fetch: globalThis.fetch, compile: WebAssembly.compile, node: globalThis.AudioWorkletNode };
+  let sent = false, disconnected = false;
+  globalThis.fetch = async () => { throw new Error("unexpected fetch"); };
+  WebAssembly.compile = async () => { throw new Error("unexpected compile"); };
+  globalThis.AudioWorkletNode = class {
+    constructor(_context, _name, options) {
+      assert.equal(options.processorOptions.module, module); sent = true;
+      this.port = { close() {}, onmessage: null };
+      queueMicrotask(() => this.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 1 } }));
+    }
+    disconnect() { disconnected = true; }
+  };
+  const options = { context: context(), document: new Uint8Array([1]), options: toWebBootOptions({}), simd128ModuleUrl: "must-not-fetch", workletModuleUrl: "worklet", preparedModule: module };
+  try {
+    await assert.rejects(createMisoAudioWorkletHost(options), error => error.tag === "miso.error.v1" && error.result === 1);
+    assert.equal(sent, true); assert.equal(disconnected, true);
+    sent = false;
+    await assert.rejects(createMisoAudioWorkletHost({ ...options, unexpected: true })); assert.equal(sent, false);
+    await assert.rejects(createMisoAudioWorkletHost({ ...options, preparedModule: {} })); assert.equal(sent, false);
+  } finally { globalThis.fetch = previous.fetch; WebAssembly.compile = previous.compile; globalThis.AudioWorkletNode = previous.node; }
+});
+
+for (const cloneFault of [false, true]) test(`actual prepared worker structured clone, clone fault=${cloneFault}`, async () => {
+  const bytes = await moduleBytes(); const previous = { self: globalThis.self, fetch: globalThis.fetch };
+  const worker = new FakeWorker(); let sentModule;
+  const scope = { onmessage: null, postMessage(reply) {
+    if (reply.module) { sentModule = reply.module; if (cloneFault) throw new DOMException("module clone failed", "DataCloneError"); }
+    worker.emit("message", structuredClone(reply));
+  } };
+  globalThis.self = scope; globalThis.fetch = async () => new Response(bytes);
+  try {
+    await import(`../src/browser/scratch-worker.ts?prepare=${cloneFault}`);
+    worker.onPost = request => scope.onmessage({ data: structuredClone(request) });
+    const pending = prepareBrowserSessionWithWorker({ document: new TextEncoder().encode(sessionDocument()), options: {}, moduleUrl: "wasm", createWorker: () => worker });
+    worker.emit("message", { type: "worker-ready" });
+    if (cloneFault) await assert.rejects(pending, error => error.name === "DataCloneError");
+    else { const prepared = await pending; assert.ok(prepared.module instanceof WebAssembly.Module); assert.notEqual(prepared.module, sentModule); await WebAssembly.instantiate(prepared.module, {}); }
+    worker.assertClosed();
+  } finally { globalThis.self = previous.self; globalThis.fetch = previous.fetch; }
+});
+
+
+test("preparation admits several independent mono and stereo sources", async () => {
+  const document = JSON.parse(sessionDocument({ frames: 257 }));
+  const source = document.sources[0], track = document.tracks[0], route = document.routes[0];
+  document.sources = []; document.tracks = []; document.routes = [];
+  for (const [index, channels] of [1, 2, 1, 2].entries()) {
+    const sourceId = `s${index}`, trackId = `t${index}`;
+    document.sources.push({ ...source, id: sourceId, channels, frames: String(257 + index) });
+    document.tracks.push({ ...track, id: trackId, source_id: sourceId, right_source_channel: channels - 1 });
+    document.routes.push({ ...route, id: `route${index}`, source: { ...route.source, track_id: trackId } });
+  }
+  const prepared = await prepareBrowserSessionInWorker({ moduleBytes: await moduleBytes(), document: new TextEncoder().encode(JSON.stringify(document)), options: { sourceRingFrames: 256 } });
+  assert.deepEqual(prepared.shape.sources.map(source => [source.id, source.channels, source.frames]), [
+    ["s0", 1, 257n], ["s1", 2, 258n], ["s2", 1, 259n], ["s3", 2, 260n],
+  ]);
+});

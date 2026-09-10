@@ -93,6 +93,9 @@ export class MisoEngineAsset {
     return new MisoEngineAsset(module, digest, 1);
   }
 
+  /** The exact compiled module, strongly owned independently of any instance. */
+  get module(): WebAssembly.Module { return this.#module; }
+
   /** How many times `WebAssembly.compile` ran for this asset. Always 1; asserted, not trusted. */
   get compileCount(): number {
     return this.#compiles;

@@ -6,7 +6,7 @@ import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import { BrowserBootError } from "./default-host.ts";
 
 export interface ScratchBootRequest {
-  readonly type: "scratch"; readonly requestId: number; readonly moduleUrl: string;
+  readonly type: "scratch" | "prepare"; readonly requestId: number; readonly moduleUrl: string;
   readonly document: Uint8Array; readonly options: BootOptions;
 }
 type ScratchFailure = { readonly name: string; readonly message: string } & (
@@ -16,7 +16,7 @@ type ScratchFailure = { readonly name: string; readonly message: string } & (
 );
 export type ScratchBootReply =
   | { readonly type: "worker-ready" }
-  | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: true; readonly shape: SessionShape }
+  | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: true; readonly shape: SessionShape; readonly module?: WebAssembly.Module }
   | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: false; readonly error: ScratchFailure };
 
 /** Only the Worker operations used by a one-shot scratch boot. */
@@ -29,7 +29,7 @@ export interface ScratchWorker {
 export type ScratchWorkerFactory = (url: URL, options: { readonly type: "module" }) => ScratchWorker;
 
 /** Boot once on a bounded module Worker, terminating before either outcome becomes observable. */
-export async function scratchBootWithWorker(options: {
+export interface ScratchBootWorkerOptions {
   readonly document: Uint8Array;
   readonly options: BootOptions;
   readonly moduleUrl: string | URL;
@@ -37,7 +37,27 @@ export async function scratchBootWithWorker(options: {
   readonly createWorker?: ScratchWorkerFactory;
   readonly requestDeadlineMs?: number;
   readonly signal?: AbortSignal;
-}): Promise<SessionShape> {
+}
+
+export interface PreparedBrowserSession {
+  readonly shape: SessionShape;
+  readonly module: WebAssembly.Module;
+}
+
+export async function scratchBootWithWorker(options: ScratchBootWorkerOptions): Promise<SessionShape> {
+  return (await runScratchWorker(options, "scratch")).shape;
+}
+
+export async function prepareBrowserSessionWithWorker(options: ScratchBootWorkerOptions): Promise<PreparedBrowserSession> {
+  const result = await runScratchWorker(options, "prepare");
+  if (!(result.module instanceof WebAssembly.Module)) throw new BrowserBootError("scratch-load", "Preparation Worker did not return a compiled module");
+  return { shape: result.shape, module: result.module };
+}
+
+async function runScratchWorker(options: ScratchBootWorkerOptions, mode: "scratch" | "prepare"): Promise<{ shape: SessionShape; module?: WebAssembly.Module }> {
+  const document = new Uint8Array(options.document);
+  const bootOptions = { ...options.options, ...(typeof options.options.console === "object" ? { console: { ...options.options.console } } : {}) };
+  const moduleUrl = String(options.moduleUrl);
   options.signal?.throwIfAborted();
   const deadline = options.requestDeadlineMs ?? 5_000;
   if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
@@ -54,11 +74,11 @@ export async function scratchBootWithWorker(options: {
       worker = new Worker(new URL("./scratch-worker.js", import.meta.url), { type: "module" });
     }
   } catch (error) { throw new BrowserBootError("scratch-start", "Scratch module Worker could not start", error); }
-  return new Promise<SessionShape>((resolve, reject) => {
+  return new Promise<{ shape: SessionShape; module?: WebAssembly.Module }>((resolve, reject) => {
     let settled = false;
     let requested = false;
     let timer: ReturnType<typeof setTimeout>;
-    const finish = (error: unknown, shape?: SessionShape) => {
+    const finish = (error: unknown, result?: { shape: SessionShape; module?: WebAssembly.Module }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -67,7 +87,7 @@ export async function scratchBootWithWorker(options: {
       worker.removeEventListener("error", failure);
       worker.removeEventListener("messageerror", decodeFailure);
       worker.terminate();
-      if (shape !== undefined) resolve(shape); else reject(error);
+      if (result !== undefined) resolve(result); else reject(error);
     };
     const arm = () => {
       clearTimeout(timer);
@@ -84,11 +104,11 @@ export async function scratchBootWithWorker(options: {
         if (options.signal?.aborted) { abort(); return; }
         requested = true;
         arm();
-        try { worker.postMessage({ type: "scratch", requestId: 1, moduleUrl: String(options.moduleUrl), document: options.document, options: options.options }); }
+        try { worker.postMessage({ type: mode, requestId: 1, moduleUrl, document, options: bootOptions }); }
         catch (error) { finish(error); }
       } else if (reply.type === "scratch-result" && requested && reply.requestId === 1) {
         if (options.signal?.aborted) { abort(); return; }
-        if (reply.ok) finish(undefined, reply.shape);
+        if (reply.ok) finish(undefined, reply);
         else {
           const failure = reply.error;
           const error = failure.kind === "engine"

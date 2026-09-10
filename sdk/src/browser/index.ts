@@ -9,6 +9,6 @@ export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
 export * from "./pcm-feed.ts";
 
-export { scratchBootWithWorker } from "./scratch.ts";
-export type { ScratchWorker, ScratchWorkerFactory } from "./scratch.ts";
+export { scratchBootWithWorker, prepareBrowserSessionWithWorker } from "./scratch.ts";
+export type { ScratchWorker, ScratchWorkerFactory, ScratchBootWorkerOptions, PreparedBrowserSession } from "./scratch.ts";
 export { createDefaultHost, BrowserBootError } from "./default-host.ts";

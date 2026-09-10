@@ -77,6 +77,7 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly sources?: readonly { readonly id: string; readonly spec: SourceSpec }[];
   /** Release URLs, from the same release as the module bytes. */
   readonly simd128ModuleUrl?: string;
+  readonly preparedModule?: WebAssembly.Module;
   readonly workletModuleUrl?: string;
   readonly hostModuleUrl?: string;
   readonly scratchWorkerModuleUrl?: string;
@@ -99,6 +100,7 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
     readonly document: Uint8Array;
     readonly options: ReturnType<typeof workletBootOptions>;
     readonly simd128ModuleUrl: string;
+    readonly preparedModule?: WebAssembly.Module;
     readonly workletModuleUrl: string;
   }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
@@ -119,9 +121,7 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
   if (typeof document === "string") return new TextEncoder().encode(document);
   if (document instanceof Uint8Array) {
-    return document.buffer instanceof ArrayBuffer
-      ? (document as Uint8Array<ArrayBuffer>)
-      : new Uint8Array(document);
+    return new Uint8Array(document);
   }
   return new TextEncoder().encode(document.toJson());
 }
@@ -155,7 +155,8 @@ export function createEngine(
 export function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>>;
 export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>> {
   const document = documentBytes(options.document);
-  const policy = options.policy ?? {};
+  const policy = { ...options.policy, ...(typeof options.policy?.console === "object" ? { console: { ...options.policy.console } } : {}) };
+  const preparedModule = options.preparedModule;
   const simd128ModuleUrl = options.simd128ModuleUrl ?? BUNDLED_ENGINE_ASSETS.wasm.href;
   const workletModuleUrl = options.workletModuleUrl ?? BUNDLED_ENGINE_ASSETS.workletModule.href;
 
@@ -229,6 +230,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }),
       simd128ModuleUrl,
       workletModuleUrl,
+      ...(preparedModule === undefined ? {} : { preparedModule }),
     });
     let semanticConsole: Promise<EngineConsole> | undefined;
     let closePromise: Promise<void> | undefined;
@@ -270,8 +272,10 @@ export async function scratchBootInWorker(request: {
   readonly options: ReturnType<typeof scratchBootOptions>;
   readonly expectedSha256?: string;
 }): Promise<SessionShape> {
+  const document = new Uint8Array(request.document);
+  const options = { ...request.options, ...(typeof request.options.console === "object" ? { console: { ...request.options.console } } : {}) };
   const asset = await MisoEngineAsset.load(request.moduleBytes, request.expectedSha256);
-  const boundary = await WasmBoundary.boot(asset, request.document, request.options);
+  const boundary = await WasmBoundary.boot(asset, document, options);
   try {
     return boundary.shape();
   } finally {
@@ -279,6 +283,43 @@ export async function scratchBootInWorker(request: {
     // second engine's worth of memory alive beside the one that is about to render.
     boundary.dispose();
   }
+}
+
+/** Compile and rehearse only disposable DSP state; retain the compiled code for live boot. */
+export async function prepareBrowserSessionInWorker(request: Parameters<typeof scratchBootInWorker>[0]): Promise<import("./scratch.ts").PreparedBrowserSession> {
+  const document = new Uint8Array(request.document);
+  const options = { ...request.options, ...(typeof request.options.console === "object" ? { console: { ...request.options.console } } : {}) };
+  const asset = await MisoEngineAsset.load(request.moduleBytes, request.expectedSha256);
+  const boundary = await WasmBoundary.boot(asset, document, options);
+  try {
+    const shape = boundary.shape();
+    const quantum = shape.quantumFrames;
+    // Only one quantum per channel is retained, regardless of source count or duration.
+    const plane = new Float32Array(quantum);
+    for (let frame = 0; frame < quantum; frame++) plane[frame] = 0.125 * Math.sin(frame * 0.13) + 0.0625;
+    const planesByChannels = new Map<number, readonly Float32Array[]>();
+    const meters = boundary.sessionMap().metersAttached;
+    if (meters && !boundary.meterLease(true).ok) throw new MisoUsageError("Preparation meter lease refused");
+    for (let block = 0; block < 64; block++) {
+      const startFrame = BigInt(block * quantum);
+      for (const source of shape.sources) {
+        if (startFrame >= source.frames) continue;
+        const frames = Number(source.frames - startFrame < BigInt(quantum) ? source.frames - startFrame : BigInt(quantum));
+        let planes = planesByChannels.get(source.channels);
+        if (planes === undefined) {
+          planes = Array.from({ length: source.channels }, () => plane);
+          planesByChannels.set(source.channels, planes);
+        }
+        const submitted = boundary.submitSource({ sourceId: source.id, generation: 1n, startFrame,
+          planes: frames === quantum ? planes : planes.map(channel => channel.subarray(0, frames)),
+          endOfRegion: startFrame + BigInt(frames) === source.frames });
+        if (!submitted.ok) throw new MisoUsageError(`Preparation source submission refused: ${submitted.code}`);
+      }
+      boundary.render(quantum);
+      if (meters) boundary.pollMeters();
+    }
+    return { shape, module: asset.module };
+  } finally { boundary.dispose(); }
 }
 
 function defaultCreateContext(options: { sampleRate: number; renderSizeHint: number }): AudioContextLike {
