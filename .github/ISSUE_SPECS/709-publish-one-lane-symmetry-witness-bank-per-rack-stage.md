@@ -200,11 +200,90 @@ update this decision record, and rerun the complete required gate sequence
 within the same owned paths, preserving Attempt 1 evidence and stopping at
 the first failure.
 
-## Attempt 2 — correction in progress
+## Attempt 2 — implementation gates complete; review pending
 
-Sol authorized Astra XHIGH to apply only that conditional correction from
-`95af1e99d564a0e8795500c1bb46b916b18de13d`. Attempt 2 evidence is separate at
-`/tmp/issue709-attempt2-nTfNNWlH`. The first tranche is limited to
-`cargo fmt --check`, the three focused tests and strict rack Clippy, followed
-by a pause for Sol's checkpoint before the remaining gates. No verdict or
-qualification claim is implied by this authorization.
+Astra XHIGH applied only the combined conditional, without suppression, after
+Attempt 1. The correction tranche passed formatting, the three focused tests
+and strict Clippy (`01-fmt.log`, `02-focused.log`, `03-clippy.log`) before Sol
+checkpointed and pushed `dbe7ea7be2bfd26da3cd20084179aa3b4a017bca`.
+
+The complete sequence below was then restarted against that clean, frozen
+checkpoint. Source SHA-256 is
+`266133f6870f2bf1bfc8d923125605ac840dba9fe3e1ddcb998420a3c822b676`.
+All 20 gates completed without retry. Only this decision record was edited
+afterward; the product source stayed frozen.
+
+Commands ran from `/home/bl/misofm/engine-rt6-stage-symmetry-witnesses`.
+In the table, `E` expands to `/tmp/issue709-attempt2-nTfNNWlH`, `B` to
+`898bdc94b0143288049397629f3afeded384f8c2`, and `H` to
+`dbe7ea7be2bfd26da3cd20084179aa3b4a017bca`. Unless overridden in a row,
+`CARGO_TARGET_DIR="$E/target"`. Logs are under `E`; `full-results.jsonl`
+preserves each literal argv, environment override, source commit and exit.
+
+| Command | Result | Log |
+| --- | --- | --- |
+| `cargo test --locked -p rack stage_witness_bank -- --nocapture` | Exit 0; 3 focused tests | `full-01-focused.log` |
+| `cargo test --locked -p rack` | Exit 0; 33 inline + 10 console-bank + 4 re-engagement tests | `full-02-debug.log` |
+| `CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked -p rack --release` | Exit 0; same 47 tests | `full-03-release.log` |
+| `cargo clippy --locked -p rack --all-targets -- -D warnings` | Exit 0; unchanged configuration warnings noted below | `full-04-clippy.log` |
+| `cargo fmt --check` | Exit 0 | `full-05-fmt.log` |
+| `CARGO_TARGET_DIR="$E/allocation-target" cargo run --offline --release --manifest-path "$E/allocation-harness/Cargo.toml"` | Exit 0; detector liveness and all 24 armed render calls passed | `full-06-allocation.log` |
+| `bash scripts/check-workspace-policy.sh` | Exit 0 | `full-07-workspace-policy.log` |
+| `bash scripts/check-rack-policy.sh` | Exit 0; dependency/safety boundary | `full-08-rack-policy.log` |
+| `bash scripts/check-realtime-policy.sh` | Exit 0; 43 marked regions in 12 files | `full-09-realtime-policy.log` |
+| `bash scripts/test-rack-policy.sh` | Exit 0 | `full-10-rack-mutations.log` |
+| `bash scripts/test-realtime-policy.sh` | Exit 0 | `full-11-realtime-mutations.log` |
+| `bash scripts/check-realtime-audit-leak.sh` | Exit 0 | `full-12-audit-leak-policy.log` |
+| `bash scripts/test-realtime-audit-leak.sh` | Exit 0 | `full-13-audit-leak-mutations.log` |
+| `cargo build --locked --release -p rack --target x86_64-unknown-linux-gnu` | Exit 0; repository x86-64-v3 AVX2/FMA pin | `full-14-native.log` |
+| `CARGO_TARGET_DIR="$E/wasm-scalar" cargo build --locked --release -p rack --target wasm32-unknown-unknown` | Exit 0 | `full-15-wasm-scalar.log` |
+| `CARGO_TARGET_DIR="$E/wasm-simd128" CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128" cargo build --locked --release -p rack --target wasm32-unknown-unknown` | Exit 0 | `full-16-wasm-simd128.log` |
+| `CARGO_TARGET_DIR="$E/mutation-target" cargo test --offline --manifest-path "$E/old-dispatch-mutation/Cargo.toml" --lib tests::stage_witness_bank_entire_armed_decision_publishes_once_even_when_declining -- --exact --nocapture` | Expected test exit 101 at the required bulk-call assertion; mutation validator exit 0 | `full-17-old-dispatch-mutation.log` |
+| `git rev-parse HEAD`; `git status --porcelain=v1`; `git diff --check "$B" "$H"`; `git diff --name-only "$B" "$H"`; `git diff --stat "$B" "$H"`; `git diff "$B" "$H" -- crates/rack/src/lib.rs .github/ISSUE_SPECS/709-publish-one-lane-symmetry-witness-bank-per-rack-stage.md` | All exits 0; clean exact head, only the two owned paths; complete diff reviewed | `full-18-exact-diff.log` |
+| `cargo test --locked -p builtins --test mono_collapse` | Exit 0; 2 existing report/state tests | `full-19-builtin-mono-report.log` |
+| `cargo test --locked -p host-core --test effect_observation every_bank_lane_publishes_its_own_reduction -- --exact` | Exit 0; existing per-lane observation test | `full-20-observation.log` |
+
+The implementation publishes one eight-entry witness array per active stage,
+bounded by `BankWidth` and the prepared slot mask. Existing stage overrides
+remain the default's source; unclassified stages still decline. The armed
+path publishes after all drains and reuses that aggregate for eligibility and
+agreement maintenance. The forced-off path retains its lazy publication after
+disengagement. The former activity-count test now expects ten constant slot
+checks rather than eight: the two additional checks guard stage publications;
+its zero lane-mask-inspection assertion remains intact.
+
+The three inline tests cover exact terms, public evidence-helper results,
+full/partial W4/W8 cohorts, identity and inactive lanes, default/external-style
+overrides, all-drains-before-publication, and the complete armed eligible,
+`UNBYPASSED`-declined and `LIVE`-declined decisions. Each visited stage is
+asserted to publish once across the whole decision, with no direct outer
+per-lane query. The external mutation restores lane/slot virtual calls only
+in the aggregate; its single run compiled and failed specifically because
+bulk counts were `[0, 0, 0]` instead of `[1, 1, 0]`. The authoritative checkout
+was never mutated. Original/mutated sources, manifest and exact diff are under
+`$E/old-dispatch-mutation/`; `mutation-input-sha256.json` records their hashes.
+The mutation diff SHA-256 is
+`42232d23c7c4d73a60d928f4c7b4dc672fc40ed9d34ebc32b33300664d17636a`.
+
+The external allocation harness uses the public rack API and the inherited
+stage bulk default. It first proves alloc/zeroed-alloc/realloc/free detector
+liveness (three allocation and three free observations), then runs 12 cases:
+W4/W8 × full/partial cohorts × eligible/bypass-declined/live-declined outcomes.
+Each case audits its initial collapsed block and its next block after a drain
+changes the witness. All 24 armed calls allocate/free zero times, with exact
+collapse, agreement and transition assertions. Harness sources, manifest,
+lockfile and binaries remain outside Git. Input SHA-256 values are:
+
+- `$E/allocation-harness/Cargo.toml`:
+  `b346af2a8a154577fc1e5a77c60e5c62352051a9fe4b76a70d96864c41f19292`.
+- `$E/allocation-harness/src/main.rs`:
+  `ce3e96abff03e4b047c24a192d3c4a3876c0a7d0423586335dd68ad96efe2e1f`.
+
+Clippy exits successfully but emits the pre-existing unreachable-path
+configuration warnings at `clippy.toml:81–82`; no suppression or configuration
+change was made. Allocation evidence is limited to the tested render paths;
+it is not a syscall trace. The Wasm evidence is crate compilation, not browser
+execution. Nested builtin-processor forwarding remains unchanged. There is
+no timing, speedup, artifact, pin, merge, delivery or **SOURCE PASS** claim.
+Astra LOW's independent adversarial review and Sol's delivery workflow remain
+pending; both attempt evidence directories are preserved.
