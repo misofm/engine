@@ -458,3 +458,10 @@ retry is authorized. An independently scoped, bounded successor may correct
 only the structural fixture delimiter expressions while preserving production
 and policy behavior, then earn its stated remaining qualification. Preserve
 all earlier failures and gate evidence; do not silently restart this feature.
+
+## Superseded by bounded qualification successor #722
+
+#714 remains exhausted at five failed attempts. #722 owns only the two
+structural-test delimiter corrections and completion of inherited qualification
+and delivery. This issue is closed as superseded, not delivered; no capability
+or parent-finding credit is awarded until #722 actually delivers.
