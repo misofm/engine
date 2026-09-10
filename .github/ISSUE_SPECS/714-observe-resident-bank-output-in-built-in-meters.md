@@ -270,7 +270,7 @@ opening checkpoint. Opening audit evidence is outside Git at
 |---|---|---|
 | Opening scope | Astra LOW PASS at reviewed head `5cff0d4740ccec8f815820743c93fc627a7d3893` | Placement-only scope accepted; #713 integration blocks implementation |
 | Dependency/API/resource preflight | Astra XHIGH PREFLIGHT PASS; Astra LOW independent PREFLIGHT PASS | Evidence and frozen-signature findings recorded below; no attempt consumed |
-| Implementation attempts 1-5 | Attempt 1 FAIL; consumed; Astra LOW independent verdict recorded below | Attempt 2 is limited to cloning/reconstructing the fixture mask per suffix, then resuming the focused gates; stop at the first unexpected failure |
+| Implementation attempts 1-5 | Attempts 1-2 FAIL; consumed; Astra LOW verdicts recorded below | Attempt 3 is limited to scoping the call-count validator to the intended observer dispatcher while retaining admission, mutation, and one-dispatch obligations; stop at the first unexpected failure |
 | Qualification/delivery | Not started | No product, test, SOURCE PASS, artifact or delivery credit |
 
 Scope review: Astra LOW PASS at `5cff0d4740ccec8f815820743c93fc627a7d3893`,
@@ -343,3 +343,23 @@ Attempt 2 is authorized only to clone or reconstruct the fixture's active mask
 per suffix, then resume the existing focused gate order. It must stop at the
 first unexpected failure. No product or API expansion, artifact, pin, timing,
 benchmark, or broader repair is authorized by this record.
+
+## Astra XHIGH ATTEMPT 2 FAIL — Astra LOW verdict
+
+Astra XHIGH's second focused pass is preserved at evidence root
+`/tmp/issue714-attempt2-pb4c9_pt`; the manifest SHA-256 is
+`7dcfe07119a16378b56fad29f66c45697938a7ffc7f49eae1ef22f38063afc85`.
+The one-line rack fixture clone completed; rustfmt exited 0 and the rack
+fixture selector exited 0 with 1/1 passed. The graph behavioral test passed,
+but the structural-valid-source check failed because its call-count validator
+counted an unrelated existing processor `.observe_resident(` in addition to the
+intended meter dispatch. No later gate ran and this attempt earns no
+qualification, delivery, timing, performance, artifact, pin, or full-RT10
+credit. Astra LOW's verdict is that the validator has scoping fragility; the
+production checkpoint is unchanged and suitable as a candid failed checkpoint.
+
+Attempt 3 is authorized only to scope the call-count validator to the intended
+observer dispatcher while retaining the admission, mutation, and one-dispatch
+obligations, then resume the existing focused gates and stop at the first
+unexpected failure. No production or API change, artifact, pin, timing,
+benchmark, or broader repair is authorized.

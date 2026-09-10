@@ -2702,7 +2702,7 @@ mod tests {
                     }
                     let mut chain = BankChain::new(
                         AoSoaScratch::new(width, 17).unwrap(),
-                        active.into_boxed_slice(),
+                        active.clone().into_boxed_slice(),
                         slots,
                     )
                     .unwrap();
