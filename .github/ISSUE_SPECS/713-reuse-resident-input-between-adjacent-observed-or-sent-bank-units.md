@@ -328,3 +328,29 @@ strengthen the structural validator for executor observation/freshness; and add
 controls for an intervening emitted scalar, a retired non-emitted run, and
 unequal or shorter populations. No later gate is authorized until those bounded
 corrections are made.
+
+## Implementation Attempt 2 — FAIL
+
+Attempt 2 is preserved at evidence directory
+`/tmp/issue713-attempt2-7qianrbm/`. Its exact failed-state record is
+`/tmp/issue713-attempt2-7qianrbm/failed-state-sha256.json` with source head
+`3821939b3a2cbd1714f2fab9a9e82794c9c0f16d`, diff hash
+`14fd5c6d0bed27709f1e5ccf8758b62f06a02d19636ca45f5c0bd066fb2ef4f4`, and
+file hashes `rack=903d99e436db163c1c200a45600cb960606480a6b2571bb2eb5d970cb547b059`,
+`graph-runtime=6c863c085205cc1e515d8311a3a936c25212e2702efeca3ae7964487aa23d2ff`,
+`graph-lib=51cbde089fa966f0652119d3e90c317b315621ac46954c99af8089fefc675d03`,
+and `allocation-test=4bcacf4b14c85f0683d3e057d7346ff4737d2e625fc72ab2feeaf04c07d5771a`.
+
+- The focused rack tests passed 2/2.
+- The focused graph/lib tests passed 3/3.
+- The prepared-plan allocation target compile exited 101 with E0308 because
+  its helper declared `Result<(), RenderError>` while `plan.render` returned
+  `Result<RenderReport, RenderError>`.
+- Integration, allocation, mutation, and broad target/workspace gates were
+  unrun. Attempt 2 receives no qualification or delivery credit.
+
+Astra LOW verified the exact failed-state hashes and returned **Attempt 2
+FAIL**. Attempt 3 is authorized only to correct the helper to return the actual
+`RenderReport` and retain/compare reports without mapping them to a unit, then
+complete the physical old-gather mutation and the outstanding scoped gates.
+The prior corrections remain coherent; no product rescope is authorized.

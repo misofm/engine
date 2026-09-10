@@ -2771,6 +2771,46 @@ pub(crate) fn build_sequential(
     }
     apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
     let folds = apply_route_fold(fold.as_ref(), &unit_of_run, &op_slot, arena, &mut units);
+    arm_resident_inputs(
+        program,
+        &first_producer,
+        &run_units,
+        &unit_of_run,
+        &units,
+        &mut identity,
+    );
+    let mut builder = ArenaLeaseSetBuilder::new(
+        NonZeroUsize::new(2).expect("stereo planes"),
+        NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
+    );
+    let buffers: Vec<u32> = (0..program.buffers).map(|_| builder.reserve()).collect();
+    builder.lease(0, buffers.clone(), buffers);
+    let (_arena, mut leases) = builder
+        .finish()
+        .expect("one lease over one coloured arena is disjoint by construction");
+    Runtime::new(
+        leases.pop().expect("the sequential lease"),
+        delays,
+        // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
+        // ops carry and this vector's order are the same walk.
+        core::mem::take(&mut parts.track_delay_lines),
+        units,
+        split_pairs,
+        identity,
+        redirects.len() as u64,
+        folds,
+    )
+}
+
+/// The admission walk uses emitted adjacency: a retired run owns no execution boundary.
+fn arm_resident_inputs(
+    program: &ExecutionProgram,
+    first_producer: &[Option<usize>],
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+    unit_of_run: &[Option<usize>],
+    units: &[RuntimeUnit],
+    identity: &mut [UnitIdentity],
+) {
     // Work on final emitted adjacency, after redirects and folded epilogues. No new allocation:
     // the sole retained bit occupies UnitIdentity padding; all other proof inputs already exist.
     let mut previous: Option<(usize, &[usize])> = None;
@@ -2795,27 +2835,6 @@ pub(crate) fn build_sequential(
         }
         previous = Some((unit, ops));
     }
-    let mut builder = ArenaLeaseSetBuilder::new(
-        NonZeroUsize::new(2).expect("stereo planes"),
-        NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
-    );
-    let buffers: Vec<u32> = (0..program.buffers).map(|_| builder.reserve()).collect();
-    builder.lease(0, buffers.clone(), buffers);
-    let (_arena, mut leases) = builder
-        .finish()
-        .expect("one lease over one coloured arena is disjoint by construction");
-    Runtime::new(
-        leases.pop().expect("the sequential lease"),
-        delays,
-        // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
-        // ops carry and this vector's order are the same walk.
-        core::mem::take(&mut parts.track_delay_lines),
-        units,
-        split_pairs,
-        identity,
-        redirects.len() as u64,
-        folds,
-    )
 }
 
 /// The separate resident proof deliberately permits extra readers and every observer. Their
@@ -3934,7 +3953,41 @@ mod tests {
                 .split("pub(crate) fn complete_pending(")
                 .next()
                 .unwrap();
+            let graph = production(graph);
+            let Some(render) = graph
+                .split("impl PreparedPlanExecutor for GraphExecutor {")
+                .nth(1)
+                .and_then(|implementation| implementation.split("    fn render(").nth(1))
+                .and_then(|render| render.split("    fn qualification_counters(").next())
+            else {
+                return false;
+            };
+            let Some(loop_body) = render
+                .split("for unit in 0..runtime.units.len() {")
+                .nth(1)
+                .and_then(|body| {
+                    body.split("let (left, right) = runtime.buffer(*output_buffer);")
+                        .next()
+                })
+            else {
+                return false;
+            };
+            let expected = [
+                "if let Err(error) = runtime.execute(unit, time.absolute_sample) {",
+                "return Err(error);",
+                "if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {",
+                "return Err(error);",
+            ];
+            let mut remaining = loop_body;
+            for statement in expected {
+                let Some((_, tail)) = remaining.split_once(statement) else {
+                    return false;
+                };
+                remaining = tail;
+            }
             count == 1
+                && render.matches("runtime.execute(").count() == 1
+                && render.matches("runtime.observe_unit(").count() == 1
                 && execute.contains("let (before, current) = units.split_at_mut(index);")
                 && execute.contains("let admitted = identity[index].resident_input;")
                 && execute.contains("let predecessor = if admitted {")
@@ -3956,11 +4009,168 @@ mod tests {
             1,
         );
         assert!(!valid(&bypass, graph, rack), "admission-bypass control");
+        let skipped_observer = graph.replacen(
+            "runtime.observe_unit(unit, time.absolute_sample)",
+            "Ok::<(), RenderError>(())",
+            1,
+        );
+        assert!(
+            !valid(runtime, &skipped_observer, rack),
+            "freshness requires predecessor observation"
+        );
+        let continued_error = graph.replacen(
+            "runtime.complete_pending(time.absolute_sample);\n                return Err(error);",
+            "runtime.complete_pending(time.absolute_sample);\n                continue;",
+            1,
+        );
+        assert!(
+            !valid(runtime, &continued_error, rack),
+            "producer failure must prevent successor execution"
+        );
+        let next_observer = graph.replacen(
+            "runtime.observe_unit(unit, time.absolute_sample)",
+            "runtime.observe_unit(unit + 1, time.absolute_sample)",
+            1,
+        );
+        assert!(
+            !valid(runtime, &next_observer, rack),
+            "observation must be for the unit just executed"
+        );
         let second = format!("unrelated.run_with_resident_input();\n{graph}");
         assert!(
             !valid(runtime, &second, rack),
             "second-production-call control"
         );
+    }
+
+    #[test]
+    fn rt9_final_adjacency_declines_scalar_and_shorter_populations_but_skips_retired_runs() {
+        let op = |input, output| RuntimeOp {
+            inputs: vec![input].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output,
+            kind: NodeKind::BankMember,
+            split_pair: None,
+            observers: Box::new([]),
+        };
+        let bank = |population, width, predecessor: bool| {
+            let members = (0..population)
+                .map(|lane| {
+                    op(
+                        if predecessor { 0 } else { lane + 1 },
+                        if predecessor { lane + 1 } else { lane + 9 },
+                    )
+                })
+                .collect::<Vec<_>>();
+            RuntimeUnit::Bank {
+                members: members.into_boxed_slice(),
+                lanes: population as usize,
+                chain: BankChain::new(
+                    AoSoaScratch::new(width, 17).expect("scratch"),
+                    (0..width.lanes()).map(|lane| lane < population).collect(),
+                    vec![],
+                )
+                .expect("chain"),
+                fold: Box::new([]),
+                master: 0,
+            }
+        };
+        let identity = |population| UnitIdentity {
+            banked: true,
+            resident_input: false,
+            stages: 1,
+            upstream_of_seam_stages: 1,
+            lane_tracks: (0..population)
+                .map(|lane| format!("track{lane}").into_boxed_str())
+                .collect(),
+        };
+        // Cases: ordinary adjacency; retired non-emitted run; intervening emitted scalar;
+        // smaller/larger predecessor populations; incompatible widths; scalar predecessor.
+        for case in 0..7 {
+            let a = if case == 3 {
+                1
+            } else if case == 4 {
+                3
+            } else {
+                2
+            };
+            let b = 2;
+            let mut units = vec![if case == 6 {
+                RuntimeUnit::Op(op(0, 1))
+            } else {
+                bank(
+                    a,
+                    if case == 5 {
+                        effect_contract::BankWidth::Eight
+                    } else {
+                        effect_contract::BankWidth::Four
+                    },
+                    true,
+                )
+            }];
+            let mut rows = vec![identity(a)];
+            let mut runs = vec![(vec![], (0..a as usize).collect::<Vec<_>>())];
+            let mut emitted = vec![Some(0)];
+            if case == 1 || case == 2 {
+                runs.push((vec![], vec![a as usize]));
+                if case == 2 {
+                    emitted.push(Some(1));
+                    units.push(RuntimeUnit::Op(op(0, 8)));
+                    rows.push(identity(1));
+                } else {
+                    emitted.push(None);
+                }
+            }
+            emitted.push(Some(units.len()));
+            units.push(bank(b, effect_contract::BankWidth::Four, false));
+            rows.push(identity(b));
+            runs.push((
+                vec![],
+                (a as usize + 1..a as usize + 1 + b as usize).collect(),
+            ));
+            let count = a + 1 + b;
+            let program = ExecutionProgram {
+                ops: (0..count)
+                    .map(|index| Op {
+                        node: index,
+                        level: 0,
+                        inputs: (index, index + 1),
+                        sidechain: None,
+                        output: BufferRef(index + 1),
+                        in_place: false,
+                    })
+                    .collect(),
+                inputs: (0..count)
+                    .map(|_| InputRef {
+                        buffer: BufferRef(1),
+                        delay: None,
+                    })
+                    .collect(),
+                delays: Box::new([]),
+                node_buffer: Box::new([]),
+                node_op: Box::new([]),
+                taps: Box::new([]),
+                buffers: count + 1,
+                output: BufferRef(count),
+            };
+            let first_producer: Vec<_> = (0..count)
+                .map(|index| (index > a).then(|| (index - a - 1) as usize))
+                .collect();
+            arm_resident_inputs(
+                &program,
+                &first_producer,
+                &runs,
+                &emitted,
+                &units,
+                &mut rows,
+            );
+            assert_eq!(
+                rows.last().expect("successor").resident_input,
+                case <= 1,
+                "case={case}"
+            );
+        }
     }
 
     #[test]

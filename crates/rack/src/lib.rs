@@ -2637,10 +2637,10 @@ mod tests {
                     let mut seed = 713;
                     let mut planes = Planes {
                         left: (0..lanes)
-                            .map(|_| (0..quantum).map(|_| seeded(&mut seed)).collect())
+                            .map(|_| (0..frames).map(|_| seeded(&mut seed)).collect())
                             .collect(),
                         right: (0..lanes)
-                            .map(|_| (0..quantum).map(|_| seeded(&mut seed)).collect())
+                            .map(|_| (0..frames).map(|_| seeded(&mut seed)).collect())
                             .collect(),
                     };
                     planes.left[0][0] = -0.0;

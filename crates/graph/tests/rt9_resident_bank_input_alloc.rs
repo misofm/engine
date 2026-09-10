@@ -17,18 +17,25 @@ use std::sync::{
 struct Probe {
     trace: AtomicU64,
     command: AtomicU32,
-    observed: [AtomicU32; 4],
+    observed: [[AtomicU32; 17]; 4],
 }
 impl Probe {
     fn event(&self, event: u64) {
-        self.trace
-            .store(self.trace.load(Relaxed) * 16 + event, Relaxed);
+        self.trace.store(
+            self.trace
+                .load(Relaxed)
+                .wrapping_mul(16)
+                .wrapping_add(event),
+            Relaxed,
+        );
     }
-    fn snapshot(&self) -> (u64, u32, [u32; 4]) {
+    fn snapshot(&self) -> (u64, u32, [[u32; 17]; 4]) {
         (
             self.trace.load(Relaxed),
             self.command.load(Relaxed),
-            self.observed.each_ref().map(|v| v.load(Relaxed)),
+            self.observed
+                .each_ref()
+                .map(|row| row.each_ref().map(|v| v.load(Relaxed))),
         )
     }
 }
@@ -58,6 +65,7 @@ impl GraphRuntimeProcessor for Source {
 
 struct Stage {
     id: usize,
+    scalar_lane: Option<usize>,
     lanes: usize,
     population: usize,
     state: [f32; 2],
@@ -104,9 +112,14 @@ impl GraphPreparedBuiltinBankProcessor for Stage {
     fn begin_block(&mut self, first: u64) -> Result<(), RenderError> {
         self.probe.event(1 + self.id as u64 * 4);
         if self.id == 1 {
-            let command = self.probe.command.swap(0, Relaxed);
-            self.state[0] += command as f32 * 0.125;
-            self.state[1] += command as f32 * 0.125;
+            let command = match self.scalar_lane {
+                Some(lane) => {
+                    self.probe.command.fetch_and(!(1 << lane), Relaxed) & (1 << lane) != 0
+                }
+                None => self.probe.command.swap(0, Relaxed) != 0,
+            };
+            self.state[0] += u32::from(command) as f32 * 0.125;
+            self.state[1] += u32::from(command) as f32 * 0.125;
         }
         if first == 0 && self.fail == 1 + self.id as u32 * 2 {
             Err(RenderError::InvalidEnvelope)
@@ -145,7 +158,15 @@ impl GraphPreparedBuiltinBankProcessor for Stage {
         ]
     }
 }
+impl GraphRuntimeProcessor for Stage {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        GraphPreparedBuiltinBankProcessor::begin_block(self, block.first_sample)?;
+        self.apply(block.left, Some(block.right), block.first_sample)
+    }
+}
+
 struct Observer {
+    command_mask: u32,
     ordinal: usize,
     fail: bool,
     probe: Arc<Probe>,
@@ -153,11 +174,15 @@ struct Observer {
 impl GraphRuntimeObserver for Observer {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.probe.event(3 + self.ordinal as u64);
-        self.probe.observed[self.ordinal * 2]
-            .store(block.left[block.left.len() - 1].to_bits(), Relaxed);
-        self.probe.observed[self.ordinal * 2 + 1]
-            .store(block.right[block.right.len() - 1].to_bits(), Relaxed);
-        self.probe.command.store(1, Relaxed);
+        for (channel, plane) in [block.left, block.right].into_iter().enumerate() {
+            for (destination, word) in self.probe.observed[self.ordinal * 2 + channel]
+                .iter()
+                .zip(plane)
+            {
+                destination.store(word.to_bits(), Relaxed);
+            }
+        }
+        self.probe.command.store(self.command_mask, Relaxed);
         if self.fail && block.first_sample == 0 {
             Err(RenderError::InvalidEnvelope)
         } else {
@@ -194,6 +219,14 @@ fn estimate() -> GraphResourceEstimate {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Control {
+    Resident,
+    Scalar,
+    Intervening,
+    Incompatible,
+}
+
 fn prepared(
     width: BankWidth,
     population: usize,
@@ -201,6 +234,7 @@ fn prepared(
     alias: bool,
     mono: u8,
     fail: u32,
+    control: Control,
 ) -> (PreparedRenderPlan, Arc<Probe>) {
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
@@ -225,7 +259,19 @@ fn prepared(
     let output = GraphNodeId::Output {
         output_id: StableGraphId::parse("main").expect("output"),
     };
+    let send_id = StableGraphId::parse("send").expect("send");
+    let send_node = GraphNodeId::Route {
+        route_id: send_id.clone(),
+    };
     let mut schedule: Vec<_> = groups.iter().flatten().cloned().collect();
+    schedule.insert(
+        if control == Control::Intervening {
+            population * 3
+        } else {
+            schedule.len()
+        },
+        send_node.clone(),
+    );
     schedule.push(output.clone());
     let mut nodes: Vec<_> = schedule
         .iter()
@@ -275,32 +321,48 @@ fn prepared(
     // A positive extra reader retains A's planar scatter and the output's stable reduction.
     connect(
         groups[2][0].clone(),
-        output.clone(),
+        send_node.clone(),
         GraphEdgeId::RouteSource {
-            route_id: StableGraphId::parse("send").expect("send"),
+            route_id: send_id.clone(),
+        },
+    );
+    connect(
+        send_node.clone(),
+        output.clone(),
+        GraphEdgeId::RouteDestination {
+            route_id: send_id.clone(),
         },
     );
     let probe = Arc::new(Probe::default());
     let banks = [1, 3]
         .into_iter()
         .enumerate()
-        .map(|(id, group)| GraphPreparedBuiltinBank {
-            backend: if width == BankWidth::Four {
-                Backend::Simd4
+        .filter(|_| control != Control::Scalar)
+        .map(|(id, group)| {
+            let bank_width = if control == Control::Incompatible && id == 1 {
+                BankWidth::Eight
             } else {
-                Backend::Simd8
-            },
-            members: groups[group].clone().into_boxed_slice(),
-            processor: Box::new(Stage {
-                id,
-                lanes: width.lanes() as usize,
-                population,
-                state: [0.0; 2],
-                mono: mono & (1 << id) != 0,
-                fail,
-                probe: Arc::clone(&probe),
-            }),
-            scratch: rack::AoSoaScratch::new(width, frames).expect("scratch"),
+                width
+            };
+            GraphPreparedBuiltinBank {
+                backend: if bank_width == BankWidth::Four {
+                    Backend::Simd4
+                } else {
+                    Backend::Simd8
+                },
+                members: groups[group].clone().into_boxed_slice(),
+                processor: Box::new(Stage {
+                    id,
+                    scalar_lane: None,
+                    lanes: bank_width.lanes() as usize,
+                    population,
+                    state: [0.0; 2],
+                    mono: mono & (1 << id) != 0,
+                    fail,
+                    probe: Arc::clone(&probe),
+                }),
+                scratch: rack::AoSoaScratch::new(bank_width, frames).expect("scratch"),
+            }
         })
         .collect();
     let required: Vec<_> = groups[0]
@@ -310,18 +372,27 @@ fn prepared(
         .chain(core::iter::once(&output))
         .cloned()
         .collect();
-    let mut levels: Vec<_> = groups
-        .iter()
+    let mut level_groups = groups.clone();
+    level_groups.insert(
+        if control == Control::Intervening {
+            3
+        } else {
+            4
+        },
+        vec![send_node.clone()],
+    );
+    level_groups.push(vec![output.clone()]);
+    let levels = level_groups
+        .into_iter()
         .enumerate()
         .map(|(level, nodes)| DependencyLevel {
-            level: level as u32,
-            nodes: nodes.clone(),
+            level: level as u64,
+            nodes,
         })
         .collect();
-    levels.push(DependencyLevel {
-        level: 4,
-        nodes: vec![output.clone()],
-    });
+    let send_edge = GraphEdgeId::RouteSource {
+        route_id: send_id.clone(),
+    };
     let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
         plan_id: 713,
         spec: GraphSpec {
@@ -332,12 +403,27 @@ fn prepared(
         sequential_schedule: schedule,
         dependency_levels: levels,
         route_timings: vec![],
-        inserted_delays: vec![],
+        inserted_delays: vec![InsertedDelay {
+            node: GraphNodeId::CompensationDelay {
+                edge_id: Box::new(send_edge.clone()),
+            },
+            edge_id: send_edge,
+            samples: LatencySamples(2),
+        }],
         buffer_assignments: vec![],
         estimate: estimate(),
         envelope,
         required_bindings: required,
-        routes: vec![],
+        routes: vec![PreparedRoute {
+            node: send_node,
+            transform: RouteTransform {
+                gain: 0.5,
+                ll: 0.75,
+                lr: -0.25,
+                rl: 0.5,
+                rr: 1.25,
+            },
+        }],
         track_delays: vec![],
         effects: vec![],
         effect_controls: vec![],
@@ -360,6 +446,25 @@ fn prepared(
             )
         })
         .collect();
+    if control == Control::Scalar {
+        for (id, group) in [1, 3].into_iter().enumerate() {
+            for (lane, node) in groups[group].iter().cloned().enumerate() {
+                bindings.push(GraphNodeBinding::new(
+                    node,
+                    Box::new(Stage {
+                        id,
+                        scalar_lane: Some(lane),
+                        lanes: 1,
+                        population: 1,
+                        state: [0.0; 2],
+                        mono: false,
+                        fail,
+                        probe: Arc::clone(&probe),
+                    }),
+                ));
+            }
+        }
+    }
     bindings.push(GraphNodeBinding::identity(output));
     let observers = (0..2)
         .map(|ordinal| {
@@ -367,6 +472,7 @@ fn prepared(
                 groups[if alias { 2 } else { 1 }][0].clone(),
                 (2 - ordinal) as u64,
                 Box::new(Observer {
+                    command_mask: (1 << population) - 1,
                     ordinal,
                     fail: fail == 5,
                     probe: Arc::clone(&probe),
@@ -411,11 +517,25 @@ fn rt9_resident_observers_extra_reader_failures_and_modes_match_old_acquisition(
                 for alias in [false, true] {
                     for mono in 0..4 {
                         for fail in 0..6 {
-                            let (mut old, old_probe) =
-                                prepared(width, population, frames, alias, mono, fail);
-                            let (mut new, new_probe) =
-                                prepared(width, population, frames, alias, mono, fail);
-                            assert_eq!(old.bank_chain_count(), new.bank_chain_count());
+                            let (mut old, old_probe) = prepared(
+                                width,
+                                population,
+                                frames,
+                                alias,
+                                mono,
+                                fail,
+                                Control::Resident,
+                            );
+                            let (mut new, new_probe) = prepared(
+                                width,
+                                population,
+                                frames,
+                                alias,
+                                mono,
+                                fail,
+                                Control::Resident,
+                            );
+                            assert_eq!(old.bank_shape(), new.bank_shape());
                             let mut a = vec![f32::from_bits(0x7fc0_aaaa); frames as usize * 2];
                             let mut b = a.clone();
                             for block in 0..3 {
@@ -472,6 +592,42 @@ fn rt9_resident_observers_extra_reader_failures_and_modes_match_old_acquisition(
 }
 
 #[test]
+#[cfg(feature = "test-support")]
+fn rt9_crossfeed_delayed_send_matches_scalar_and_admission_controls() {
+    for control in [
+        Control::Resident,
+        Control::Intervening,
+        Control::Incompatible,
+    ] {
+        let (mut scalar, scalar_probe) =
+            prepared(BankWidth::Four, 3, 17, true, 0, 0, Control::Scalar);
+        let (mut candidate, probe) = prepared(BankWidth::Four, 3, 17, true, 0, 0, control);
+        assert_eq!(scalar.bank_shape(), [0, 0]);
+        let mut reference = [0.0; 34];
+        let mut output = [0.0; 34];
+        for block in 0..3 {
+            test_only_resident_input_reset(false);
+            render(&mut scalar, &mut reference, 17, block).expect("scalar render");
+            assert_eq!(test_only_resident_input_counts(), [0, 0], "scalar decline");
+            test_only_resident_input_reset(false);
+            render(&mut candidate, &mut output, 17, block).expect("candidate render");
+            assert_eq!(output.map(f32::to_bits), reference.map(f32::to_bits));
+            assert_eq!(
+                probe.snapshot().2,
+                scalar_probe.snapshot().2,
+                "all observed words"
+            );
+            assert_eq!(
+                test_only_resident_input_counts()[1],
+                u64::from(control == Control::Resident),
+                "adjacency/backend control"
+            );
+        }
+    }
+    test_only_resident_input_reset(false);
+}
+
+#[test]
 fn rt9_resident_prepared_plan_render_allocates_and_frees_nothing() {
     struct Restore(Mode);
     impl Drop for Restore {
@@ -494,7 +650,8 @@ fn rt9_resident_prepared_plan_render_allocates_and_frees_nothing() {
     for width in [BankWidth::Four, BankWidth::Eight] {
         for population in [width.lanes() as usize - 1, width.lanes() as usize] {
             for mono in 0..4 {
-                let (mut plan, probe) = prepared(width, population, 17, true, mono, 0);
+                let (mut plan, probe) =
+                    prepared(width, population, 17, true, mono, 0, Control::Resident);
                 let mut pcm = [f32::from_bits(0x7fc0_bbbb); 34];
                 #[cfg(feature = "test-support")]
                 test_only_resident_input_reset(false);
