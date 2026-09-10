@@ -29,9 +29,9 @@ The adopted source and product/test identities are:
 
 Run 34448821511 passed every non-artifact required leaf, but shipped-artifact
 job 102779640808 failed the aggregate: expected
-5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574 was
-observed instead of
-c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569.
+c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569 was
+observed as
+5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574.
 The provisional observed digest
 5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574 has zero
 qualification or delivery credit. #716 is closed. The failure is retained as
@@ -104,14 +104,16 @@ After this spec is pushed and synchronized, Sol prepares the mechanical
 overlay branch and then the exact detached qualification checkout:
 
     overlay branch: codex/qualify-resident-input-artifact-overlay-717
-    overlay worktree: /home/bl/engine-rt9-resident-artifact-overlay-717
-    E2: /home/bl/engine-rt9-resident-artifact-717-qualify
+    overlay worktree: /home/bl/misofm/engine-rt9-resident-artifact-overlay-717
+    E2: /home/bl/misofm/engine-rt9-resident-artifact-717-qualify
 
 The final detached checkout is clean, detached, and has literal
 upstream=not-applicable-detached. No executor creates a checkout or branch.
-Every external lease names the exact spec, overlay, E2 head, current main,
-#713 source/test identity, tracker, issue bodies, roots, commands, and marker
-paths. Astra LOW reviews that lease before any root or command exists.
+Freeze the command text before lease review. Every external lease names the
+exact spec, overlay, E2 head, current main, #713 source/test identity, tracker,
+issue bodies, roots, commands, and marker paths. Astra LOW reviews that lease
+after command text is frozen and before any execution root is created or
+command executes.
 
 Fresh roots are all absent as ordinary paths and dangling symlinks before
 overlay preparation and again before the lease:
@@ -131,8 +133,13 @@ provisional payload. No execution root is created while drafting this spec.
 All calls use the absolute E2 checkout, login=true, direct real exit
 propagation, and a printed cwd, exact HEAD, detached state, literal
 upstream=not-applicable-detached, and clean status before assertions. A live
-lease and its release/revocation markers are checked before every call. No
-custom runner, retry, fabricated status, or polling wrapper is allowed.
+lease and its release/revocation markers are checked before every call. Only
+an empty-stdin continuation on an already-started persistent session is
+permitted; it is not a second invocation. No other continuation, retry,
+fabricated status, or polling wrapper is allowed. The later Astra LOW lease
+review freezes per-call receipts, a data-only terminal result, an independent
+acknowledgement marker, a release marker, absent revocation, and exact stop
+semantics.
 
 After the exact-head Astra LOW lease review, create the evidence, temporary,
 and ordinary artifact directories separately and in that order. Keep both
@@ -143,7 +150,8 @@ builder invocation, with REPIN unset:
 
 Require the builder's actual exit zero, exactly six ordinary artifact files,
 the provisional Wasm digest, the five non-Wasm hashes, unchanged E2 HEAD and
-clean status, and no supplied target or hermetic target before their commands.
+clean status. The builder owns and creates qualify-target; only hermetic-target
+must remain absent until the hermetic command owns it.
 Builder stdout, stderr, actual exit, environment, cwd, head, status, and
 directory traversal are retained in the evidence receipt. A builder or
 validation failure consumes the attempt before later gates.
@@ -161,11 +169,16 @@ qualification TMPDIR and target, and the supplied artifact:
     env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-resident-input-artifact-717-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-resident-input-artifact-717-qualify-target node hosts/host-web/qualification/generate-matrix.mjs --check
     env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-resident-input-artifact-717-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-resident-input-artifact-717-qualify-target git diff --check 32d75d36492095e4914251dcbcb89a7aa262d13d <exact-reviewed-E2-head>
 
-The committed review before execution includes name-status and unified diffs
-from origin/main to E2 and from #713 head to E2. It permits only the #717
-spec, the #713 delivery row, conditional pin, candidateCommit/wasmSha256
-fields, and generated matrix lineage. The four inherited #713 product/test
-paths, source identity, and main ancestry must remain byte-identical.
+The committed review before execution has separate allowlists. The
+`origin/main→E2` name-status and unified diff permits the inherited #713 spec,
+the four inherited #713 product/test paths above, and the #717/overlay paths:
+this #717 spec, the conditional pin, the candidateCommit/wasmSha256 fields,
+and the generated matrix lineage. The updated #713 head `32d75d36→E2`
+name-status and
+unified diff permits only this #717 spec, a #713 delivery/qualification row if
+later added, the pin, the two results fields, and the generated matrix lineage.
+The inherited product/test bytes must equal the #713 PASS identity
+7576d1b6c794f01df4abeb7256a8309d45879b21.
 
 Astra LOW reviews the ordinary build evidence, six-file manifest, digest and
 hash parity, browser/resource/SDK/mutation gates, current-base exact path
