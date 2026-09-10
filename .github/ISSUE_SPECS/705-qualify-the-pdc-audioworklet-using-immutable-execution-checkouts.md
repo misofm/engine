@@ -1346,3 +1346,76 @@ the Phase 1 lease is accepted; the later Phase 1 evidence review remains a
 separate Astra LOW PASS after terminal acknowledgement and release. No E1,
 lease, root, builder, artifact, pin, qualification, or delivery claim is made
 by this correction.
+
+## Attempt 5 superseding command-authority ruling — external per-call lease strings
+
+This ruling supersedes the immediately preceding embedded `commands` JSON and
+every other literal command-string example in the prospective A5 receipt
+mechanics. The embedded JSON is a non-authoritative schema/example only. It
+must not be copied, substituted incompletely, or executed. It does not freeze
+an E1, a head, a root, a marker state, a lease, or an invocation. All earlier
+substantive identity, ancestry, first-failure, digest, empty-output,
+clean-checkout, Phase 2, artifact, pin, retained-history, and no-claim gates
+remain in force.
+
+Only after the final E1 exists at its exact detached head may Sol generate the
+exact, fully substituted command strings externally. Sol stores those strings
+in the live small JSON lease, whose identities and body/PDC/root/process facts
+are generated from that final E1 and the synchronized pushed state. Astra LOW
+reviews the live lease, every substituted string, and the exact E1 before any
+command is accepted. No command string is copied back into this spec. This
+correction authorizes no E1, lease, root, builder, artifact, pin,
+qualification, or delivery action.
+
+The live lease freezes exactly these command IDs, each as one fully substituted
+per-call string: `preflight`, `ancestry`, `mkdir-evidence`, `mkdir-tmp`,
+`mkdir-output`, `builder`, `validation`, `terminal`, `ack`, and `release`.
+There is no combined `mkdir` command and no generic or placeholder command
+ID. Every call string carries the complete guard for the exact E1 path and
+exact E1 HEAD: detached worktree, clean tracked/untracked status, the live
+lease marker present, and `ack`, `release`, and `revoked` markers absent as
+both ordinary paths and dangling symlinks. The guard is evaluated in the
+call's exact E1 worktree before that call's operation; a failed guard is the
+first failure and consumes A5.
+
+`preflight` carries the complete authority check: exact E1 path and HEAD,
+detachment and cleanliness, prepared-E1 validity, remote/main identity,
+preparation-head identity, tracker-head identity, both full tracker/spec
+reviews, all four GitHub body hashes, the PDC source hash, required tool
+identity, diff-check, relevant-process absence, all nine root absences as
+ordinary paths and dangling symlinks, and lease-marker state. It also carries
+the complete per-call E1/head/detached/clean/marker guard. `ancestry` carries
+both full read-only reviews: the synchronized main-to-E1 review and the
+preparation/tracker/body/PDC/root/process authority review, with their exact
+substituted heads and paths; it does not reduce either review to a short diff
+or a heading check.
+
+`mkdir-evidence`, `mkdir-tmp`, and `mkdir-output` are three separate guarded
+calls in that order. Each creates only its named root after checking that the
+ordinary path and dangling symlink are absent. `builder` retains the latest
+procedural correction: it records the pre-launch metadata, runs the sole
+builder once with the required temporary target and output paths, preserves
+the actual builder exit and stdout/stderr, records ancillary capture exits
+without masking the builder exit, and returns the builder's actual status.
+`validation` retains the latest correction: it authenticates the recorded
+builder exit, requires exactly one lowercase 64-hex digest followed by one
+real LF, checks the output tree with non-following traversal and its actual
+exit, requires the supplied target root to be absent as both path kinds, and
+rechecks the exact detached E1 HEAD and clean status. Both calls carry the
+full guard before their operation.
+
+`terminal` writes only the fixed data-only terminal result after successful
+validation and carries the full guard. `ack` separately authenticates that
+terminal result and writes the acknowledgement marker while preserving the
+release/revocation absence guard. `release` requires the acknowledgement,
+keeps revocation absent, and writes the release marker exactly once; it also
+carries the full E1/head/detached/clean/marker guard, with the documented
+acknowledgement and release preconditions applied in their stated order.
+Any preflight, ancestry, mkdir, builder, validation, terminal, ack, or release
+failure consumes A5 with no retry, sixth attempt, or qualification credit.
+
+This is a documentation-only correction to command authority. It supersedes
+the flawed literal strings without weakening any substantive gate or changing
+the retained attempt history. Astra LOW review of the current pushed spec
+authorizes E1 creation only; after E1 exists, a fresh exact-E1 live-lease
+review is required before the lease or any per-call command is accepted.
