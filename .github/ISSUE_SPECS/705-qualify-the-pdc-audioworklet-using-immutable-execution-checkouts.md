@@ -1448,3 +1448,59 @@ remained absent, and E1 remained clean and detached with literal
 `upstream=not-applicable-detached`. This record grants only the authorized
 mechanical overlay; it grants no Phase 2 qualification, artifact, pin,
 timing, performance, product, or delivery credit.
+
+## Attempt 5 Phase 2 qualification — Astra LOW PASS
+
+Phase 2 ran on the exact detached E2
+`/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-qualify-final` at clean head
+`318674a4660fef69357c5eea6bcb065df5312615`, with literal
+`upstream=not-applicable-detached`. The live lease is
+`/tmp/cp1-pdc-artifact-705-a5-final-phase2.lease`, SHA-256
+`686f719964a1f951cedaa9778734ccd1f940ef369b50e3a6038e6ca1130c6954`.
+The Astra XHIGH executor transcript is
+`/home/bl/.codex2/sessions/2026/09/10/rollout-2026-09-10T06-36-19-01a08a08-113b-7e83-ba25-49064a45b4b2.jsonl`, SHA-256
+`f08c26eee37c2ca984fe1ac9efbbfac35db3f331d98cea5f45fdf485233392c7`.
+Astra LOW independently authenticated the lease and transcript and returned
+PASS. No qualification command was retried or rerun.
+
+All 18 leased commands returned actual exit 0, in this exact order:
+
+```text
+preflight, mkdir-evidence, mkdir-tmp, mkdir-artifact, builder,
+artifact-validation, check-worklet, expected-resources, hermetic-test,
+sdk-ci, sdk-package, qualification-ci, browser-qualify, matrix-check,
+diff-check, terminal, ack, release
+```
+
+The browser qualification passed Chromium `151.0.7922.34`, Firefox `153.0`,
+and WebKit `26.5`. The artifact contains exactly six ordinary files. Their
+SHA-256 values are:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a  miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569  miso-engine-v1-audio-worklet.simd128.wasm
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d  miso-engine-v1-parameter-metadata.json
+```
+
+The terminal result is the fixed data-only PASS record at
+`/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence/terminal.json`, with
+SHA-256 `f190c9dd5474b3a08b56d427d7146a3566870c9be1104287a99e46717b948f06`.
+The acknowledgement marker SHA-256 is
+`da4769119aa609d7631dc3331f1ff2ac9c59e1f0a6e282a44c8964523b271e69`; the
+release marker SHA-256 is
+`fdc935e6a3f33abdcfb4f5d7a335d408b2b988e7a5f8411d9f73349d1fab39be`; and no
+revocation marker exists. Pin, results, and browser-matrix hashes remain the
+reviewed overlay identities. Only the permitted ignored SDK and qualification
+dependency/generated outputs were present.
+
+This PASS records qualification and artifact identity only. It makes no timing,
+allocation, performance, listening, sound-quality, size, improvement, budget,
+or universal PCM-equivalence claim, and no product source was changed. Required
+CI, one guarded PR merge, post-main qualification, GitHub issue/spec
+synchronization, issue census, and eligible clean delivered-worktree removal
+remain open delivery gates. Preserve the artifact, all receipts and markers,
+all failed attempts and worktrees, and the current overlay history until those
+gates complete.
