@@ -4141,7 +4141,7 @@ mod tests {
                 .split("pub(crate) fn observe_unit(")
                 .nth(1)
                 .unwrap()
-                .split("// REALTIME_POLICY_END")
+                .split(concat!("// REALTIME_POLICY_", "END"))
                 .next()
                 .unwrap();
             // Effect-state publication has an unrelated method with the same name.
@@ -4149,7 +4149,7 @@ mod tests {
             // at the existing realtime-region boundary.
             let Some(dispatcher) = production
                 .split_once("\nfn observe(\n")
-                .and_then(|(_, body)| body.split_once("// REALTIME_POLICY_END"))
+                .and_then(|(_, body)| body.split_once(concat!("// REALTIME_POLICY_", "END")))
                 .map(|(body, _)| body)
             else {
                 return false;

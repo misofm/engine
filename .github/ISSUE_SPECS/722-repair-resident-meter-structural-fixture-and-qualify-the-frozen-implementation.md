@@ -97,3 +97,14 @@ meter input slice; no load-elimination, speedup or full-RT10 claim follows.
 Scoped before implementation. #714 is frozen at terminal FAIL; successor
 attempts have not started. Independent XHIGH scope PASS supports only this
 bounded correction and remaining qualification.
+
+## Attempt 1 focused checkpoint
+
+Astra LOW changed exactly the two test delimiter expressions to constant
+concatenations, preserving their computed value. Formatting, resident meter
+2/2, admission 1/1 and executor-order 1/1 selectors passed in both debug and
+release-unwind. Realtime policy and its self-test passed. Nine actual command
+receipts, argv/environment/exits and full outputs are preserved at
+`/tmp/issue722-attempt1-n4fv8jyj/`. Implementation paused for root checkpoint.
+No production or policy change and no SOURCE PASS is claimed. Independent
+XHIGH review and the listed remaining gates follow this pushed checkpoint.
