@@ -749,6 +749,32 @@ GitHub bodies. The lease records all four body SHA-256 values. A body mismatch,
 stale tracker ref, or root/path identity mismatch stops before any directory is
 created. The frozen tracker files remain outside E1 throughout both phases.
 
+The body comparison is exactly this read-only command, run from E1 after the
+tracker checkout has been reconciled; it is the authority for the four parity
+checks and does not read a tracker file from E1:
+
+```text
+python3 - <<'PY'
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+checks = {
+    "559": "/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/559-audit-349-lane-a-handoff.md",
+    "560": "/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/560-audit-349-lane-b-handoff.md",
+    "703": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final/.github/ISSUE_SPECS/703-qualify-prepared-pdc-incoming-edge-borrowed-key-checkouts.md",
+    "705": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final/.github/ISSUE_SPECS/705-qualify-the-pdc-audioworklet-using-immutable-execution-checkouts.md",
+}
+for issue, path in checks.items():
+    local = Path(path).read_bytes()
+    remote = json.loads(subprocess.check_output(["gh", "issue", "view", issue, "--repo", "misofm/engine", "--json", "body"]))["body"].encode()
+    if local != remote:
+        raise SystemExit(f"body parity failed for #{issue}: local={hashlib.sha256(local).hexdigest()} remote={hashlib.sha256(remote).hexdigest()}")
+    print(f"#{issue} body parity {hashlib.sha256(local).hexdigest()}")
+PY
+```
+
 After the preflight lease is issued, create these directories separately and in
 this order, recording absence first and the real mkdir result:
 
