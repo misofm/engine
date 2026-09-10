@@ -354,3 +354,24 @@ FAIL**. Attempt 3 is authorized only to correct the helper to return the actual
 `RenderReport` and retain/compare reports without mapping them to a unit, then
 complete the physical old-gather mutation and the outstanding scoped gates.
 The prior corrections remain coherent; no product rescope is authorized.
+
+## Implementation Attempt 3 — focused green checkpoint
+
+The bounded Attempt 3 correction changes only the integration fixture: its
+helper now returns and compares the actual `RenderReport` rather than mapping
+the result to `()`. The preserved focused checkpoint is rooted at
+`9cfb6c6ce7bff2fa29ad5b291d08539944c62925`; evidence is retained under
+`/tmp/issue713-attempt3-wu8edtgu/`, with fixture hash
+`ece9d1a1681ec80ff4fcf0d1d16d28dafe6094dc399fc24afc18e42ba5794b2e` and
+tranche hash `03fe2d33114cc7d64bfdd658ab84e115fc06e2f4af74881d6600dba81001752`.
+
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- Focused rack tests passed 2/2.
+- Focused graph/lib tests passed 3/3.
+- Prepared-plan integration tests passed 3/3, covering scalar, nonunity
+  crossfeed/delayed-PDC send, admission controls, observer/failure modes, and
+  the live zero-allocation render gate.
+- The physical old-gather mutation and broad qualification gates remain pending.
+
+This is a focused green checkpoint only. It is not source PASS and carries no
+delivery, timing, artifact, AudioWorklet-pin, or performance claim.

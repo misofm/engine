@@ -496,7 +496,7 @@ fn render(
     pcm: &mut [f32],
     frames: usize,
     block: u64,
-) -> Result<(), RenderError> {
+) -> Result<realtime::RenderReport, RenderError> {
     plan.render(
         realtime::RenderIo {
             input: None,
@@ -607,10 +607,13 @@ fn rt9_crossfeed_delayed_send_matches_scalar_and_admission_controls() {
         let mut output = [0.0; 34];
         for block in 0..3 {
             test_only_resident_input_reset(false);
-            render(&mut scalar, &mut reference, 17, block).expect("scalar render");
+            let scalar_report =
+                render(&mut scalar, &mut reference, 17, block).expect("scalar render");
             assert_eq!(test_only_resident_input_counts(), [0, 0], "scalar decline");
             test_only_resident_input_reset(false);
-            render(&mut candidate, &mut output, 17, block).expect("candidate render");
+            let candidate_report =
+                render(&mut candidate, &mut output, 17, block).expect("candidate render");
+            assert_eq!(candidate_report, scalar_report);
             assert_eq!(output.map(f32::to_bits), reference.map(f32::to_bits));
             assert_eq!(
                 probe.snapshot().2,
