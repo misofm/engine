@@ -826,7 +826,8 @@ class MisoAudioWorkletHost {
 
 export async function createMisoAudioWorkletHost(options) {
   const quantumFrames = options?.context?.renderQuantumSize ?? 128;
-  if (!hasExactFields(options, OPTION_FIELDS)
+  if (!hasExactFields(options, options?.preparedModule === undefined ? OPTION_FIELDS : [...OPTION_FIELDS, "preparedModule"])
+      || (options.preparedModule !== undefined && !(options.preparedModule instanceof WebAssembly.Module))
       || options.context?.state !== "suspended"
       || !validU32(quantumFrames) || quantumFrames === 0
       || !validU32(options.context?.sampleRate) || options.context.sampleRate === 0
@@ -843,7 +844,7 @@ export async function createMisoAudioWorkletHost(options) {
   try {
     const selected = {
       backend: SHIPPING_BACKEND,
-      module: await fetchModule(options.simd128ModuleUrl),
+      module: options.preparedModule ?? await fetchModule(options.simd128ModuleUrl),
     };
     await options.context.audioWorklet.addModule(options.workletModuleUrl);
     node = new AudioWorkletNode(options.context, PROCESSOR_NAME, {
