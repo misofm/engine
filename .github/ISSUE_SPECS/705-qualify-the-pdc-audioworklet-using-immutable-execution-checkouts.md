@@ -623,26 +623,41 @@ XHIGH performs only the mechanical post-probe overlay after Phase 1 PASS and
 lease release; it does not scope, execute, or review qualification. Astra HIGH
 has no assignment. Agents remain bounded assignees and do not own issues.
 
-At this amendment boundary the reconciled identities are:
+The following are historical pre-amendment observations, retained for
+provenance only and never valid prospective execution authority:
 
 ```text
-main_head:        b1f9128f3e06532afdfc16aad661c4b2deb5dea1
-tracker_head:     54866e97147b0f1f830676b32b4a355e737444d3
-preparation_head: e4120281699dc1baa0c5c9a64b3118b28700ea5f
-preparation:      /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705
-tracker:          /home/bl/misofm/engine-audit-handoff
+pre-amendment preparation observation: e4120281699dc1baa0c5c9a64b3118b28700ea5f
+pre-amendment tracker observation:     54866e97147b0f1f830676b32b4a355e737444d3
 ```
 
-The preparation branch is `codex/qualify-pdc-artifact-immutable-705` and is
-clean and pushed at `e4120281699dc1baa0c5c9a64b3118b28700ea5f`. The tracker
-branch is `codex/audit-349-priority-handoff` and is clean and pushed at
-`54866e97147b0f1f830676b32b4a355e737444d3`. #703 is passive at SOURCE PASS;
-#705 is the sole active lane-B issue. Independent tracker or other-lane
-coordination is permitted outside an active execution lease. Before a lease,
-Sol freezes the #705 repository state, #703/#705/#559/#560 GitHub bodies,
-tracker state, source identities, and artifact/pin state named by the lease.
-During that lease none of those frozen states may be mutated; coordination
-that would change them waits for lease release and a fresh reconciliation.
+The current main is `b1f9128f3e06532afdfc16aad661c4b2deb5dea1`. It was merged
+into the preparation branch at merge checkpoint
+`1cc6f0ea17b708bce4bf362cc4ee95c13cdb9957`, preserving the exact #703
+product and spec bytes. The post-merge preparation branch is
+`codex/qualify-pdc-artifact-immutable-705` at the new published correction
+HEAD supplied verbatim in the lease. The tracker branch is
+`codex/audit-349-priority-handoff`; its exact synchronized snapshot is also
+supplied verbatim in the lease. #703 is passive at SOURCE PASS; #705 is the
+sole active lane-B issue.
+
+Independent lane-A branches, worktrees, issues, and shared tracker/body
+coordination may continue. A #705 lease freezes only the #705 preparation,
+E1/E2/overlay identities, leased evidence roots, #703/#705 bodies and specs,
+and artifact/pin inputs named by that lease. Unrelated lane or tracker progress
+is allowed during the lease. The lease records a frozen tracker commit and the
+corresponding #559/#560 body SHA-256 values; parity checks use that immutable
+tracker snapshot, not a prohibition on unrelated tracker progress. Any change
+to a frozen #705 input requires lease release and fresh reconciliation.
+
+The post-merge byte proof is:
+
+```text
+#703 spec, pre-merge 38cd73fb and post-merge 1cc6f0ea:
+1924969e54e135e577a905637bbd129dcfa3dbabc36f45c5da5e2a92c1747372
+#703 product pdc.rs, pre-merge 38cd73fb and post-merge 1cc6f0ea:
+2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e
+```
 
 The #703 source and spec identities remain unchanged: source introduction
 `a722fb40cf5bb309ac67d09ade6c3943f872ebab`, qualified source
@@ -716,8 +731,8 @@ git rev-parse --is-inside-work-tree
 git rev-parse refs/remotes/origin/main
 git ls-remote --exit-code origin refs/heads/main
 git -C /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705 rev-parse HEAD
-git -C /home/bl/misofm/engine-audit-handoff rev-parse HEAD
-git -C /home/bl/misofm/engine-audit-handoff rev-parse refs/remotes/origin/codex/audit-349-priority-handoff
+git -C /home/bl/misofm/engine-audit-handoff cat-file -e <frozen-tracker-head>^{commit}
+git -C /home/bl/misofm/engine-audit-handoff show -s --format=%H <frozen-tracker-head>
 git diff --check
 test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
 test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
@@ -742,12 +757,14 @@ only from the tracker checkout, never from E1:
 /home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/560-audit-349-lane-b-handoff.md
 ```
 
-Compare those two files byte-for-byte with `gh issue view 559 --json body` and
-`gh issue view 560 --json body` after removing only the CLI's terminal newline;
-compare the E1-local #703 and #705 specs in the same way with their matching
-GitHub bodies. The lease records all four body SHA-256 values. A body mismatch,
-stale tracker ref, or root/path identity mismatch stops before any directory is
-created. The frozen tracker files remain outside E1 throughout both phases.
+At lease creation, `<frozen-tracker-head>` is replaced by the exact tracker
+commit frozen in the lease. Compare the two tracker snapshot files from that
+commit byte-for-byte with `gh issue view 559 --json body` and `gh issue view 560
+--json body` after removing only the CLI's terminal newline; compare the E1-local
+#703 and #705 specs in the same way with their matching GitHub bodies. The lease
+records all four body SHA-256 values. A body mismatch, stale tracker object, or
+root/path identity mismatch stops before any directory is created. The frozen
+tracker snapshot remains outside E1 throughout both phases.
 
 The body comparison is exactly this read-only command, run from E1 after the
 tracker checkout has been reconciled; it is the authority for the four parity
@@ -760,20 +777,44 @@ import json
 import subprocess
 from pathlib import Path
 
+tracker_repo = "/home/bl/misofm/engine-audit-handoff"
+tracker_commit = "<frozen-tracker-head>"
 checks = {
-    "559": "/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/559-audit-349-lane-a-handoff.md",
-    "560": "/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/560-audit-349-lane-b-handoff.md",
+    "559": (tracker_repo, "codex/audit-349-priority-handoff:.github/ISSUE_SPECS/559-audit-349-lane-a-handoff.md"),
+    "560": (tracker_repo, "codex/audit-349-priority-handoff:.github/ISSUE_SPECS/560-audit-349-lane-b-handoff.md"),
     "703": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final/.github/ISSUE_SPECS/703-qualify-prepared-pdc-incoming-edge-borrowed-key-checkouts.md",
     "705": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final/.github/ISSUE_SPECS/705-qualify-the-pdc-audioworklet-using-immutable-execution-checkouts.md",
 }
-for issue, path in checks.items():
-    local = Path(path).read_bytes()
+for issue, source in checks.items():
+    if issue in ("559", "560"):
+        repo, relative = source
+        local = subprocess.check_output(["git", "-C", repo, "show", f"{tracker_commit}:{relative.split(':', 1)[1]}"])
+    else:
+        local = Path(source).read_bytes()
     remote = json.loads(subprocess.check_output(["gh", "issue", "view", issue, "--repo", "misofm/engine", "--json", "body"]))["body"].encode()
     if local != remote:
         raise SystemExit(f"body parity failed for #{issue}: local={hashlib.sha256(local).hexdigest()} remote={hashlib.sha256(remote).hexdigest()}")
     print(f"#{issue} body parity {hashlib.sha256(local).hexdigest()}")
 PY
 ```
+
+Before Phase 1 directories are created, review the two committed ancestry
+boundaries separately from the exact E1 checkout. Run these commands with the
+lease-bound `<exact-E1-head>` substituted literally:
+
+```text
+git diff --name-status b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-E1-head>
+git diff --unified=80 b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-E1-head>
+git diff --name-status 5a493f08e6000f7da54ae8ec351a166149c51603 b1f9128f3e06532afdfc16aad661c4b2deb5dea1
+git diff --unified=80 5a493f08e6000f7da54ae8ec351a166149c51603 b1f9128f3e06532afdfc16aad661c4b2deb5dea1
+```
+
+The main-to-E1 review permits exactly the immutable #703 spec, the #703
+`crates/graph-compiler/src/pdc.rs` source, and the #705 spec. The
+#703-source-pass-to-current-main review records inherited main evolution only;
+it is not an overlay review and makes no claim that the source-pass-to-current
+preparation diff contains only overlay changes. Any other main-to-E1 path or
+unexplained ancestry difference stops before the probe.
 
 After the preflight lease is issued, create these directories separately and in
 this order, recording absence first and the real mkdir result:
@@ -820,18 +861,16 @@ git status --porcelain=v1 --untracked-files=all
 git branch --show-current
 git rev-parse --verify refs/remotes/origin/codex/qualify-pdc-artifact-overlay-705-a5-final
 git ls-remote --exit-code origin refs/heads/codex/qualify-pdc-artifact-overlay-705-a5-final
-git diff --name-status b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
-git diff --unified=80 b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
-git diff --name-status 5a493f08e6000f7da54ae8ec351a166149c51603 <exact-reviewed-E2-head>
-git diff --unified=80 5a493f08e6000f7da54ae8ec351a166149c51603 <exact-reviewed-E2-head>
-git diff --check b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+git diff --name-status <exact-E1-head> <exact-reviewed-E2-head>
+git diff --unified=80 <exact-E1-head> <exact-reviewed-E2-head>
+git diff --check <exact-E1-head> <exact-reviewed-E2-head>
 ```
 
-The main-to-E2 diff may contain only immutable inherited #703 source/spec and
-the authorized #705 overlay. The #703-source-pass-to-E2 diff may contain only
-the #705 spec, conditional pin, `candidateCommit`, `wasmSha256`, and generated
-matrix lineage. Astra LOW reviews the exact path and hunk output; an empty
-working-tree diff is not evidence.
+The exact E1-to-E2 diff may contain only the authorized overlay: this #705 spec,
+the conditional pin, `candidateCommit`, `wasmSha256`, and generated matrix
+lineage. It must contain no #703 source/spec or inherited main changes. Astra
+LOW reviews the exact path and hunk output; an empty working-tree diff is not
+evidence.
 
 After the E2 lease, create these directories separately and in this order,
 recording ordinary and dangling-symlink absence before each creation:
@@ -856,7 +895,7 @@ env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-fi
 env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target npm_config_cache=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp/npm-cache npm --prefix hosts/host-web/qualification ci --ignore-scripts
 env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target npm_config_cache=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp/npm-cache npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/cp1-pdc-artifact-705-a5-final-artifact --browser all --check-matrix --self-test-mutations
 env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target node hosts/host-web/qualification/generate-matrix.mjs --check
-env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target git diff --check b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target git diff --check <exact-E1-head> <exact-reviewed-E2-head>
 ```
 
 Immediately after the builder, require exactly six ordinary artifact files.
