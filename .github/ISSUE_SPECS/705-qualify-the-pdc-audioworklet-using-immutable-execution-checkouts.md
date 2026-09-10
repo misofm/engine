@@ -1291,3 +1291,58 @@ transcripts, separate builder files, terminal JSON, ack, release, ancestry,
 parity, and retained history. There is no manifest, copied receipt index,
 fabricated UTC stream, or qualification claim. Phase 2 remains exactly as
 specified above and starts only after Astra LOW Phase 1 PASS and release.
+
+## Attempt 5 superseding mechanical correction — live lease and literal checks
+
+This short correction supersedes only the preceding Attempt 5 lease,
+preflight, builder, validation, and Phase 1 review wording where it conflicts
+with this section. It preserves the fresh E1 path, external dynamic hashes,
+all five-attempt accounting, every substantive gate, every retained failure,
+and all no-claim limits. It is documentation only: it creates no E1, lease,
+root, or execution.
+
+The external JSON lease is created and authenticated before E1 preflight. Its
+lease marker is therefore required as an ordinary file and is not required to
+be absent; its `ack`, `release`, and `revocation` markers must each be absent as
+both ordinary paths and dangling symlinks. The lease uses exactly the existing
+identity/root/marker keys above plus this exact-key command object (the values
+are literal command strings, not labels or hashes):
+
+```json
+"commands": {
+  "preflight": "pwd; git rev-parse --verify HEAD; git status --porcelain=v1 --untracked-files=all; git rev-parse --is-inside-work-tree; test -f /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease; test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack; test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release; test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked",
+  "ancestry": "git diff --name-status b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-E1-head>",
+  "mkdir": "mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+  "builder": "set -e; printf 'builder_start_epoch_seconds=%s\\n' \"$(date +%s)\" > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; set +e; env MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-probe-output > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout 2> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stderr; builder_exit=$?; set -e; printf 'builder_exit=%s\\n' \"$builder_exit\" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; printf 'builder_end_epoch_seconds=%s\\n' \"$(date +%s)\" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; set +e; cat /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout; stdout_capture_exit=$?; cat /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stderr >&2; stderr_capture_exit=$?; set -e; printf 'stdout_capture_exit=%s\\n' \"$stdout_capture_exit\" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; printf 'stderr_capture_exit=%s\\n' \"$stderr_capture_exit\" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; exit \"$builder_exit\"",
+  "validation": "set -e; awk -F= '$1==\"builder_exit\" {print $2}' /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder-exit.value; test \"$(cat /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder-exit.value)\" = 0; python3 -c 'import re; from pathlib import Path; assert re.fullmatch(rb\"[0-9a-f]{64}\\n\", Path(\"/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout\").read_bytes())'; set +e; find -P /tmp/cp1-pdc-artifact-705-a5-final-probe-output -mindepth 1 -print -quit > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/output.find; find_exit=$?; set -e; test \"$find_exit\" -eq 0; test ! -s /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/output.find; test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-target",
+  "terminal": "python3 -c 'import json; from pathlib import Path; e=Path(\"/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence\"); m=(e/\"builder.meta\").read_text().splitlines(); x=int(next(v.split(\"=\",1)[1] for v in m if v.startswith(\"builder_exit=\"))); d=(e/\"builder.stdout\").read_text()[:-1]; (e/\"terminal.json\").write_text(json.dumps({\"builder_exit\":x,\"digest\":d,\"e1_head\":\"<exact-E1-head>\",\"validation\":\"PASS\"},sort_keys=True,separators=(\",\",\":\"))+\"\\n\")'",
+  "ack": "test -s /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/terminal.json && printf 'acknowledged\\n' > /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack",
+  "release": "test -s /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack && test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && printf 'released\\n' > /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release"
+}
+```
+
+The exact lease review validates the key set, the live lease identity, and
+every command string before it accepts the lease. Its process scan excludes
+the scanner's own `os.getpid()` as well as the named executor and its complete
+shell/ancestor chain; it still rejects any other process whose resolved cwd or
+argv contains the exact E1 or root. The scan must not reject its own Python
+scanner, shell, or ancestor merely because those command lines contain the
+needles.
+
+The builder command starts under `set -e`, records pre-launch metadata, uses
+`set +e` only around the sole builder, restores `set -e`, records the actual
+builder exit, and then captures stdout/stderr under a separate `set +e` block.
+It records those ancillary capture exits and exits with the saved builder exit;
+ancillary capture failures cannot mask it. Validation uses the literal shell
+quoted AWK predicate `$1=="builder_exit"`, requires the Python bytes regex
+`rb"[0-9a-f]{64}\n"` with one real LF, and runs `find -P` into a file, checks
+its actual exit, then checks that file is empty. It does not use command
+substitution to decide whether the output tree is empty.
+
+Astra LOW PASS on the pushed preparation/spec authorizes Sol to create the
+fresh detached E1 only. It grants no lease or execution authority. After that
+E1 exists, a second Astra LOW exact-E1 plus live-lease review must PASS before
+the Phase 1 lease is accepted; the later Phase 1 evidence review remains a
+separate Astra LOW PASS after terminal acknowledgement and release. No E1,
+lease, root, builder, artifact, pin, qualification, or delivery claim is made
+by this correction.
