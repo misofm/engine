@@ -94,3 +94,14 @@ SHA-256: `80abeec2688be94807bf4086861639fa63e4111df1d1978e37b1288ff2151de4`; pri
 This is not artifact PASS: ordinary reproducibility build and the existing
 artifact/resource/SDK/browser gates remain. Evidence root:
 `/tmp/issue387-artifact-y1odl9dw`.
+
+## Verification setup correction
+
+Independent parser before/after control passed: isolated main14079d2c aborts
+on empty render_profile; candidate returns correctly located json.syntax;
+legal minimal input passes both. Initial fuzz launch failed before workload
+execution because cargo-fuzz replaced target flags and lane D4 rejected missing
+AVX2/FMA. Receipt `/tmp/issue387-xhigh-zpkzo4q1/fuzz.log` retained. Root authorizes
+bounded verification attempt2 using the existing CI RUSTFLAGS target-feature
+settings (+avx2,+fma) for one 900-second seeded invocation. No product change,
+completed fuzz time, or fuzz PASS is claimed from the failed launch.
