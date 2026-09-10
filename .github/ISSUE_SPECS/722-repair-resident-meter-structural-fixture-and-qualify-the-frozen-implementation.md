@@ -163,3 +163,23 @@ rack contains exactly the accepted #709/#722 deltas with #713 machinery
 preserved. No conflict, new production correction or whitespace error. Both
 imports are separate recoverable checkpoints. Joint focused and allocation
 gates remain pending; no integration or delivery PASS is claimed here.
+
+## Joint current-main qualification checkpoint
+
+Joint source cbc3c4f7917d5704396fa904b68e0c5c021da610 passed all twelve focused
+commands. Each debug/release-unwind profile passed rack50, meter9, graph
+resident2, executor/order1 and compiler resident2 tests. Formatting and realtime
+policy passed. Existing #709 allocation harness proved detector3/3 and24
+allocation/free-free render calls. Existing #722 harness proved detector1/1,
+zero allocations/frees on accepted and declined paths, correct dispatch counts
+and queue overflow/publication counters. Copied harness sources/locks are
+unchanged; locked offline metadata resolves their local dependencies to the
+joint checkout. Actual commands, environments, exits and source identities
+are external at `/tmp/joint709722-gates-itstq384/`. No retry or source edit.
+
+Independent XHIGH SOURCE COMPOSITION PASS reconstructs9573fe16 as the disjoint
+union of accepted #709 and current-main/#713 edits, then removes the exact
+three #722 rack insertion blocks from joint source to recover9573fe16 byte
+for byte. Five other files exactly match accepted #722; merge parents and
+clean source verified. Final joint receipt review precedes shared artifact
+qualification and PR/main delivery.
