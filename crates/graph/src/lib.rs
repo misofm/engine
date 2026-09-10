@@ -20,10 +20,11 @@ pub use runtime::{
 pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
     test_only_arm_failed_buffer_capture, test_only_completion_disabled,
-    test_only_failed_buffer_capture, test_only_reset_selected_split_fader,
-    test_only_reset_split_pair_table_witness, test_only_resident_input_counts,
-    test_only_resident_input_reset, test_only_selected_split_fader,
-    test_only_set_completion_disabled, test_only_split_pair_table_witness,
+    test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
+    test_only_resident_input_counts, test_only_resident_input_reset,
+    test_only_selected_split_fader, test_only_set_completion_disabled,
+    test_only_split_pair_table_witness,
 };
 
 use core::cell::Cell;
@@ -1690,9 +1691,24 @@ pub struct GraphObservationBlock<'a> {
     pub right: &'a [f32],
     pub first_sample: u64,
 }
+/// Immutable final bank output, offered at the same post-node observation point.
+#[derive(Clone, Copy)]
+pub struct GraphResidentObservationBlock<'a> {
+    pub lane: rack::ResidentOutputLane<'a>,
+    pub first_sample: u64,
+}
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
+
+    /// `None` declines without mutation and requests the ordinary planar observation.
+    /// Both `Some` results accept once; an accepted error propagates without retry.
+    fn observe_resident(
+        &mut self,
+        _block: GraphResidentObservationBlock<'_>,
+    ) -> Option<Result<(), RenderError>> {
+        None
+    }
 }
 /// One immutable prepared observer binding, ordered by its stable meter handle.
 pub struct GraphNodeObserverBinding {

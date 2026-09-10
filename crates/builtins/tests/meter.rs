@@ -437,3 +437,177 @@ fn silence_against_a_nonzero_held_peak_still_decays() {
     );
     assert_eq!(second.left.energy, 0.0, "and still adds no energy");
 }
+
+fn assert_snapshot_bits(actual: MeterSnapshot, expected: MeterSnapshot) {
+    assert_eq!(actual, expected);
+    for (a, b) in [(actual.left, expected.left), (actual.right, expected.right)] {
+        assert_eq!(a.sample_peak.to_bits(), b.sample_peak.to_bits());
+        assert_eq!(a.rms.to_bits(), b.rms.to_bits());
+        assert_eq!(a.energy.to_bits(), b.energy.to_bits());
+        assert_eq!(a.held_peak.to_bits(), b.held_peak.to_bits());
+    }
+}
+
+#[test]
+fn resident_meter_matches_planar_bits_for_every_selection_stride_and_state_transition() {
+    let hostile = [
+        0.0,
+        -0.0,
+        0.25,
+        -0.75,
+        1.0,
+        -1.5,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::from_bits(1),
+        f32::from_bits(0x8000_0001),
+        0.03125,
+    ];
+    for stride in [1, 4, 8] {
+        for lane in 0..stride {
+            for selection in 1..=MeterMetricSet::ALL.bits() {
+                let config = MeterConfig {
+                    period_frames: NonZeroU32::new(5).unwrap(),
+                    peak_hold_frames: 2,
+                    peak_decay_db_per_second: 120.0,
+                    queue_capacity: NonZeroUsize::new(2).unwrap(),
+                    reset_generation: 714,
+                };
+                let prepare = || {
+                    MeterAccumulator::prepare_selected(
+                        MeterHandle(NonZeroU64::new(1).unwrap()),
+                        config,
+                        48_000,
+                        MeterMetricSet::from_bits_retain(selection),
+                    )
+                    .unwrap()
+                };
+                let mut planar = prepare();
+                let mut resident = prepare();
+                let mut time = 3_u64;
+                for block in 0..18 {
+                    if block == 7 {
+                        time += 17;
+                    }
+                    if block == 10 || block == 13 {
+                        let reset = if block == 10 {
+                            BuiltinResetKind::DiscontinuityKeepTargets
+                        } else {
+                            BuiltinResetKind::FullToPrepared
+                        };
+                        planar.accumulator.reset(reset);
+                        resident.accumulator.reset(reset);
+                    }
+                    let frames = [0, 1, 4, 13, 2, 5][block % 6];
+                    let left: Vec<_> = (0..frames)
+                        .map(|f| {
+                            if block > 13 {
+                                -0.0
+                            } else {
+                                hostile[(f + block + lane) % hostile.len()]
+                            }
+                        })
+                        .collect();
+                    let right: Vec<_> = (0..frames)
+                        .map(|f| {
+                            if block > 13 {
+                                0.0
+                            } else {
+                                hostile[(f * 3 + lane + 1) % hostile.len()]
+                            }
+                        })
+                        .collect();
+                    // Unselected lanes and the unused capacity behind the validated view are poison.
+                    let mut bank_left = vec![f32::from_bits(0x7fc0_0714); (frames + 3) * stride];
+                    let mut bank_right = vec![f32::NEG_INFINITY; (frames + 3) * stride];
+                    for f in 0..frames {
+                        bank_left[f * stride + lane] = left[f];
+                        bank_right[f * stride + lane] = right[f];
+                    }
+                    let input = MeterInput::strided(
+                        &bank_left[..frames * stride],
+                        &bank_right[..frames * stride],
+                        frames,
+                        stride,
+                        lane,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        resident.accumulator.observe_input(input, time),
+                        planar.accumulator.observe(&left, &right, time),
+                    );
+                    time += frames as u64;
+                    // Delayed drains force queue overflow as well as partial/multiple windows.
+                    if block % 3 == 2 || block == 17 {
+                        loop {
+                            match (resident.consumer.try_pop(), planar.consumer.try_pop()) {
+                                (Ok(a), Ok(b)) => assert_snapshot_bits(a, b),
+                                (Err(a), Err(b)) => {
+                                    assert_eq!(a, b);
+                                    break;
+                                }
+                                _ => panic!("publication count differs"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resident_meter_shape_and_time_errors_precede_mutation_and_empty_input_matches_planar() {
+    for (left, right, frames, stride, lane) in [
+        (&[][..], &[][..], 0, 0, 0),
+        (&[][..], &[][..], 0, 4, 4),
+        (&[][..], &[][..], usize::MAX, 8, 0),
+        (&[0.0][..], &[][..], 1, 1, 0),
+        (&[0.0][..], &[0.0][..], 0, 1, 0),
+        (&[0.0][..], &[0.0, 0.0][..], 1, 1, 0),
+    ] {
+        assert!(matches!(
+            MeterInput::strided(left, right, frames, stride, lane),
+            Err(MeterObservationError::LaneLength)
+        ));
+    }
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(2).unwrap(),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(4).unwrap(),
+        reset_generation: 1,
+    };
+    let prepare = || {
+        MeterAccumulator::prepare(MeterHandle(NonZeroU64::new(1).unwrap()), config, 48_000).unwrap()
+    };
+    let mut a = prepare();
+    let mut b = prepare();
+    a.accumulator.observe(&[0.5], &[-0.25], 3).unwrap();
+    b.accumulator.observe(&[0.5], &[-0.25], 3).unwrap();
+    assert_eq!(
+        a.accumulator.observe(&[1.0], &[], u64::MAX),
+        Err(MeterObservationError::LaneLength)
+    );
+    let input = MeterInput::strided(&[0.0; 8], &[1.0; 8], 1, 8, 7).unwrap();
+    assert_eq!(
+        a.accumulator.observe_input(input, u64::MAX),
+        Err(MeterObservationError::SampleTimeOverflow)
+    );
+    for meter in [&mut a, &mut b] {
+        meter.accumulator.observe(&[0.125], &[-0.5], 4).unwrap();
+    }
+    assert_snapshot_bits(a.consumer.try_pop().unwrap(), b.consumer.try_pop().unwrap());
+    a.accumulator
+        .observe_input(MeterInput::strided(&[], &[], 0, 8, 7).unwrap(), u64::MAX)
+        .unwrap();
+    b.accumulator.observe(&[], &[], u64::MAX).unwrap();
+    for meter in [&mut a, &mut b] {
+        meter
+            .accumulator
+            .observe(&[0.0; 2], &[-0.0; 2], 20)
+            .unwrap();
+    }
+    assert_snapshot_bits(a.consumer.try_pop().unwrap(), b.consumer.try_pop().unwrap());
+}
