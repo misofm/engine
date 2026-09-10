@@ -1419,3 +1419,32 @@ the flawed literal strings without weakening any substantive gate or changing
 the retained attempt history. Astra LOW review of the current pushed spec
 authorizes E1 creation only; after E1 exists, a fresh exact-E1 live-lease
 review is required before the lease or any per-call command is accepted.
+
+## Attempt 5 Phase 1 identity evidence — Astra LOW PASS
+
+Phase 1 completed at the exact detached E1
+`91cacf5ea4135e27a586341c5450465f8735f99c`. Astra LOW independently reviewed
+the original Astra XHIGH executor transcript and returned PASS. The builder ran
+exactly once and returned zero; all ten leased commands matched the reviewed
+lease byte-for-byte and returned zero in order. The authenticated builder
+stdout is exactly one lowercase digest plus LF:
+
+```text
+c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569
+```
+
+The external lease receipt SHA-256 is
+`272ce4478cdce08ac24b3496813710b591e1e4b52aadceccb071b39843f46968`; the
+original executor transcript SHA-256 is
+`8da681216f6ab918898105262761e7f241faae187ff128eb02367bd8dff70bd9`; the
+terminal result SHA-256 is
+`9cb8c9dec5371e3a93a6910f039084d011b7b4902941f2a90e4b33a9d9f7c06a`; the
+acknowledgement marker SHA-256 is
+`da4769119aa609d7631dc3331f1ff2ac9c59e1f0a6e282a44c8964523b271e69`; and the
+release marker SHA-256 is
+`fdc935e6a3f33abdcfb4f5d7a335d408b2b988e7a5f8411d9f73349d1fab39be`.
+The probe output tree was empty, the supplied target and all Phase 2 roots
+remained absent, and E1 remained clean and detached with literal
+`upstream=not-applicable-detached`. This record grants only the authorized
+mechanical overlay; it grants no Phase 2 qualification, artifact, pin,
+timing, performance, product, or delivery credit.
