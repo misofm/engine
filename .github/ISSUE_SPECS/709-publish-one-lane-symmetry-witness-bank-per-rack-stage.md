@@ -16,10 +16,12 @@ adversarial verdict for every implementation attempt. Agents are bounded
 assignees and do not own the issue.
 
 The smallest closable outcome replaces the collapse witness's `lanes × slots`
-virtual-call shape with one fixed-width lane-witness publication per visited rack
-stage, then combines those witnesses locally. It changes no DSP arithmetic,
-render ordering, queue semantics, PCM, public ABI, session schema, effect
-contract, artifact, pin, benchmark, or performance budget.
+virtual calls at the **`BankChain` → `BankStage` boundary** with one fixed-width
+lane-witness publication per visited rack stage, then combines those witnesses
+locally. Nested processor forwarding outside `rack` is an unchanged residual.
+The issue changes no DSP arithmetic, render ordering, queue semantics, PCM,
+public ABI, session schema, effect contract, artifact, pin, benchmark, or
+performance budget.
 
 ## Exact-path ownership
 
@@ -50,6 +52,13 @@ path, the dispatch therefore performs a virtual call for each visited
 lane/slot pair even though lane width is fixed at four or eight and each stage
 already holds event-maintained witness state.
 
+Production `BuiltinStage` implementations outside this issue's ownership can
+forward `lane_symmetry` into their own boxed processor traits. #709 does not
+remove or measure that nested dispatch. A bulk `BankStage` default must preserve
+each existing implementation's `lane_symmetry` override through the concrete
+implementation's default-method instantiation; it may not substitute an
+unconditional declined bank for already classified external stages.
+
 `BankChain::run` must continue to call every active slot's `begin_block` before
 reading a witness. That ordering makes an admitted live-channel record affect
 the first sample of the drained block and prevents an addressed one-channel
@@ -63,17 +72,25 @@ claim is authorized.
 ## Product contract
 
 1. A rack stage publishes the witnesses for the fixed maximum of eight lanes
-   through one stage-level virtual query. A private `[ChannelSymmetryWitness; 8]`
-   or byte-equivalent representation is acceptable; it must not allocate.
-2. An active collapse dispatch invokes each visited active stage at most once to
-   obtain its lane witnesses. It must not make a virtual query per lane/slot
-   pair. The chain combines stage results locally for W4, W8, partial cohorts,
-   identity slots, inactive lanes, eligibility, and agreement preservation.
+   through one stage-level `BankStage` virtual query. A private
+   `[ChannelSymmetryWitness; 8]` or byte-equivalent representation is acceptable;
+   it must not allocate. The supplied valid width and slot-active mask bound the
+   publication: W4 never queries lanes 4–7, and identity lanes never cause a
+   query that the existing walk skipped.
+2. An active collapse decision invokes each visited active `BankStage` at most
+   once to obtain its lane witnesses across both eligibility and subsequent
+   agreement-preservation evaluation. It must not perform a second aggregate
+   query when eligibility declines. The chain combines the single aggregate
+   locally for W4, W8, partial cohorts, identity slots, inactive lanes,
+   eligibility, and agreement preservation.
 3. `begin_block` remains complete and ordered before witness publication. A live
    update drained for block N changes block N's eligibility.
 4. Identity slots contribute nothing. Inactive lanes remain declined and never
-   become accidental collapse candidates. Unsupported/unclassified stages keep
-   the conservative declined default.
+   become accidental collapse candidates. The stage-level default delegates only
+   the supplied valid, active lanes to the implementation's existing
+   `lane_symmetry` override, preserving external classified stages. An
+   implementation that never classified `lane_symmetry` still inherits its
+   conservative declined result.
 5. Mono-collapse arming, forced-off behavior, recovery, `channels_agree`,
    desymmetrization, transition counters, gather/scatter selection, fault
    propagation, and observation/report/latency state retain their existing
@@ -107,10 +124,13 @@ Each implementation attempt must provide:
 1. Focused W4 and W8 tests proving exact lane-witness results for full and partial
    cohorts, inactive lanes, identity slots, mixed eligible/ineligible stages,
    live-channel drain changes, and conservative defaults.
-2. An instrumented private test stage proving the armed collapse decision uses
-   at most one stage-level virtual witness publication per visited active stage,
-   with no per-lane virtual witness calls. The gate must fail under restoration
-   of the old `lanes × slots` dispatch shape.
+2. Instrumented private test stages proving the entire armed collapse decision,
+   including a declining eligibility result followed by agreement-preservation
+   evaluation, uses at most one `BankChain` → `BankStage` bulk virtual call per
+   visited active stage. The gate also proves W4 never queries lanes 4–7 and
+   identity lanes introduce no query. It must fail under restoration of the old
+   outer-boundary `lanes × slots` dispatch shape. Nested builtin-processor
+   forwarding is explicitly outside this structural claim.
 3. Existing mono-collapse PCM/state/transition/fault tests, including disengage,
    recovery, forced-off, observations, bypass, and exact operation order.
 4. A render allocation gate covering the changed armed and declining paths.
@@ -137,3 +157,14 @@ Required PR qualification, guarded live head/base merge, post-main
 qualification, exact GitHub synchronization, and clean delivered-worktree
 removal follow the repository workflow. Failed worktrees, branches, commits,
 and evidence are preserved.
+
+## Scope review record
+
+Initial Astra LOW review at pushed brief `757bb598` returned **SCOPE FAIL**
+without implementation or attempt consumption. The source fact pattern and
+rack-only boundary were valid, but the virtual-call claim accidentally included
+nested builtin-processor forwarding outside the owned path. This amendment
+limits the claim to `BankChain` → `BankStage`, preserves external overrides,
+bounds publication by valid width and the slot-active mask, and requires one
+aggregate to serve both eligibility and agreement preservation. Fresh Astra LOW
+exact-head review is required before implementation.
