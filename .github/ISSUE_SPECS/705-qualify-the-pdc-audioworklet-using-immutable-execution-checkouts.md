@@ -919,3 +919,127 @@ This amendment grants no lease or execution authority until Astra LOW has
 reviewed the exact pushed amendment, prepared E1, and all frozen identities.
 No builder, qualification, artifact, pin, timing, or output-root action was
 performed while preparing this amendment.
+
+## Attempt 5 final minimal execution authority — superseding receipt mechanics
+
+This section supersedes only the prospective Attempt 5 receipt and lease
+mechanics above. It preserves every substantive A5 identity, ordering,
+first-failure, digest, empty-output, clean-checkout, Phase 2 qualification,
+artifact, and no-claim gate. Attempts 1–4 and their evidence remain unchanged;
+A5 is still the fifth and final attempt and any dispatched failure consumes it.
+
+The three files currently named
+`/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.draft`,
+`/tmp/cp1-pdc-artifact-705-a5-final-phase1.commands.json.draft`, and
+`/tmp/cp1-pdc-artifact-705-a5-final-phase1.freeze.draft` are unissued,
+non-authoritative planning remnants. They must be preserved byte-for-byte and
+must never be treated as a lease, command authority, freeze, receipt, or
+evidence. No replacement draft is required for A5. No lease, root, checkout,
+builder, artifact, or qualification action is authorized by this section.
+
+Sol issues one small JSON Phase 1 lease only after the final Astra LOW scope
+review. Its frozen fields are exactly the following values (the lease may add
+only an issuance UTC and its own external file path):
+
+```json
+{
+  "issue": 705,
+  "attempt": 5,
+  "phase": "1-identity-probe",
+  "executor": "/root/issue705_a5_astra_xhigh_exec",
+  "model": "Astra XHIGH",
+  "e1": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final",
+  "e1_head": "e154291237e98958c19937aa7c530f07c654f842",
+  "main_head": "b1f9128f3e06532afdfc16aad661c4b2deb5dea1",
+  "tracker_repo": "/home/bl/misofm/engine-audit-handoff",
+  "tracker_head": "ff4b425058ac4c889266d610ffaf175281c12303",
+  "body_sha256": {
+    "559": "568f4d4a19ba9ed498b951895fa892594087acb87102c0b4faf4b84666845a9b",
+    "560": "ff06482f921a4fc1cca53890d494232f131503d0c1cf8654bb07ed153b0559c6",
+    "703": "1924969e54e135e577a905637bbd129dcfa3dbabc36f45c5da5e2a92c1747372",
+    "705": "7faa360e893f453f23f5d127687a80d390d08a5d62207b05d629efa150433458"
+  },
+  "pdc_source_sha256": "2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e",
+  "roots": [
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-artifact",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target"
+  ],
+  "command": "env MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+  "release_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release",
+  "revocation_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked"
+}
+```
+
+Every Astra XHIGH `functions.exec` call uses the exact absolute E1 worktree,
+`login:true`, and a direct command. The original tool-call transcripts are the
+complete receipts: they supply the exact call IDs, UTCs, argv/environment,
+workdir, detached HEAD, literal `upstream=not-applicable-detached`, status,
+stdout, stderr, and actual exit. Astra LOW later authenticates those
+transcripts against the lease and command order. No copied per-call files,
+executor-authored receipt index, self-excluding manifest, status-file authority,
+custom runner, retry, or polling receipt is required for Phase 1. The builder's
+stdout, stderr, and actual exit remain distinct transcript streams; a builder
+exit is authoritative over any observation or display result.
+
+The exact preflight is one direct read-only call before any root is created. It
+prints and enforces, in this order: `pwd` equals E1; `git rev-parse --verify
+HEAD` equals `e154291237e98958c19937aa7c530f07c654f842`; porcelain status is
+empty; `git branch --show-current` is empty; the worktree is valid and detached;
+`git rev-parse refs/remotes/origin/main` and
+`git ls-remote --exit-code origin refs/heads/main` both equal
+`b1f9128f3e06532afdfc16aad661c4b2deb5dea1`; the preparation and tracker
+objects resolve at their recorded heads; the four tracker/spec GitHub bodies
+match their recorded SHA-256 values; `crates/graph-compiler/src/pdc.rs` matches
+the recorded PDC SHA-256; the required cargo executable is the recorded one;
+`git diff --check` passes; no relevant builder/Cargo/browser qualification
+process is already running; all nine roots are absent both as ordinary paths
+and dangling symlinks; and both lease markers are absent both ways. The stale
+primary checkout is not read or compared. Any failed observation stops before
+directory creation.
+
+After the preflight, issue three separate direct `mkdir` calls, in exactly this
+order, each preceded by its own ordinary-path and dangling-symlink absence
+test, with the per-call E1/HEAD/status/marker guard still enforced:
+
+```text
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+```
+
+Run the single lease command exactly once. The direct `functions.exec`
+transcript is the builder receipt; do not redirect it through a runner or run a
+second capture command. Stop immediately on a nonzero builder exit. Then, in a
+separate direct validation call, require actual builder exit zero, exactly one
+lowercase 64-hex digest followed by LF on builder stdout, an empty output tree
+using non-following traversal, absent probe target as both ordinary path and
+dangling symlink, unchanged detached HEAD, and clean tracked/untracked status.
+The private temporary Wasm target created and removed inside TMPDIR remains
+permitted; the supplied target root must stay absent.
+
+After validation, write only a small data-only terminal result in the evidence
+root containing the authenticated digest, builder actual exit, E1 HEAD, and
+validation result. The terminal result is not execution authority. After a
+separate terminal acknowledgement, write the release marker. Keep the terminal
+result and release-marker transcript outside any claim of pre-seal evidence.
+There is no manifest or copied receipt ceremony. Every call retains the same
+direct E1 identity and marker guard. The first failed preflight, mkdir, builder,
+validation, terminal write, or acknowledgement stops the attempt; A5 is then a
+consumed failure with no retry, no sixth attempt, and no qualification credit.
+
+After Phase 1 receives Astra LOW PASS and the lease is explicitly released,
+the existing Phase 2 substantive qualification commands, six-file artifact
+requirements, five non-Wasm authority hashes, conditional pin/results/matrix
+overlay, exact E1-to-E2 path review, browser qualification, mutation checks,
+and all no-claim limits remain unchanged. Sol issues a similarly small new
+Phase 2 lease after the overlay is pushed and receives exact-head Astra LOW
+scope PASS; it names the exact E2/head/main/tracker/body/PDC identities, Phase 2
+roots, qualification command sequence, and release/revocation markers. Lane A
+may continue independently outside those frozen #705 inputs.
