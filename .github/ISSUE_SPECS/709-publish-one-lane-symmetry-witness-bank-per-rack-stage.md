@@ -380,3 +380,36 @@ This is recorded as a provisional, unqualified pin; ordinary six-file build
 and shared artifact qualification remain mandatory. Probe argv/environment,
 source head, status and full outputs are external at
 `/tmp/rack-meter-artifact-ydlz4bpc/probe.*`. No performance or delivery claim.
+
+## Shared artifact qualification checkpoint
+
+One ordinary build with repin mode unset reproduced ea8f843b254bfc96c277f22d4946db0c33555a281113e221d17f8ec6067a468b
+and the exact six-file set. All five non-Wasm payload hashes match delivered
+#710. Every existing qualification command passed once against this artifact.
+Let A=/tmp/rack-meter-artifact-ydlz4bpc/artifact:
+
+```sh
+bash scripts/build-web-audioworklet.sh "$A"
+bash scripts/check-web-audioworklet.sh "$A"
+python3 -B scripts/check-browser-expected-resources.py --artifacts "$A"
+bash scripts/test-web-audioworklet.sh
+bash scripts/check-sdk-types.sh
+bash scripts/check-sdk-headless.sh "$A"
+bash scripts/sdk-package.sh check "$A"
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts "$A" --browser all --record-matrix --candidate-commit cbc3c4f7917d5704396fa904b68e0c5c021da610 --self-test-mutations
+node hosts/host-web/qualification/generate-matrix.mjs --check
+```
+
+Exact argv, source heads, external target/temp paths, exits, timestamps and
+full outputs are preserved at `/tmp/rack-meter-artifact-ydlz4bpc/`, including
+`qualification-commands.json` and `artifact-sha256.json`. Static render closure,
+boot memory budget, native/browser resource/PCM parity and26 resource negative
+controls passed. SDK headless188/188 and publishable-tarball gates passed.
+Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 passed all existing gates.
+Matrix changes only source/digest lineage; browser floors, resource expectations
+and fixture digests are unchanged. No retry, new harness, compiler capture,
+performance or physical-device claim.
+
+Both #709/#722 cite this shared artifact evidence. Final XHIGH artifact review,
+exact-head PR qualification, guarded merge and exact-main qualification remain
+required before synchronized closure. No registry publication.
