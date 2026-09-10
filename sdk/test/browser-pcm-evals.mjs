@@ -478,7 +478,7 @@ test("control preparation never discards or applies a superseding producer gener
   assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
 });
 
-function runPrelude(source, { tracking = false, mutate = false } = {}) {
+function runPrelude(source, { tracking = false, mutate = false, capacity = 2, initial = true } = {}) {
   const mutated = mutate ? source.replace(
     "const staging = this.sourcePcm",
     "if (control[CONTROL_WROTE] > 1) new Float32Array(4); const staging = this.sourcePcm",
@@ -490,19 +490,20 @@ function runPrelude(source, { tracking = false, mutate = false } = {}) {
       this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
       this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
       this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
-      this.exports = { memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return seekResult; }, miso_engine_web_v1_source_submit: (_h, _id, generation, start, channels, frames, end) => { submissions.push({ generation, start, channels, frames, end, pcm: [...this.sourcePcm] }); return submitResult; } };
+      this.exports = { memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return seekResult; }, miso_engine_web_v1_source_submit: (_h, _id, generation, start, channels, frames, end) => { submissions.push({ generation, start, channels, frames, end, pcm: [...this.sourcePcm] }); return typeof submitResult === "function" ? submitResult() : submitResult; } };
     }
     process() { return true; }
   }
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
   const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
   const attach = new (registrations.get("miso-sab-feed-attach"))();
-  const rings = [1, 2, 1].map((channels, index) => createMsb1Ring({ sourceId: `source-${index}`, channels, frameCapacity: 4, capacity: 2 }));
+  const rings = [1, 2, 1].map((channels, index) => createMsb1Ring({ sourceId: `source-${index}`, channels, frameCapacity: 4, capacity }));
   const ringControls = rings.map(controls);
   attach.port.onmessage({ data: { op: "attach", rings } });
   const writers = rings.map((ring) => new Msb1RingWriter(ring));
   for (const [index, writer] of writers.entries()) {
     writer.engage(1n);
+    if (!initial) continue;
     const planes = writer.reserve(3);
     planes[0].set([index + 1, 2, 3]);
     if (writer.channels === 2) planes[1].set([4, 5, 6]);
@@ -512,6 +513,36 @@ function runPrelude(source, { tracking = false, mutate = false } = {}) {
   if (tracking) arm();
   return { sandbox, allocations, engine, attach, rings, ringControls, writers, submissions, seeks, process, setSubmitResult: (value) => { submitResult = value; }, setSeekResult: (value) => { seekResult = value; } };
 }
+
+test("full shared runways fill each internal queue gradually within the per-source callback budget", async () => {
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = runPrelude(source, { capacity: 8, initial: false });
+  const queued = [0, 0, 0]; const accepted = [0, 0, 0]; const positions = [0n, 0n, 0n];
+  let pressure = 0;
+  run.setSubmitResult(() => {
+    const index = new Uint8Array(run.engine.memoryBuffer, 0, 8)[7] - 48;
+    if (queued[index] === 8) { pressure++; return 6; }
+    queued[index]++; accepted[index]++; return 0;
+  });
+  const refill = () => run.writers.forEach((writer, index) => {
+    while (writer.occupancy < writer.capacity) {
+      for (const plane of writer.reserve(4)) plane.fill(index + 0.25);
+      writer.commit({ generation: 1n, startFrame: positions[index], frames: 4, endOfRegion: false });
+      positions[index] += 4n;
+    }
+  });
+  for (let block = 0; block < 12; block++) {
+    refill(); const before = [...accepted]; run.process();
+    assert.ok(accepted.every((count, index) => count - before[index] <= 2));
+    assert.ok(queued.every((count) => count > 0), "each source supplies the upcoming render");
+    for (let index = 0; index < queued.length; index++) queued[index]--;
+    assert.deepEqual(run.ringControls.map((control) => control[MSB1_CONTROL.DEPTH]), queued);
+  }
+  assert.deepEqual(queued, [7, 7, 7], "the original internal capacity remains reachable");
+  assert.ok(pressure > 0, "real capacity backpressure retains pending shared PCM");
+  assert.ok(run.writers.every((writer) => writer.occupancy > 0));
+  assert.ok(run.ringControls.every((control) => control[MSB1_CONTROL.UNDERRUNS] === 0 && control[MSB1_CONTROL.REFUSED] === 0));
+});
 
 test("moved prelude drains odd mono/stereo rings and allocation mutation turns red", async () => {
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
