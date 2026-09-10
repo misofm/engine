@@ -1846,8 +1846,44 @@ impl BankChain {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError> {
+        self.run_with_input(members, frames, first_sample, None)
+    }
+
+    /// Run after graph has proved that the immediately preceding, successfully observed unit
+    /// produced these exact inputs in this block. Owners remain independent. Local shape declines
+    /// use ordinary gather in this invocation, before the same stages and scatter.
+    pub fn run_with_resident_input<M: BankMembers + ?Sized>(
+        &mut self,
+        predecessor: &BankChain,
+        members: &mut M,
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        self.run_with_input(members, frames, first_sample, Some(predecessor))
+    }
+
+    fn run_with_input<M: BankMembers + ?Sized>(
+        &mut self,
+        members: &mut M,
+        frames: u32,
+        first_sample: u64,
+        predecessor: Option<&BankChain>,
+    ) -> Result<(), RenderError> {
         debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
         let len = frames as usize * self.lanes;
+        // Validate stored shape before any successor drain or destination write. Graph owns
+        // adjacency, current-block freshness, and the lane-wise dataflow/observation proof.
+        let predecessor = predecessor.filter(|source| {
+            source.width() == self.width()
+                && source.quantum() == self.quantum()
+                && source.active == self.active
+                && source.fold.is_empty()
+                && source.aux.is_empty()
+                && len <= source.scratch.left.len()
+                && len <= source.scratch.right.len()
+                && len <= self.scratch.left.len()
+                && len <= self.scratch.right.len()
+        });
         // Step 0: every slot's live-console queue, drained before anything else. See
         // `BankStage::begin_block` for why this cannot be folded into `process`.
         for slot in &mut self.slots {
@@ -1962,6 +1998,10 @@ impl BankChain {
         }
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
+        }
+        if let Some(source) = predecessor {
+            self.acquire_resident_input(source, frames, collapse);
+        } else if collapse {
             self.gather_mono(members, frames);
         } else {
             self.gather(members, frames);
@@ -2064,6 +2104,30 @@ impl BankChain {
     ///
     /// [`Self::gather`]'s two shapes, one plane each. The right plane is not read and the right
     /// scratch is not written; the seam writes it, after the prefix and before anything reads it.
+    /// Copy exactly the words ordinary acquisition overwrites. The mode is the successor's
+    /// post-drain collapse decision, independent of how its predecessor rendered this block.
+    fn acquire_resident_input(&mut self, source: &BankChain, frames: u32, mono: bool) {
+        let len = frames as usize * self.lanes;
+        if self.full_bank {
+            self.scratch.left[..len].copy_from_slice(&source.scratch.left[..len]);
+            if !mono {
+                self.scratch.right[..len].copy_from_slice(&source.scratch.right[..len]);
+            }
+        } else {
+            for lane in 0..self.lanes {
+                if self.active[lane] {
+                    for frame in 0..frames as usize {
+                        let word = frame * self.lanes + lane;
+                        self.scratch.left[word] = source.scratch.left[word];
+                        if !mono {
+                            self.scratch.right[word] = source.scratch.right[word];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn gather_mono<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
         if self.full_bank {
             match self.scratch.width {
@@ -2553,6 +2617,189 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let quantum = 17;
+            for partial in [false, true] {
+                let active: Vec<_> = (0..lanes).map(|lane| !partial || lane % 3 != 1).collect();
+                let make = || {
+                    BankChain::new(
+                        AoSoaScratch::new(width, quantum).expect("scratch"),
+                        active.clone().into_boxed_slice(),
+                        vec![slot(active.clone(), Box::new(PassThrough))],
+                    )
+                    .expect("chain")
+                };
+                for frames in [1, lanes as u32 - 1, lanes as u32, lanes as u32 + 1, quantum] {
+                    let mut seed = 713;
+                    let mut planes = Planes {
+                        left: (0..lanes)
+                            .map(|_| (0..frames).map(|_| seeded(&mut seed)).collect())
+                            .collect(),
+                        right: (0..lanes)
+                            .map(|_| (0..frames).map(|_| seeded(&mut seed)).collect())
+                            .collect(),
+                    };
+                    planes.left[0][0] = -0.0;
+                    planes.right[0][0] = f32::from_bits(0x7fc0_0713);
+                    let mut source = make();
+                    source.run(&mut planes, frames, 0).expect("producer");
+                    for mono in [false, true] {
+                        let mut resident = make();
+                        let mut reference = make();
+                        for chain in [&mut resident, &mut reference] {
+                            chain.scratch.left.fill(f32::from_bits(0x7fc0_aaaa));
+                            chain.scratch.right.fill(f32::from_bits(0xffc0_bbbb));
+                        }
+                        reference.force_scalar_transpose();
+                        if mono {
+                            reference.gather_mono(&planes, frames);
+                        } else {
+                            reference.gather(&planes, frames);
+                        }
+                        resident.acquire_resident_input(&source, frames, mono);
+                        for (actual, expected) in resident
+                            .scratch
+                            .left
+                            .iter()
+                            .chain(resident.scratch.right.iter())
+                            .zip(
+                                reference
+                                    .scratch
+                                    .left
+                                    .iter()
+                                    .chain(reference.scratch.right.iter()),
+                            )
+                        {
+                            assert_eq!(
+                                actual.to_bits(),
+                                expected.to_bits(),
+                                "{width:?} partial={partial} frames={frames} mono={mono}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rt9_resident_run_and_local_declines_preserve_drains_errors_and_collapse_order() {
+        struct Reads {
+            planes: Planes,
+            calls: std::cell::Cell<usize>,
+        }
+        impl BankMembers for Reads {
+            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+                self.calls.set(self.calls.get() + 1);
+                self.planes.plane(lane)
+            }
+            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+                self.planes.plane_mut(lane)
+            }
+        }
+        for mono in [false, true] {
+            for failure in [
+                None,
+                Some(TraceKind::Begin),
+                Some(if mono {
+                    TraceKind::Mono
+                } else {
+                    TraceKind::Dual
+                }),
+            ] {
+                for mismatch in 0..5 {
+                    let spec = TraceSpec {
+                        id: 0,
+                        mask: [true; 4],
+                        seam: SeamSide::UpstreamOfSeam,
+                        mono_capable: true,
+                        fail: failure,
+                        delta: 0.25,
+                    };
+                    let render = |resident: bool| {
+                        TEST_TRACE.with(|trace| {
+                            *trace.borrow_mut() = TraceObservation::with_queues(&[spec])
+                        });
+                        let mut source = BankChain::new(
+                            AoSoaScratch::new(
+                                if mismatch == 1 {
+                                    BankWidth::Eight
+                                } else {
+                                    BankWidth::Four
+                                },
+                                if mismatch == 2 { 4 } else { 3 },
+                            )
+                            .expect("scratch"),
+                            vec![true; if mismatch == 1 { 8 } else { 4 }].into_boxed_slice(),
+                            vec![],
+                        )
+                        .expect("source");
+                        if mismatch == 3 {
+                            source.active[3] = false;
+                        }
+                        if mismatch == 4 {
+                            source
+                                .arm_fold(vec![true; 4].into_boxed_slice())
+                                .expect("fold");
+                        }
+                        let mut inputs = trace_planes();
+                        if mono {
+                            inputs.right.clone_from(&inputs.left);
+                        }
+                        // Prepare identical resident and planar inputs without running the epilogue
+                        // deliberately used to exercise the local decline.
+                        if mismatch == 0 {
+                            source.gather(&inputs, 3);
+                        }
+                        let mut chain = BankChain::new(
+                            AoSoaScratch::new(BankWidth::Four, 3).expect("scratch"),
+                            vec![true; 4].into_boxed_slice(),
+                            vec![trace_slot(spec)],
+                        )
+                        .expect("successor");
+                        chain.arm_mono_collapse(mono);
+                        let mut reads = Reads {
+                            planes: inputs,
+                            calls: std::cell::Cell::new(0),
+                        };
+                        let mut results = Vec::new();
+                        for block in 0..2 {
+                            // Both arms receive the same predecessor output on each block.
+                            if mismatch == 0 {
+                                source.gather(&reads.planes, 3);
+                            }
+                            let result = if resident {
+                                chain.run_with_resident_input(&source, &mut reads, 3, block * 3)
+                            } else {
+                                chain.run(&mut reads, 3, block * 3)
+                            };
+                            results.push(result);
+                        }
+                        let counters = (
+                            chain.transposes(),
+                            chain.collapses(),
+                            chain.collapse_transitions(),
+                        );
+                        let trace = TEST_TRACE.with(|trace| trace.borrow().clone());
+                        (reads.planes, reads.calls.get(), results, counters, trace)
+                    };
+                    let old = render(false);
+                    let new = render(true);
+                    assert_planes_bit_equal(&new.0, &old.0, "resident run");
+                    assert_eq!((&new.2, &new.3, &new.4), (&old.2, &old.3, &old.4));
+                    if mismatch == 0 {
+                        assert_eq!(new.1, 0, "resident acquisition must never gather");
+                    } else {
+                        assert_eq!(new.1, old.1, "decline gathers once, after identical drains");
+                    }
+                }
+            }
+        }
+    }
 
     struct PassThrough;
     impl BankStage for PassThrough {
