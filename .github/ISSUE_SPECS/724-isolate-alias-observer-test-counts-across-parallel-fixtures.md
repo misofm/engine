@@ -100,3 +100,16 @@ authoritative source remains clean. Evidence and mutant binary are preserved in
 Root authorizes verification attempt2 with a distinct clean positive target:
 repeat only invalid full-debug, then the remaining unrun gates. Reuse the earned
 once-only negative control; no source change or further mutation is authorized.
+
+## Independent Astra XHIGH SOURCE PASS
+
+Accepted source5e9fb254, documentation head754726cc2addea512faf860ea51817f4ba4b81f7.
+Verification attempt2 passed full locked debug and release-unwind suites (50/50
+in each), strict all-target/all-feature compiler Clippy, and formatting. The
+once-only old-global physical mutation made both threads observe7, failing the
+intended2/5 assertions; source restored exactly. Test-only scope, unchanged
+production/lock/pin and original three-callback assertion were independently
+verified. The invalid cache-contaminated positive invocation remains preserved.
+Evidence: `/tmp/issue724-review-rzhy86pj/VERDICT.md`; manifest SHA-256
+30473b1dcfe3b3d661f3ca6b1711c97450947b90d2e86a1facc5a91cbab542e7.
+Corrective PR and corrected-main qualification remain mandatory before closure.
