@@ -269,7 +269,7 @@ opening checkpoint. Opening audit evidence is outside Git at
 | Stage | Status | Evidence/next authorization |
 |---|---|---|
 | Opening scope | Astra LOW PASS at reviewed head `5cff0d4740ccec8f815820743c93fc627a7d3893` | Placement-only scope accepted; #713 integration blocks implementation |
-| Dependency/API/resource preflight | Not run; blocked | Record integrated main, exact signatures and accounting before activation |
+| Dependency/API/resource preflight | Not run; dependency delivered | Astra XHIGH must perform the read-only API/resource preflight, then Astra LOW reviews before authorization |
 | Implementation attempts 1-5 | Not started; zero consumed | One coherent pass and one adversarial verdict per authorized attempt; hard stop after five failures |
 | Qualification/delivery | Not started | No product, test, SOURCE PASS, artifact or delivery credit |
 
@@ -283,3 +283,18 @@ preflight requirements remain unchanged.
 No implementation, build, test, mutation, timing, benchmark, artifact or pin work
 was performed for the opening scope. Future verdicts and failed gates must be
 recorded candidly without overwriting earlier attempt evidence.
+
+## Current integration baseline — #713 dependency delivered
+
+The #713 dependency is delivered through PR #718 at merge
+`0df770b0f1f002b563246db70b71a3991fe8a8c7`, with parents `0dc06633` and
+`be50921a`. Required run `34453900286` and verdict job `102797510876` passed;
+post-main run `34454589139` and verdict job `102799403320` passed at the exact
+merge. The current integration baseline is main
+`0df770b0f1f002b563246db70b71a3991fe8a8c7`; #713's accepted product/test
+identity remains `7576d1b6c794f01df4abeb7256a8309d45879b21`, and RT9 remains
+partial. The dependency blocker is cleared, but #714 implementation remains
+unauthorized pending Astra XHIGH's read-only API/resource preflight against
+this baseline and Astra LOW review. The exact existing allowlist and all
+no-claim boundaries remain unchanged; no product, test, timing, performance,
+artifact, pin, SOURCE PASS, or full-RT10 claim is made.
