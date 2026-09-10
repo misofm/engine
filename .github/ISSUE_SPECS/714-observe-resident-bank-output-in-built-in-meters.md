@@ -399,3 +399,32 @@ passed both tests. Exact commands, exits, source identity, diff and logs are
 preserved in `/tmp/issue714-attempt4-1kttzoal/`. This is a focused checkpoint,
 not SOURCE PASS. Astra XHIGH now owns adversarial verification under the user's
 latest routing; the original remaining finite gates and stop-on-failure rule apply.
+
+## Attempt 4 verification incomplete; fifth attempt bounded
+
+Astra XHIGH stopped on an external mutation-driver setup assertion (exit 1):
+`let resident = if eligible` occurs three times in runtime.rs because test
+strings repeat the production token. The driver incorrectly required one global
+occurrence. No product failure was demonstrated. Evidence and exact failed
+command are `/tmp/issue714-attempt4-review-tll88otr/VERDICT.md` and adjacent
+`unexpected-setup-command.py`, status, logs and final-source record.
+
+Independent tests passed: builtins meter 9/9, rack resident output 1/1, graph
+resident meter 2/2, compiler resident meter 2/2 and actual executor structural
+selector 1/1. An extra guessed selector selected zero tests and earns no credit.
+The physical planar mutation retained 9/9 meter semantics and failed the intended
+acquisition assertion with `[1,0,0]` rather than `[0,1,1]`. Shared source stayed
+clean; the external source was restored exactly before the setup failure.
+Restored decisive reruns, allocation, remaining policies/suites/targets and
+resource reconciliation are incomplete. No SOURCE PASS or delivery credit.
+
+Attempt 5 is the final attempt under the user-approved ceiling. Root authorizes
+only external verification-driver correction and completion of the original
+finite gates on unchanged product source. Scope admission mutation to the actual
+production observe_unit body, excluding embedded validator strings; require an
+exact single-site diff and restoration. Preflight actual selectors, script
+arguments and the existing-support allocation harness before executing their
+gates. Reuse existing fixtures and resource probes; no new evidence framework,
+production correction, policy weakening, timing or artifact work. Stop at the
+first unexpected failure, preserve it and return an adversarial verdict. A fifth
+failure requires a candid hard stop and bounded rescope, never a sixth retry.
