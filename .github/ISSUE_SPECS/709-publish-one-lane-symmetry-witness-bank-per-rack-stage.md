@@ -168,3 +168,43 @@ limits the claim to `BankChain` → `BankStage`, preserves external overrides,
 bounds publication by valid width and the slot-active mask, and requires one
 aggregate to serve both eligibility and agreement preservation. Fresh Astra LOW
 exact-head review is required before implementation.
+
+## Attempt 1 — FAIL
+
+Astra XHIGH supplied the implementation at clean, pushed source checkpoint
+`95af1e99d564a0e8795500c1bb46b916b18de13d`. Raw logs and Cargo targets are
+preserved at `/tmp/issue709-attempt1-28LQihgQ`; no timing, performance,
+allocation reduction, artifact, or delivery claim is made.
+
+Commands ran from `/home/bl/misofm/engine-rt6-stage-symmetry-witnesses` with
+`CARGO_TARGET_DIR=/tmp/issue709-attempt1-28LQihgQ/target`:
+
+| Exact command after the target-directory assignment | Result | Log |
+| --- | --- | --- |
+| `cargo test --locked -p rack stage_witness_bank -- --nocapture` | Exit 0; all 3 claim-discriminating inline tests passed | `01-focused.log` |
+| `cargo test --locked -p rack` | Exit 0; 33 inline, 10 console-bank and 4 re-engagement tests passed | `02-debug.log` |
+| `CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked -p rack --release` | Exit 0; the same 47 tests passed | `03-release.log` |
+| `cargo clippy --locked -p rack --all-targets -- -D warnings` | Exit 101; blocking `clippy::collapsible_if` in the new inline test's `WitnessStage::begin_block`, `crates/rack/src/lib.rs:5092` | `04-clippy.log` |
+
+The attempt stopped at that first failed gate without a fix or retry. The
+render-allocation harness, workspace/realtime policies and mutation gates,
+native/Wasm portability builds, final formatting gate and exact diff review
+were not completed. No allocation-harness files were created.
+
+Astra LOW (`/root/issue709_astra_low_scope`) recorded **Attempt 1 FAIL** on that
+clean, pushed checkpoint: the Clippy log confirms the blocker; allocation,
+policy and portability qualification remain incomplete; **no SOURCE PASS**.
+No additional blocking source finding emerged. The reviewer authorized
+Attempt 2 solely to combine the nested conditional without suppression,
+update this decision record, and rerun the complete required gate sequence
+within the same owned paths, preserving Attempt 1 evidence and stopping at
+the first failure.
+
+## Attempt 2 — correction in progress
+
+Sol authorized Astra XHIGH to apply only that conditional correction from
+`95af1e99d564a0e8795500c1bb46b916b18de13d`. Attempt 2 evidence is separate at
+`/tmp/issue709-attempt2-nTfNNWlH`. The first tranche is limited to
+`cargo fmt --check`, the three focused tests and strict rack Clippy, followed
+by a pause for Sol's checkpoint before the remaining gates. No verdict or
+qualification claim is implied by this authorization.

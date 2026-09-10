@@ -5089,10 +5089,10 @@ mod tests {
 
         fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
             record_witness_call(|calls| calls.begun |= 1 << self.inner.id);
-            if first_sample == 8 {
-                if let Some(witness) = self.drain_change {
-                    self.inner.witnesses[0] = witness;
-                }
+            if first_sample == 8
+                && let Some(witness) = self.drain_change
+            {
+                self.inner.witnesses[0] = witness;
             }
             Ok(())
         }
