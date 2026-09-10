@@ -323,3 +323,42 @@ reproduce and qualify it. No artifact acceptance, SOURCE delivery or browser
 claim follows. Exact command/environment/stdout/stderr are external at
 `/tmp/issue710-artifact-88js3ptr/probe.*`; locked SDK/browser dependency setup
 also passed. The next step is one ordinary six-file build and existing gates.
+
+## Current-source and artifact qualification checkpoint
+
+Independent Astra XHIGH records INTEGRATION SOURCE PASS for 5a66a1fa: exact
+merge parents f991f8a4 and 92a00bc5, accepted product/test hashes unchanged,
+all five focused gate receipts verified. Subsequent c375ca98 changes only the
+provisional pin/spec.
+
+The ordinary builder reproduced the observed digest and exact six-file set.
+Every following command exited 0 against that same external artifact (no
+retries). Let A=/tmp/issue710-artifact-88js3ptr/artifact:
+
+```sh
+bash scripts/build-web-audioworklet.sh "$A"
+bash scripts/check-web-audioworklet.sh "$A"
+python3 -B scripts/check-browser-expected-resources.py --artifacts "$A"
+bash scripts/test-web-audioworklet.sh
+bash scripts/check-sdk-types.sh
+bash scripts/check-sdk-headless.sh "$A"
+bash scripts/sdk-package.sh check "$A"
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts "$A" --browser all --record-matrix --candidate-commit 5a66a1fa41e57437cfc76ee27d30a59fce0dbbcb --self-test-mutations
+node hosts/host-web/qualification/generate-matrix.mjs --check
+```
+
+Ordinary build ran with repin mode unset. Actual argv, source commit, external
+TMPDIR/CARGO_TARGET_DIR, timestamps, exits, stdout and stderr are preserved at
+`/tmp/issue710-artifact-88js3ptr/`, with `qualification-commands.json` and
+`artifact-sha256.json`. SDK headless passed 188/188; publishable-tarball passed.
+Static render closure, boot budget, native/browser corpus/resource parity and
+26 resource negative controls passed. Chromium 151.0.7922.34, Firefox 153.0 and
+WebKit 26.5 passed every existing matrix gate. Generated results differ from
+main only in source/digest lineage; floors and expectations are unchanged.
+All five non-Wasm payload identities remain current-main identities, including
+#719 host JS/declarations; only the Wasm digest changes. These are existing
+headless browser correctness gates, not physical-device or performance claims.
+
+Final XHIGH artifact/evidence review and exact-head PR/main qualification are
+still required before synchronized closure. No registry publication is part of
+this delivery.
