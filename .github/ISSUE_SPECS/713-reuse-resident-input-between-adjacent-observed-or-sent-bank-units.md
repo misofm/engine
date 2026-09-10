@@ -49,16 +49,20 @@ Graph bind/runtime privately proves the resident-input candidate for immediately
 adjacent emitted bank units. Its proof covers backend, lane/dataflow identity,
 bank width, render quantum, populated-lane set, lane order, the exact successor
 first-slot predecessor output, one undelayed main input, and the absence of
-reduction, sidechain, or staging on that input. It also proves that folded or
-transformed output, nonadjacency, extra readers, and unsupported observation or
-send relationships decline before the resident entry is reached.
+reduction, sidechain, or staging on that input. Because predecessor scatter
+remains, the separate resident predicate may admit extra readers, planar sends,
+direct observers, and observed aliases. Each such reader/send/observer keeps its
+original planar path and execution order. Admission still declines folded or
+transformed predecessor output, nonadjacency, backend/width/quantum/lane
+mismatch, changed B input identity, delay/reduction/sidechain/staging, or any
+relationship that would change execution order.
 
 The existing `chains_into` extra-reader, direct-observer, and alias-observer
-declines remain unchanged. Do not weaken its reader, send, sidechain,
-session-output, or alias-observer proofs and do not turn this child into a
-general chain executor rewrite. Rack does not reject nonadjacency or
-current-block identity and does not accept a caller-trusted mode; graph owns
-those proofs.
+declines remain unchanged and are irrelevant to this separate resident
+admission. Do not weaken its reader, send, sidechain, session-output, or
+alias-observer proofs and do not turn this child into a general chain executor
+rewrite. Rack does not reject nonadjacency or current-block identity and does
+not accept a caller-trusted mode; graph owns those proofs.
 
 ## Safe resident run API and word semantics
 
@@ -110,6 +114,15 @@ acquisition would overwrite:
 The allocation/equivalence fixtures must poison inactive lanes and right scratch
 to discriminate an overbroad copy. No public mutable scratch API, retained
 borrow, unsafe alias, or public mode/error type is authorized.
+
+## Structural resident-call gate
+
+A captured `rg`/source validator must find exactly one non-test production call
+to `run_with_resident_input`, located in graph's adjacency- and
+freshness-enforcing execution path. The method definition, its private wrapper,
+and test calls are accounted for separately. A mutation that adds or moves a
+second production call, or bypasses graph admission, must fail this same source
+gate. Do not add a policy or script path for this check.
 
 ## Current-block freshness and placement
 
@@ -189,7 +202,9 @@ producer-process failure, observation failure, successor-begin failure, and
 successor-process failure with ordered traces and subsequent-state checks.
 Exercise nonunity crossfeed sends, delayed PDC, an extra consumer, fanout and
 reduction. Cover independent collapse modes and recovery, scalar and incompatible
-controls, nonadjacent controls, and the forced old acquisition path.
+controls, nonadjacent controls, and the forced old acquisition path. Direct,
+alias, multiple-observer, and planar-send fixtures are positive resident cases
+when the separate predicate holds; incompatible forms remain controls.
 
 One mutation must restore the old planar gather and fail the physical resident-
 acquisition assertion while semantic PCM/reference checks remain meaningful. Keep
@@ -218,9 +233,10 @@ and issue synchronization remain mandatory for any later delivery.
 
 - Only eligible adjacent compatible units use resident input, with a provable
   identical word copy into existing successor scratch.
-- The safe resident-copy method exposes no scratch or retained references,
-  returns a typed/explicit fallback for every frozen mismatch, and leaves the
-  unchanged `run` path available.
+- The safe resident execution entry exposes no scratch or retained references;
+  every local mismatch selects ordinary gather within the same invocation and
+  leaves the unchanged `run` path available, while execution failures return
+  the existing `Result<(), RenderError>`.
 - Partial and mono copy masks preserve inactive lanes and untouched right
   scratch, with poisoned discriminators covering accidental writes.
 - Current-block freshness, predecessor observation ordering, successor begin and
@@ -231,6 +247,12 @@ and issue synchronization remain mandatory for any later delivery.
   unchanged.
 - Existing `chains_into` declines remain intact, including extra readers,
   direct observers, alias observers, sends, sidechains, and nonadjacent cases.
+- The separate resident predicate admits positive extra-reader, planar-send,
+  direct-observer, and observed-alias cases only when the frozen identity and
+  order proof holds; their original planar paths remain observable.
+- The source validator finds exactly one non-test production call to
+  `run_with_resident_input`, and its admission-bypass/second-call mutation fails
+  the same gate.
 - Old/reference and resident paths pass the finite scalar/W4/W8 behavioral and
   failure matrix, including the forced old-acquisition control and physical
   mutation failure.
@@ -254,5 +276,17 @@ scope review.
 
 No product source, test, artifact, pin, timing, or benchmark change is made by
 this opening checkpoint. The opening scope review failed before implementation;
-this correction consumes no implementation attempt. No RT-9 full-delivery or
-performance credit is claimed.
+the copy-only API correction also failed before implementation, and this is the
+current correction. No implementation attempt was consumed by any of those
+scope reviews. No RT-9 full-delivery or performance credit is claimed.
+
+## Scope correction history
+
+- Astra LOW returned **SCOPE FAIL** for opening checkpoint
+  `211fb5ee142287ca029683c1f98e84da552c39eb`; no implementation ran and no
+  attempt was consumed.
+- Astra LOW returned **SCOPE FAIL** for the copy-only API correction
+  `ee1fab399cde253e87303426e90c31858a3725f8`; no implementation ran and no
+  attempt was consumed.
+- `f55b1e4e32e5e294d7cb1a16ff0786336496cfc2` is the current correction under
+  review. It is still scope work only; no implementation attempt is consumed.
