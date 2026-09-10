@@ -227,3 +227,13 @@ performance or physical-device claim.
 Both #709/#722 cite this shared artifact evidence. Final XHIGH artifact review,
 exact-head PR qualification, guarded merge and exact-main qualification remain
 required before synchronized closure. No registry publication.
+
+## Independent shared artifact PASS
+
+Astra XHIGH accepts exact pushed401a09f4: product source unchanged from joint
+PASSb823abb0; all actual six-file hashes, probe/ordinary/pin agreement, five
+unchanged non-Wasm identities, eight successful qualification receipts and
+lineage-only matrix diff verified. Both live issue bodies matched the specs.
+No rerun or blocker. This appended verdict changes only decision records;
+required exact-head PR qualification, guarded merge and exact-main qualification
+remain before synchronized closure.
