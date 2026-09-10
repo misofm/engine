@@ -269,8 +269,8 @@ opening checkpoint. Opening audit evidence is outside Git at
 | Stage | Status | Evidence/next authorization |
 |---|---|---|
 | Opening scope | Astra LOW PASS at reviewed head `5cff0d4740ccec8f815820743c93fc627a7d3893` | Placement-only scope accepted; #713 integration blocks implementation |
-| Dependency/API/resource preflight | Not run; dependency delivered | Astra XHIGH must perform the read-only API/resource preflight, then Astra LOW reviews before authorization |
-| Implementation attempts 1-5 | Not started; zero consumed | One coherent pass and one adversarial verdict per authorized attempt; hard stop after five failures |
+| Dependency/API/resource preflight | Astra XHIGH PREFLIGHT PASS; Astra LOW independent PREFLIGHT PASS | Evidence and frozen-signature findings recorded below; no attempt consumed |
+| Implementation attempts 1-5 | Attempt 1 explicitly authorized; zero consumed | Astra XHIGH may execute one coherent pass within the existing allowlist and focused gate order; one adversarial verdict follows |
 | Qualification/delivery | Not started | No product, test, SOURCE PASS, artifact or delivery credit |
 
 Scope review: Astra LOW PASS at `5cff0d4740ccec8f815820743c93fc627a7d3893`,
@@ -293,8 +293,24 @@ post-main run `34454589139` and verdict job `102799403320` passed at the exact
 merge. The current integration baseline is main
 `0df770b0f1f002b563246db70b71a3991fe8a8c7`; #713's accepted product/test
 identity remains `7576d1b6c794f01df4abeb7256a8309d45879b21`, and RT9 remains
-partial. The dependency blocker is cleared, but #714 implementation remains
-unauthorized pending Astra XHIGH's read-only API/resource preflight against
-this baseline and Astra LOW review. The exact existing allowlist and all
+partial. The dependency blocker is cleared, and the read-only API/resource
+preflight against this baseline has passed independent Astra LOW review; Attempt
+1 is authorized within the existing allowlist and focused gate order. The exact
+existing allowlist and all
 no-claim boundaries remain unchanged; no product, test, timing, performance,
 artifact, pin, SOURCE PASS, or full-RT10 claim is made.
+
+## Astra XHIGH PREFLIGHT PASS — Attempt 1 authorized
+
+Astra XHIGH completed the read-only API/resource preflight at evidence root
+`/tmp/issue714-preflight-qxddd3h5`; its manifest SHA-256 is
+`f41d01a56c79898f7670bba34d2ffd431351c341b133111c6fe21f5599aa1b71`.
+Frozen signatures were taken from `FROZEN_API.md`. The findings retain the safe
+borrow ownership, E0506, final-right, default-decline, accepted-error, and lazy
+fallback requirements. Native, Wasm scalar, and Wasm SIMD128 resource accounting
+recorded zero retained, peak, largest, and allocation deltas. Wasm remains
+compile-only for this preflight. Astra LOW independently returned PREFLIGHT
+PASS. Zero implementation attempts were consumed; Attempt 1 is explicitly
+authorized to Astra XHIGH within the existing allowlist and focused gate order.
+This records no artifact, pin, timing, performance, SOURCE PASS, or full-RT10
+claim.
