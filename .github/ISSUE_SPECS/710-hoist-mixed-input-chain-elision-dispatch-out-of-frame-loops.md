@@ -141,7 +141,7 @@ specified order, mono leaves channel 1 untouched, and the approximately 374
 integration-test lines are proportional. Selector instrumentation and broader
 qualification remain incomplete; no SOURCE PASS was recorded.
 
-## Attempt 2 — narrow correction authorized
+## Attempt 2 — required implementation gates complete; review pending
 
 Astra LOW and Sol authorized only qualifying the test macros as
 `std::thread_local!` and `std::vec!`, updating this record and rerunning the
@@ -150,7 +150,89 @@ authorized. Astra XHIGH applied those three qualifications without changing
 the integration tests. Attempt 2 evidence is separate at
 `/tmp/issue710-attempt2-IYCU7pK6`; Attempt 1 evidence remains preserved.
 
-Sol requires formatting, frozen-reference provenance, the full
-`input_chain_elision` integration target and the `mixed_elision` lib test,
-then a pause for checkpoint before broader gates. No timing, speedup,
-artifact, pin, delivery or SOURCE PASS claim is made.
+The correction's formatting, frozen-reference provenance, nine integration
+tests and one selector-count test passed (`01`–`04` logs and
+`focused-results.jsonl`). Astra XHIGH paused; Sol audited, committed and pushed
+the exact source checkpoint `c5b08616454d7367fc3e758cd541a0873c503ba5`.
+Sol then authorized a restart of the full sequence on that frozen source.
+All commands below passed without a failed gate or retry. This record is an
+implementation evidence report, pending the separate Astra LOW verdict.
+
+Commands ran from `/home/bl/misofm/engine-rt7-hoist-elision-plan` with Rust/Cargo
+1.97.1. Let `E=/tmp/issue710-attempt2-IYCU7pK6`; the default Cargo target was
+`CARGO_TARGET_DIR=$E/target`. Native commands inherited the repository's
+approved `-C target-feature=+avx2,+fma` configuration. Policy commands also
+used `TMPDIR=$E/policy-tmp`; scripts with explicit `/tmp` scratch paths kept
+their existing behavior. `toolchain-and-environment.log` records toolchain,
+installed targets and flag environment. `full-results.jsonl` records literal
+argv, environment overrides, source commit and exit for every row. Log names
+below are relative to `E` and have the suffix `.log`.
+
+| Exact command (environment overrides shown where different) | Result | Log |
+| --- | --- | --- |
+| `cargo fmt --check` | Exit 0 | `full-01-fmt` |
+| `python3 "$E/verify-frozen-references.py"` | Exit 0; both actual pre-change bodies equal their frozen copies after restoring only function names | `full-02-frozen-reference` |
+| `cargo test --locked -p lane --test input_chain_elision -- --nocapture` | Exit 0; 9 passed | `full-03-input-chain-elision` |
+| `cargo test --locked -p lane --lib mixed_elision -- --nocapture` | Exit 0; 1 passed | `full-04-selection-count` |
+| `CARGO_TARGET_DIR="$E/mutation-target" cargo test --offline --manifest-path "$E/inner-plan-mutation/Cargo.toml" --test input_chain_elision mixed_elision_production_structure_selects_before_frames_and_audits_helpers -- --exact --nocapture` | Compiled; expected test exit 101 at the intended structural assertion; validator exit 0 | `full-05-inner-plan-mutation` |
+| `cargo test --locked -p lane --test sanitise_counter` | Exit 0; 2 passed | `full-06-sanitise` |
+| `cargo test --locked -p builtins --test mono_collapse --test input_liveness_mono` | Exit 0; 10 passed | `full-07-builtin-mono` |
+| `CARGO_TARGET_DIR="$E/allocation-target" cargo run --offline --release --manifest-path "$E/allocation-harness/Cargo.toml"` | Exit 0; detector liveness and 288 audited calls passed | `full-08-allocation` |
+| `cargo test --locked -p lane` | Exit 0; 48 passed, 2 descriptive timing tests ignored | `full-09-debug` |
+| `CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked -p lane --release` | Exit 0; 48 passed, same 2 ignored | `full-10-release` |
+| `cargo clippy --locked -p lane --all-targets -- -D warnings` | Exit 0 | `full-11-clippy` |
+| `bash scripts/check-workspace-policy.sh` | Exit 0 | `full-12-workspace-policy` |
+| `bash scripts/check-lane-policy.sh` | Exit 0 | `full-13-lane-policy` |
+| `bash scripts/check-realtime-policy.sh` | Exit 0; 41 regions in 12 files | `full-14-realtime-policy` |
+| `bash scripts/check-unfused-seal.sh` | Exit 0 | `full-15-unfused-seal` |
+| `bash scripts/check-realtime-audit-leak.sh` | Exit 0; production dependency graphs exclude audit instrumentation | `full-16-realtime-audit-leak` |
+| `bash scripts/test-workspace-policy.sh` | Exit 0; expected counter-mutation diagnostics retained | `full-17-workspace-mutations` |
+| `bash scripts/test-lane-policy.sh` | Exit 0 | `full-18-lane-mutations` |
+| `bash scripts/test-realtime-policy.sh` | Exit 0 | `full-19-realtime-mutations` |
+| `bash scripts/test-realtime-audit-leak.sh` | Exit 0 | `full-20-audit-leak-mutations` |
+| `cargo build --locked --release -p lane --target x86_64-unknown-linux-gnu` | Exit 0; approved native ISA flags | `full-21-native-build` |
+| `CARGO_TARGET_DIR="$E/wasm-scalar" cargo build --locked --release -p lane --target wasm32-unknown-unknown` | Exit 0 | `full-22-wasm-scalar` |
+| `CARGO_TARGET_DIR="$E/wasm-simd128" CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128" cargo build --locked --release -p lane --target wasm32-unknown-unknown` | Exit 0 | `full-23-wasm-simd128` |
+| `python3 "$E/verify-final-source.py"` | Exit 0; exact HEAD/upstream, clean tree, base/brief diffs confined to the three owned paths, unchanged product/test hashes, actual brief provenance and prior gate statuses verified | `full-24-source-review` |
+
+The one external mutation passed the runtime plan into the specialized body
+and restored all three per-frame conditions to `plan.elided` lookups. The
+production structural test rejected it with
+`runtime plan/control in frame body or helper: mixed_channel_block: InputChainPlan`.
+It compiled and reached that assertion: 0 passed, 1 failed, 8 filtered out.
+The isolated manifest emitted two existing `miso_wasm_simd8` check-cfg warnings
+because it does not inherit the workspace lint declarations; these did not
+cause the rejection. The input copy, manifest, source, test and exact
+`mutation.diff` remain under `E/inner-plan-mutation`; their hashes are in
+`mutation-input-sha256.json`. Mutation-diff SHA-256 is
+`63f7ceeac7d6053148dbe5679edc0ddb408bd07d1ea18a9de6b10b028a35bdb5`.
+The authoritative checkout was never mutated for this gate.
+
+The external allocation harness used the public dual/mono elided entries,
+actual prepared plans for all 16 pairings, different channel data/trim,
+nonfinite and signed-zero inputs, and 0/1/17 frames at scalar/W4/W8. Its
+288 scoped calls include every mixed shape and the existing fast paths;
+each had zero allocations and frees. Mono channel-1 sentinels stayed intact.
+The System-forwarding detector first observed its expected 3 allocations and
+3 frees across alloc, zeroed alloc, realloc and dealloc. All buffers were
+prepared outside the measured intervals; this checks kernel allocation, not
+whole-host rendering or syscalls. Harness source, manifest, generated lockfile,
+binary and target remain external. `allocation-input-sha256.json` records
+manifest SHA-256 `330d8145d95b0653aba6b26e4a2abc1505b52d5686c4fd27e85297aaa634c393`
+and source SHA-256 `0fa81daf3d655a7f265af1b972d3e70b502bd0ecad62ba8be88573e6347c7810`.
+
+`qualified-source.diff` preserves the reviewed base-to-source diff.
+`frozen-checkpoint-sha256.json` and the final review confirm product SHA-256
+`217815ba5ddddf85a3a3ed7d522103a8a8b20730e69f395fcdc2a29ce42e08f1`
+and unchanged integration SHA-256
+`b30e02d8171ae994ee53a5f09d6088d7f141745e3a5dd9a33c1a7008d805023b`.
+No source or test edit followed the checkpoint; only this decision record
+changed after qualification.
+
+Bitwise and allocation executions are native scalar/W4/W8 evidence. Wasm
+results establish compilation only; no Wasm runtime or AArch64 execution was
+performed. The structural gate checks the production source and its named
+free-helper closure, not an assembly or cycle claim. No timing, speedup,
+AudioWorklet, artifact, pin, PR, merge, delivery or SOURCE PASS claim is made.
+Astra XHIGH pauses here for Sol's exact-path checkpoint audit and Astra LOW's
+independent adversarial review.
