@@ -428,3 +428,33 @@ gates. Reuse existing fixtures and resource probes; no new evidence framework,
 production correction, policy weakening, timing or artifact work. Stop at the
 first unexpected failure, preserve it and return an adversarial verdict. A fifth
 failure requires a candid hard stop and bounded rescope, never a sixth retry.
+
+## Attempt 5 FAIL — frozen at the hard stop
+
+Astra XHIGH stopped at the required realtime policy gate on unchanged product
+source `b0f80bc4fbf39c7a2121daa6caa3b9d4eb7283f9` (product hashes equal
+ad9685fc). `bash scripts/check-realtime-policy.sh` exited 1:
+`crates/graph/src/runtime.rs has unmatched realtime policy markers`. The
+structural fixture embeds two complete END-marker strings at lines 4144/4152;
+the raw scanner counts eight BEGIN and ten END lines, despite eight actual
+paired regions. No render arithmetic or allocation failure is demonstrated.
+
+Evidence: `/tmp/issue714-attempt5-review-aj9srv1e/VERDICT.md`, exact per-command
+receipts/logs and source copies; manifest SHA-256
+471ff0b7722872d670114f0499996bd379d3f2681cd889153f26dd237e616848.
+Earned gates: admission/order physical negative controls and exact restored
+reruns; live detector and accepted/declined prepared renders with zero
+allocations/frees, eight queued plus one later publication and two drops;
+268 tests in each debug/release-unwind profile; all four strict Clippy suites;
+formatting; workspace/rack/graph/builtins/lane policies and self-tests.
+
+Realtime self-tests, audit-leak, unfused seal, native/Wasm build/atomics and
+current candidate layout measurements did not run after the failure. Fifteen
+retained owner definitions and preparation allocation contracts remain unchanged,
+but this does not grant the unexecuted gates. No SOURCE PASS or delivery.
+
+All five attempts are consumed. Implementation is frozen; no sixth repair or
+retry is authorized. An independently scoped, bounded successor may correct
+only the structural fixture delimiter expressions while preserving production
+and policy behavior, then earn its stated remaining qualification. Preserve
+all earlier failures and gate evidence; do not silently restart this feature.
