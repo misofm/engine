@@ -268,10 +268,17 @@ opening checkpoint. Opening audit evidence is outside Git at
 
 | Stage | Status | Evidence/next authorization |
 |---|---|---|
-| Opening scope | Prepared; adversarial review pending | Placement-only scope; #713 integration blocks implementation |
+| Opening scope | Astra LOW PASS at reviewed head `5cff0d4740ccec8f815820743c93fc627a7d3893` | Placement-only scope accepted; #713 integration blocks implementation |
 | Dependency/API/resource preflight | Not run; blocked | Record integrated main, exact signatures and accounting before activation |
 | Implementation attempts 1-5 | Not started; zero consumed | One coherent pass and one adversarial verdict per authorized attempt; hard stop after five failures |
 | Qualification/delivery | Not started | No product, test, SOURCE PASS, artifact or delivery credit |
+
+Scope review: Astra LOW PASS at `5cff0d4740ccec8f815820743c93fc627a7d3893`,
+against main `b1f9128f3e06532afdfc16aad661c4b2deb5dea1` and tracker
+`6063cd58d3a966db94d9fb728d422ed860f3a734`. This records scope approval only:
+there is no implementation authorization, attempt consumption, or credit. The
+#713 dependency, integration gate, lane-B ownership boundary, and all finite
+preflight requirements remain unchanged.
 
 No implementation, build, test, mutation, timing, benchmark, artifact or pin work
 was performed for the opening scope. Future verdicts and failed gates must be
