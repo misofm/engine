@@ -87,3 +87,16 @@ Actual commands, environment, exit status and logs are preserved externally in
 change was preserved externally and restored; no dependency change is included.
 These focused commands lacked --locked; independent review uses --locked.
 Root audited the exact-path checkpoint. Independent XHIGH verdict and CI remain.
+
+## Verification attempt 1 — cache contamination; bounded attempt 2
+
+The external old-global negative control discriminated correctly: both threads
+saw7 rather than2/5, exit101. The verifier then incorrectly reused its target
+cache for the positive checkout; Cargo ran the mutant binary without rebuilding
+(0.06s). This invalid positive result is a verifier failure, not source evidence.
+Both source copies were restored/verified against accepted TLS hash41265ed3;
+authoritative source remains clean. Evidence and mutant binary are preserved in
+`/tmp/issue724-review-rzhy86pj`. Release/Clippy/format did not start.
+Root authorizes verification attempt2 with a distinct clean positive target:
+repeat only invalid full-debug, then the remaining unrun gates. Reuse the earned
+once-only negative control; no source change or further mutation is authorized.
