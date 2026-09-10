@@ -228,7 +228,9 @@ test("createEngine snapshots document and nested policy before scratch awaits an
 test("preparation compiles once, disposes scratch, and yields fresh stateful live DSP and meter origins", async () => {
   const effects = ["miso.parametric-eq", "miso.compressor", "miso.delay"].map((id, index) => {
     const row = CATALOG.effects.find(effect => effect.id === id);
-    return effectEntry(`fx${index}`, id, row.parameters.map(parameter => ({ id: parameter.id, unit: parameter.unitName, value: parameter.default })));
+    const values = id === "miso.parametric-eq" ? { 1: 1, 3: 1000, 4: 6 }
+      : id === "miso.delay" ? { 1: 5, 2: 0.5, 4: 0.5 } : {};
+    return effectEntry(`fx${index}`, id, row.parameters.map(parameter => ({ id: parameter.id, unit: parameter.unitName, value: values[parameter.id] ?? parameter.default })));
   });
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode(sessionDocument({ effects: { simd1: effects }, frames: 16384 }));
@@ -246,12 +248,25 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   try {
     assert.equal(live.renderedQuanta(), 0n); assert.deepEqual(live.shape(), prepared.shape);
     live.meterLease(true); reference.meterLease(true);
+    let meterWindows = 0, delayedEnergy = 0;
     for (let block = 0; block < 8; block++) {
-      const pcm = ramp(128, block + 1);
+      // Excite the effects once, then observe their history while the source is silent.
+      const pcm = block === 0 ? ramp(128, 1) : new Float32Array(128);
       for (const boundary of [live, reference]) assert.equal(boundary.submitSource({ sourceId: "s", generation: 1n, startFrame: BigInt(block * 128), planes: [pcm, pcm], endOfRegion: false }).ok, true);
-      assert.deepEqual(live.render(128), reference.render(128));
-      assert.deepEqual(live.pollMeters(), reference.pollMeters());
+      const output = live.render(128);
+      assert.deepEqual(output, reference.render(128));
+      if (block === 0) assert.notDeepEqual(output.left, pcm, "active processing changes unaffected input");
+      if (block >= 2) for (const value of output.left) delayedEnergy += value * value;
+      const meter = live.pollMeters();
+      assert.deepEqual(meter, reference.pollMeters());
+      if (meter !== undefined) {
+        assert.equal(meter.firstSample, BigInt(meterWindows * 256));
+        assert.equal(meter.endSample, BigInt((meterWindows + 1) * 256));
+        meterWindows++;
+      }
     }
+    assert.equal(meterWindows, 4, "live meter windows originate at sample zero");
+    assert.ok(delayedEnergy > 0.001, "short wet feedback delay produces a nontrivial tail within eight quanta");
   } finally { live.dispose(); reference.dispose(); }
 });
 
@@ -306,4 +321,21 @@ for (const cloneFault of [false, true]) test(`actual prepared worker structured 
     else { const prepared = await pending; assert.ok(prepared.module instanceof WebAssembly.Module); assert.notEqual(prepared.module, sentModule); await WebAssembly.instantiate(prepared.module, {}); }
     worker.assertClosed();
   } finally { globalThis.self = previous.self; globalThis.fetch = previous.fetch; }
+});
+
+
+test("preparation admits several independent mono and stereo sources", async () => {
+  const document = JSON.parse(sessionDocument({ frames: 257 }));
+  const source = document.sources[0], track = document.tracks[0], route = document.routes[0];
+  document.sources = []; document.tracks = []; document.routes = [];
+  for (const [index, channels] of [1, 2, 1, 2].entries()) {
+    const sourceId = `s${index}`, trackId = `t${index}`;
+    document.sources.push({ ...source, id: sourceId, channels, frames: String(257 + index) });
+    document.tracks.push({ ...track, id: trackId, source_id: sourceId, right_source_channel: channels - 1 });
+    document.routes.push({ ...route, id: `route${index}`, source: { ...route.source, track_id: trackId } });
+  }
+  const prepared = await prepareBrowserSessionInWorker({ moduleBytes: await moduleBytes(), document: new TextEncoder().encode(JSON.stringify(document)), options: { sourceRingFrames: 256 } });
+  assert.deepEqual(prepared.shape.sources.map(source => [source.id, source.channels, source.frames]), [
+    ["s0", 1, 257n], ["s1", 2, 258n], ["s2", 1, 259n], ["s3", 2, 260n],
+  ]);
 });
