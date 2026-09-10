@@ -45,65 +45,82 @@ copy remains. This is not a timing, cycle, or full-selective-tee claim.
 
 ## Frozen eligibility and declines
 
-Admit resident input only when all of these are proven at preparation time for
-immediately adjacent emitted bank units:
+Graph bind/runtime privately proves the resident-input candidate for immediately
+adjacent emitted bank units. Its proof covers backend, lane/dataflow identity,
+bank width, render quantum, populated-lane set, lane order, the exact successor
+first-slot predecessor output, one undelayed main input, and the absence of
+reduction, sidechain, or staging on that input. It also proves that folded or
+transformed output, nonadjacency, extra readers, and unsupported observation or
+send relationships decline before the resident entry is reached.
 
-- backend, bank width, render quantum, populated-lane set, and lane order match;
-- every successor first-slot input is exactly the predecessor's final output;
-- the successor has one undelayed main input and no reduction, sidechain, or
-  staging path for that input; and
-- the retained words are the same planar/AoSoA values that the old successor
-  gather would have acquired.
+The existing `chains_into` extra-reader, direct-observer, and alias-observer
+declines remain unchanged. Do not weaken its reader, send, sidechain,
+session-output, or alias-observer proofs and do not turn this child into a
+general chain executor rewrite. Rack does not reject nonadjacency or
+current-block identity and does not accept a caller-trusted mode; graph owns
+those proofs.
 
-Decline on any mismatch, folded or transformed output, nonadjacency, or identity
-that cannot be proved from the lowered program and prepared metadata. The
-existing `chains_into` extra-reader, direct-observer, and alias-observer declines
-remain unchanged. Do not weaken its reader, send, sidechain, session-output, or
-alias-observer proofs and do not turn this child into a general chain executor
-rewrite.
+## Safe resident run API and word semantics
 
-## Safe resident-copy API and word semantics
+Because `BankChain` scratch is private, authorize one narrow safe public rack
+entry for graph's adjacent prepared-unit path. Freeze the exact preferred
+signature as:
 
-Because `BankChain` scratch is private, authorize one narrow safe rack method (or
-equivalent trait hook) for graph's adjacent prepared-unit path. Freeze the
-preferred shape as:
-
-```text
-BankChain::copy_resident_input_into(
-    &self,
-    successor: &mut BankChain,
-    frames: usize,
-    mode: ResidentInputMode,
-) -> Result<(), ResidentInputError>
+```rust
+pub fn run_with_resident_input<M: BankMembers + ?Sized>(
+    &mut self,
+    predecessor: &BankChain,
+    members: &mut M,
+    frames: u32,
+    first_sample: u64,
+) -> Result<(), RenderError>;
 ```
 
-The method copies from the predecessor's current resident output into the
-successor's existing scratch. It exposes no mutable scratch, retains no
-references, and is callable only for the graph's adjacent prepared units. Its
-typed error/fallback must reject at least width, frame-count, mode, active-lane,
-nonadjacency, and unavailable/current-block mismatches. The unchanged `run`
-method remains the old acquisition path and remains valid for every decline.
+The existing public `run` keeps its signature and delegates with
+`predecessor: None` to one private `run_with_input(..., predecessor:
+Option<&BankChain>)`; `run_with_resident_input` delegates to that same private
+method with `Some(predecessor)`. Both entries therefore share one executor, and
+the unchanged `run` retains the old acquisition behavior for every ordinary
+case.
+
+At the start of the private invocation, rack validates only local stored source
+compatibility before successor drains: equal width, quantum, active mask,
+destination bounds, and no unsupported predecessor epilogue. A local decline
+selects ordinary gather inside that same invocation. It does not return a public
+mode/error choice and it never calls `run` again. All local compatibility checks
+complete before any destination write.
+
+The method exposes no mutable scratch and retains no references. It is the sole
+production rack entry used by graph for the graph-owned adjacent proof; no
+execution token or caller-trusted compatibility flag is introduced. The private
+mode is derived only after this invocation's drains from its collapse decision.
+The successor then runs `begin_block`, witness, collapse, and agreement in their
+existing order; at the existing acquisition boundary it copies resident words
+or performs the ordinary gather, followed by unchanged stages, seam, scatter,
+and epilogue.
 
 The copy is mode-aware and overwrites exactly the words the successor's old
 acquisition would overwrite:
 
-- partial gathers write only active lanes;
-- mono gathers leave right-channel scratch untouched; and
-- inactive lanes and untouched right scratch remain unchanged, or a separate
-  proof establishes that those words are unobservable.
+- partial gathers write only active-lane words;
+- mono gathers write only the left plane and leave right scratch untouched; and
+- inactive lanes and untouched right scratch remain unchanged, with no
+  unobservability waiver for the discriminator path.
 
 The allocation/equivalence fixtures must poison inactive lanes and right scratch
 to discriminate an overbroad copy. No public mutable scratch API, retained
-borrow, unsafe alias, or caller-trusted compatibility flag is authorized.
+borrow, unsafe alias, or public mode/error type is authorized.
 
 ## Current-block freshness and placement
 
-Resident input is valid only after predecessor execution succeeds and its
-predecessor observation completes. Successor `begin_block` and collapse
-decisions occur in their original order before resident acquisition. Graph uses
-safe disjoint borrowing, such as a split unit slice, and never aliases the two
-owners. A producer process or observation failure prevents B from executing; it
-falls back by not executing B and never by reusing stale resident data.
+Graph reaches B only after A executes successfully and A's observation completes
+in the same invocation. Safe disjoint borrowing (for example, a split unit
+slice) gives A immutable access and B mutable access without aliasing owners.
+Rack validates its local stored shape before B drains. Then B's
+`begin_block`/witness/collapse/agreement decisions occur once in their original
+order before resident acquisition. A producer process or observation failure
+prevents B from executing; no stale resident data is reused and `run` is never
+called a second time on decline or error.
 
 Preserve `BankChain::transposes` semantics. Add only private or test-only gather
 evidence that distinguishes the resident acquisition from the old planar gather;
