@@ -84,3 +84,13 @@ source patch and logs: `/tmp/issue387-implementation-20260910`.
 The original named crash artifact remains unavailable; preserved regressions
 are content-equivalent reproducers. No claim of baseline/actual-Wasm/fuzz or
 artifact qualification PASS yet. Root checkpoints; Astra XHIGH reviews next.
+
+## Provisional artifact checkpoint
+
+Root's first probe invocation refused before compilation because its output
+directory did not exist (exit2); receipt retained. After creating the required
+empty directory, one probe build passed on sourceee779e2f. New provisional Wasm
+SHA-256: `80abeec2688be94807bf4086861639fa63e4111df1d1978e37b1288ff2151de4`; prior main pin `ea8f843b254bfc96c277f22d4946db0c33555a281113e221d17f8ec6067a468b`.
+This is not artifact PASS: ordinary reproducibility build and the existing
+artifact/resource/SDK/browser gates remain. Evidence root:
+`/tmp/issue387-artifact-y1odl9dw`.
