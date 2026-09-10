@@ -4144,7 +4144,17 @@ mod tests {
                 .split("// REALTIME_POLICY_END")
                 .next()
                 .unwrap();
-            production.matches(".observe_resident(").count() == 1
+            // Effect-state publication has an unrelated method with the same name.
+            // Count calls only inside the meter-observer dispatcher, whose body ends
+            // at the existing realtime-region boundary.
+            let Some(dispatcher) = production
+                .split_once("\nfn observe(\n")
+                .and_then(|(_, body)| body.split_once("// REALTIME_POLICY_END"))
+                .map(|(body, _)| body)
+            else {
+                return false;
+            };
+            dispatcher.matches(".observe_resident(").count() == 1
                 && production.matches(".final_output_lane(").count() == 1
                 && [
                     "let Self { lease, units, .. } = self;",
@@ -4172,6 +4182,14 @@ mod tests {
         let source = include_str!("runtime.rs");
         assert!(valid(source));
         for (from, to) in [
+            (
+                ".observe_resident(crate::GraphResidentObservationBlock",
+                ".observe_other(crate::GraphResidentObservationBlock",
+            ),
+            (
+                "let mut planar = None;",
+                "let mut planar = None; observer.observe_resident(block);",
+            ),
             ("let resident = if eligible", "let resident = if true"),
             ("index.checked_sub(start)", "Some(index)"),
             (

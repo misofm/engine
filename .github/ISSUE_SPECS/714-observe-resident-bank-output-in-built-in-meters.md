@@ -363,3 +363,28 @@ observer dispatcher while retaining the admission, mutation, and one-dispatch
 obligations, then resume the existing focused gates and stop at the first
 unexpected failure. No production or API change, artifact, pin, timing,
 benchmark, or broader repair is authorized.
+
+
+## Recovery checkpoint and Attempt 4 authorization
+
+The owner transferred coordination to this session. Astra LOW implements;
+Astra XHIGH scopes and verifies, superseding earlier prospective model routing.
+The five-attempt policy delivered in #707 applies; Attempts 1–3 remain consumed.
+
+Independent Astra XHIGH recovery review confirmed Attempt 3 FAIL from
+`/tmp/issue714-attempt3-4eobg44i/VERDICT.md`. The preserved validator correction
+passed graph resident-meter tests (2/2) and the execution-order selector (1/1),
+then the builtins-compiler fixture failed E0616 on private `PreparedGraphPlan.routes`.
+No later gate ran. Current runtime.rs matches the preserved implementation diff;
+all six owned source hashes and manifest entries verify. Manifest SHA-256:
+`2a3d5642a89ca6feb9776c88c9969e208ff4baab9367a784d0a305ce3dc275fa`.
+This is a candid failed checkpoint, with no source or delivery PASS.
+
+Attempt 4 may change only the private builtins-compiler fixture: supply its
+nonunity crossfeed transform during PreparedGraphPlanParts construction through
+a private parameterized helper, preserving the old wrapper's default behavior,
+and remove the illegal post-construction private-field mutation. Public API and
+production behavior stay unchanged. Run formatting and the existing compiler
+resident-meter selector first; checkpoint the coherent correction before
+continuing the original finite qualification gates. Stop at first unexpected
+failure and preserve its result. Astra XHIGH independently reviews the attempt.
