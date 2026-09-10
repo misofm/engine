@@ -42,11 +42,8 @@ pub(crate) fn timings(
     tails: &BTreeMap<GraphNodeId, TailSamples>,
     caps: &GraphCompileCaps,
 ) -> Result<TimingResult, GraphDiagnostic> {
-    let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
-        .iter()
-        .cloned()
-        .map(|node| (node, Vec::new()))
-        .collect();
+    let mut incoming_by_node: BTreeMap<&GraphNodeId, Vec<&GraphEdge>> =
+        schedule.iter().map(|node| (node, Vec::new())).collect();
     for edge in edges {
         incoming_by_node
             .get_mut(&edge.destination.node)

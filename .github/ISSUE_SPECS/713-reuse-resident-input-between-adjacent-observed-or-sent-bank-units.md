@@ -435,3 +435,19 @@ is lane-B-owned artifact disposition followed by required CI, exact-head/current
 base review, guarded merge, post-main qualification, GitHub closure and
 cleanup. RT-9 remains a partial finding; no timing, full-tee, artifact, or pin
 credit is claimed.
+
+## Lane-B artifact disposition — current-main delivery preparation
+
+Current main is now merged from origin at 0dc066337d990a368801138d1c1f8b63830cd57e.
+Lane-B #705 delivered through PR #715 at that merge; reviewed head
+67c1d2e20e06951641ed3e26486933efa22ceab5, required PR qualification
+34447199222, and guarded post-main qualification 34447806043 with verdict job
+102778046641 all passed. The #705 artifact/pin dependency is therefore
+delivered, and lane-B pin ownership is released for this preparation.
+
+#713 source PASS remains applicable at product/test head
+7576d1b6c794f01df4abeb7256a8309d45879b21; its source and evidence are
+unchanged. This record claims no #713 delivery, timing, full-tee, artifact,
+pin, or performance result. Required current-head Astra LOW review, PR
+qualification, guarded merge, post-main qualification, GitHub synchronization,
+and clean-worktree cleanup remain open.
