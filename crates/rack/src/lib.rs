@@ -1428,6 +1428,43 @@ pub trait BankMembers {
     }
 }
 
+/// An immutable active lane of the final left/right resident bank output.
+///
+/// The borrowed words contain `frames * width.lanes()` entries per plane; a lane's
+/// sample at frame `f` is at `f * width.lanes() + lane`. Only graph's observation
+/// point after successful execution can establish current-block and node identity.
+#[derive(Clone, Copy)]
+pub struct ResidentOutputLane<'a> {
+    left: &'a [f32],
+    right: &'a [f32],
+    frames: u32,
+    width: BankWidth,
+    lane: usize,
+}
+
+impl<'a> ResidentOutputLane<'a> {
+    #[must_use]
+    pub fn left(&self) -> &'a [f32] {
+        self.left
+    }
+    #[must_use]
+    pub fn right(&self) -> &'a [f32] {
+        self.right
+    }
+    #[must_use]
+    pub const fn frames(&self) -> u32 {
+        self.frames
+    }
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+    #[must_use]
+    pub const fn lane(&self) -> usize {
+        self.lane
+    }
+}
+
 /// One bank chain: a resident L/R AoSoA block plus its ordered slots.
 ///
 /// Exactly one gather and one scatter per [`run`](BankChain::run), whatever the slot count
@@ -1878,6 +1915,34 @@ impl BankChain {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// Borrow the actual final scratch planes for one active lane.
+    ///
+    /// This validates dimensions only. The caller must establish successful execution
+    /// in the current block and an identical final-output member mapping before offering
+    /// it to an observer. In particular, a previous collapse does not prove freshness,
+    /// and a dual suffix can change the right plane after the collapse seam's copy.
+    #[must_use]
+    pub fn final_output_lane(&self, frames: u32, lane: usize) -> Option<ResidentOutputLane<'_>> {
+        let width = self.scratch.width;
+        let lanes = width.lanes() as usize;
+        if frames == 0
+            || frames > self.scratch.quantum
+            || self.lanes != lanes
+            || self.active.len() != lanes
+            || !self.active.get(lane).copied().unwrap_or(false)
+        {
+            return None;
+        }
+        let words = usize::try_from(frames).ok()?.checked_mul(lanes)?;
+        Some(ResidentOutputLane {
+            left: self.scratch.left.get(..words)?,
+            right: self.scratch.right.get(..words)?,
+            frames,
+            width,
+            lane,
+        })
+    }
+
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
     pub fn run<M: BankMembers + ?Sized>(
@@ -2626,6 +2691,86 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_output_lane_checks_shape_and_preserves_final_planes_after_collapse() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for population in [1, lanes - 1, lanes] {
+                let active: Vec<_> = (0..lanes).map(|lane| lane < population).collect();
+                for suffix in [false, true] {
+                    let mut slots =
+                        vec![slot(active.clone(), Box::new(Scale::new([0.5; 2], true)))];
+                    if suffix {
+                        slots.push(slot(
+                            active.clone(),
+                            Box::new(Matrix {
+                                coefficients: [0.75, 0.125, -0.25, 0.5],
+                            }),
+                        ));
+                    }
+                    let mut chain = BankChain::new(
+                        AoSoaScratch::new(width, 17).unwrap(),
+                        active.clone().into_boxed_slice(),
+                        slots,
+                    )
+                    .unwrap();
+                    chain.arm_mono_collapse(true);
+                    // Engage, forced decline, and recovery all expose the final right plane.
+                    for (block, forced) in [false, true, false].into_iter().enumerate() {
+                        chain.force_mono_collapse_off(forced);
+                        chain.scratch.left.fill(f32::from_bits(0x7fc0_0714));
+                        chain.scratch.right.fill(f32::from_bits(0xffc0_0714));
+                        let frames = 9;
+                        let mut planes = Planes {
+                            left: (0..lanes)
+                                .map(|lane| vec![(lane + 1) as f32; frames as usize])
+                                .collect(),
+                            right: (0..lanes)
+                                .map(|lane| vec![(lane + 1) as f32; frames as usize])
+                                .collect(),
+                        };
+                        chain.run(&mut planes, frames, block as u64 * 9).unwrap();
+                        assert_eq!(chain.is_collapsed(), !forced);
+                        for lane in 0..lanes {
+                            let view = chain.final_output_lane(frames, lane);
+                            if lane >= population {
+                                assert!(view.is_none());
+                                continue;
+                            }
+                            let view = view.unwrap();
+                            assert_eq!(
+                                (view.frames(), view.width(), view.lane()),
+                                (frames, width, lane)
+                            );
+                            assert_eq!(view.left().len(), frames as usize * lanes);
+                            assert_eq!(view.right().len(), frames as usize * lanes);
+                            for frame in 0..frames as usize {
+                                assert_eq!(
+                                    view.left()[frame * lanes + lane].to_bits(),
+                                    planes.left[lane][frame].to_bits()
+                                );
+                                assert_eq!(
+                                    view.right()[frame * lanes + lane].to_bits(),
+                                    planes.right[lane][frame].to_bits()
+                                );
+                            }
+                            if suffix {
+                                assert_ne!(view.left()[lane], view.right()[lane]);
+                            }
+                        }
+                        assert!(chain.final_output_lane(0, 0).is_none());
+                        assert!(chain.final_output_lane(18, 0).is_none());
+                        assert!(chain.final_output_lane(frames, lanes).is_none());
+                    }
+                    chain.scratch.right = Box::new([]);
+                    assert!(chain.final_output_lane(1, 0).is_none());
+                    chain.active = Box::new([]);
+                    assert!(chain.final_output_lane(1, 0).is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words() {

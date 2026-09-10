@@ -3649,6 +3649,60 @@ pub enum MeterObservationError {
     LaneLength,
     SampleTimeOverflow,
 }
+
+/// Checked, borrowed left/right input for a single meter lane.
+#[derive(Clone, Copy)]
+pub struct MeterInput<'a> {
+    left: &'a [f32],
+    right: &'a [f32],
+    frames: usize,
+    stride: usize,
+    lane: usize,
+}
+
+impl<'a> MeterInput<'a> {
+    // REALTIME_POLICY_BEGIN
+    /// Validate both exact plane lengths before any meter state can change.
+    /// Empty planes accept zero frames with a valid stride/lane.
+    ///
+    /// # Errors
+    /// [`MeterObservationError::LaneLength`] for any invalid or overflowing shape.
+    pub fn strided(
+        left: &'a [f32],
+        right: &'a [f32],
+        frames: usize,
+        stride: usize,
+        lane: usize,
+    ) -> Result<Self, MeterObservationError> {
+        if stride == 0
+            || lane >= stride
+            || frames.checked_mul(stride) != Some(left.len())
+            || right.len() != left.len()
+        {
+            return Err(MeterObservationError::LaneLength);
+        }
+        Ok(Self {
+            left,
+            right,
+            frames,
+            stride,
+            lane,
+        })
+    }
+
+    fn samples(
+        &self,
+        words: &'a [f32],
+        start: usize,
+        end: usize,
+    ) -> impl Iterator<Item = f32> + Clone {
+        let lane = self.lane;
+        words[start * self.stride..end * self.stride]
+            .chunks_exact(self.stride)
+            .map(move |frame| frame[lane])
+    }
+    // REALTIME_POLICY_END
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MeterLaneSnapshot {
     pub sample_peak: f32,
@@ -3786,14 +3840,25 @@ impl MeterAccumulator {
         right: &[f32],
         first_sample: u64,
     ) -> Result<(), MeterObservationError> {
-        if left.len() != right.len() {
-            return Err(MeterObservationError::LaneLength);
-        }
-        let len = match u64::try_from(left.len())
+        let input = MeterInput::strided(left, right, left.len(), 1, 0)?;
+        self.observe_input(input, first_sample)
+    }
+
+    /// Observe checked planar or strided words with the same scalar window state machine.
+    ///
+    /// # Errors
+    /// [`MeterObservationError::SampleTimeOverflow`] before any state mutation if the
+    /// block would run past `u64::MAX`.
+    pub fn observe_input(
+        &mut self,
+        input: MeterInput<'_>,
+        first_sample: u64,
+    ) -> Result<(), MeterObservationError> {
+        let len = match u64::try_from(input.frames)
             .ok()
             .and_then(|len| first_sample.checked_add(len))
         {
-            Some(_) => left.len(),
+            Some(_) => input.frames,
             None => return Err(MeterObservationError::SampleTimeOverflow),
         };
         if self
@@ -3843,8 +3908,12 @@ impl MeterAccumulator {
             && self.right.held == 0.0
             && self.left.hold_remaining == window.hold_frames
             && self.right.hold_remaining == window.hold_frames
-            && left[..len].iter().all(|sample| *sample == 0.0)
-            && right[..len].iter().all(|sample| *sample == 0.0);
+            && input
+                .samples(input.left, 0, len)
+                .all(|sample| sample == 0.0)
+            && input
+                .samples(input.right, 0, len)
+                .all(|sample| sample == 0.0);
         let mut offset = 0;
         while offset < len {
             let take = ((period - self.frames) as usize).min(len - offset);
@@ -3860,14 +3929,14 @@ impl MeterAccumulator {
             if self.metrics == MeterMetricSet::ALL {
                 observe_segment(
                     &mut self.left,
-                    &left[offset..end],
+                    input.samples(input.left, offset, end),
                     window,
                     &mut self.cumulative_clipped,
                     &mut self.cumulative_sanitized,
                 );
                 observe_segment(
                     &mut self.right,
-                    &right[offset..end],
+                    input.samples(input.right, offset, end),
                     window,
                     &mut self.cumulative_clipped,
                     &mut self.cumulative_sanitized,
@@ -3875,7 +3944,7 @@ impl MeterAccumulator {
             } else {
                 observe_selected_segment(
                     &mut self.left,
-                    &left[offset..end],
+                    input.samples(input.left, offset, end),
                     window,
                     self.metrics,
                     &mut self.cumulative_clipped,
@@ -3883,7 +3952,7 @@ impl MeterAccumulator {
                 );
                 observe_selected_segment(
                     &mut self.right,
-                    &right[offset..end],
+                    input.samples(input.right, offset, end),
                     window,
                     self.metrics,
                     &mut self.cumulative_clipped,
@@ -3999,7 +4068,7 @@ fn clear_interval(lane: &mut MeterLane) {
 /// is forbidden on any path whose bits are pinned.
 fn observe_segment(
     lane: &mut MeterLane,
-    samples: &[f32],
+    samples: impl Iterator<Item = f32> + Clone,
     window: MeterWindow,
     cumulative_clipped: &mut u64,
     cumulative_sanitized: &mut u64,
@@ -4010,7 +4079,7 @@ fn observe_segment(
     let mut hold_remaining = lane.hold_remaining;
     let mut clipped = 0_u64;
     let mut sanitized = 0_u64;
-    for sample in samples.iter().copied() {
+    for sample in samples.clone() {
         let invalid = !normal_or_zero(sample);
         let sample = if invalid { 0.0 } else { sample };
         sanitized += u64::from(invalid);
@@ -4047,7 +4116,7 @@ fn observe_segment(
 /// selection stays on [`observe_segment`] so its arithmetic order and published bits do not move.
 fn observe_selected_segment(
     lane: &mut MeterLane,
-    samples: &[f32],
+    samples: impl Iterator<Item = f32> + Clone,
     window: MeterWindow,
     metrics: MeterMetricSet,
     cumulative_clipped: &mut u64,
@@ -4055,7 +4124,7 @@ fn observe_selected_segment(
 ) {
     if metrics.contains(MeterMetricSet::SAMPLE_PEAK) {
         let mut peak = lane.peak;
-        for sample in samples.iter().copied() {
+        for sample in samples.clone() {
             let sample = if normal_or_zero(sample) { sample } else { 0.0 };
             let absolute = sample.abs();
             peak = if absolute > peak { absolute } else { peak };
@@ -4064,7 +4133,7 @@ fn observe_selected_segment(
     }
     if metrics.contains(MeterMetricSet::ENERGY_RMS) {
         let mut energy = lane.energy;
-        for sample in samples.iter().copied() {
+        for sample in samples.clone() {
             let sample = if normal_or_zero(sample) { sample } else { 0.0 };
             #[cfg(test)]
             meter_work_probe::ENERGY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -4075,7 +4144,7 @@ fn observe_selected_segment(
     if metrics.contains(MeterMetricSet::COUNTS) {
         let mut clipped = 0_u64;
         let mut sanitized = 0_u64;
-        for sample in samples.iter().copied() {
+        for sample in samples.clone() {
             #[cfg(test)]
             meter_work_probe::COUNTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let invalid = !normal_or_zero(sample);
@@ -4091,7 +4160,7 @@ fn observe_selected_segment(
     if metrics.contains(MeterMetricSet::HELD_PEAK) {
         let mut held = lane.held;
         let mut hold_remaining = lane.hold_remaining;
-        for sample in samples.iter().copied() {
+        for sample in samples.clone() {
             #[cfg(test)]
             meter_work_probe::HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let sample = if normal_or_zero(sample) { sample } else { 0.0 };
