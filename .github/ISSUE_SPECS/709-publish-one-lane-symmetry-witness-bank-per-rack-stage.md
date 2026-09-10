@@ -369,3 +369,14 @@ three #722 rack insertion blocks from joint source to recover9573fe16 byte
 for byte. Five other files exactly match accepted #722; merge parents and
 clean source verified. Final joint receipt review precedes shared artifact
 qualification and PR/main delivery.
+
+## Joint integration PASS and provisional artifact
+
+Independent Astra XHIGH accepts joint headb823abb0: exact source composition,
+all twelve focused gate receipts, both retargeted allocation harnesses and
+tested source identities verified without reruns. Root's single repin-report
+invocation then exited0 with digest `ea8f843b254bfc96c277f22d4946db0c33555a281113e221d17f8ec6067a468b`.
+This is recorded as a provisional, unqualified pin; ordinary six-file build
+and shared artifact qualification remain mandatory. Probe argv/environment,
+source head, status and full outputs are external at
+`/tmp/rack-meter-artifact-ydlz4bpc/probe.*`. No performance or delivery claim.
