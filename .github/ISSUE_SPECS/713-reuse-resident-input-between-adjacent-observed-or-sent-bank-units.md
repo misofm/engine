@@ -40,6 +40,9 @@ This child may establish only a bounded RT-9 partial outcome. It must not claim
 that all observer/send declines are eliminated or that the original RT-9 finding
 is fully delivered.
 
+The physical work removed is one successor gather transpose; a whole-block AoSoA
+copy remains. This is not a timing, cycle, or full-selective-tee claim.
+
 ## Frozen eligibility and declines
 
 Admit resident input only when all of these are proven at preparation time for
@@ -58,6 +61,49 @@ existing `chains_into` extra-reader, direct-observer, and alias-observer decline
 remain unchanged. Do not weaken its reader, send, sidechain, session-output, or
 alias-observer proofs and do not turn this child into a general chain executor
 rewrite.
+
+## Safe resident-copy API and word semantics
+
+Because `BankChain` scratch is private, authorize one narrow safe rack method (or
+equivalent trait hook) for graph's adjacent prepared-unit path. Freeze the
+preferred shape as:
+
+```text
+BankChain::copy_resident_input_into(
+    &self,
+    successor: &mut BankChain,
+    frames: usize,
+    mode: ResidentInputMode,
+) -> Result<(), ResidentInputError>
+```
+
+The method copies from the predecessor's current resident output into the
+successor's existing scratch. It exposes no mutable scratch, retains no
+references, and is callable only for the graph's adjacent prepared units. Its
+typed error/fallback must reject at least width, frame-count, mode, active-lane,
+nonadjacency, and unavailable/current-block mismatches. The unchanged `run`
+method remains the old acquisition path and remains valid for every decline.
+
+The copy is mode-aware and overwrites exactly the words the successor's old
+acquisition would overwrite:
+
+- partial gathers write only active lanes;
+- mono gathers leave right-channel scratch untouched; and
+- inactive lanes and untouched right scratch remain unchanged, or a separate
+  proof establishes that those words are unobservable.
+
+The allocation/equivalence fixtures must poison inactive lanes and right scratch
+to discriminate an overbroad copy. No public mutable scratch API, retained
+borrow, unsafe alias, or caller-trusted compatibility flag is authorized.
+
+## Current-block freshness and placement
+
+Resident input is valid only after predecessor execution succeeds and its
+predecessor observation completes. Successor `begin_block` and collapse
+decisions occur in their original order before resident acquisition. Graph uses
+safe disjoint borrowing, such as a split unit slice, and never aliases the two
+owners. A producer process or observation failure prevents B from executing; it
+falls back by not executing B and never by reusing stale resident data.
 
 Preserve `BankChain::transposes` semantics. Add only private or test-only gather
 evidence that distinguishes the resident acquisition from the old planar gather;
@@ -155,6 +201,14 @@ and issue synchronization remain mandatory for any later delivery.
 
 - Only eligible adjacent compatible units use resident input, with a provable
   identical word copy into existing successor scratch.
+- The safe resident-copy method exposes no scratch or retained references,
+  returns a typed/explicit fallback for every frozen mismatch, and leaves the
+  unchanged `run` path available.
+- Partial and mono copy masks preserve inactive lanes and untouched right
+  scratch, with poisoned discriminators covering accidental writes.
+- Current-block freshness, predecessor observation ordering, successor begin and
+  collapse placement, and safe disjoint borrowing prevent stale data and owner
+  aliasing.
 - Separate owners, predecessor scatter, observers, sends, unit boundaries,
   PDC, reductions, collapse, state, reports, errors, and command boundaries are
   unchanged.
@@ -182,4 +236,6 @@ disjoint from lane B and consumes one lane-A implementation slot after Astra LOW
 scope review.
 
 No product source, test, artifact, pin, timing, or benchmark change is made by
-this opening checkpoint. No RT-9 full-delivery or performance credit is claimed.
+this opening checkpoint. The opening scope review failed before implementation;
+this correction consumes no implementation attempt. No RT-9 full-delivery or
+performance credit is claimed.
