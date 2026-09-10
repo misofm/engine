@@ -71,3 +71,16 @@ Upstream `timothee-haudebourg/json-syntax` default branch still lacks the `end_f
 - `cargo test --locked --workspace` count matches `main` plus the new regression tests.
 - Fuzz `session_parse` for 15 minutes with `{}` seeded: no crashes.
 - The wasm artifact re-pin and browser lineage refreshed (session ships in the artifact).
+
+## Current implementation checkpoint
+
+Astra LOW recovered the lexical refusal and parser/native boundary regressions
+without historical workflow or artifact pin changes. Added explicit root,
+Unicode-path, escaped-string and legal empty-array controls, schema explanation,
+and intentional fuzz seed `fuzz/corpus/session_parse/empty-object.json`.
+`cargo test --locked -p session -p capi -p host-web` passed 172 tests with four
+pre-existing ignores; formatting and diff checks passed. Actual command/env,
+source patch and logs: `/tmp/issue387-implementation-20260910`.
+The original named crash artifact remains unavailable; preserved regressions
+are content-equivalent reproducers. No claim of baseline/actual-Wasm/fuzz or
+artifact qualification PASS yet. Root checkpoints; Astra XHIGH reviews next.
