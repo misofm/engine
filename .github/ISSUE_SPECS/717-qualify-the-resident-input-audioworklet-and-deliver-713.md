@@ -196,3 +196,24 @@ successful synchronization, close #713 and #717 together and verify both
 closed states. Until then #713 and #717 remain OPEN and no delivery claim is
 valid. Preserve all failed attempts and evidence. A later attempt requires a
 fresh numbered root set, a new lease, and a newly reviewed rebrief.
+
+## Preparation checkpoint — Astra LOW SCOPE PASS and mechanical overlay
+
+Astra LOW recorded SCOPE PASS at preparation head
+`f84e75477852a9be94963fc1216eeb271a87eca2`. Luna XHIGH then performed only
+the authorized mechanical overlay. The overlay diff is limited to this spec,
+the pin `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`,
+`hosts/host-web/qualification/results.json` (only `candidateCommit` and
+`wasmSha256`), and the generated
+`hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`. The pin is exactly
+`5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574` plus LF;
+results identify candidate `d6a04d93e4296e6c1d6eaefc9547b60bcf8462cc` and that
+same Wasm digest. Resulting file SHA-256 values are pin
+`2eeea48cb64576f15fe7c9d28bc40d26fe7d9aacf9671e2089cefdbf415652aa`, results
+`17fe2f7d7026c0f930c8f980eca3e73d50f72fdb42068fdf2aee07b31c27270a`, and
+matrix `ed8c79252c3638c4b09785613752505fb77be7298b6c7caadb9f5b5703aa5296`.
+The existing matrix generator ran once and its `--check` passed. This overlay
+earns no qualification or delivery credit, created no execution roots, and
+did not create E2 or a lease. The next gate is the detached E2 at
+`/home/bl/misofm/engine-rt9-resident-artifact-717-qualify` with a reviewed
+lease before any execution root or command.
