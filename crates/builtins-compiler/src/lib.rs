@@ -5490,6 +5490,24 @@ mod tests {
         n: usize,
         variant: BoundaryVariant,
     ) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
+        track_graph_variant_with_route_transform(
+            n,
+            variant,
+            RouteTransform {
+                gain: 0.5,
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+        )
+    }
+
+    fn track_graph_variant_with_route_transform(
+        n: usize,
+        variant: BoundaryVariant,
+        route_transform: RouteTransform,
+    ) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(HARNESS_QUANTUM),
@@ -5789,13 +5807,7 @@ mod tests {
             ) {
                 vec![PreparedRoute {
                     node: route,
-                    transform: RouteTransform {
-                        gain: 0.5,
-                        ll: 1.0,
-                        lr: 0.0,
-                        rl: 0.0,
-                        rr: 1.0,
-                    },
+                    transform: route_transform,
                 }]
             } else {
                 Vec::new()
@@ -10441,16 +10453,18 @@ mod tests {
                 });
             }
             let builtins = prepare_session_builtins(&compiled, &requests, caps()).unwrap();
-            let (mut graph, levels) = track_graph_variant(n, variant);
-            if variant == BoundaryVariant::SelectedSend {
-                let route = &mut graph.routes[0];
-                route.transform = RouteTransform {
+            let (mut graph, levels) = track_graph_variant_with_route_transform(
+                n,
+                variant,
+                RouteTransform {
                     gain: 0.625,
                     ll: 0.75,
                     lr: -0.25,
                     rl: 0.125,
                     rr: 0.5,
-                };
+                },
+            );
+            if variant == BoundaryVariant::SelectedSend {
                 let edge_id = GraphEdgeId::RouteDestination {
                     route_id: StableGraphId::parse("proof-send").unwrap(),
                 };

@@ -388,3 +388,14 @@ production behavior stay unchanged. Run formatting and the existing compiler
 resident-meter selector first; checkpoint the coherent correction before
 continuing the original finite qualification gates. Stop at first unexpected
 failure and preserve its result. Astra XHIGH independently reviews the attempt.
+
+## Attempt 4 focused checkpoint
+
+Astra LOW repaired only private compiler fixture construction: the route
+transform is supplied through PreparedGraphPlanParts; existing fixture callers
+retain their default transform. Formatting passed and
+`cargo test --locked -p builtins-compiler --features test-support --lib resident_meter`
+passed both tests. Exact commands, exits, source identity, diff and logs are
+preserved in `/tmp/issue714-attempt4-1kttzoal/`. This is a focused checkpoint,
+not SOURCE PASS. Astra XHIGH now owns adversarial verification under the user's
+latest routing; the original remaining finite gates and stop-on-failure rule apply.
