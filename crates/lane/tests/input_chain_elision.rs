@@ -15,11 +15,12 @@
 //! and watching the bits move. Both are `-0.0` cases, and both are why the test is on bit
 //! patterns and not on `==`.
 
-use lane::kernels::SvfCoef;
 use lane::kernels::builtins::{
-    InputChainCoef, InputChainPlan, InputChainState, input_chain_block, input_chain_block_elided,
-    input_chain_plan,
+    InputChainCoef, InputChainPlan, InputChainReport, InputChainState, NONFINITE_LIMIT,
+    input_chain_block, input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
+    no_lanes,
 };
+use lane::kernels::{SvfCoef, svf_step};
 use lane::{Lane, Simd4, Simd8};
 
 /// Frames per case. Long enough that a real section's recurrence is well past its transient.
@@ -166,6 +167,18 @@ fn run<L: Lane>(
     plan: &InputChainPlan,
     samples: &[f32],
 ) -> (Run, Run) {
+    run_reference(c, seed, plan, samples, false, false)
+}
+
+// Reuse the existing corpus's output/state/report packer for the independent mixed references.
+fn run_reference<L: Lane>(
+    c: &InputChainCoef<L>,
+    seed: &InputChainState<L>,
+    plan: &InputChainPlan,
+    samples: &[f32],
+    frozen: bool,
+    mono: bool,
+) -> (Run, Run) {
     let frames = samples.len() / L::WIDTH / 2;
     let split = frames * L::WIDTH;
     let mut one = (
@@ -175,8 +188,18 @@ fn run<L: Lane>(
     );
     let mut two = (one.0.clone(), one.1.clone(), *seed);
 
-    let reference = input_chain_block::<L>(&mut one.0, &mut one.1, frames, c, &mut one.2);
-    let elided = input_chain_block_elided::<L>(&mut two.0, &mut two.1, frames, c, &mut two.2, plan);
+    let reference = if mono {
+        frozen_mixed_chain_block_mono(&mut one.0, frames, c, &mut one.2, plan)
+    } else if frozen {
+        frozen_mixed_chain_block(&mut one.0, &mut one.1, frames, c, &mut one.2, plan)
+    } else {
+        input_chain_block(&mut one.0, &mut one.1, frames, c, &mut one.2)
+    };
+    let elided = if mono {
+        input_chain_block_mono_elided(&mut two.0, frames, c, &mut two.2, plan)
+    } else {
+        input_chain_block_elided(&mut two.0, &mut two.1, frames, c, &mut two.2, plan)
+    };
 
     let pack = |io: &(Vec<f32>, Vec<f32>, InputChainState<L>),
                 report: &lane::kernels::builtins::InputChainReport<L>|
@@ -456,4 +479,345 @@ fn negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate() {
     check::<f32>("1");
     check::<Simd4>("4");
     check::<Simd8>("8");
+}
+
+// Frozen from 413767be8f3a54d47b33296bdf767772aca7da60 for #710. These are the actual
+// pre-change mixed dual/mono bodies, including runtime plan lookups and identity-run tracking.
+// Only their names changed; neither reference calls the specialized production helper.
+fn frozen_mixed_chain_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    let mut state = s.section;
+    let mut nc1 = [[zero; 2]; 2];
+    for (channel, coefficients) in c.section.iter().enumerate() {
+        for (section, coefficient) in coefficients.iter().enumerate() {
+            nc1[channel][section] = coefficient.c1.neg();
+        }
+    }
+
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
+            let mut v = x.andnot(bad).mul(c.trim[channel]);
+            let mut run = false;
+            for section in 0..2 {
+                if plan.elided[channel][section] {
+                    run = true;
+                    continue;
+                }
+                if run {
+                    v = v.add(zero);
+                    run = false;
+                }
+                let coefficient = &c.section[channel][section];
+                let v0 = v;
+                let (v1, v2) = svf_step(
+                    v0,
+                    nc1[channel][section],
+                    coefficient.a2,
+                    coefficient.a3,
+                    &mut state[channel][section],
+                );
+                v = coefficient
+                    .m2
+                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+            }
+            if run {
+                v = v.add(zero);
+            }
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+
+    s.section = state;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}
+
+fn frozen_mixed_chain_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut state = s.section[0];
+    let mut nc1 = [zero; 2];
+    for (section, coefficient) in c.section[0].iter().enumerate() {
+        nc1[section] = coefficient.c1.neg();
+    }
+
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(c.trim[0]);
+        let mut run = false;
+        for section in 0..2 {
+            if plan.elided[0][section] {
+                run = true;
+                continue;
+            }
+            if run {
+                v = v.add(zero);
+                run = false;
+            }
+            let coefficient = &c.section[0][section];
+            let v0 = v;
+            let (v1, v2) = svf_step(
+                v0,
+                nc1[section],
+                coefficient.a2,
+                coefficient.a3,
+                &mut state[section],
+            );
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        }
+        if run {
+            v = v.add(zero);
+        }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+
+    s.section[0] = state;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
+fn mixed_reference_cases<L: Lane>() {
+    for pattern in 0..16 {
+        // Both orders include a real HPF after an identity: moving the signed-zero add is visible.
+        for shapes in [0b0101, 0b1010] {
+            let mut c = chain_coef::<L>(&designs(pattern, shapes));
+            c.trim[1] = L::splat(-1.75);
+            let mut seed = InputChainState::<L>::default();
+            let plan = input_chain_plan(&c, &seed);
+            for (channel, states) in seed.section.iter_mut().enumerate() {
+                for (section, state) in states.iter_mut().enumerate() {
+                    // Forced sentinels strengthen the non-write assertion beyond reachable +0.
+                    state.ic1 = if plan.elided[channel][section] {
+                        L::splat(f32::from_bits(0x7fc0_1000 + (channel * 2 + section) as u32))
+                    } else {
+                        L::splat((1 + channel * 2 + section) as f32 * 0.125)
+                    };
+                    state.ic2 = L::splat(-0.0);
+                }
+            }
+            let state_bits: Vec<u32> = seed
+                .section
+                .iter()
+                .flatten()
+                .flat_map(|s| bits(s.ic1).into_iter().chain(bits(s.ic2)))
+                .collect();
+            for frames in [0, 1, 17] {
+                let mut samples = signal(0x710 + pattern as u64);
+                samples.truncate(2 * frames * L::WIDTH);
+                let hostile = [
+                    -0.0,
+                    0.0,
+                    f32::NAN,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    1.0e30,
+                    9.0e29,
+                ];
+                for (index, sample) in samples.iter_mut().enumerate() {
+                    if index % 3 == 0 {
+                        *sample = hostile[(index / 3) % hostile.len()];
+                    }
+                }
+                if frames != 0 {
+                    samples[frames * L::WIDTH] = 123.25;
+                }
+                for mono in [false, true] {
+                    let (reference, actual) = run_reference(&c, &seed, &plan, &samples, true, mono);
+                    assert_eq!(
+                        reference,
+                        actual,
+                        "W{} pattern={pattern:04b} shapes={shapes:04b} frames={frames} mono={mono}",
+                        L::WIDTH
+                    );
+                    for channel in 0..2 {
+                        for section in 0..2 {
+                            if plan.elided[channel][section] || mono && channel == 1 {
+                                let start = (channel * 2 + section) * 2 * L::WIDTH;
+                                let words = start..start + 2 * L::WIDTH;
+                                assert_eq!(
+                                    actual.1[words.clone()],
+                                    state_bits[words],
+                                    "elided section or mono channel 1 must remain untouched"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_elision_matches_frozen_bodies_scalar() {
+    mixed_reference_cases::<f32>();
+}
+#[test]
+fn mixed_elision_matches_frozen_bodies_w4() {
+    mixed_reference_cases::<Simd4>();
+}
+#[test]
+fn mixed_elision_matches_frozen_bodies_w8() {
+    mixed_reference_cases::<Simd8>();
+}
+
+// Inspect the actual production functions and the complete free-helper closure. Removing comments
+// and whitespace makes the check independent of formatting; no reference body participates.
+fn compact_function(source: &str, name: &str) -> String {
+    let source = source
+        .lines()
+        .map(|line| line.split("//").next().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let start = source
+        .find(&format!("fn {name}<"))
+        .expect("production function");
+    let open = start + source[start..].find('{').unwrap();
+    let mut depth = 1;
+    let end = source[open + 1..]
+        .bytes()
+        .position(|b| {
+            depth += usize::from(b == b'{');
+            depth -= usize::from(b == b'}');
+            depth == 0
+        })
+        .unwrap()
+        + open
+        + 2;
+    source[start..end].split_whitespace().collect()
+}
+
+fn assert_free_helpers(body: &str, allowed: &[&str]) {
+    for (at, _) in body.match_indices('(') {
+        let mut prefix = &body[..at];
+        if prefix.ends_with('>') {
+            prefix = &prefix[..prefix.rfind("::<").expect("generic call")];
+        }
+        prefix = prefix.trim_end_matches('!');
+        let start = prefix
+            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .map_or(0, |i| i + 1);
+        let name = &prefix[start..];
+        if name.is_empty() || name == "let" || prefix[..start].ends_with(['.', ':']) {
+            continue;
+        }
+        assert!(
+            allowed.contains(&name),
+            "unaudited frame/helper call: {name}"
+        );
+    }
+}
+
+#[test]
+fn mixed_elision_production_structure_selects_before_frames_and_audits_helpers() {
+    let source = include_str!("../src/kernels/builtins.rs");
+    for (name, channels) in [("mixed_chain_block", 2), ("mixed_chain_block_mono", 1)] {
+        let f = compact_function(source, name);
+        let body = &f[f.find('{').unwrap() + 1..];
+        for token in ["for", "while", "loop", "match"] {
+            assert!(
+                !body.contains(token),
+                "selector wrapper contains loop/branch"
+            );
+        }
+        assert_eq!(body.matches("dispatch_mixed_channel(").count(), channels);
+        assert_eq!(body.matches("plan.elided[").count(), channels);
+        assert_eq!(body.matches("plan.elided[0]").count(), 1);
+        assert_eq!(body.matches("plan.elided[1]").count(), channels - 1);
+        assert_free_helpers(body, &["debug_assert_eq", "dispatch_mixed_channel"]);
+    }
+    let dispatch = compact_function(source, "dispatch_mixed_channel");
+    assert_eq!(dispatch.matches("matchshape{").count(), 1);
+    for token in ["for", "while", "loop"] {
+        assert!(!dispatch.contains(token));
+    }
+    assert_eq!(dispatch.matches("mixed_channel_block::<").count(), 4);
+    for (a, b) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert!(dispatch.contains(&format!("[{a},{b}]=>mixed_channel_block::<L,{a},{b}>(")));
+    }
+    for (text, name, allowed) in [
+        (source, "mixed_channel_block", &["no_lanes", "svf_step"][..]),
+        (source, "no_lanes", &[][..]),
+        (
+            include_str!("../src/kernels.rs"),
+            "svf_step",
+            &["flush"][..],
+        ),
+        (include_str!("../src/lib.rs"), "flush", &[][..]),
+    ] {
+        let f = compact_function(text, name);
+        for token in [
+            "InputChainPlan",
+            ".elided",
+            "shape",
+            "plan",
+            "match",
+            "while",
+            "loop",
+        ] {
+            assert!(
+                !f.contains(token),
+                "runtime plan/control in frame body or helper: {name}: {token}"
+            );
+        }
+        let open = f.find('{').unwrap();
+        let body = &f[open + 1..];
+        assert_free_helpers(body, allowed);
+        if name == "mixed_channel_block" {
+            assert_eq!(f[..open].matches("bool").count(), 2);
+            assert!(f[..open].contains("constELIDE_HPF:bool,constELIDE_LPF:bool>"));
+            assert_eq!(body.matches("for").count(), 1);
+            assert!(body.contains("forframeinio.chunks_exact_mut(L::WIDTH){"));
+            assert_eq!(body.matches("if").count(), 3);
+            for condition in ["ifELIDE_HPF{", "if!ELIDE_LPF{", "elseif!ELIDE_HPF{"] {
+                assert!(body.contains(condition));
+            }
+        } else {
+            assert!(
+                !body.contains("if") && !body.contains("for"),
+                "runtime helper branch"
+            );
+        }
+    }
 }

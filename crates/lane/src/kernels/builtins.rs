@@ -903,77 +903,106 @@ fn mixed_chain_block<L: Lane>(
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
+    // Each channel owns disjoint buffers, coefficients, integrators and report accumulators.
+    // Lane arithmetic and svf_step have no fallible step or observable side effect. Completing
+    // one channel first therefore preserves every per-channel operation; caller state is still
+    // published once, after both channels finish, exactly as in the interleaved mixed body.
+    let mut state = s.section;
+    let (left_count, left_nonfinite) = dispatch_mixed_channel(
+        left,
+        c.trim[0],
+        &c.section[0],
+        &mut state[0],
+        plan.elided[0],
+    );
+    let (right_count, right_nonfinite) = dispatch_mixed_channel(
+        right,
+        c.trim[1],
+        &c.section[1],
+        &mut state[1],
+        plan.elided[1],
+    );
+    s.section = state;
+    InputChainReport {
+        sanitized: [left_count, right_count],
+        nonfinite: [left_nonfinite, right_nonfinite],
+    }
+}
+
+/// Select one of the four immutable two-section shapes before its channel's frame loop.
+#[inline(always)]
+fn dispatch_mixed_channel<L: Lane>(
+    io: &mut [f32],
+    trim: L,
+    coefficients: &[SvfCoef<L>; 2],
+    state: &mut [SvfState<L>; 2],
+    shape: [bool; 2],
+) -> (L, L::Mask) {
+    #[cfg(test)]
+    MIXED_PLAN_SELECTIONS.with(|count| count.set(count.get() + 1));
+    match shape {
+        [false, false] => mixed_channel_block::<L, false, false>(io, trim, coefficients, state),
+        [true, false] => mixed_channel_block::<L, true, false>(io, trim, coefficients, state),
+        [false, true] => mixed_channel_block::<L, false, true>(io, trim, coefficients, state),
+        [true, true] => mixed_channel_block::<L, true, true>(io, trim, coefficients, state),
+    }
+}
+
+/// No runtime plan reaches this body. The const arms place one add at an identity run's
+/// original position; the both-elided instantiation adds once and touches no integrator.
+#[inline(always)]
+fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
+    io: &mut [f32],
+    trim: L,
+    coefficients: &[SvfCoef<L>; 2],
+    state: &mut [SvfState<L>; 2],
+) -> (L, L::Mask) {
     let limit = L::splat(NONFINITE_LIMIT);
     let one = L::splat(1.0);
     let zero = L::zero();
-
-    let mut count = [zero; 2];
-    let mut nonfinite = [no_lanes::<L>(); 2];
-    let mut state = s.section;
-    let mut nc1 = [[zero; 2]; 2];
-    for (channel, coefficients) in c.section.iter().enumerate() {
-        for (section, coefficient) in coefficients.iter().enumerate() {
-            nc1[channel][section] = coefficient.c1.neg();
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let nc1 = [coefficients[0].c1.neg(), coefficients[1].c1.neg()];
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(trim);
+        if ELIDE_HPF {
+            v = v.add(zero);
+        } else {
+            let coefficient = &coefficients[0];
+            let v0 = v;
+            let (v1, v2) = svf_step(v0, nc1[0], coefficient.a2, coefficient.a3, &mut state[0]);
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
         }
-    }
-
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
-        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
-            let x = L::load(frame);
-            let bad = L::mask_not(x.abs().lt(limit));
-            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
-            let mut v = x.andnot(bad).mul(c.trim[channel]);
-            let mut run = false;
-            for section in 0..2 {
-                if plan.elided[channel][section] {
-                    run = true;
-                    continue;
-                }
-                if run {
-                    v = v.add(zero);
-                    run = false;
-                }
-                let coefficient = &c.section[channel][section];
-                let v0 = v;
-                let (v1, v2) = svf_step(
-                    v0,
-                    nc1[channel][section],
-                    coefficient.a2,
-                    coefficient.a3,
-                    &mut state[channel][section],
-                );
-                v = coefficient
-                    .m2
-                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
-            }
-            if run {
-                v = v.add(zero);
-            }
-            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
-            v.store(frame);
+        if !ELIDE_LPF {
+            let coefficient = &coefficients[1];
+            let v0 = v;
+            let (v1, v2) = svf_step(v0, nc1[1], coefficient.a2, coefficient.a3, &mut state[1]);
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        } else if !ELIDE_HPF {
+            v = v.add(zero);
         }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
     }
-
-    s.section = state;
-    InputChainReport {
-        sanitized: count,
-        nonfinite,
-    }
+    (count, nonfinite)
 }
 
 // ---------------------------------------------------------------------------------------------
 // The mono-collapse one-plane variants.
 //
 // A collapsed track computes one channel and the strip duplicates it at the fader/matrix seam, so
-// these are the same three shapes as above with the channel loop peeled to the one live channel.
-// The rule that makes them class A is stated once here and holds for every one of them: **each is
-// the dual body's channel-`0` arm, character for character, with the channel index frozen at `0`
-// and the `1` arm deleted.** No operation is reassociated, no compare is hoisted, no accumulation
-// changes order -- the two channels were already independent per-frame arithmetic in one loop, so
-// deleting one of them cannot move the other's bits.
+// these are the same three shapes as above with only channel 0 processed. The mixed variant
+// shares the specialized per-channel body with its dual counterpart; the other two retain their
+// peeled frame bodies. No operation is reassociated and no per-channel accumulation changes
+// order: the two channels have independent arithmetic, so omitting channel 1 cannot move channel
+// 0's bits.
 //
 // The report is filled for **both** channels, because the collapsed track's right plane is the
 // duplicated left one and its accounting is therefore the left one's: a caller that read
@@ -1072,53 +1101,9 @@ fn mixed_chain_block_mono<L: Lane>(
     plan: &InputChainPlan,
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
-    let zero = L::zero();
-
-    let mut count = zero;
-    let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
-    let mut nc1 = [zero; 2];
-    for (section, coefficient) in c.section[0].iter().enumerate() {
-        nc1[section] = coefficient.c1.neg();
-    }
-
-    for frame in io.chunks_exact_mut(L::WIDTH) {
-        let x = L::load(frame);
-        let bad = L::mask_not(x.abs().lt(limit));
-        count = count.add(one.andnot(L::mask_not(bad)));
-        let mut v = x.andnot(bad).mul(c.trim[0]);
-        let mut run = false;
-        for section in 0..2 {
-            if plan.elided[0][section] {
-                run = true;
-                continue;
-            }
-            if run {
-                v = v.add(zero);
-                run = false;
-            }
-            let coefficient = &c.section[0][section];
-            let v0 = v;
-            let (v1, v2) = svf_step(
-                v0,
-                nc1[section],
-                coefficient.a2,
-                coefficient.a3,
-                &mut state[section],
-            );
-            v = coefficient
-                .m2
-                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
-        }
-        if run {
-            v = v.add(zero);
-        }
-        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
-        v.store(frame);
-    }
-
+    let (count, nonfinite) =
+        dispatch_mixed_channel(io, c.trim[0], &c.section[0], &mut state, plan.elided[0]);
     s.section[0] = state;
     InputChainReport {
         sanitized: [count; 2],
@@ -1159,4 +1144,57 @@ pub fn input_chain_block_mono_elided<L: Lane>(
 #[must_use]
 pub const fn plan_is_channel_symmetric(plan: &InputChainPlan) -> bool {
     plan.elided[0][0] == plan.elided[1][0] && plan.elided[0][1] == plan.elided[1][1]
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static MIXED_PLAN_SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod mixed_elision_tests {
+    use super::*;
+    use crate::{Simd4, Simd8};
+
+    fn check<L: Lane>() {
+        let zero = L::zero();
+        let coefficient = SvfCoef {
+            c1: zero,
+            a2: zero,
+            a3: zero,
+            m0: L::splat(1.0),
+            m1: zero,
+            m2: zero,
+        };
+        let c = InputChainCoef {
+            trim: [L::splat(1.0); 2],
+            section: [[coefficient; 2]; 2],
+        };
+        for frames in [0, 1, 17] {
+            for pairing in 0..16 {
+                let plan = InputChainPlan {
+                    elided: [
+                        [pairing & 1 != 0, pairing & 2 != 0],
+                        [pairing & 4 != 0, pairing & 8 != 0],
+                    ],
+                };
+                let mut left = std::vec![-0.0; frames * L::WIDTH];
+                let mut right = std::vec![1.0; frames * L::WIDTH];
+                let mut state = InputChainState::default();
+                MIXED_PLAN_SELECTIONS.with(|count| count.set(0));
+                let _ = mixed_chain_block(&mut left, &mut right, frames, &c, &mut state, &plan);
+                assert_eq!(MIXED_PLAN_SELECTIONS.with(std::cell::Cell::get), 2);
+                MIXED_PLAN_SELECTIONS.with(|count| count.set(0));
+                let _ = mixed_chain_block_mono(&mut left, frames, &c, &mut state, &plan);
+                assert_eq!(MIXED_PLAN_SELECTIONS.with(std::cell::Cell::get), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_elision_selects_once_per_channel_independent_of_frames() {
+        check::<f32>();
+        check::<Simd4>();
+        check::<Simd8>();
+    }
 }
