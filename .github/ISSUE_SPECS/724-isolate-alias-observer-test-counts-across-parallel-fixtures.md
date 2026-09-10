@@ -76,3 +76,14 @@ evidence. No registry publication, speedup or full-RT10 claim.
 Independent XHIGH scope PASS established before implementation. No correction
 or rerun has been performed. Earlier source/shared-artifact PASS remains earned;
 #709/#722 delivery is blocked on this test-isolation correction and required CI.
+
+## Attempt 1 implementation checkpoint
+
+Astra LOW changed only the alias count storage/accesses inside the test module
+and added the deterministic two-thread 2/5 observer regression. Formatting, new
+regression (1), alias selector (3), and resident-meter selector (2) passed.
+Actual commands, environment, exit status and logs are preserved externally in
+`/tmp/issue724-attempt1-implementation`. Cargo's generated dependency ordering
+change was preserved externally and restored; no dependency change is included.
+These focused commands lacked --locked; independent review uses --locked.
+Root audited the exact-path checkpoint. Independent XHIGH verdict and CI remain.

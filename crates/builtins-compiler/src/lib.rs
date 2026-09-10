@@ -5313,15 +5313,15 @@ mod tests {
         nonfinite: bool,
     }
 
-    static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
     static INTERVENING_OBSERVER_ERRORS: AtomicUsize = AtomicUsize::new(0);
     thread_local! {
+        static ALIAS_OBSERVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         static ALIAS_CAPTURE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     struct AliasObserver;
     impl GraphRuntimeObserver for AliasObserver {
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
-            ALIAS_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+            ALIAS_OBSERVATIONS.with(|count| count.set(count.get() + 1));
             ALIAS_CAPTURE.with(|capture| {
                 let mut capture = capture.borrow_mut();
                 capture.extend(block.left.iter().map(|sample| sample.to_bits()));
@@ -8853,6 +8853,39 @@ mod tests {
     }
 
     #[test]
+    fn alias_observer_counts_and_capture_are_thread_local() {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for calls in [2, 5] {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    ALIAS_OBSERVATIONS.with(|count| count.set(0));
+                    ALIAS_CAPTURE.with(|capture| capture.borrow_mut().clear());
+                    barrier.wait();
+
+                    let left = [calls as f32];
+                    let right = [-(calls as f32)];
+                    let mut observer = AliasObserver;
+                    let mut results = Vec::new();
+                    for first_sample in 0..calls {
+                        results.push(observer.observe(GraphObservationBlock {
+                            left: &left,
+                            right: &right,
+                            first_sample: first_sample as u64,
+                        }));
+                    }
+                    barrier.wait();
+
+                    assert!(results.into_iter().all(|result| result.is_ok()));
+                    assert_eq!(ALIAS_OBSERVATIONS.with(std::cell::Cell::get), calls);
+                    let expected = [left[0].to_bits(), right[0].to_bits()].repeat(calls);
+                    ALIAS_CAPTURE.with(|capture| assert_eq!(*capture.borrow(), expected));
+                });
+            }
+        });
+    }
+
+    #[test]
     fn serialized_alias_observer_is_the_decline_boundary() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
@@ -8867,7 +8900,7 @@ mod tests {
         );
         let eligible_witness = test_only_fader_matrix_witness();
         test_only_reset_fader_matrix_witness();
-        ALIAS_OBSERVATIONS.store(0, Ordering::Relaxed);
+        ALIAS_OBSERVATIONS.with(|count| count.set(0));
         let (observed, _, _, _) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
@@ -8877,7 +8910,7 @@ mod tests {
         );
         assert_eq!(eligible, observed, "alias observer preserves PCM words");
         let observed_witness = test_only_fader_matrix_witness();
-        let observed_calls = ALIAS_OBSERVATIONS.load(Ordering::Relaxed);
+        let observed_calls = ALIAS_OBSERVATIONS.with(std::cell::Cell::get);
         let paired_alias = ALIAS_CAPTURE.with(|capture| capture.borrow().clone());
         let (separate_observed, _, _, _) = render_post_input_bits_with_variant(
             9,
