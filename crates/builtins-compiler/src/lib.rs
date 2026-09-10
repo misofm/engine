@@ -4317,6 +4317,26 @@ impl GraphRuntimeObserver for MeterObserver {
                 builtins::MeterObservationError::LaneLength => RenderError::InvalidEnvelope,
             })
     }
+
+    fn observe_resident(
+        &mut self,
+        block: graph::GraphResidentObservationBlock<'_>,
+    ) -> Option<Result<(), RenderError>> {
+        Some(
+            builtins::MeterInput::strided(
+                block.lane.left(),
+                block.lane.right(),
+                block.lane.frames() as usize,
+                block.lane.width().lanes() as usize,
+                block.lane.lane(),
+            )
+            .and_then(|input| self.0.observe_input(input, block.first_sample))
+            .map_err(|error| match error {
+                builtins::MeterObservationError::SampleTimeOverflow => RenderError::TimeOverflow,
+                builtins::MeterObservationError::LaneLength => RenderError::InvalidEnvelope,
+            }),
+        )
+    }
 }
 
 fn render_error(error: BuiltinParameterError) -> RenderError {
@@ -10371,6 +10391,280 @@ mod tests {
     impl GraphRuntimeProcessor for HarnessSink {
         fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             Ok(())
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn resident_meter_prepared_plans_match_planar_with_aliases_mixed_observers_and_delayed_sends() {
+        struct FailingObserver;
+        impl GraphRuntimeObserver for FailingObserver {
+            fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                Err(RenderError::InvalidEnvelope)
+            }
+            fn observe_resident(
+                &mut self,
+                _block: graph::GraphResidentObservationBlock<'_>,
+            ) -> Option<Result<(), RenderError>> {
+                Some(Err(RenderError::InvalidEnvelope))
+            }
+        }
+        struct CountSink(Arc<AtomicUsize>);
+        impl GraphRuntimeProcessor for CountSink {
+            fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let run = |backend, n, variant, disabled, fail| {
+            let compiled = n_track_session(n);
+            let config = MeterConfig {
+                period_frames: NonZeroU32::new(17).unwrap(),
+                peak_hold_frames: 3,
+                peak_decay_db_per_second: 24.0,
+                queue_capacity: NonZeroUsize::new(2).unwrap(),
+                reset_generation: 714,
+            };
+            let selected = n - 1;
+            let mut requests = vec![MeterRequest {
+                handle: handle(20),
+                track_id: track_name(selected),
+                tap: MeterTap::PostFader,
+                config,
+            }];
+            if variant == BoundaryVariant::AliasObserved {
+                requests.push(MeterRequest {
+                    handle: handle(1),
+                    track_id: track_name(selected),
+                    tap: MeterTap::PostDynamic,
+                    config,
+                });
+            }
+            let builtins = prepare_session_builtins(&compiled, &requests, caps()).unwrap();
+            let (mut graph, levels) = track_graph_variant(n, variant);
+            if variant == BoundaryVariant::SelectedSend {
+                let route = &mut graph.routes[0];
+                route.transform = RouteTransform {
+                    gain: 0.625,
+                    ll: 0.75,
+                    lr: -0.25,
+                    rl: 0.125,
+                    rr: 0.5,
+                };
+                let edge_id = GraphEdgeId::RouteDestination {
+                    route_id: StableGraphId::parse("proof-send").unwrap(),
+                };
+                graph.inserted_delays.push(graph::InsertedDelay {
+                    node: GraphNodeId::CompensationDelay {
+                        edge_id: Box::new(edge_id.clone()),
+                    },
+                    edge_id,
+                    samples: effect_contract::LatencySamples(7),
+                });
+            }
+            let classes = SessionPoolClasses::from_session(&compiled);
+            let mut artifact =
+                builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+            let node = GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(&track_name(selected)).unwrap(),
+                stage: TrackStage::PostFader,
+            };
+            let extra = MeterAccumulator::prepare(handle(30), config, 48_000).unwrap();
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    node.clone(),
+                    30,
+                    Box::new(MeterObserver(extra.accumulator)),
+                ));
+            artifact.meter_consumers.push(MeterConsumer {
+                handle: handle(30),
+                track_id: track_name(selected).into_boxed_str(),
+                tap: MeterTap::PostFader,
+                consumer: extra.consumer,
+            });
+            if fail {
+                artifact
+                    .builtin_observers
+                    .push(GraphNodeObserverBinding::new(
+                        node.clone(),
+                        22,
+                        Box::new(FailingObserver),
+                    ));
+            }
+            let capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    node,
+                    25,
+                    Box::new(Capture(Arc::clone(&capture))),
+                ));
+            let envelope = artifact.graph.envelope;
+            let mut nodes: Vec<_> = (0..n)
+                .map(|index| {
+                    GraphNodeBinding::new(
+                        GraphNodeId::TrackStage {
+                            track_id: StableGraphId::parse(&track_name(index)).unwrap(),
+                            stage: TrackStage::Input,
+                        },
+                        Box::new(SeededInput {
+                            seed: 714 + index as u64,
+                            symmetric: false,
+                            nonfinite: true,
+                        }),
+                    )
+                })
+                .collect();
+            let sink_calls = Arc::new(AtomicUsize::new(0));
+            nodes.push(GraphNodeBinding::new(
+                GraphNodeId::Output {
+                    output_id: StableGraphId::parse("main-out").unwrap(),
+                },
+                Box::new(CountSink(Arc::clone(&sink_calls))),
+            ));
+            let mut bound = artifact
+                .into_bound(GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("resident meter bind: {}", error.code));
+            graph::test_only_meter_input_reset(disabled);
+            let mut pcm = Vec::new();
+            let mut snapshots = Vec::new();
+            let mut reports = Vec::new();
+            for block in 0..if fail { 1 } else { 5 } {
+                let mut words = vec![0.0; HARNESS_QUANTUM as usize * 2];
+                let report = bound.plan.render(
+                    engine::realtime::RenderIo {
+                        input: None,
+                        output: engine::realtime::PlanarBufferMut::try_new(
+                            &mut words,
+                            2,
+                            HARNESS_QUANTUM as usize,
+                            HARNESS_QUANTUM as usize,
+                        )
+                        .unwrap(),
+                    },
+                    engine::realtime::RenderTime {
+                        absolute_sample: block * u64::from(HARNESS_QUANTUM),
+                    },
+                );
+                assert_eq!(report.is_err(), fail);
+                reports.push(report);
+                pcm.extend(words.into_iter().map(f32::to_bits));
+                for meter in &mut bound.meter_consumers {
+                    while let Ok(snapshot) = meter.consumer.try_pop() {
+                        snapshots.push(snapshot);
+                    }
+                }
+            }
+            let counts = graph::test_only_meter_input_counts();
+            graph::test_only_meter_input_reset(false);
+            let observed = capture.lock().unwrap().clone();
+            if fail {
+                assert!(observed.is_empty(), "later custom observer must not run");
+                assert!(!snapshots.is_empty());
+                assert!(
+                    snapshots
+                        .iter()
+                        .all(|snapshot| snapshot.handle == handle(20)),
+                    "later direct and alias meters must publish nothing"
+                );
+                assert_eq!(
+                    sink_calls.load(Ordering::Relaxed),
+                    0,
+                    "successor must not execute"
+                );
+            } else {
+                assert!(observed.iter().any(|word| *word != 0));
+                assert!(
+                    snapshots
+                        .iter()
+                        .any(|snapshot| snapshot.cumulative_dropped_snapshots > 0)
+                );
+                assert_eq!(sink_calls.load(Ordering::Relaxed), 5);
+            }
+            (pcm, observed, snapshots, counts, reports)
+        };
+        for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+            for n in [3, 4, 5, 8, 9] {
+                for variant in [
+                    BoundaryVariant::Plain,
+                    BoundaryVariant::AliasObserved,
+                    BoundaryVariant::SelectedSend,
+                ] {
+                    let a = run(backend, n, variant, false, false);
+                    let b = run(backend, n, variant, true, false);
+                    assert_eq!(a.0, b.0, "output: {backend:?}/{n}/{variant:?}");
+                    assert_eq!(a.1, b.1);
+                    assert_eq!(a.4, b.4);
+                    assert_eq!(a.2, b.2);
+                    for (a, b) in a.2.iter().zip(&b.2) {
+                        for (a, b) in [(a.left, b.left), (a.right, b.right)] {
+                            assert_eq!(a.sample_peak.to_bits(), b.sample_peak.to_bits());
+                            assert_eq!(a.rms.to_bits(), b.rms.to_bits());
+                            assert_eq!(a.energy.to_bits(), b.energy.to_bits());
+                            assert_eq!(a.held_peak.to_bits(), b.held_peak.to_bits());
+                        }
+                    }
+                    assert_eq!(b.3[1..], [0, 0]);
+                    if backend == Backend::Scalar {
+                        assert_eq!(a.3[1..], [0, 0]);
+                    } else {
+                        assert!(
+                            a.3[2] >= 10,
+                            "both production meters must accept resident input: {backend:?}/{n}/{variant:?}: {:?}",
+                            a.3
+                        );
+                        assert!(a.3[1] > a.3[2], "the mixed custom observer declines");
+                        // Mixed declines share one planar acquisition at this final member.
+                        assert_eq!(a.3[0], b.3[0]);
+                    }
+                }
+            }
+            let a = run(backend, 3, BoundaryVariant::AliasObserved, false, true);
+            let b = run(backend, 3, BoundaryVariant::AliasObserved, true, true);
+            assert_eq!((&a.0, &a.1, &a.2, &a.4), (&b.0, &b.1, &b.2, &b.4));
+            assert_eq!(
+                a.3,
+                if backend == Backend::Scalar {
+                    [1, 0, 0]
+                } else {
+                    [0, 2, 2]
+                }
+            );
+            assert_eq!(b.3, [1, 0, 0]);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline() {
+        for backend in [Backend::Simd4, Backend::Simd8] {
+            let mut candidate =
+                prepared_pair_graph_fixture(true, true, false, false, None, backend, 9);
+            let mut reference =
+                prepared_pair_graph_fixture(true, true, false, false, None, backend, 9);
+            candidate.plan.arm_mono_collapse(&|_| true);
+            reference.plan.arm_mono_collapse(&|_| true);
+            for (block, forced) in [false, true, false].into_iter().enumerate() {
+                candidate.plan.force_mono_collapse_off(forced);
+                reference.plan.force_mono_collapse_off(forced);
+                graph::test_only_meter_input_reset(false);
+                let a = render_bound(&mut candidate, block as u64 * u64::from(HARNESS_QUANTUM));
+                assert_eq!(graph::test_only_meter_input_counts(), [0, 1, 1]);
+                graph::test_only_meter_input_reset(true);
+                let b = render_bound(&mut reference, block as u64 * u64::from(HARNESS_QUANTUM));
+                assert_eq!(graph::test_only_meter_input_counts(), [1, 0, 0]);
+                assert_eq!(a, b);
+                assert_eq!(
+                    candidate.meter_consumers[0].consumer.try_pop(),
+                    reference.meter_consumers[0].consumer.try_pop()
+                );
+                graph::test_only_meter_input_reset(false);
+            }
         }
     }
 

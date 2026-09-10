@@ -270,7 +270,7 @@ opening checkpoint. Opening audit evidence is outside Git at
 |---|---|---|
 | Opening scope | Astra LOW PASS at reviewed head `5cff0d4740ccec8f815820743c93fc627a7d3893` | Placement-only scope accepted; #713 integration blocks implementation |
 | Dependency/API/resource preflight | Astra XHIGH PREFLIGHT PASS; Astra LOW independent PREFLIGHT PASS | Evidence and frozen-signature findings recorded below; no attempt consumed |
-| Implementation attempts 1-5 | Attempt 1 explicitly authorized; zero consumed | Astra XHIGH may execute one coherent pass within the existing allowlist and focused gate order; one adversarial verdict follows |
+| Implementation attempts 1-5 | Attempt 1 FAIL; consumed; Astra LOW independent verdict recorded below | Attempt 2 is limited to cloning/reconstructing the fixture mask per suffix, then resuming the focused gates; stop at the first unexpected failure |
 | Qualification/delivery | Not started | No product, test, SOURCE PASS, artifact or delivery credit |
 
 Scope review: Astra LOW PASS at `5cff0d4740ccec8f815820743c93fc627a7d3893`,
@@ -314,3 +314,32 @@ PASS. Zero implementation attempts were consumed; Attempt 1 is explicitly
 authorized to Astra XHIGH within the existing allowlist and focused gate order.
 This records no artifact, pin, timing, performance, SOURCE PASS, or full-RT10
 claim.
+
+## Astra XHIGH ATTEMPT 1 FAIL — Astra LOW verdict
+
+Astra XHIGH's first unexpected focused-gate failure is preserved at evidence
+root `/tmp/issue714-attempt1-8ba98eid`; the manifest SHA-256 is
+`026876d4642eefd8d46b627e8187f2d7e695cf2a37bd304348b6108a82d59cae`.
+Astra LOW independently returned an ATTEMPT 1 FAIL verdict. The exact ordered
+commands and exits were:
+
+    rustfmt --edition 2024 --config-path rustfmt.toml --config skip_children=true crates/rack/src/lib.rs crates/graph/src/lib.rs crates/graph/src/runtime.rs crates/builtins/src/lib.rs crates/builtins/tests/meter.rs crates/builtins-compiler/src/lib.rs  # exit 0
+    cargo check --locked -p builtins-compiler --lib --features test-support  # exit 0
+    cargo test --locked -p builtins --test meter  # exit 0; 9/9 passed
+    cargo test --locked -p rack --lib resident_output_lane  # exit 101; E0382
+
+The rack failure is the active `active` borrow after the suffix loop consumed
+it with `active.into_boxed_slice()` in the prior suffix iteration. The failure
+consumed Attempt 1; no later graph or compiler selectors, broader suites,
+policy, mutation, allocation, target, timing, benchmark, artifact, or pin
+gates ran. The candid failed checkpoint contains exactly these six authorized
+dirty files: `crates/builtins-compiler/src/lib.rs`, `crates/builtins/src/lib.rs`,
+`crates/builtins/tests/meter.rs`, `crates/graph/src/lib.rs`,
+`crates/graph/src/runtime.rs`, and `crates/rack/src/lib.rs`. It earns no
+qualification, delivery, timing, performance, artifact, pin, or full-RT10
+credit; the tree is authorized for this candid failed checkpoint.
+
+Attempt 2 is authorized only to clone or reconstruct the fixture's active mask
+per suffix, then resume the existing focused gate order. It must stop at the
+first unexpected failure. No product or API expansion, artifact, pin, timing,
+benchmark, or broader repair is authorized by this record.

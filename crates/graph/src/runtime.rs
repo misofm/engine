@@ -49,6 +49,20 @@ pub(crate) const ARENA_BASE: u32 = 1;
 thread_local! {
     static TEST_ONLY_RESIDENT_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_ONLY_RESIDENT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+    static TEST_ONLY_METER_RESIDENT_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_ONLY_METER_INPUT_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_meter_input_reset(disabled: bool) {
+    TEST_ONLY_METER_RESIDENT_DISABLED.with(|value| value.set(disabled));
+    TEST_ONLY_METER_INPUT_COUNTS.with(|value| value.set([0; 3]));
+}
+
+/// Actual `[planar acquisitions, resident offers, resident accepts]`, including accepted errors.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_meter_input_counts() -> [u64; 3] {
+    TEST_ONLY_METER_INPUT_COUNTS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1418,7 +1432,8 @@ impl Runtime {
         }
     }
 
-    /// Runs the observers of unit `index`, in member order and then by handle.
+    /// Runs observers in their existing member/direct/alias binding order.
+    /// GraphExecutor calls this only after this unit successfully executes in this block.
     pub(crate) fn observe_unit(
         &mut self,
         index: usize,
@@ -1426,10 +1441,44 @@ impl Runtime {
     ) -> Result<(), RenderError> {
         let Self { lease, units, .. } = self;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => observe(op, lease, first_sample),
-            RuntimeUnit::Bank { members, .. } => {
-                for member in members.iter_mut() {
-                    observe(member, lease, first_sample)?;
+            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None),
+            RuntimeUnit::Bank {
+                members,
+                lanes,
+                chain,
+                fold,
+                ..
+            } => {
+                let population = *lanes;
+                let width = chain.width().lanes() as usize;
+                // execute scatters exactly the final slot's output members. Observed direct
+                // and alias outputs cannot be redirected by scatter_target; extra readers
+                // and sends still consume that unchanged scatter. Folded forms decline.
+                let eligible = population > 0
+                    && population <= width
+                    && !members.is_empty()
+                    && members.len().is_multiple_of(population)
+                    && chain.active().len() == width
+                    && chain
+                        .active()
+                        .iter()
+                        .enumerate()
+                        .all(|(lane, active)| *active == (lane < population))
+                    && fold.is_empty()
+                    && chain.fold_lanes().is_empty()
+                    && chain.aux_lanes().is_empty();
+                let frames = u32::try_from(lease.frames()).ok();
+                let final_start = members.len().checked_sub(population);
+                let chain: &BankChain = chain;
+                for (index, member) in members.iter_mut().enumerate() {
+                    let resident = if eligible {
+                        final_start
+                            .and_then(|start| index.checked_sub(start))
+                            .and_then(|lane| chain.final_output_lane(frames?, lane))
+                    } else {
+                        None
+                    };
+                    observe(member, lease, first_sample, resident)?;
                 }
                 Ok(())
             }
@@ -1674,12 +1723,47 @@ fn execute_op(
     Ok(())
 }
 
-fn observe(op: &mut RuntimeOp, lease: &ArenaLease, first_sample: u64) -> Result<(), RenderError> {
-    if op.observers.is_empty() {
-        return Ok(());
-    }
-    let (left, right) = lease.read_stereo(op.output);
+fn observe(
+    op: &mut RuntimeOp,
+    lease: &ArenaLease,
+    first_sample: u64,
+    resident: Option<rack::ResidentOutputLane<'_>>,
+) -> Result<(), RenderError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let resident =
+        resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
+    let mut planar = None;
     for observer in op.observers.iter_mut() {
+        if let Some(lane) = resident {
+            #[cfg(any(test, feature = "test-support"))]
+            TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
+                let mut counts = value.get();
+                counts[1] += 1;
+                value.set(counts);
+            });
+            if let Some(result) = observer
+                .observer
+                .observe_resident(crate::GraphResidentObservationBlock { lane, first_sample })
+            {
+                #[cfg(any(test, feature = "test-support"))]
+                TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
+                    let mut counts = value.get();
+                    counts[2] += 1;
+                    value.set(counts);
+                });
+                result?;
+                continue;
+            }
+        }
+        let (left, right) = *planar.get_or_insert_with(|| {
+            #[cfg(any(test, feature = "test-support"))]
+            TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
+                let mut counts = value.get();
+                counts[0] += 1;
+                value.set(counts);
+            });
+            lease.read_stereo(op.output)
+        });
         observer.observer.observe(GraphObservationBlock {
             left,
             right,
@@ -3930,6 +4014,178 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn resident_meter_dispatch_preserves_binding_order_lazy_fallback_and_accepted_errors() {
+        struct Observer {
+            handle: u64,
+            accept: Option<bool>,
+            trace: Arc<std::sync::Mutex<Vec<(u64, bool)>>>,
+        }
+        impl crate::GraphRuntimeObserver for Observer {
+            fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                self.trace.lock().unwrap().push((self.handle, false));
+                assert_eq!(block.left, &[7.0; 3]);
+                assert_eq!(block.right, &[-9.0; 3]);
+                Ok(())
+            }
+            fn observe_resident(
+                &mut self,
+                block: crate::GraphResidentObservationBlock<'_>,
+            ) -> Option<Result<(), RenderError>> {
+                let fail = self.accept?;
+                self.trace.lock().unwrap().push((self.handle, true));
+                assert_eq!(block.first_sample, 71);
+                for frame in 0..3 {
+                    let at = frame * block.lane.width().lanes() as usize + block.lane.lane();
+                    assert_eq!(block.lane.left()[at], 7.0);
+                    assert_eq!(block.lane.right()[at], -9.0);
+                }
+                Some(if fail {
+                    Err(RenderError::InvalidEnvelope)
+                } else {
+                    Ok(())
+                })
+            }
+        }
+        let mut lease = stereo_lease(3, 1);
+        lease.write(0, 1).fill(7.0);
+        lease.write(1, 1).fill(-9.0);
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(effect_contract::BankWidth::Four, 5).unwrap(),
+            Box::new([true, false, false, false]),
+            vec![],
+        )
+        .unwrap();
+        chain
+            .run(
+                &mut ArenaMembers {
+                    lease: &mut lease,
+                    inputs: &[1],
+                    outputs: &[1],
+                    fold: &[],
+                    master: 0,
+                },
+                3,
+                71,
+            )
+            .unwrap();
+        let view = chain.final_output_lane(3, 0).unwrap();
+        for accepts in [
+            vec![],
+            vec![Some(false), Some(false)],
+            vec![None, None],
+            vec![Some(false), None, Some(false), None],
+            vec![Some(true), None, Some(false)],
+            vec![None, Some(true), Some(false)],
+        ] {
+            let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observers = accepts
+                .iter()
+                .enumerate()
+                .map(|(handle, accept)| {
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::Output {
+                            output_id: crate::StableGraphId::parse("out").unwrap(),
+                        },
+                        handle as u64,
+                        Box::new(Observer {
+                            handle: handle as u64,
+                            accept: *accept,
+                            trace: Arc::clone(&trace),
+                        }),
+                    )
+                })
+                .collect();
+            let mut op = RuntimeOp {
+                inputs: Box::new([]),
+                staged: Box::new([]),
+                sidechain: None,
+                output: 1,
+                kind: NodeKind::BankMember,
+                split_pair: None,
+                observers,
+            };
+            test_only_meter_input_reset(false);
+            let result = observe(&mut op, &lease, 71, Some(view));
+            let take = accepts
+                .iter()
+                .position(|a| *a == Some(true))
+                .map_or(accepts.len(), |i| i + 1);
+            assert_eq!(result.is_err(), accepts.contains(&Some(true)));
+            let seen = &accepts[..take];
+            assert_eq!(
+                *trace.lock().unwrap(),
+                seen.iter()
+                    .enumerate()
+                    .map(|(i, a)| (i as u64, a.is_some()))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                test_only_meter_input_counts(),
+                [
+                    u64::from(seen.contains(&None)),
+                    take as u64,
+                    seen.iter().filter(|a| a.is_some()).count() as u64,
+                ]
+            );
+        }
+        test_only_meter_input_reset(false);
+    }
+
+    #[test]
+    fn resident_meter_entry_has_one_final_output_dispatch_and_admission_control() {
+        fn valid(source: &str) -> bool {
+            let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+            let observation = production
+                .split("pub(crate) fn observe_unit(")
+                .nth(1)
+                .unwrap()
+                .split("// REALTIME_POLICY_END")
+                .next()
+                .unwrap();
+            production.matches(".observe_resident(").count() == 1
+                && production.matches(".final_output_lane(").count() == 1
+                && [
+                    "let Self { lease, units, .. } = self;",
+                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None)",
+                    "let eligible = population > 0",
+                    "population <= width",
+                    "!members.is_empty()",
+                    "members.len().is_multiple_of(population)",
+                    "chain.active().len() == width",
+                    "*active == (lane < population)",
+                    "fold.is_empty()",
+                    "chain.fold_lanes().is_empty()",
+                    "chain.aux_lanes().is_empty()",
+                    "u32::try_from(lease.frames()).ok()",
+                    "members.len().checked_sub(population)",
+                    "let chain: &BankChain = chain;",
+                    "let resident = if eligible",
+                    "index.checked_sub(start)",
+                    "chain.final_output_lane(frames?, lane)",
+                    "observe(member, lease, first_sample, resident)?;",
+                ]
+                .iter()
+                .all(|term| observation.contains(term))
+        }
+        let source = include_str!("runtime.rs");
+        assert!(valid(source));
+        for (from, to) in [
+            ("let resident = if eligible", "let resident = if true"),
+            ("index.checked_sub(start)", "Some(index)"),
+            (
+                "chain.final_output_lane(frames?, lane)",
+                "chain.final_output_lane(1, lane)",
+            ),
+            (
+                "observe(member, lease, first_sample, resident)?;",
+                "observe(member, lease, first_sample, resident).ok();",
+            ),
+        ] {
+            assert!(!valid(&source.replacen(from, to, 1)), "control: {from}");
+        }
+    }
 
     #[test]
     fn rt9_resident_entry_has_one_guarded_production_caller_and_control() {
