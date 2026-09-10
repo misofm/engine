@@ -2,28 +2,30 @@
 
 ## Authority and outcome
 
-Parent: #703 / CP1 / lane B. #704 is a closed procedural hard stop with zero
-credit; it supplies no inherited probe, artifact, pin, or delivery authority.
-The only active slots are #703 and this materially changed artifact successor;
-no original finding may start. CP1 remains partial.
+Parent: #703 / CP1 / lane B. #703 is passive at SOURCE PASS; #704 is a closed
+procedural hard stop with zero credit and supplies no inherited probe, artifact,
+pin, or delivery authority. #705 is the sole active lane-B issue; no original
+finding may start. CP1 remains partial.
 
-Sol HIGH coordinates. Astra XHIGH scopes, executes the probe/qualification, and
-returns a separate adversarial evidence verdict. Luna HIGH performs only the
-non-delicate mechanical pin/results/matrix overlay. Astra HIGH performs delicate
-audio/DSP implementation only if separately rescoped. Agents are bounded
-assignees and do not own issues.
+Sol HIGH coordinates. Astra XHIGH executes the probe and qualification. A
+separate Astra LOW assignment scopes each published checkout and reviews the
+evidence adversarially. Luna XHIGH performs only the non-delicate mechanical
+pin/results/matrix overlay after Phase 1 PASS and lease release. Astra HIGH has
+no assignment here. Agents are bounded assignees and do not own issues.
 
 The source introduction is `a722fb40cf5bb309ac67d09ade6c3943f872ebab`; the
 qualified source is `6a61bf14fd6bad10d76c62a06a3ae3845c70f097`; the #703 PASS
 record is `5a493f08e6000f7da54ae8ec351a166149c51603`; main is
-`ebf404d73d58b72acad8d67ca70759940e034f36`; and the PDC source SHA-256 is
+`b1f9128f3e06532afdfc16aad661c4b2deb5dea1`; and the PDC source SHA-256 is
 `2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e`.
 The #703 source evidence has 130 records with manifest SHA-256
 `b2bb2e8c`; the delivered six-file artifact is preserved at
 `/tmp/cp1-buffer-position-artifact-a1-artifact`, with delivered pin
 `3a9de0b07c8242922ff773114ce44306b8bae7c3444b3785cbbe8bd18028cc16`.
 The abbreviated manifest is an authority reference only; original receipts and
-complete files govern.
+complete files govern. Current main for this amendment is
+`b1f9128f3e06532afdfc16aad661c4b2deb5dea1`; the preparation and tracker
+identities are frozen below.
 
 This issue qualifies the exact generated PDC AudioWorklet artifact after source
 PASS. It changes no product source, tests, fixtures, scripts, workflows,
@@ -603,3 +605,252 @@ Astra XHIGH executes and a separate Astra XHIGH reviews. Luna HIGH handles only
 the post-probe overlay. Any dispatched A5 failure hard-stops #705; there is no
 sixth attempt. This rebrief grants no execution authority until the exact
 preflight commands, E1, and lease receive final Astra XHIGH scope PASS.
+
+## Attempt 5 amendment — final role, identity, and command authority
+
+This amendment supersedes only the prospective Attempt 5 section above. It
+does not rewrite the A1–A4 records, their failures, their retained evidence,
+or their zero-credit accounting. Attempts 1–4 remain consumed failures;
+Attempt 5 remains the fifth and final attempt. Any dispatched preflight, setup,
+receipt, probe, overlay, artifact, or qualification failure hard-stops #705.
+There is no sixth attempt, renamed helper, successor, or retroactive credit.
+
+The roles for this final attempt are fixed as follows. Sol HIGH coordinates and
+freezes authority. Astra XHIGH is the sole executor for both Phase 1 and Phase
+2. A separate Astra LOW assignment performs the final read-only scope review
+before each lease and the adversarial evidence review after each phase. Luna
+XHIGH performs only the mechanical post-probe overlay after Phase 1 PASS and
+lease release; it does not scope, execute, or review qualification. Astra HIGH
+has no assignment. Agents remain bounded assignees and do not own issues.
+
+At this amendment boundary the reconciled identities are:
+
+```text
+main_head:        b1f9128f3e06532afdfc16aad661c4b2deb5dea1
+tracker_head:     54866e97147b0f1f830676b32b4a355e737444d3
+preparation_head: e4120281699dc1baa0c5c9a64b3118b28700ea5f
+preparation:      /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705
+tracker:          /home/bl/misofm/engine-audit-handoff
+```
+
+The preparation branch is `codex/qualify-pdc-artifact-immutable-705` and is
+clean and pushed at `e4120281699dc1baa0c5c9a64b3118b28700ea5f`. The tracker
+branch is `codex/audit-349-priority-handoff` and is clean and pushed at
+`54866e97147b0f1f830676b32b4a355e737444d3`. #703 is passive at SOURCE PASS;
+#705 is the sole active lane-B issue. Independent tracker or other-lane
+coordination is permitted outside an active execution lease. Before a lease,
+Sol freezes the #705 repository state, #703/#705/#559/#560 GitHub bodies,
+tracker state, source identities, and artifact/pin state named by the lease.
+During that lease none of those frozen states may be mutated; coordination
+that would change them waits for lease release and a fresh reconciliation.
+
+The #703 source and spec identities remain unchanged: source introduction
+`a722fb40cf5bb309ac67d09ade6c3943f872ebab`, qualified source
+`6a61bf14fd6bad10d76c62a06a3ae3845c70f097`, SOURCE PASS record
+`5a493f08e6000f7da54ae8ec351a166149c51603`, PDC source SHA-256
+`2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e`, and
+the delivered six-file authority and pin recorded above. Do not edit, rebase,
+cherry-pick, or requalify #703.
+
+The existing detached A5 checkout is retained exactly as the old-brief
+observation and has no execution authority:
+
+```text
+old A5 E1: /home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe
+old A5 E1 HEAD: e4120281699dc1baa0c5c9a64b3118b28700ea5f
+```
+
+Do not mutate or reuse that checkout. After this amendment is pushed and the
+separate Astra LOW final scope review passes, Sol prepares the new distinct
+detached E1 below at the exact pushed amendment commit supplied verbatim in
+the lease. Sol, not the executor, creates it; this amendment does not create it.
+
+```text
+E1 / Phase 1 detached checkout:
+    /home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-final
+    containing-brief commit: this pushed amendment HEAD, copied verbatim into the lease
+
+Phase 2 overlay branch:
+    codex/qualify-pdc-artifact-overlay-705-a5-final
+    /home/bl/misofm/engine-cp1-pdc-artifact-overlay-705-a5-final
+
+E2 / Phase 2 detached checkout:
+    /home/bl/misofm/engine-cp1-pdc-artifact-705-a5-qualify-final
+```
+
+Use only these fresh Attempt 5 roots. Every entry must be absent as both an
+ordinary path and a dangling symlink before E1 preparation and again before
+execution. No root, lease, output, checkout, branch, or artifact is created by
+this documentation amendment:
+
+```text
+/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+/tmp/cp1-pdc-artifact-705-a5-final-probe-output
+/tmp/cp1-pdc-artifact-705-a5-final-probe-target
+/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence
+/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp
+/tmp/cp1-pdc-artifact-705-a5-final-artifact
+/tmp/cp1-pdc-artifact-705-a5-final-qualify-target
+/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target
+```
+
+### Attempt 5 Phase 1 preflight and probe — literal authority
+
+The final Astra LOW scope review checks the exact pushed preparation HEAD,
+detached E1 identity, frozen source/spec identities, all nine root absences,
+and the command text below before Sol issues a lease. Every E1 shell call uses
+the absolute E1 worktree and `login:true`, prints cwd, exact HEAD,
+`upstream=not-applicable-detached`, and porcelain status, and propagates the
+real exit. No `@{upstream}`, custom runner, retry, polling wrapper, or
+stale-primary-checkout assertion is allowed.
+
+The Phase 1 preflight consists exactly of these direct observations, in order:
+
+```text
+pwd
+git rev-parse --verify HEAD
+git status --porcelain=v1 --untracked-files=all
+git branch --show-current
+git rev-parse --is-inside-work-tree
+git rev-parse refs/remotes/origin/main
+git ls-remote --exit-code origin refs/heads/main
+git -C /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705 rev-parse HEAD
+git -C /home/bl/misofm/engine-audit-handoff rev-parse HEAD
+git -C /home/bl/misofm/engine-audit-handoff rev-parse refs/remotes/origin/codex/audit-349-priority-handoff
+git diff --check
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-output && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-target
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-artifact && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-artifact
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-target
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-hermetic-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-hermetic-target
+```
+
+The two main observations are authoritative only when both equal parsed
+`main_head`: `git rev-parse refs/remotes/origin/main` and
+`git ls-remote --exit-code origin refs/heads/main`. The stale primary checkout
+`/home/bl/misofm/engine` and its local `refs/heads/main` are never read or
+compared as main authority. The two tracker parity files are authoritative
+only from the tracker checkout, never from E1:
+
+```text
+/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/559-audit-349-lane-a-handoff.md
+/home/bl/misofm/engine-audit-handoff/.github/ISSUE_SPECS/560-audit-349-lane-b-handoff.md
+```
+
+Compare those two files byte-for-byte with `gh issue view 559 --json body` and
+`gh issue view 560 --json body` after removing only the CLI's terminal newline;
+compare the E1-local #703 and #705 specs in the same way with their matching
+GitHub bodies. The lease records all four body SHA-256 values. A body mismatch,
+stale tracker ref, or root/path identity mismatch stops before any directory is
+created. The frozen tracker files remain outside E1 throughout both phases.
+
+After the preflight lease is issued, create these directories separately and in
+this order, recording absence first and the real mkdir result:
+
+```text
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+```
+
+Run exactly once from E1, with no other builder invocation:
+
+```text
+env MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+```
+
+Require actual exit 0, exactly one lowercase 64-hex digest plus LF on stdout,
+an empty probe-output directory, unchanged tracked bytes and exact detached
+HEAD, and an absent supplied probe target after the builder. The builder's
+private temporary Wasm target under TMPDIR is permitted. Seal complete stdout,
+stderr, argv, environment, cwd, status, receipt and self-excluding manifest;
+release the lease and stop for the separate Astra LOW evidence review. A
+matching digest is identity evidence only.
+
+### Attempt 5 Phase 2 overlay and qualification — literal authority
+
+After Phase 1 Astra LOW PASS and explicit lease release, Luna XHIGH may make
+the mechanical overlay on the named overlay branch only. Set
+`candidateCommit` to `a722fb40cf5bb309ac67d09ade6c3943f872ebab` and
+`wasmSha256` to the authenticated Phase 1 digest. Change the pin only when the
+digest differs. Regenerate the browser matrix lineage exactly once, checkpoint
+and push the overlay, synchronize #705 and the tracker outside any execution
+lease, and stop for the separate Astra LOW exact-head scope review. No other
+tracked path may change.
+
+Sol then prepares E2 at the exact pushed overlay commit. The E2 preflight uses
+the absolute E2 worktree, `login:true`, and these observations before any
+qualification root is created:
+
+```text
+pwd
+git rev-parse --verify HEAD
+git status --porcelain=v1 --untracked-files=all
+git branch --show-current
+git rev-parse --verify refs/remotes/origin/codex/qualify-pdc-artifact-overlay-705-a5-final
+git ls-remote --exit-code origin refs/heads/codex/qualify-pdc-artifact-overlay-705-a5-final
+git diff --name-status b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+git diff --unified=80 b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+git diff --name-status 5a493f08e6000f7da54ae8ec351a166149c51603 <exact-reviewed-E2-head>
+git diff --unified=80 5a493f08e6000f7da54ae8ec351a166149c51603 <exact-reviewed-E2-head>
+git diff --check b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+```
+
+The main-to-E2 diff may contain only immutable inherited #703 source/spec and
+the authorized #705 overlay. The #703-source-pass-to-E2 diff may contain only
+the #705 spec, conditional pin, `candidateCommit`, `wasmSha256`, and generated
+matrix lineage. Astra LOW reviews the exact path and hunk output; an empty
+working-tree diff is not evidence.
+
+After the E2 lease, create these directories separately and in this order,
+recording ordinary and dangling-symlink absence before each creation:
+
+```text
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp
+mkdir /tmp/cp1-pdc-artifact-705-a5-final-artifact
+```
+
+Run each command exactly once, in order, from absolute E2, with
+`MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` unset, explicit TMPDIR and target, and
+complete structured receipts. Stop at the first failure:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target bash scripts/check-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/cp1-pdc-artifact-705-a5-final-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target bash scripts/test-web-audioworklet.sh
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target npm_config_cache=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp/npm-cache npm --prefix sdk ci --ignore-scripts
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target bash scripts/sdk-package.sh check /tmp/cp1-pdc-artifact-705-a5-final-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target npm_config_cache=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp/npm-cache npm --prefix hosts/host-web/qualification ci --ignore-scripts
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target npm_config_cache=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp/npm-cache npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/cp1-pdc-artifact-705-a5-final-artifact --browser all --check-matrix --self-test-mutations
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target node hosts/host-web/qualification/generate-matrix.mjs --check
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-qualify-target git diff --check b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-reviewed-E2-head>
+```
+
+Immediately after the builder, require exactly six ordinary artifact files.
+The Wasm digest must equal the authenticated probe, the conditional pin and
+`wasmSha256` must agree, and these five non-Wasm authority hashes remain fixed:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a  miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d  miso-engine-v1-parameter-metadata.json
+```
+
+If the Wasm digest is unchanged, all six files must be byte-equal to the
+preserved delivered authority. If it differs, qualify the new six-file set
+without any size, timing, allocation, performance, listening, or sound-quality
+claim. Only the explicitly ignored SDK and qualification dependency outputs may
+appear. Preserve all receipts, failures, old A5 checkout/evidence, and roots.
+This amendment grants no lease or execution authority until Astra LOW has
+reviewed the exact pushed amendment, prepared E1, and all frozen identities.
+No builder, qualification, artifact, pin, timing, or output-root action was
+performed while preparing this amendment.
