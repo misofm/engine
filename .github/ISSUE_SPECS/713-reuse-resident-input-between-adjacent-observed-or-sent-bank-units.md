@@ -375,3 +375,26 @@ tranche hash `03fe2d33114cc7d64bfdd658ab84e115fc06e2f4af74881d6600dba81001752`.
 
 This is a focused green checkpoint only. It is not source PASS and carries no
 delivery, timing, artifact, AudioWorklet-pin, or performance claim.
+
+## Implementation Attempt 3 — FAIL after scoped qualification
+
+Attempt 3's qualification record is preserved under
+`/tmp/issue713-attempt3-wu8edtgu/`.
+
+- The focused rack, graph/lib, and prepared-plan integration suites remained
+  green at 2/2, 3/3, and 3/3.
+- The physical old-gather mutation produced its intended failure, and the
+  restored candidate passed the same test.
+- Full graph/rack debug and release-unwind suites passed.
+- Strict Clippy exited 101 at
+  `crates/graph/tests/rt9_resident_bank_input_alloc.rs:303` for
+  `clippy::needless_range_loop` on the indexed fixture lane loop.
+- Standalone allocation, policy/mutation follow-up, target, and final exact
+  gates were not run after that first unexpected failure.
+
+Astra LOW returned **Attempt 3 FAIL** with no source or delivery credit.
+Attempt 4 is authorized only to replace that indexed fixture lane loop with an
+equivalent iterator/enumeration over the actual lane population, preserving
+edge order and lane IDs. No lint suppression, blind stage-group enumeration,
+other defect correction, or product rescope is authorized. Attempt 4 must then
+rerun the affected Clippy gate and the outstanding scoped gates.
