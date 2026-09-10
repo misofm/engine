@@ -42,3 +42,13 @@ changing sealed input bytes. Authoring guidance reflects the bounded guarantee.
 Focused formatting and all 10 validator integration tests passed. Actual command,
 environment, exit and output receipts: `/tmp/issue211-attempt1`.
 Root owns this exact-path checkpoint; independent Astra XHIGH verdict pending.
+
+## Attempt 1 review failure and attempt 2 correction
+
+Astra XHIGH stopped at strict Clippy's single_element_loop in the canonical
+fixture test; ordinary tests remained green. Receipt:
+`/tmp/issue211-verification-attempt1/clippy.json`. Root authorized only flattening
+that singleton loop. Astra LOW applied the correction; locked validator tests,
+strict all-target/all-feature Clippy and formatting all passed. Evidence:
+`/tmp/issue211-attempt2`. Incidental unrelated lock ordering was restored; only
+the test correction and this record change. Independent attempt2 verdict pending.

@@ -402,15 +402,14 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
 
 #[test]
 fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
-    for name in ["canonical-minimal.json"] {
-        let source = fixture(name);
-        let report = validate_session_document(&source);
-        assert_eq!(
-            report.canonical(),
-            Some(source.as_str()),
-            "{name} is checked in as canonical"
-        );
-    }
+    let name = "canonical-minimal.json";
+    let source = fixture(name);
+    let report = validate_session_document(&source);
+    assert_eq!(
+        report.canonical(),
+        Some(source.as_str()),
+        "{name} is checked in as canonical"
+    );
 }
 
 #[test]
