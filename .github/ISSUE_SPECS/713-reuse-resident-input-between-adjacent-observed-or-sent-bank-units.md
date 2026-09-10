@@ -451,3 +451,17 @@ unchanged. This record claims no #713 delivery, timing, full-tee, artifact,
 pin, or performance result. Required current-head Astra LOW review, PR
 qualification, guarded merge, post-main qualification, GitHub synchronization,
 and clean-worktree cleanup remain open.
+
+## DELIVERY QUALIFICATION FAIL — #716
+
+PR #716 used exact head `d6a04d93e4296e6c1d6eaefc9547b60bcf8462cc`.
+Its test merge `a4072c7097e0983a71b5dab1c6a3db37ace06828` has tree
+`ced9b39475ddc2c9e05c441efa0db0f18f716dd2`, equal to the head tree.
+Required run `34448821511` passed every non-artifact leaf, but shipped-artifact
+job `102779640808` failed the expected digest
+`c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569` against
+observed `5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574`;
+the aggregate therefore failed. PR #716 is closed with its branch and run
+preserved. The source PASS remains valid, but this earns no delivery or timing
+credit. A new lane-B successor is required; #714 remains queued. No full-RT9,
+artifact, pin, or performance claim is made.
