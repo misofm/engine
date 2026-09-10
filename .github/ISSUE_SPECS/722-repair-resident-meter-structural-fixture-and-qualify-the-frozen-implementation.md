@@ -134,3 +134,23 @@ layout measurements and resource reconciliation are external at
 No unexpected failure, new harness, full repeated campaign or compiler-IR
 capture. Integration, artifact qualification and required CI remain root's
 delivery steps. #710 is now delivered at878db254 with both required runs PASS.
+
+## Current-main combined delivery coordination
+
+User routing: Astra LOW implementation, Astra XHIGH scope/verification.
+Independent XHIGH scope PASS permits combined delivery with #722 from delivered
+main878db254. Admit only the separately accepted #709 and #722 deltas. #709's
+rack changes remain owned by #709 and are not repairs or expanded authority
+under exhausted #714 or qualification successor #722. All #722 production
+additions remain unchanged. Verify the shared rack file as the composition of
+accepted deltas; no additional production correction is authorized. Stop on
+conflicts or unexpected source drift. Preserve #713 resident-input machinery.
+
+Root checkpoints each history merge separately. Then run the existing rack
+suite, meter tests, graph resident/executor selectors and compiler resident
+selectors in debug and release-unwind, formatting and realtime policy. Retarget
+and rerun only the existing #709 and #722 allocation harnesses once to establish
+joint-checkout behavior, including live detectors. No new harness/full campaign.
+XHIGH integration PASS precedes one root-owned shared artifact qualification
+and PR/main pair. Each issue retains separate acceptance and closure evidence.
+No timing, full-RT10, nested-forwarding removal or publication claim.
