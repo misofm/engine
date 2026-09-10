@@ -300,3 +300,31 @@ scope reviews. No RT-9 full-delivery or performance credit is claimed.
 
 Zero implementation attempts are consumed. This PASS authorizes neither full
 RT-9 delivery nor timing, artifact, AudioWorklet-pin, or performance authority.
+That zero-attempt statement applies to the scope reviews only; Attempt 1 below
+is the first implementation attempt and is recorded separately as a failure.
+
+## Implementation Attempt 1 — FAIL
+
+Attempt 1 is preserved at evidence directory
+`/tmp/issue713-attempt1-ecgenb20/`, including the failed-state hashes at
+`/tmp/issue713-attempt1-ecgenb20/failed-state-sha256.json`.
+
+- Preflight passed: `UnitIdentity` was 32/8 on native and 20/4 on Wasm scalar
+  and Wasm SIMD128; measured allocation deltas were zero.
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- The first focused rack test compiled, then exited 101 with one pass and one
+  failure. `rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words`
+  hit the existing exact-length assertion because the fixture exposed quantum-17
+  planes for partial frame counts.
+- Graph, allocation, mutation, target, and broad workspace gates were not run.
+  Attempt 1 receives zero source or qualification credit.
+
+Astra LOW verified the exact diff and preserved hashes, returned **Attempt 1
+FAIL**, and authorized one bounded Attempt 2 with no product rescope. Attempt 2
+must slice exposed planes to `frames` while retaining quantum scratch and poison;
+add actual nonunity-crossfeed and delayed-PDC send semantics; cover scalar,
+incompatible, and nonadjacent controls; add the physical old-gather mutation;
+strengthen the structural validator for executor observation/freshness; and add
+controls for an intervening emitted scalar, a retired non-emitted run, and
+unequal or shorter populations. No later gate is authorized until those bounded
+corrections are made.

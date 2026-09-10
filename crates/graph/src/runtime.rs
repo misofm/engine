@@ -44,6 +44,24 @@ use engine::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 
+// Private qualification hooks count actual planar acquisition reads, not transpose accounting.
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_RESIDENT_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_ONLY_RESIDENT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_resident_input_reset(disabled: bool) {
+    TEST_ONLY_RESIDENT_DISABLED.with(|value| value.set(disabled));
+    TEST_ONLY_RESIDENT_COUNTS.with(|value| value.set([0; 2]));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_resident_input_counts() -> [u64; 2] {
+    TEST_ONLY_RESIDENT_COUNTS.with(std::cell::Cell::get)
+}
+
 /// A bounded, render-local witness for the private post-fader buffer at a failed render boundary.
 ///
 /// This exists only for the split-owner qualification fixture. The capture is copied into fixed
@@ -852,6 +870,11 @@ pub(crate) struct FoldLane {
 
 impl BankMembers for ArenaMembers<'_> {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+        #[cfg(any(test, feature = "test-support"))]
+        TEST_ONLY_RESIDENT_COUNTS.with(|count| {
+            let [gathers, residents] = count.get();
+            count.set([gathers + 1, residents]);
+        });
         self.lease.read_stereo(self.inputs[lane])
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
@@ -993,6 +1016,8 @@ impl BankMembers for ArenaMembers<'_> {
 /// pulled from the chain on demand.
 pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
+    /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
+    resident_input: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
@@ -1286,13 +1311,28 @@ impl Runtime {
             track_delays,
             units,
             split_pairs,
+            identity,
             bank_inputs,
             bank_outputs,
             ..
         } = self;
+        // GraphExecutor reaches this unit only after the previous execute and observe both
+        // returned Ok in this block. Splitting borrows the two resident owners disjointly.
+        let (before, current) = units.split_at_mut(index);
+        let admitted = identity[index].resident_input;
+        #[cfg(any(test, feature = "test-support"))]
+        let admitted = admitted && !TEST_ONLY_RESIDENT_DISABLED.with(std::cell::Cell::get);
+        let predecessor = if admitted {
+            match before.last() {
+                Some(RuntimeUnit::Bank { chain, .. }) => Some(chain),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let delays: &mut [CompensationDelay] = delays;
         let track_delays: &mut [TrackDelayLine] = track_delays;
-        match &mut units[index] {
+        match &mut current[0] {
             RuntimeUnit::Op(op) => {
                 execute_op(op, lease, delays, track_delays, split_pairs, first_sample)
             }
@@ -1327,17 +1367,24 @@ impl Runtime {
                     bank_outputs[lane] = members[last + lane].output;
                 }
                 let frames = lease.frames();
-                chain.run(
-                    &mut ArenaMembers {
-                        lease,
-                        inputs: &bank_inputs[..lanes],
-                        outputs: &bank_outputs[..lanes],
-                        fold,
-                        master: *master,
-                    },
-                    u32::try_from(frames).unwrap_or(u32::MAX),
-                    first_sample,
-                )
+                let mut planes = ArenaMembers {
+                    lease,
+                    inputs: &bank_inputs[..lanes],
+                    outputs: &bank_outputs[..lanes],
+                    fold,
+                    master: *master,
+                };
+                let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+                if let Some(predecessor) = predecessor {
+                    #[cfg(any(test, feature = "test-support"))]
+                    TEST_ONLY_RESIDENT_COUNTS.with(|count| {
+                        let [gathers, residents] = count.get();
+                        count.set([gathers, residents + 1]);
+                    });
+                    chain.run_with_resident_input(predecessor, &mut planes, frames, first_sample)
+                } else {
+                    chain.run(&mut planes, frames, first_sample)
+                }
             }
         }
     }
@@ -2661,6 +2708,7 @@ pub(crate) fn build_sequential(
             let node_of = |index: usize| &spec.nodes[program.ops[index].node as usize].id;
             identity.push(UnitIdentity {
                 banked: !membership.is_empty(),
+                resident_input: false,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
                     (0..stages)
@@ -2723,6 +2771,30 @@ pub(crate) fn build_sequential(
     }
     apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
     let folds = apply_route_fold(fold.as_ref(), &unit_of_run, &op_slot, arena, &mut units);
+    // Work on final emitted adjacency, after redirects and folded epilogues. No new allocation:
+    // the sole retained bit occupies UnitIdentity padding; all other proof inputs already exist.
+    let mut previous: Option<(usize, &[usize])> = None;
+    for (run, (_, ops)) in run_units.iter().enumerate() {
+        let Some(unit) = unit_of_run[run] else {
+            continue;
+        };
+        if let Some((before, earlier)) = previous {
+            let lanes = identity[unit].lane_tracks.len();
+            identity[unit].resident_input = resident_units_match(&units[before], &units[unit])
+                && identity[before].lane_tracks == identity[unit].lane_tracks
+                && earlier[earlier.len() - lanes..]
+                    .iter()
+                    .zip(&ops[..lanes])
+                    .all(|(producer, consumer)| {
+                        let op = &program.ops[*consumer];
+                        op.input_count() == 1
+                            && op.sidechain.is_none()
+                            && program.inputs_of(op)[0].delay.is_none()
+                            && first_producer[*consumer] == Some(*producer)
+                    });
+        }
+        previous = Some((unit, ops));
+    }
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -2744,6 +2816,47 @@ pub(crate) fn build_sequential(
         redirects.len() as u64,
         folds,
     )
+}
+
+/// The separate resident proof deliberately permits extra readers and every observer. Their
+/// planar scatter and schedule boundaries remain intact. Equal validated bank widths also prove
+/// backend identity by BankWidth::for_backend; scalar units cannot enter this path.
+fn resident_units_match(before: &RuntimeUnit, after: &RuntimeUnit) -> bool {
+    let (
+        RuntimeUnit::Bank {
+            members: a,
+            lanes: a_lanes,
+            chain: a_chain,
+            fold,
+            ..
+        },
+        RuntimeUnit::Bank {
+            members: b,
+            lanes: b_lanes,
+            chain: b_chain,
+            ..
+        },
+    ) = (before, after)
+    else {
+        return false;
+    };
+    a_lanes == b_lanes
+        && *a_lanes > 0
+        && a_chain.width() == b_chain.width()
+        && a_chain.quantum() == b_chain.quantum()
+        && a_chain.active() == b_chain.active()
+        && fold.is_empty()
+        && a_chain.fold_lanes().is_empty()
+        && a_chain.aux_lanes().is_empty()
+        && a[a.len() - a_lanes..]
+            .iter()
+            .zip(&b[..*b_lanes])
+            .all(|(a, b)| {
+                matches!(b.kind, NodeKind::BankMember)
+                    && b.staged.is_empty()
+                    && b.sidechain.is_none()
+                    && b.inputs.as_ref() == [a.output]
+            })
 }
 
 /// Arm every admitted chain's epilogue and neutralise the reduction it performed.
@@ -3800,6 +3913,77 @@ mod tests {
     };
 
     #[test]
+    fn rt9_resident_entry_has_one_guarded_production_caller_and_control() {
+        fn valid(runtime: &str, graph: &str, rack: &str) -> bool {
+            let production = |source: &str| {
+                source
+                    .split("\n#[cfg(test)]\nmod tests {")
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            let runtime = production(runtime);
+            let count = [&runtime, &production(graph), &production(rack)]
+                .iter()
+                .map(|source| source.matches(".run_with_resident_input(").count())
+                .sum::<usize>();
+            let execute = runtime
+                .split("pub(crate) fn execute(")
+                .nth(1)
+                .unwrap()
+                .split("pub(crate) fn complete_pending(")
+                .next()
+                .unwrap();
+            count == 1
+                && execute.contains("let (before, current) = units.split_at_mut(index);")
+                && execute.contains("let admitted = identity[index].resident_input;")
+                && execute.contains("let predecessor = if admitted {")
+                && execute.contains("if let Some(predecessor) = predecessor {")
+                && execute.contains(
+                    "chain.run_with_resident_input(predecessor, &mut planes, frames, first_sample)",
+                )
+        }
+        let runtime = include_str!("runtime.rs");
+        let graph = include_str!("lib.rs");
+        let rack = include_str!("../../rack/src/lib.rs");
+        assert!(
+            valid(runtime, graph, rack),
+            "sole resident call must remain behind graph admission"
+        );
+        let bypass = runtime.replacen(
+            "let admitted = identity[index].resident_input;",
+            "let admitted = true;",
+            1,
+        );
+        assert!(!valid(&bypass, graph, rack), "admission-bypass control");
+        let second = format!("unrelated.run_with_resident_input();\n{graph}");
+        assert!(
+            !valid(runtime, &second, rack),
+            "second-production-call control"
+        );
+    }
+
+    #[test]
+    fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
+        struct Before {
+            _banked: bool,
+            _stages: u32,
+            _upstream: u32,
+            _tracks: Box<[Box<str>]>,
+        }
+        assert_eq!(
+            core::mem::size_of::<UnitIdentity>(),
+            core::mem::size_of::<Before>()
+        );
+        assert_eq!(
+            core::mem::align_of::<UnitIdentity>(),
+            core::mem::align_of::<Before>()
+        );
+        // build_sequential retains the same vector capacity and boxes it once; no separate
+        // resident table, per-block allocation, or transient acquisition buffer is introduced.
+    }
+
+    #[test]
     fn synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline() {
         // This is a deliberately synthetic lowered program. It isolates the defensive identity
         // gate; #476 owns the separate question of whether production lowering can emit it.
@@ -3981,6 +4165,7 @@ mod tests {
             })],
             vec![UnitIdentity {
                 banked: false,
+                resident_input: false,
                 stages: 1,
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
