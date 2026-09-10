@@ -1043,3 +1043,251 @@ Phase 2 lease after the overlay is pushed and receives exact-head Astra LOW
 scope PASS; it names the exact E2/head/main/tracker/body/PDC identities, Phase 2
 roots, qualification command sequence, and release/revocation markers. Lane A
 may continue independently outside those frozen #705 inputs.
+
+## Attempt 5 final authority correction — external post-push lease
+
+This section supersedes only the prospective Attempt 5 lease and receipt
+mechanics above. It preserves every earlier attempt, failed receipt, draft,
+checkout, root, substantive gate, Phase 2 rule, and no-claim limit. A5 remains
+the fifth and final attempt; any dispatched preflight, ancestry review, mkdir,
+builder, validation, terminal write, acknowledgement, or release-write failure
+consumes A5 with no retry or sixth attempt.
+
+The prior A5 JSON lease block is historical and is not a lease template. No
+lease, body digest, E1 head, preparation head, or tracker head is embedded in
+this #705 body. After this amendment is pushed and the #705 GitHub body is
+synchronized, Sol computes those values from the pushed state and writes one
+small external JSON lease. Astra LOW reviews that lease and the exact pushed
+body before any E1 or root exists. The #705 body digest is computed after the
+push and appears only in that external lease; this avoids a self-referential
+#705 hash.
+
+The external lease has exactly these fields; angle-bracket values are filled
+only after the push and are never copied back into this spec:
+
+```json
+{
+  "issue": 705,
+  "attempt": 5,
+  "phase": "1-identity-probe",
+  "executor": "/root/issue705_a5_astra_xhigh_exec",
+  "model": "Astra XHIGH",
+  "e1": "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-authority",
+  "e1_head": "<post-push-E1-head>",
+  "main_head": "b1f9128f3e06532afdfc16aad661c4b2deb5dea1",
+  "preparation_repo": "/home/bl/misofm/engine-cp1-pdc-artifact-isolated-705",
+  "preparation_head": "<post-push-preparation-head>",
+  "tracker_repo": "/home/bl/misofm/engine-audit-handoff",
+  "tracker_head": "<post-push-tracker-head>",
+  "cargo": "/home/bl/.cargo/bin/cargo",
+  "body_sha256": {
+    "559": "<post-sync-559-body-sha256>",
+    "560": "<post-sync-560-body-sha256>",
+    "703": "<post-sync-703-body-sha256>",
+    "705": "<post-sync-705-body-sha256>"
+  },
+  "pdc_source_sha256": "2fc6a8e84dd47dd86f177aae6a206a0caef297829c4f25192382764ff0877e2e",
+  "roots": [
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-artifact",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target"
+  ],
+  "lease_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease",
+  "terminal_result": "/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/terminal.json",
+  "ack_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack",
+  "release_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release",
+  "revocation_marker": "/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked"
+}
+```
+
+The lease also carries the literal command strings below. The fresh E1 path is
+`/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-authority`; the old A5
+E1 and the prior `a5-probe-final` path remain preserved and are never reused.
+Sol prepares this fresh detached E1 at the lease's exact `e1_head`. The
+preparation and tracker checkouts remain outside E1 and are not copied into it.
+
+The relevant-process check is narrow: it rejects only a process whose resolved
+cwd or argv contains the exact E1 path or one of the nine exact roots. It
+excludes the executor PID and its complete ancestor chain, and does not reject
+unrelated Cargo, browser, GitHub, shell, or agent processes. The exact check is:
+
+```text
+python3 - <<'PY'
+import os
+from pathlib import Path
+
+needles = [
+    "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-authority",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-artifact",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target",
+]
+executor = int(os.environ["A5_EXECUTOR_PID"])
+excluded = set()
+pid = executor
+while pid > 1 and pid not in excluded:
+    excluded.add(pid)
+    try:
+        pid = int(Path(f"/proc/{pid}/stat").read_text().split()[3])
+    except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+        break
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit() or int(entry.name) in excluded:
+        continue
+    try:
+        cwd = os.readlink(entry / "cwd")
+        argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    if any(needle in cwd or needle in argv for needle in needles):
+        raise SystemExit(f"relevant process {entry.name}: {cwd!r} {argv!r}")
+PY
+```
+
+Every call is a direct `functions.exec` call from the literal E1 with
+`login:true`. The transcript truth is its combined output, actual exit,
+workdir, and wall time plus the separate builder files below. It does not
+claim distinct tool stdout/stderr streams or UTC timestamps.
+
+The exact preflight runs before any root is created and stops on any failure:
+
+```text
+pwd
+git rev-parse --verify HEAD
+git status --porcelain=v1 --untracked-files=all
+git branch --show-current
+git rev-parse --is-inside-work-tree
+git rev-parse refs/remotes/origin/main
+git ls-remote --exit-code origin refs/heads/main
+git -C /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705 rev-parse --verify <preparation-head>
+git -C /home/bl/misofm/engine-audit-handoff cat-file -e <tracker-head>^{commit}
+git -C /home/bl/misofm/engine-audit-handoff show -s --format=%H <tracker-head>
+git diff --check
+test -x /home/bl/.cargo/bin/cargo
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-output && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-target
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-artifact && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-artifact
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-qualify-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-qualify-target
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-hermetic-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-hermetic-target
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.revoked
+A5_EXECUTOR_PID=$$ python3 - <<'PY'
+import os
+from pathlib import Path
+
+needles = [
+    "/home/bl/misofm/engine-cp1-pdc-artifact-705-a5-probe-authority",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-output",
+    "/tmp/cp1-pdc-artifact-705-a5-final-probe-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-evidence",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-tmp",
+    "/tmp/cp1-pdc-artifact-705-a5-final-artifact",
+    "/tmp/cp1-pdc-artifact-705-a5-final-qualify-target",
+    "/tmp/cp1-pdc-artifact-705-a5-final-hermetic-target",
+]
+executor = int(os.environ["A5_EXECUTOR_PID"])
+excluded = set()
+pid = executor
+while pid > 1 and pid not in excluded:
+    excluded.add(pid)
+    try:
+        pid = int(Path(f"/proc/{pid}/stat").read_text().split()[3])
+    except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+        break
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit() or int(entry.name) in excluded:
+        continue
+    try:
+        cwd = os.readlink(entry / "cwd")
+        argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    if any(needle in cwd or needle in argv for needle in needles):
+        raise SystemExit(f"relevant process {entry.name}: {cwd!r} {argv!r}")
+PY
+```
+
+The four body hashes are computed and compared to GitHub in the lease review
+using the already frozen tracker checkout and fresh E1. The review also checks
+the exact PDC source hash, preparation/tracker object identity, cargo path,
+all root and marker absences, and the external `main_head`. No stale primary
+checkout is authority.
+
+Restore the committed ancestry review immediately before any mkdir or builder
+call, with the exact external values substituted literally:
+
+```text
+git diff --name-status b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-E1-head>
+git diff --unified=80 b1f9128f3e06532afdfc16aad661c4b2deb5dea1 <exact-E1-head>
+git diff --name-status 5a493f08e6000f7da54ae8ec351a166149c51603 b1f9128f3e06532afdfc16aad661c4b2deb5dea1
+git diff --unified=80 5a493f08e6000f7da54ae8ec351a166149c51603 b1f9128f3e06532afdfc16aad661c4b2deb5dea1
+```
+
+The first diff permits only the immutable #703 spec, #703
+`crates/graph-compiler/src/pdc.rs`, and this #705 spec. The second diff records
+inherited main evolution. Any unexplained path or ancestry mismatch stops A5.
+
+Create the three Phase 1 directories in order, with each call repeating the
+E1, HEAD, status, marker, relevant-process, ordinary-path, and dangling-link
+guards before its one mkdir:
+
+```text
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence && mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp && mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-tmp
+test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-output && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-output && mkdir /tmp/cp1-pdc-artifact-705-a5-final-probe-output
+```
+
+The builder is one direct shell invocation. Only builder stdout and stderr
+are redirected to the two evidence files; only builder start, exit, and end
+are written to metadata. The display cannot mask the builder exit:
+
+```text
+set +e; printf 'builder_start_epoch_seconds=%s\n' "$(date +%s)" > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; env MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 TMPDIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a5-final-probe-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a5-final-probe-output > /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout 2> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stderr; builder_exit=$?; printf 'builder_exit=%s\n' "$builder_exit" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; printf 'builder_end_epoch_seconds=%s\n' "$(date +%s)" >> /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta; cat /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout; cat /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stderr >&2; exit "$builder_exit"
+```
+
+Require builder exit zero, exactly one lowercase 64-hex digest plus LF on
+builder stdout, an empty output tree with non-following traversal, an absent
+probe target as both ordinary path and dangling symlink, unchanged detached
+HEAD, and clean tracked/untracked status. The private Wasm target inside
+TMPDIR is permitted; the supplied target root must stay absent. The exact
+validation call is:
+
+```text
+test "$(awk -F= '$1==\"builder_exit\" {print $2}' /tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.meta)" = 0 && python3 -c 'import re; from pathlib import Path; assert re.fullmatch(rb"[0-9a-f]{64}\\n", Path("/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/builder.stdout").read_bytes())' && test "$(find -P /tmp/cp1-pdc-artifact-705-a5-final-probe-output -mindepth 1 -print -quit)" = "" && test ! -e /tmp/cp1-pdc-artifact-705-a5-final-probe-target && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-probe-target && test "$(git rev-parse --verify HEAD)" = "<exact-E1-head>" && test -z "$(git status --porcelain=v1 --untracked-files=all)"
+```
+
+Write only the fixed terminal result, acknowledge it, and release the lease:
+
+```text
+python3 -c 'import json; from pathlib import Path; e=Path("/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence"); m=(e/"builder.meta").read_text().splitlines(); x=int(next(v.split("=",1)[1] for v in m if v.startswith("builder_exit="))); d=(e/"builder.stdout").read_text()[:-1]; (e/"terminal.json").write_text(json.dumps({"builder_exit":x,"digest":d,"e1_head":"<exact-E1-head>","validation":"PASS"},sort_keys=True,separators=(",",":"))+"\n")'
+python3 -c 'import json; from pathlib import Path; p=Path("/tmp/cp1-pdc-artifact-705-a5-final-probe-evidence/terminal.json"); v=json.loads(p.read_text()); assert v["builder_exit"]==0 and v["validation"]=="PASS" and len(v["digest"])==64; Path("/tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack").write_text("acknowledged\n")'
+test -s /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.ack && test ! -e /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && test ! -L /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release && printf 'released\n' > /tmp/cp1-pdc-artifact-705-a5-final-phase1.lease.release
+```
+
+The terminal result and release transcript are outside any pre-seal evidence
+claim. A terminal-write, acknowledgement, or release-write failure consumes
+A5; there is no retry. After release, Astra LOW reviews the combined direct
+transcripts, separate builder files, terminal JSON, ack, release, ancestry,
+parity, and retained history. There is no manifest, copied receipt index,
+fabricated UTC stream, or qualification claim. Phase 2 remains exactly as
+specified above and starts only after Astra LOW Phase 1 PASS and release.
