@@ -419,6 +419,28 @@ pub trait BankStage: Send {
         ChannelSymmetryWitness::DECLINED
     }
 
+    /// Publish one fixed-width witness bank for this block's valid, non-identity lanes.
+    ///
+    /// The default preserves existing `lane_symmetry` overrides: its calls are made through
+    /// the concrete implementation of this default, after one chain-to-stage virtual call.
+    /// A processor boxed inside that implementation may still forward its own virtual queries.
+    /// Lanes outside `width` or absent from `active_lanes` remain declined and are never queried.
+    // REALTIME_POLICY_BEGIN
+    fn lane_symmetry_bank(
+        &self,
+        width: BankWidth,
+        active_lanes: u8,
+    ) -> [ChannelSymmetryWitness; 8] {
+        let mut witnesses = [ChannelSymmetryWitness::DECLINED; 8];
+        for (lane, witness) in witnesses[..width.lanes() as usize].iter_mut().enumerate() {
+            if active_lanes & (1u8 << lane) != 0 {
+                *witness = self.lane_symmetry(lane);
+            }
+        }
+        witnesses
+    }
+    // REALTIME_POLICY_END
+
     /// Drain this stage's live-console queues, before any lane of the block is dispatched.
     ///
     /// # Why the drain is a separate call and not the first paragraph of [`process`](Self::process)
@@ -1691,28 +1713,10 @@ impl BankChain {
 
     /// This cohort lane's channel-symmetry witness: the conjunction over every slot of the chain.
     ///
-    /// # Why this is a pull and not a stored aggregate
-    ///
-    /// The terms themselves are event-maintained -- a slot's live terms move only when a record is
-    /// drained, and its designed term only when the plan is rebuilt -- so the aggregate is a
-    /// conjunction of at most `slots` already-computed values. That is the cost the collapse
-    /// design priced as "an AND over eight lane witnesses, nanoseconds", and it is why nothing
-    /// here is cached: a cache would add a per-block invalidation check to buy back an `and` over
-    /// four bools.
-    ///
-    /// What *is* cached is one level down, and it has to be: `lane_channel_symmetry` is a walk over
-    /// every designed word a kernel reads, and [`BankChain::run`] pulls this once per lane per slot
-    /// per block. `EffectBankStage::designed` and its console twin take that comparison once, at
-    /// bind, where it is fixed for the life of the bound bank; the live terms stay live, because
-    /// they are the ones a drain moves. So the per-block cost of the whole witness is an `and` over
-    /// `slots * lanes` cached flags plus one stored byte per console-driven lane.
-    ///
-    /// The **input** bank is the third holder of that cache and the only one whose words move
-    /// within a plan, because #210 phase 3 made its trim and polarity words live. It keeps the
-    /// same shape anyway -- the builtins crate's `InputStage::symmetry` -- maintained by the five
-    /// writers of a compared word rather than fixed at bind. Until #235 it alone re-derived its
-    /// walk on every pull, which is what made this paragraph a description of two thirds of the
-    /// tree rather than of all of it.
+    /// Stages maintain designed and live terms at preparation or event-drain boundaries. This
+    /// single-lane evidence helper pulls only the requested lane. Render and the bank-wide
+    /// helpers publish all lanes once per active stage through `lane_symmetry_bank` instead.
+    /// The aggregate is local to the decision, so a later block always sees its completed drains.
     ///
     /// An inactive lane declines: it renders no track, so there is nothing to collapse.
     #[must_use]
@@ -1731,6 +1735,42 @@ impl BankChain {
         witness
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// One publication per active stage; slot identities contribute no terms.
+    fn lane_symmetry_bank(&self) -> [ChannelSymmetryWitness; 8] {
+        let mut witnesses = [ChannelSymmetryWitness::DECLINED; 8];
+        for (witness, active) in witnesses.iter_mut().zip(self.active.iter()) {
+            if *active {
+                *witness = ChannelSymmetryWitness::SYMMETRIC;
+            }
+        }
+        for slot in &self.slots {
+            if slot.has_active_lanes() {
+                let stage = slot
+                    .stage
+                    .lane_symmetry_bank(self.scratch.width, slot.active_lanes);
+                for lane in 0..self.lanes {
+                    if slot.lane_active(lane) {
+                        witnesses[lane] = witnesses[lane].and(stage[lane]);
+                    }
+                }
+            }
+        }
+        witnesses
+    }
+
+    fn all_active_witnesses_hold(
+        &self,
+        witnesses: &[ChannelSymmetryWitness; 8],
+        terms: u8,
+    ) -> bool {
+        witnesses
+            .iter()
+            .zip(self.active.iter())
+            .all(|(witness, active)| !active || witness.holds(terms))
+    }
+    // REALTIME_POLICY_END
+
     /// One flag per **active** lane, in lane order: does that lane's whole witness hold?
     ///
     /// The localisable form of [`symmetry_counters`](Self::symmetry_counters), and the form the
@@ -1740,9 +1780,10 @@ impl BankChain {
     /// member list does.
     #[must_use]
     pub fn active_lane_eligibility(&self) -> Vec<bool> {
+        let witnesses = self.lane_symmetry_bank();
         (0..self.lanes)
             .filter(|lane| self.active[*lane])
-            .map(|lane| self.lane_symmetry(lane).eligible())
+            .map(|lane| witnesses[lane].eligible())
             .collect()
     }
 
@@ -1754,9 +1795,10 @@ impl BankChain {
     /// planner's problem, not the chain's.
     #[must_use]
     pub fn all_lanes_symmetric(&self) -> bool {
-        (0..self.lanes)
-            .filter(|lane| self.active[*lane])
-            .all(|lane| self.lane_symmetry(lane).eligible())
+        self.all_active_witnesses_hold(
+            &self.lane_symmetry_bank(),
+            ChannelSymmetryWitness::SYMMETRIC.terms(),
+        )
     }
 
     /// Whether a **dual** block rendered under this cohort's witness leaves every active lane's two
@@ -1766,25 +1808,23 @@ impl BankChain {
     /// `UNBYPASSED` term: see [`ChannelSymmetryWitness::AGREEING`] for why a bypass window is the
     /// one way to lose the witness without moving the two channels apart.
     ///
-    /// Short-circuits, like its sibling, and [`run`](Self::run) reaches it only when the answer can
-    /// change something -- see the guard chain there, which is what keeps this off the steady-state
-    /// path of every session that is not in the middle of a bypass.
-    fn all_lanes_preserve_agreement(&self) -> bool {
-        (0..self.lanes)
-            .filter(|lane| self.active[*lane])
-            .all(|lane| self.lane_symmetry(lane).preserves_channel_agreement())
+    /// Reuses the eligibility publication when armed. The forced-off path publishes only if
+    /// this maintenance step is reached, after any disengage has restored channel state.
+    fn all_lanes_preserve_agreement(&self, witnesses: &[ChannelSymmetryWitness; 8]) -> bool {
+        self.all_active_witnesses_hold(witnesses, ChannelSymmetryWitness::AGREEING)
     }
 
     /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
     #[must_use]
     pub fn symmetry_counters(&self) -> [u64; 2] {
+        let witnesses = self.lane_symmetry_bank();
         let mut counters = [0_u64; 2];
-        for lane in 0..self.lanes {
+        for (lane, witness) in witnesses.iter().enumerate().take(self.lanes) {
             if !self.active[lane] {
                 continue;
             }
             counters[1] += 1;
-            if self.lane_symmetry(lane).eligible() {
+            if witness.eligible() {
                 counters[0] += 1;
             }
         }
@@ -1894,45 +1934,16 @@ impl BankChain {
                 slot.stage.begin_block(first_sample)?;
             }
         }
-        // The dispatch. One `bool` per block per chain, decided before a sample is gathered, from
-        // the event-maintained witness the slots already carry: `all_lanes_symmetric` is an `and`
-        // over `slots * lanes` cached flags plus, for a console slot, one stored byte per lane.
-        //
-        // A command lands at a block boundary, so the eligibility this reads is the eligibility
-        // that holds for every sample of this block -- which is what makes a per-block mode legal
-        // at all.
-        //
-        // M3 adds one term to the M2 dispatch and no work to it: `collapse_channels_agree` is the
-        // premise the witness does not supply, maintained at the bottom of this section.
-        //
-        // That sentence was **false as shipped** and is true again (#235). M3 hoisted the witness
-        // out of the M2 conjunction's short-circuit into an unconditional per-block pull, which
-        // reached an input-bank walk nothing cached: +39-42% on the dispatch-dominated rows and
-        // +4.5% on the forced-off arm, on chains that could never collapse at all. Both halves
-        // are repaired here -- `armed &&` below restores the short-circuit, and
-        // `InputStage::symmetry` gives the input bank the caching the first paragraph above always
-        // claimed for it -- and the second half also retires ~2 us the *eligible* arm had been
-        // paying since M2, which no short-circuit can reach because that arm's walk is the one the
-        // dispatch genuinely needs.
+        // Publish after every drain. The armed decision combines each stage's lane bank once,
+        // then reuses it if declining eligibility requires agreement maintenance below. Stages
+        // outside rack may still forward nested processor queries; only this boundary is bulk.
         let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
-        // `armed &&` is M2's short-circuit, restored (#235). The walk runs only where its answer
-        // can change something, and the `false` it substitutes elsewhere is not an approximation:
-        //
-        // * the recovery-window proof and the collapse decision below are both
-        //   `armed && witness && ..`, so an unarmed chain's witness cannot reach either;
-        // * the invariant's maintenance step is `.. && self.can_collapse()
-        //   && self.collapse_channels_agree && !witness && !self.all_lanes_preserve_agreement()`.
-        //   An unarmed chain that can collapse at all is the forced-off arm, and there the
-        //   substituted `false` opens the `!witness` clause and hands the question to
-        //   `all_lanes_preserve_agreement`. That is the *same verdict*, because `AGREEING` is a
-        //   subset of `ALL`: eligible implies preserving, so `!eligible && !preserving` and
-        //   `!preserving` clear the flag on exactly the same blocks. The arm pays one walk either
-        //   way, and the invariant is maintained on it exactly as M3 wrote it.
-        //
-        // So a chain with no collapsible prefix and a stereo-source chain -- every session M2 left
-        // alone -- take no walk at all, which is what the guard chain below claims and what the
-        // hoist had stopped being true.
-        let witness = armed && self.all_lanes_symmetric();
+        // Keep the #235 short-circuit: a chain that cannot collapse publishes nothing. Forced-off
+        // chains publish lazily at the maintenance step, after any disengage, in the original order.
+        let witnesses = armed.then(|| self.lane_symmetry_bank());
+        let witness = witnesses.as_ref().is_some_and(|bank| {
+            self.all_active_witnesses_hold(bank, ChannelSymmetryWitness::SYMMETRIC.terms())
+        });
         // The way back for a chain the invariant has declined. Asked at most once per block per
         // prefix slot, and only inside a *recovery window* -- the chain is otherwise ready to
         // collapse and this is the only thing refusing it -- so a session that never disagrees
@@ -1969,13 +1980,9 @@ impl BankChain {
         //   it is why the M3 dispatch adds no work at all to the sessions M2 left alone;
         // * a chain that has **already lost** agreement is skipped: only a proof brings it back,
         //   and the proof is above;
-        // * a block whose witness was **eligible** is skipped, because eligible implies preserving
-        //   -- `AGREEING` is a subset of `ALL` -- so the second walk would be asking a question the
-        //   first already answered. Since #235 restored M2's short-circuit this clause is the one
-        //   the *armed* arm takes; the forced-off arm reaches here with `witness == false` because
-        //   the eligible walk was never taken, and answers the same question once through
-        //   `all_lanes_preserve_agreement` instead. Same verdict, same one walk -- see the
-        //   short-circuit's own note above.
+        // * a block whose witness was **eligible** is skipped, because eligible implies preserving.
+        //   A declining armed decision reuses its publication. A forced-off decision publishes here
+        //   once, only when agreement can still be lost, preserving the original short-circuit.
         //
         // What is left is the case the walk is for: a collapsible chain rendering dual under a
         // witness that is not eligible, with agreement still to lose. That is a bypass window, or
@@ -1992,7 +1999,9 @@ impl BankChain {
             && self.can_collapse()
             && self.collapse_channels_agree
             && !witness
-            && !self.all_lanes_preserve_agreement()
+            && !self.all_lanes_preserve_agreement(
+                &witnesses.unwrap_or_else(|| self.lane_symmetry_bank()),
+            )
         {
             self.collapse_channels_agree = false;
         }
@@ -3777,7 +3786,10 @@ mod tests {
             )
         );
         let (queries, lane_inspections) = prepared_activity_observation();
-        assert_eq!(queries, 8, "ordinary, prefix-mono and seam-dual guards");
+        assert_eq!(
+            queries, 10,
+            "ordinary, prefix-mono and seam-dual guards plus two stage publications"
+        );
         assert_eq!(
             lane_inspections, 0,
             "prepared queries do not scan lane masks"
@@ -5258,6 +5270,309 @@ mod tests {
         Planes {
             left: plane.clone(),
             right: plane,
+        }
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct WitnessCalls {
+        bulk: [usize; 3],
+        direct: [usize; 3],
+        lanes: [[usize; 8]; 3],
+        begun: u8,
+    }
+
+    thread_local! {
+        static WITNESS_CALLS: std::cell::Cell<WitnessCalls> =
+            std::cell::Cell::new(WitnessCalls::default());
+    }
+
+    fn record_witness_call(update: impl FnOnce(&mut WitnessCalls)) {
+        WITNESS_CALLS.with(|calls| {
+            let mut value = calls.get();
+            update(&mut value);
+            calls.set(value);
+        });
+    }
+
+    fn reset_witness_calls() {
+        WITNESS_CALLS.with(|calls| calls.set(WitnessCalls::default()));
+    }
+
+    /// Models an external implementation that only overrides the pre-existing lane method.
+    struct DefaultWitnessStage {
+        id: usize,
+        witnesses: [ChannelSymmetryWitness; 8],
+    }
+
+    impl BankStage for DefaultWitnessStage {
+        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+
+        fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
+            record_witness_call(|calls| calls.lanes[self.id][lane] += 1);
+            self.witnesses[lane]
+        }
+    }
+
+    /// The two outer entry points count separately, so restoring the old lane/slot walk fails
+    /// even if it returns the same bits. The concrete inner default also records every lane read.
+    struct WitnessStage {
+        inner: DefaultWitnessStage,
+        width: BankWidth,
+        active_lanes: u8,
+        require_drains: u8,
+        drain_change: Option<ChannelSymmetryWitness>,
+    }
+
+    impl BankStage for WitnessStage {
+        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+
+        fn supports_mono_collapse(&self) -> bool {
+            true
+        }
+
+        fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+            record_witness_call(|calls| calls.begun |= 1 << self.inner.id);
+            if first_sample == 8
+                && let Some(witness) = self.drain_change
+            {
+                self.inner.witnesses[0] = witness;
+            }
+            Ok(())
+        }
+
+        fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
+            record_witness_call(|calls| calls.direct[self.inner.id] += 1);
+            self.inner.lane_symmetry(lane)
+        }
+
+        fn lane_symmetry_bank(
+            &self,
+            width: BankWidth,
+            active_lanes: u8,
+        ) -> [ChannelSymmetryWitness; 8] {
+            assert_eq!(width, self.width);
+            assert_eq!(active_lanes, self.active_lanes);
+            record_witness_call(|calls| {
+                assert_eq!(calls.begun & self.require_drains, self.require_drains);
+                calls.bulk[self.inner.id] += 1;
+            });
+            self.inner.lane_symmetry_bank(width, active_lanes)
+        }
+    }
+
+    fn witness_slot(
+        id: usize,
+        width: BankWidth,
+        mask: u8,
+        witnesses: [ChannelSymmetryWitness; 8],
+        require_drains: u8,
+        drain_change: Option<ChannelSymmetryWitness>,
+    ) -> BankSlot {
+        slot(
+            (0..width.lanes())
+                .map(|lane| mask & (1 << lane) != 0)
+                .collect(),
+            Box::new(WitnessStage {
+                inner: DefaultWitnessStage { id, witnesses },
+                width,
+                active_lanes: mask,
+                require_drains,
+                drain_change,
+            }),
+        )
+    }
+
+    #[test]
+    fn stage_witness_bank_default_preserves_overrides_width_and_identity_bounds() {
+        let values = core::array::from_fn(|lane| ChannelSymmetryWitness::from_terms(lane as u8));
+        let classified: Box<dyn BankStage> = Box::new(DefaultWitnessStage {
+            id: 0,
+            witnesses: values,
+        });
+        let unclassified: Box<dyn BankStage> = Box::new(PassThrough);
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            for mask in [0, 0x55, 0xff] {
+                reset_witness_calls();
+                let bank = classified.lane_symmetry_bank(width, mask);
+                let queries = WITNESS_CALLS.with(|calls| calls.get().lanes[0]);
+                for lane in 0..8 {
+                    let active = lane < width.lanes() as usize && mask & (1 << lane) != 0;
+                    assert_eq!(queries[lane], usize::from(active));
+                    assert_eq!(
+                        bank[lane],
+                        if active {
+                            values[lane]
+                        } else {
+                            ChannelSymmetryWitness::DECLINED
+                        }
+                    );
+                }
+                assert_eq!(
+                    unclassified.lane_symmetry_bank(width, mask),
+                    [ChannelSymmetryWitness::DECLINED; 8]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_witness_bank_aggregates_exact_terms_for_full_partial_and_identity_lanes() {
+        let symmetric = ChannelSymmetryWitness::SYMMETRIC;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let valid = if lanes == 4 { 0x0f } else { 0xff };
+            for active_mask in [valid, valid & 0x55] {
+                let active: Vec<bool> = (0..lanes)
+                    .map(|lane| active_mask & (1 << lane) != 0)
+                    .collect();
+                let masks = [active_mask & 0x33, active_mask & 0x66, 0];
+                let first = core::array::from_fn(|lane| {
+                    if lane == 0 {
+                        symmetric
+                    } else {
+                        ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::UNBYPASSED)
+                    }
+                });
+                let second = core::array::from_fn(|lane| {
+                    if lane == 2 {
+                        ChannelSymmetryWitness::DECLINED
+                    } else {
+                        ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::LIVE)
+                    }
+                });
+                let chain = BankChain::new(
+                    AoSoaScratch::new(width, 8).expect("scratch"),
+                    active.clone().into_boxed_slice(),
+                    vec![
+                        witness_slot(0, width, masks[0], first, 0, None),
+                        witness_slot(1, width, masks[1], second, 0, None),
+                        witness_slot(
+                            2,
+                            width,
+                            masks[2],
+                            [ChannelSymmetryWitness::DECLINED; 8],
+                            0,
+                            None,
+                        ),
+                    ],
+                )
+                .expect("chain");
+                let expected: [ChannelSymmetryWitness; 8] = core::array::from_fn(|lane| {
+                    if lane >= lanes || !active[lane] {
+                        return ChannelSymmetryWitness::DECLINED;
+                    }
+                    let a = if masks[0] & (1 << lane) != 0 {
+                        first[lane]
+                    } else {
+                        symmetric
+                    };
+                    let b = if masks[1] & (1 << lane) != 0 {
+                        second[lane]
+                    } else {
+                        symmetric
+                    };
+                    a.and(b)
+                });
+                reset_witness_calls();
+                assert_eq!(chain.lane_symmetry_bank(), expected);
+                let calls = WITNESS_CALLS.with(std::cell::Cell::get);
+                assert_eq!(calls.bulk, [1, 1, 0]);
+                assert_eq!(calls.direct, [0; 3]);
+                for (stage, mask) in masks.iter().enumerate() {
+                    for lane in 0..8 {
+                        assert_eq!(
+                            calls.lanes[stage][lane],
+                            usize::from(mask & (1 << lane) != 0)
+                        );
+                    }
+                }
+                let eligible: Vec<bool> = (0..lanes)
+                    .filter(|lane| active[*lane])
+                    .map(|lane| expected[lane].eligible())
+                    .collect();
+                assert_eq!(chain.active_lane_eligibility(), eligible);
+                assert_eq!(
+                    chain.all_lanes_symmetric(),
+                    eligible.iter().all(|value| *value)
+                );
+                assert_eq!(
+                    chain.symmetry_counters(),
+                    [
+                        eligible.iter().filter(|value| **value).count() as u64,
+                        eligible.len() as u64
+                    ]
+                );
+                for (lane, witness) in expected.iter().enumerate() {
+                    assert_eq!(chain.lane_symmetry(lane), *witness);
+                }
+                assert_eq!(
+                    chain.lane_symmetry(usize::MAX),
+                    ChannelSymmetryWitness::DECLINED
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_witness_bank_entire_armed_decision_publishes_once_even_when_declining() {
+        let symmetric = ChannelSymmetryWitness::SYMMETRIC;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let valid = if lanes == 4 { 0x0f } else { 0xff };
+            for mask in [valid, valid & 0x55] {
+                for changed in [
+                    symmetric,
+                    ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::UNBYPASSED),
+                    ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::LIVE),
+                ] {
+                    let active = (0..lanes).map(|lane| mask & (1 << lane) != 0).collect();
+                    let mut chain = BankChain::new(
+                        AoSoaScratch::new(width, 8).expect("scratch"),
+                        active,
+                        vec![
+                            witness_slot(0, width, mask, [symmetric; 8], 0b11, None),
+                            witness_slot(1, width, mask, [symmetric; 8], 0b11, Some(changed)),
+                        ],
+                    )
+                    .expect("chain");
+                    chain.arm_mono_collapse(true);
+                    let mut planes = identical_planes(lanes, 8);
+                    for sample in [0, 8] {
+                        reset_witness_calls();
+                        chain.run(&mut planes, 8, sample).expect("render");
+                        let calls = WITNESS_CALLS.with(std::cell::Cell::get);
+                        assert_eq!(
+                            calls.bulk,
+                            [1, 1, 0],
+                            "whole decision, including preservation"
+                        );
+                        assert_eq!(calls.direct, [0; 3], "no outer per-lane virtual calls");
+                        for stage in 0..2 {
+                            for lane in 0..8 {
+                                assert_eq!(
+                                    calls.lanes[stage][lane],
+                                    usize::from(mask & (1 << lane) != 0)
+                                );
+                            }
+                        }
+                        let current = if sample == 0 { symmetric } else { changed };
+                        assert_eq!(chain.is_collapsed(), current.eligible());
+                        assert_eq!(
+                            chain.collapse_channels_agree(),
+                            current.preserves_channel_agreement()
+                        );
+                    }
+                    assert_eq!(chain.collapses(), 1 + u64::from(changed.eligible()));
+                    assert_eq!(
+                        chain.collapse_transitions(),
+                        [u64::from(!changed.eligible()), 0, 0]
+                    );
+                }
+            }
         }
     }
 
