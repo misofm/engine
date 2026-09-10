@@ -398,3 +398,18 @@ equivalent iterator/enumeration over the actual lane population, preserving
 edge order and lane IDs. No lint suppression, blind stage-group enumeration,
 other defect correction, or product rescope is authorized. Attempt 4 must then
 rerun the affected Clippy gate and the outstanding scoped gates.
+
+## Implementation Attempt 4 — focused correction checkpoint
+
+Attempt 4 changes exactly one fixture source line: the lane loop now enumerates
+`groups[0]` directly, preserving the actual lane population, edge order, and
+lane IDs. Evidence is retained under `/tmp/issue713-attempt4-_dmwn7zs/`.
+
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- Prepared-plan integration tests passed 3/3.
+- Strict rack and graph Clippy with all targets/features and `-D warnings`
+  passed.
+- Policy, target, and final exact-path/resource gates remain pending.
+
+This is a focused correction checkpoint only. It carries no SOURCE PASS,
+delivery, timing, artifact, AudioWorklet-pin, or performance claim.

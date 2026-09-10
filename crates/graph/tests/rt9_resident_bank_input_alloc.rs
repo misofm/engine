@@ -300,7 +300,7 @@ fn prepared(
             path: "$.rt9".to_owned(),
         })
     };
-    for lane in 0..population {
+    for (lane, _) in groups[0].iter().enumerate() {
         for stage in 1..4 {
             connect(
                 groups[stage - 1][lane].clone(),
