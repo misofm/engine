@@ -32,3 +32,13 @@ Impact: the author-session skill and any CLI-validated workflow can produce docu
 Fix direction: add a fifth stage (`prepare-effects`) running `prepare_native_session_effects` with the standard caps and mapping its `EffectDiagnosticSet` into the CLI's dotted-diagnostic report — or fold it into stage 4 as `prepare-session`. Ceremony: STAGE_NAMES, the validator's mutation tables gain out-of-domain effect rows (the 20.000002 probe becomes the red test), author-session skill docs, and #207's E5 note ('CLI PASS necessary but not sufficient') retires once fixed.
 
 Standard protocol: Opus implements, Fable adversarially verifies pre-PR.
+## Implementation attempt 1 checkpoint
+
+Astra LOW added the existing launch effect preparer as stage five, mapped typed
+preparation diagnostics and covered valid/invalid compressor ratio, unknown
+identity/parameter, earlier-stage skips, CLI exit and no canonical output on
+failure. Schema-only canonical fixture expectations were classified without
+changing sealed input bytes. Authoring guidance reflects the bounded guarantee.
+Focused formatting and all 10 validator integration tests passed. Actual command,
+environment, exit and output receipts: `/tmp/issue211-attempt1`.
+Root owns this exact-path checkpoint; independent Astra XHIGH verdict pending.

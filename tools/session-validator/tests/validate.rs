@@ -1,4 +1,4 @@
-//! The validator's contract: every checked-in valid session fixture passes every stage, and a
+//! The validator's contract: launch fixtures pass preparation; schema examples retain their intended refusals, and a
 //! defect is attributed to the stage that actually rejects it.
 //!
 //! Stage attribution is the whole point of the tool -- an author repairs a grammar typo, a schema
@@ -78,7 +78,7 @@ fn source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_bo
 }
 
 #[test]
-fn every_valid_session_fixture_passes_every_stage() {
+fn fixtures_distinguish_schema_examples_from_launch_effects() {
     let names = session_fixture_names();
     // A glob that silently matched nothing would make this test vacuous.
     for required in [
@@ -102,6 +102,16 @@ fn every_valid_session_fixture_passes_every_stage() {
             continue;
         }
         let report = validate_session_document(&fixture(name));
+        if name == "canonical.json" {
+            assert_eq!(report.failed_stage(), Some(4));
+            assert_eq!(report.stages()[4].diagnostics.len(), 1);
+            assert_eq!(
+                report.stages()[4].diagnostics[0].code,
+                "effect.native.unavailable"
+            );
+            assert!(report.canonical().is_none());
+            continue;
+        }
         assert!(
             report.passed(),
             "{name} must pass every stage:\n{}",
@@ -112,7 +122,7 @@ fn every_valid_session_fixture_passes_every_stage() {
                 .stages()
                 .iter()
                 .all(|stage| stage.status == StageStatus::Pass),
-            "{name} must run all four stages:\n{}",
+            "{name} must run all five stages:\n{}",
             report.render(name)
         );
         assert!(report.canonical().is_some(), "{name} must canonicalize");
@@ -392,7 +402,7 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
 
 #[test]
 fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
-    for name in ["canonical.json", "canonical-minimal.json"] {
+    for name in ["canonical-minimal.json"] {
         let source = fixture(name);
         let report = validate_session_document(&source);
         assert_eq!(
@@ -428,4 +438,113 @@ fn the_report_is_deterministic() {
     let first = validate_session_document(&source).render("session.json");
     let second = validate_session_document(&source).render("session.json");
     assert_eq!(first, second);
+}
+
+#[test]
+fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() {
+    use effect_compiler::{
+        EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
+    };
+    use session::{CompileCaps, compile_session, parse_session_json};
+    let base: serde_json::Value =
+        serde_json::from_str(&fixture("compressor-dynamic-observation.json")).unwrap();
+    for (label, expected) in [
+        ("ratio-max", None),
+        ("ratio-next", Some("effect.parameter.domain")),
+        ("unknown-effect", Some("effect.native.unavailable")),
+        ("unknown-parameter", Some("effect.parameter.unknown")),
+    ] {
+        let mut value = base.clone();
+        let effect = &mut value["tracks"][0]["dynamic"]["effects"][0];
+        match label {
+            "ratio-max" => effect["params"][1]["value"] = serde_json::json!(20.0),
+            "ratio-next" => {
+                effect["params"][1]["value"] =
+                    serde_json::json!(f32::from_bits(20.0_f32.to_bits() + 1))
+            }
+            "unknown-effect" => {
+                effect["identity"]["effect_id"] = serde_json::json!("missing.effect")
+            }
+            "unknown-parameter" => effect["params"][1]["parameter_id"] = serde_json::json!(999),
+            _ => unreachable!(),
+        }
+        let source = serde_json::to_string(&value).unwrap();
+        let model = parse_session_json(&source).unwrap();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .unwrap();
+        let engine = prepare_native_session_effects(
+            &compiled,
+            &launch_native_effect_registry().unwrap(),
+            EffectCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_scratch_bytes: u64::MAX,
+                maximum_automation_spans_per_block: u32::MAX,
+            },
+        );
+        let report = validate_session_document(&source);
+        assert_eq!(report.stages().len(), 5);
+        assert!(
+            report.stages()[..4]
+                .iter()
+                .all(|stage| stage.status == StageStatus::Pass),
+            "{label}"
+        );
+        assert_eq!(report.passed(), engine.is_ok(), "{label}");
+        if let Some(code) = expected {
+            assert_eq!(report.failed_stage(), Some(4), "{label}");
+            let diagnostics = engine.err().unwrap().0;
+            let actual = &report.stages()[4].diagnostics;
+            assert!(
+                actual.iter().any(|item| item.code == code),
+                "{label}: {actual:?}"
+            );
+            assert_eq!(actual.len(), diagnostics.len());
+            for (actual, expected) in actual.iter().zip(diagnostics) {
+                assert_eq!(actual.code, expected.code);
+                assert_eq!(actual.path, expected.path);
+                assert!(actual.line.is_none() && actual.column.is_none());
+            }
+            assert!(report.canonical().is_none());
+        } else {
+            assert!(report.canonical().is_some());
+        }
+        let path = std::env::temp_dir().join(format!(
+            "session-validator-211-{}-{label}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, &source).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_session_validator"))
+            .args(["validate", "--canonical"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(expected.is_some())),
+            "{label}"
+        );
+        if let Some(code) = expected {
+            assert!(output.stdout.is_empty(), "{label}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains("FAIL at stage 5 (prepare-effects)"));
+            assert!(stderr.contains(code));
+            assert!(stderr.contains("$.tracks[id="));
+        } else {
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                report.canonical().unwrap()
+            );
+        }
+    }
 }

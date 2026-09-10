@@ -1,6 +1,6 @@
 ---
 name: author-session
-description: Author, extend, or repair a strict Session V1 canonical JSON document and prove it with the real grammar, typed-model, compile, and builtins-preparation pipeline.
+description: Author, extend, or repair a strict Session V1 canonical JSON document and prove it with the real grammar, typed-model, compile, builtins, and native-effect preparation pipeline.
 ---
 
 # Authoring a Session V1 document
@@ -13,7 +13,8 @@ sniffing, or TOML translation. Unknown keys reject.
 
 1. Read `docs/SESSION_SCHEMA_V1.md` end to end.
 2. Copy structure from the nearest `fixtures/session/v1/*.json` document. Start with
-   `fixtures/session/v1/canonical.json` or `canonical-minimal.json`; use
+   `canonical-minimal.json`; `fixtures/session/v1/canonical.json` is a schema example with an
+   unregistered effect ID and deliberately fails effect preparation. Use
    `observation-frame-shape.json` for populated
    effects and `console-sixty-four-track-intended.json` for the production rack layout.
 3. Generate parameter metadata rather than guessing effect IDs, parameter IDs, units, domains, or
@@ -42,7 +43,7 @@ strings: no sign, whitespace, leading zero except `"0"`, or value above `1844674
   `{"kind":"routed","source":{...},"port_id":"..."}`.
 - Every track has `simd1`, `dynamic`, and `simd2`, with `effects: []` when unused. Effect order is
   semantic. Intended layout is EQ then compressor on `simd1`, limiter on `simd2`. Third-party CID
-  effects are allowed only in `dynamic` and never bank.
+  effects are schema-valid only in `dynamic`, never bank, and fail launch preparation.
 - `fader` contains `left_db`, `right_db`, `left_mute`, `right_mute`. Solo is live monitoring state
   and never appears in a session document.
 
@@ -79,8 +80,9 @@ accept `both` only. HPF, LPF, and delay are prepared-only and cannot be automate
   canonical writer choose spelling.
 - Automation segments are ordered and nonoverlapping with `end_sample > start_sample`;
   exponential endpoints must both be positive.
-- A validator PASS establishes Session V1 validity and preparation, not graph acyclicity, external
-  effect availability, package validity, or that declared automation currently renders.
+- A validator PASS establishes Session V1 validity, builtin preparation, and launch native effect
+  preparation. It does not certify graph/PDC compilation, source availability, host resource
+  budgets, or that declared automation currently renders.
 
 ## Validate and canonicalize
 
@@ -90,7 +92,9 @@ cargo run -q -p session-validator -- validate --canonical draft.json > session.j
 cargo run -q -p session-validator -- validate session.json
 ```
 
-The four stages are `json-grammar`, `typed-model`, `compile-session`, and `prepare-builtins`.
+The five stages are `json-grammar`, `typed-model`, `compile-session`, `prepare-builtins`, and
+`prepare-effects`. The effect stage uses the launch registry and reports its `effect.*` diagnostics
+for unavailable effects and invalid parameters, ports, link modes, or quality.
 Grammar failures report `json.syntax`; duplicate keys report the decoded JSON path and the second
 key's byte span. Typed failures use `schema.*`, `numeric.*`, `reference.*`, and the other codes in
 `docs/SESSION_SCHEMA_V1.md`. Read the code and exact `$.json.path`, fix the named leaf, and rerun.
