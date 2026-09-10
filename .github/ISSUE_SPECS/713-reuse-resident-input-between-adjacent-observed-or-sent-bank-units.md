@@ -1,0 +1,478 @@
+# Reuse resident input between adjacent observed or sent bank units
+
+GitHub: https://github.com/misofm/engine/issues/713
+
+Parent: #349 (RT-9). Coordination: #559/#560. Base main:
+`b1f9128f3e06532afdfc16aad661c4b2deb5dea1`. Tracker:
+`8fae33b6554642d7afd0e66c2ac463a75c0beb3a`.
+
+## Problem
+
+RT-9 remains open because an observer or send tap can preserve separate adjacent
+bank units while the successor reacquires the predecessor's output through a
+whole-block gather. The bounded child removes only that successor gather when a
+resident-input proof is complete. It does not merge the owners, bypass the
+predecessor scatter, or deliver the full selective-tee finding.
+
+The historical cross-rack chain merge in PR #208 deliberately retained declines
+for extra readers, sends, leased-stage observers, and lane misalignment. The
+#203 metering issue and PR #521 metering change did not deliver a resident-input
+tee. Those retained boundaries and their attribution remain unchanged.
+
+## Smallest partial slice
+
+For immediately adjacent compatible bank units, reuse the predecessor's retained
+AoSoA output as the successor's input and remove exactly one successor gather
+transpose. Keep the two `BankChain` owners separate and preserve all unit
+boundaries, predecessor scatter, predecessor observation, successor observation,
+sends, and normal scratch ownership:
+
+- the predecessor executes and scatters its final output as before;
+- the successor copies the identical retained AoSoA words into its existing
+  scratch at its normal input-acquisition boundary;
+- the successor then executes with the same input it would have obtained from the
+  old gather path;
+- no pointer or lifetime alias crosses the owners, and no unsafe alias is
+  introduced; and
+- the full selective tee remains a separately scoped successor.
+
+This child may establish only a bounded RT-9 partial outcome. It must not claim
+that all observer/send declines are eliminated or that the original RT-9 finding
+is fully delivered.
+
+The physical work removed is one successor gather transpose; a whole-block AoSoA
+copy remains. This is not a timing, cycle, or full-selective-tee claim.
+
+## Frozen eligibility and declines
+
+Graph bind/runtime privately proves the resident-input candidate for immediately
+adjacent emitted bank units. Its proof covers backend, lane/dataflow identity,
+bank width, render quantum, populated-lane set, lane order, the exact successor
+first-slot predecessor output, one undelayed main input, and the absence of
+reduction, sidechain, or staging on that input. Because predecessor scatter
+remains, the separate resident predicate may admit extra readers, planar sends,
+direct observers, and observed aliases. Each such reader/send/observer keeps its
+original planar path and execution order. Admission still declines folded or
+transformed predecessor output, nonadjacency, backend/width/quantum/lane
+mismatch, changed B input identity, delay/reduction/sidechain/staging, or any
+relationship that would change execution order.
+
+The existing `chains_into` extra-reader, direct-observer, and alias-observer
+declines remain unchanged and are irrelevant to this separate resident
+admission. Do not weaken its reader, send, sidechain, session-output, or
+alias-observer proofs and do not turn this child into a general chain executor
+rewrite. Rack does not reject nonadjacency or current-block identity and does
+not accept a caller-trusted mode; graph owns those proofs.
+
+## Safe resident run API and word semantics
+
+Because `BankChain` scratch is private, authorize one narrow safe public rack
+entry for graph's adjacent prepared-unit path. Freeze the exact preferred
+signature as:
+
+```rust
+pub fn run_with_resident_input<M: BankMembers + ?Sized>(
+    &mut self,
+    predecessor: &BankChain,
+    members: &mut M,
+    frames: u32,
+    first_sample: u64,
+) -> Result<(), RenderError>;
+```
+
+The existing public `run` keeps its signature and delegates with
+`predecessor: None` to one private `run_with_input(..., predecessor:
+Option<&BankChain>)`; `run_with_resident_input` delegates to that same private
+method with `Some(predecessor)`. Both entries therefore share one executor, and
+the unchanged `run` retains the old acquisition behavior for every ordinary
+case.
+
+At the start of the private invocation, rack validates only local stored source
+compatibility before successor drains: equal width, quantum, active mask,
+destination bounds, and no unsupported predecessor epilogue. A local decline
+selects ordinary gather inside that same invocation. It does not return a public
+mode/error choice and it never calls `run` again. All local compatibility checks
+complete before any destination write.
+
+The method exposes no mutable scratch and retains no references. It is the sole
+production rack entry used by graph for the graph-owned adjacent proof; no
+execution token or caller-trusted compatibility flag is introduced. The private
+mode is derived only after this invocation's drains from its collapse decision.
+The successor then runs `begin_block`, witness, collapse, and agreement in their
+existing order; at the existing acquisition boundary it copies resident words
+or performs the ordinary gather, followed by unchanged stages, seam, scatter,
+and epilogue.
+
+The copy is mode-aware and overwrites exactly the words the successor's old
+acquisition would overwrite:
+
+- partial gathers write only active-lane words;
+- mono gathers write only the left plane and leave right scratch untouched; and
+- inactive lanes and untouched right scratch remain unchanged, with no
+  unobservability waiver for the discriminator path.
+
+The allocation/equivalence fixtures must poison inactive lanes and right scratch
+to discriminate an overbroad copy. No public mutable scratch API, retained
+borrow, unsafe alias, or public mode/error type is authorized.
+
+## Structural resident-call gate
+
+A captured `rg`/source validator must find exactly one non-test production call
+to `run_with_resident_input`, located in graph's adjacency- and
+freshness-enforcing execution path. The method definition, its private wrapper,
+and test calls are accounted for separately. A mutation that adds or moves a
+second production call, or bypasses graph admission, must fail this same source
+gate. Do not add a policy or script path for this check.
+
+## Current-block freshness and placement
+
+Graph reaches B only after A executes successfully and A's observation completes
+in the same invocation. Safe disjoint borrowing (for example, a split unit
+slice) gives A immutable access and B mutable access without aliasing owners.
+Rack validates its local stored shape before B drains. Then B's
+`begin_block`/witness/collapse/agreement decisions occur once in their original
+order before resident acquisition. A producer process or observation failure
+prevents B from executing; no stale resident data is reused and `run` is never
+called a second time on decline or error.
+
+Preserve `BankChain::transposes` semantics. Add only private or test-only gather
+evidence that distinguishes the resident acquisition from the old planar gather;
+do not publish a new runtime counter or reinterpret an existing counter as a
+timing result.
+
+## Behavioral and realtime contract
+
+Preserve the exact sequence
+`execute(A) -> observe(A) -> execute(B) -> observe(B)`.
+
+- An observer failure in A prevents every B drain/state transition exactly as it
+  does on the old path.
+- A command enqueued by A's observer reaches B at the same block boundary and in
+  the same order.
+- Begin/process errors, reports, counters, queued records, and state are exact
+  against an old scalar reference and the prior acquisition path.
+- Sends retain planar source, gain, matrix, PDC, fanout, and reduction semantics,
+  including nonunity crossfeed and delayed compensation paths.
+- Independent collapse and right-channel state remain independent.
+- Render performs no allocation, free, lock, syscall, I/O, logging, unbounded
+  work, unsafe aliasing, or structural mutation.
+
+## Exact ownership and paths
+
+The authorized implementation and evidence paths are only:
+
+- `crates/rack/src/lib.rs`;
+- `crates/graph/src/runtime.rs`;
+- `crates/graph/src/lib.rs`;
+- `crates/graph-compiler/src/lib.rs`, only for named meter/send/width/collapse
+  integration evidence;
+- new `crates/graph/tests/rt9_resident_bank_input_alloc.rs`; and
+- this numbered specification.
+
+No `program.rs`, manifest, policy, host, artifact, pin, workflow, benchmark,
+timing, or unrelated test path is authorized. Lane B alone owns AudioWorklet
+qualification and pins. Preserve PR #208's retained declines, #203/#521's
+non-tee history, and all existing source, evidence, artifact, and worktree
+history.
+
+## Preparation and allocation gates
+
+Before implementation, freeze a safe borrow/API design that does not move
+`BankChain` owners or rewrite the general chain executor. Calculate retained,
+preparation-peak, and largest-allocation coverage for native and Wasm layouts.
+If the resident metadata or acquisition peak is outside the named accounting
+paths, stop and split an accounting prerequisite; do not invent a cap, waive a
+bound, or continue into unrelated resource work.
+
+The allocation fixture must exercise an actual `PreparedRenderPlan` with a live
+detector and prove zero render allocation/free. Preparation allocation accounting
+is separate and must identify ownership and release. It must not be converted
+into a timing, cycle, or memory-improvement claim.
+
+## Finite evidence gates
+
+Compare the old scalar/reference acquisition with W4 and W8 full and partial
+units at frames `1`, `width - 1`, `width`, `width + 1`, and the configured
+quantum. The evidence must include asymmetric values, signed zero, nonfinite
+values, stateful stages, and multiblock behavior, with bitwise PCM,
+observations, reports, counters, and state equality.
+
+Exercise direct observers, alias observers, multiple observers, observer failure,
+producer-process failure, observation failure, successor-begin failure, and
+successor-process failure with ordered traces and subsequent-state checks.
+Exercise nonunity crossfeed sends, delayed PDC, an extra consumer, fanout and
+reduction. Cover independent collapse modes and recovery, scalar and incompatible
+controls, nonadjacent controls, and the forced old acquisition path. Direct,
+alias, multiple-observer, and planar-send fixtures are positive resident cases
+when the separate predicate holds; incompatible forms remain controls.
+
+One mutation must restore the old planar gather and fail the physical resident-
+acquisition assertion while semantic PCM/reference checks remain meaningful. Keep
+the mutation private and preserve its original failure and restored result.
+
+Reuse the existing graph/rack corpus and fixtures. Do not manufacture a timing
+workload, retry a measurement, or claim an improvement from a source shape.
+
+## Proportional verification and delivery
+
+After Sol scope approval, Astra XHIGH owns the low-level/render implementation
+because this child changes the audio execution path. Astra LOW performs every
+scope, source, evidence, exact-head, and post-main verification assignment.
+The implementation follows the repository's attempt, adversarial-review,
+checkpoint, required-CI, guarded-merge, GitHub-synchronization, and clean
+delivered-worktree requirements.
+
+Run focused graph/rack gates first, then the affected crate debug and
+release-unwind suites, strict Clippy, allocation gate, policy and mutation
+controls, unfused/realtime checks, native x86-64-v3, Wasm scalar and Wasm
+simd128 builds, and exact diff/resource checks. No timing or benchmark gate is
+authorized. Required PR CI, guarded merge-parent review, post-main qualification,
+and issue synchronization remain mandatory for any later delivery.
+
+## Acceptance gates
+
+- Only eligible adjacent compatible units use resident input, with a provable
+  identical word copy into existing successor scratch.
+- The safe resident execution entry exposes no scratch or retained references;
+  every local mismatch selects ordinary gather within the same invocation and
+  leaves the unchanged `run` path available, while execution failures return
+  the existing `Result<(), RenderError>`.
+- Partial and mono copy masks preserve inactive lanes and untouched right
+  scratch, with poisoned discriminators covering accidental writes.
+- Current-block freshness, predecessor observation ordering, successor begin and
+  collapse placement, and safe disjoint borrowing prevent stale data and owner
+  aliasing.
+- Separate owners, predecessor scatter, observers, sends, unit boundaries,
+  PDC, reductions, collapse, state, reports, errors, and command boundaries are
+  unchanged.
+- Existing `chains_into` declines remain intact, including extra readers,
+  direct observers, alias observers, sends, sidechains, and nonadjacent cases.
+- The separate resident predicate admits positive extra-reader, planar-send,
+  direct-observer, and observed-alias cases only when the frozen identity and
+  order proof holds; their original planar paths remain observable.
+- The source validator finds exactly one non-test production call to
+  `run_with_resident_input`, and its admission-bypass/second-call mutation fails
+  the same gate.
+- Old/reference and resident paths pass the finite scalar/W4/W8 behavioral and
+  failure matrix, including the forced old-acquisition control and physical
+  mutation failure.
+- The actual prepared-plan allocation gate proves zero render allocation/free
+  with a live detector; no timing, cycle, memory-saving, or improvement claim is
+  made.
+- The feature diff contains only the exact authorized paths, and this issue's
+  title/body match the numbered local specification.
+- The resulting status is a bounded RT-9 partial child. Full selective teeing
+  remains a separately numbered successor.
+
+## Initial scope record
+
+At main `b1f9128f3e06532afdfc16aad661c4b2deb5dea1`, live #349 still records RT-9
+as an open medium class-A row at `crates/graph/src/runtime.rs:2686-2731`.
+Synchronized tracker head is `8fae33b6554642d7afd0e66c2ac463a75c0beb3a`.
+Lane A has completed the RT-8 reconciliation in #711; #705 remains lane B's
+active AudioWorklet qualification and pin responsibility. This child is path
+disjoint from lane B and consumes one lane-A implementation slot after Astra LOW
+scope review.
+
+No product source, test, artifact, pin, timing, or benchmark change is made by
+this opening checkpoint. The opening scope review failed before implementation;
+the copy-only API correction also failed before implementation, and this is the
+current correction. No implementation attempt was consumed by any of those
+scope reviews. No RT-9 full-delivery or performance credit is claimed.
+
+## Scope correction history
+
+- Astra LOW returned **SCOPE FAIL** for opening checkpoint
+  `211fb5ee142287ca029683c1f98e84da552c39eb`; no implementation ran and no
+  attempt was consumed.
+- Astra LOW returned **SCOPE FAIL** for the copy-only API correction
+  `ee1fab399cde253e87303426e90c31858a3725f8`; no implementation ran and no
+  attempt was consumed.
+- Astra LOW returned **SCOPE FAIL** for correction
+  `f55b1e4e32e5e294d7cb1a16ff0786336496cfc2`; the extra-reader/send/observer
+  eligibility, the structural single-caller gate, and the prior failure history
+  were not yet frozen precisely enough. No implementation ran and no attempt
+  was consumed.
+- Astra LOW returned **implementation-scope PASS** at clean
+  `1bd33f9bb2243d9aa89378f39f06d340aa7209d7`. Astra XHIGH alone is authorized
+  to implement, only after the borrow-safety, layout/retained-peak, and
+  accounting preflight, and only within the frozen paths and gates above.
+
+Zero implementation attempts are consumed. This PASS authorizes neither full
+RT-9 delivery nor timing, artifact, AudioWorklet-pin, or performance authority.
+That zero-attempt statement applies to the scope reviews only; Attempt 1 below
+is the first implementation attempt and is recorded separately as a failure.
+
+## Implementation Attempt 1 — FAIL
+
+Attempt 1 is preserved at evidence directory
+`/tmp/issue713-attempt1-ecgenb20/`, including the failed-state hashes at
+`/tmp/issue713-attempt1-ecgenb20/failed-state-sha256.json`.
+
+- Preflight passed: `UnitIdentity` was 32/8 on native and 20/4 on Wasm scalar
+  and Wasm SIMD128; measured allocation deltas were zero.
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- The first focused rack test compiled, then exited 101 with one pass and one
+  failure. `rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words`
+  hit the existing exact-length assertion because the fixture exposed quantum-17
+  planes for partial frame counts.
+- Graph, allocation, mutation, target, and broad workspace gates were not run.
+  Attempt 1 receives zero source or qualification credit.
+
+Astra LOW verified the exact diff and preserved hashes, returned **Attempt 1
+FAIL**, and authorized one bounded Attempt 2 with no product rescope. Attempt 2
+must slice exposed planes to `frames` while retaining quantum scratch and poison;
+add actual nonunity-crossfeed and delayed-PDC send semantics; cover scalar,
+incompatible, and nonadjacent controls; add the physical old-gather mutation;
+strengthen the structural validator for executor observation/freshness; and add
+controls for an intervening emitted scalar, a retired non-emitted run, and
+unequal or shorter populations. No later gate is authorized until those bounded
+corrections are made.
+
+## Implementation Attempt 2 — FAIL
+
+Attempt 2 is preserved at evidence directory
+`/tmp/issue713-attempt2-7qianrbm/`. Its exact failed-state record is
+`/tmp/issue713-attempt2-7qianrbm/failed-state-sha256.json` with source head
+`3821939b3a2cbd1714f2fab9a9e82794c9c0f16d`, diff hash
+`14fd5c6d0bed27709f1e5ccf8758b62f06a02d19636ca45f5c0bd066fb2ef4f4`, and
+file hashes `rack=903d99e436db163c1c200a45600cb960606480a6b2571bb2eb5d970cb547b059`,
+`graph-runtime=6c863c085205cc1e515d8311a3a936c25212e2702efeca3ae7964487aa23d2ff`,
+`graph-lib=51cbde089fa966f0652119d3e90c317b315621ac46954c99af8089fefc675d03`,
+and `allocation-test=4bcacf4b14c85f0683d3e057d7346ff4737d2e625fc72ab2feeaf04c07d5771a`.
+
+- The focused rack tests passed 2/2.
+- The focused graph/lib tests passed 3/3.
+- The prepared-plan allocation target compile exited 101 with E0308 because
+  its helper declared `Result<(), RenderError>` while `plan.render` returned
+  `Result<RenderReport, RenderError>`.
+- Integration, allocation, mutation, and broad target/workspace gates were
+  unrun. Attempt 2 receives no qualification or delivery credit.
+
+Astra LOW verified the exact failed-state hashes and returned **Attempt 2
+FAIL**. Attempt 3 is authorized only to correct the helper to return the actual
+`RenderReport` and retain/compare reports without mapping them to a unit, then
+complete the physical old-gather mutation and the outstanding scoped gates.
+The prior corrections remain coherent; no product rescope is authorized.
+
+## Implementation Attempt 3 — focused green checkpoint
+
+The bounded Attempt 3 correction changes only the integration fixture: its
+helper now returns and compares the actual `RenderReport` rather than mapping
+the result to `()`. The preserved focused checkpoint is rooted at
+`9cfb6c6ce7bff2fa29ad5b291d08539944c62925`; evidence is retained under
+`/tmp/issue713-attempt3-wu8edtgu/`, with fixture hash
+`ece9d1a1681ec80ff4fcf0d1d16d28dafe6094dc399fc24afc18e42ba5794b2e` and
+tranche hash `03fe2d33114cc7d64bfdd658ab84e115fc06e2f4af74881d6600dba81001752`.
+
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- Focused rack tests passed 2/2.
+- Focused graph/lib tests passed 3/3.
+- Prepared-plan integration tests passed 3/3, covering scalar, nonunity
+  crossfeed/delayed-PDC send, admission controls, observer/failure modes, and
+  the live zero-allocation render gate.
+- The physical old-gather mutation and broad qualification gates remain pending.
+
+This is a focused green checkpoint only. It is not source PASS and carries no
+delivery, timing, artifact, AudioWorklet-pin, or performance claim.
+
+## Implementation Attempt 3 — FAIL after scoped qualification
+
+Attempt 3's qualification record is preserved under
+`/tmp/issue713-attempt3-wu8edtgu/`.
+
+- The focused rack, graph/lib, and prepared-plan integration suites remained
+  green at 2/2, 3/3, and 3/3.
+- The physical old-gather mutation produced its intended failure, and the
+  restored candidate passed the same test.
+- Full graph/rack debug and release-unwind suites passed.
+- Strict Clippy exited 101 at
+  `crates/graph/tests/rt9_resident_bank_input_alloc.rs:303` for
+  `clippy::needless_range_loop` on the indexed fixture lane loop.
+- Standalone allocation, policy/mutation follow-up, target, and final exact
+  gates were not run after that first unexpected failure.
+
+Astra LOW returned **Attempt 3 FAIL** with no source or delivery credit.
+Attempt 4 is authorized only to replace that indexed fixture lane loop with an
+equivalent iterator/enumeration over the actual lane population, preserving
+edge order and lane IDs. No lint suppression, blind stage-group enumeration,
+other defect correction, or product rescope is authorized. Attempt 4 must then
+rerun the affected Clippy gate and the outstanding scoped gates.
+
+## Implementation Attempt 4 — focused correction checkpoint
+
+Attempt 4 changes exactly one fixture source line: the lane loop now enumerates
+`groups[0]` directly, preserving the actual lane population, edge order, and
+lane IDs. Evidence is retained under `/tmp/issue713-attempt4-_dmwn7zs/`.
+
+- Rustfmt and `cargo fmt --all -- --check` passed.
+- Prepared-plan integration tests passed 3/3.
+- Strict rack and graph Clippy with all targets/features and `-D warnings`
+  passed.
+- Policy, target, and final exact-path/resource gates remain pending.
+
+This is a focused correction checkpoint only. It carries no SOURCE PASS,
+delivery, timing, artifact, AudioWorklet-pin, or performance claim.
+
+## Astra LOW SOURCE PASS — Attempt 4
+
+Independent Astra LOW review returned **SOURCE PASS** at clean pushed head
+`7576d1b6c794f01df4abeb7256a8309d45879b21`. The authoritative verdict and
+attributed log hashes are preserved at
+`/tmp/issue713-astra-low-review-wcrdc9ai/verdict.json`.
+
+The fresh review passed rack 2/2, graph 3/3, integration 3/3, strict Clippy,
+release allocation, and the physical old-gather mutation with its intended
+failure and restored pass. Production behavior, graph admission, execution
+order/freshness, masked copy, send/PDC semantics, and resource accounting were
+reviewed and accepted. The recorded policy, native x86-64-v3, Wasm scalar, and
+Wasm SIMD128 evidence was accepted. Attempts 1–3 receive no source or
+qualification credit; Attempt 4 receives SOURCE PASS only.
+
+Issue #713 is now passive and releases its lane-A implementation slot. Lane B's
+#705 retains sole AudioWorklet qualification and pin authority. Remaining work
+is lane-B-owned artifact disposition followed by required CI, exact-head/current-
+base review, guarded merge, post-main qualification, GitHub closure and
+cleanup. RT-9 remains a partial finding; no timing, full-tee, artifact, or pin
+credit is claimed.
+
+## Lane-B artifact disposition — current-main delivery preparation
+
+Current main is now merged from origin at 0dc066337d990a368801138d1c1f8b63830cd57e.
+Lane-B #705 delivered through PR #715 at that merge; reviewed head
+67c1d2e20e06951641ed3e26486933efa22ceab5, required PR qualification
+34447199222, and guarded post-main qualification 34447806043 with verdict job
+102778046641 all passed. The #705 artifact/pin dependency is therefore
+delivered, and lane-B pin ownership is released for this preparation.
+
+#713 source PASS remains applicable at product/test head
+7576d1b6c794f01df4abeb7256a8309d45879b21; its source and evidence are
+unchanged. This record claims no #713 delivery, timing, full-tee, artifact,
+pin, or performance result. Required current-head Astra LOW review, PR
+qualification, guarded merge, post-main qualification, GitHub synchronization,
+and clean-worktree cleanup remain open.
+
+## DELIVERY QUALIFICATION FAIL — #716
+
+PR #716 used exact head `d6a04d93e4296e6c1d6eaefc9547b60bcf8462cc`.
+Its test merge `a4072c7097e0983a71b5dab1c6a3db37ace06828` has tree
+`ced9b39475ddc2c9e05c441efa0db0f18f716dd2`, equal to the head tree.
+Required run `34448821511` passed every non-artifact leaf, but shipped-artifact
+job `102779640808` failed the expected digest
+`c4312e05d4f7e8117d9cfba8fc5a07b5f294fb6473db75f4804353730a302569` against
+observed `5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574`;
+the aggregate therefore failed. PR #716 is closed with its branch and run
+preserved. The source PASS remains valid, but this earns no delivery or timing
+credit. A new lane-B successor is required; #714 remains queued. No full-RT9,
+artifact, pin, or performance claim is made.
+
+## Lane-B #717 ATTEMPT 1 — Astra LOW PASS
+
+The lane-B successor #717 received Astra LOW ATTEMPT 1 PASS at clean detached
+E2 head `8b8fc4b41cda90a02a8ec78280a75523b0611f73`. Its qualified Wasm digest
+is `5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574`, and
+the inherited product/test identity remains unchanged at
+`7576d1b6c794f01df4abeb7256a8309d45879b21`. Qualification PASS carries no
+delivery credit: the combined PR, required CI, guarded merge, post-main
+qualification, GitHub synchronization, and clean-worktree removal remain
+pending. No timing or full-RT9 claim is made.
