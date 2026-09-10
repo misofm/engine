@@ -313,3 +313,13 @@ PR qualification, guarded merge and successful exact-main qualification.
 Synchronize issue closure only then; remove clean delivered worktrees while
 preserving branches/history and external evidence. #709 and #714 remain outside
 this integration.
+
+## Provisional artifact checkpoint
+
+Integrated source `5a66a1fa41e57437cfc76ee27d30a59fce0dbbcb` produced digest
+`6d3a6144109bbc4578dd661bdb84a13490fc94c5191b72608409ca40b44581f8` in the single authorized repin-report invocation (exit 0).
+Root records this as a provisional, unqualified pin so the ordinary builder can
+reproduce and qualify it. No artifact acceptance, SOURCE delivery or browser
+claim follows. Exact command/environment/stdout/stderr are external at
+`/tmp/issue710-artifact-88js3ptr/probe.*`; locked SDK/browser dependency setup
+also passed. The next step is one ordinary six-file build and existing gates.
