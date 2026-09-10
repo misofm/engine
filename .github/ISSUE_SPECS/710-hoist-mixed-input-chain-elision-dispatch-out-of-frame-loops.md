@@ -236,3 +236,38 @@ free-helper closure, not an assembly or cycle claim. No timing, speedup,
 AudioWorklet, artifact, pin, PR, merge, delivery or SOURCE PASS claim is made.
 Astra XHIGH pauses here for Sol's exact-path checkpoint audit and Astra LOW's
 independent adversarial review.
+
+## Attempt 2 — Astra LOW SOURCE PASS
+
+Astra LOW (`/root/issue709_astra_low_scope`) returned **SOURCE PASS** at exact
+clean pushed head `a1890963eb383e5aad1985a1f0efb8a4f3140fb4` for product/test
+checkpoint `c5b08616454d7367fc3e758cd541a0873c503ba5`. The reviewer verified
+HEAD/upstream identity, local/GitHub body parity, exact three-path ownership,
+and all preserved input, mutation and evidence hashes. Fresh review evidence is
+at `/tmp/issue710-low-review-lzqkanjf`.
+
+The reviewer independently reran:
+
+| Command | Result |
+| --- | --- |
+| `python3 /tmp/issue710-attempt2-IYCU7pK6/verify-frozen-references.py` | Exit 0; original source also matched the Git base |
+| `cargo test --locked -p lane --test input_chain_elision -- --nocapture` | Exit 0; 9 passed |
+| `cargo test --locked -p lane --lib mixed_elision -- --nocapture` | Exit 0; 1 passed |
+| `cargo clippy --locked -p lane --all-targets -- -D warnings` | Exit 0 |
+| `cargo run --offline --release --manifest-path /tmp/issue710-attempt2-IYCU7pK6/allocation-harness/Cargo.toml` | Exit 0; detector liveness and 288 allocation/free-free calls passed |
+
+No blocker was found. Arithmetic and signed-zero placement remain intact;
+disjoint channel execution preserves reports and state, mono preserves channel
+1, and instrumentation is excluded from production by `cfg(test)`. Frozen
+references, selector counts, source/helper checks and the specifically rejected
+production mutation provide complementary evidence. The structural gate covers
+the current named helper closure rather than arbitrary transformations or
+machine code; allocation evidence covers the tested kernels; Wasm evidence is
+compilation only.
+
+Sol fetched origin after the verdict. `origin/main` and the branch merge base
+remain `898bdc94b0143288049397629f3afeded384f8c2`; there is no current-main
+drift and the diff remains limited to the three owned paths. `lane` is in the
+browser artifact dependency closure, so #710 is passive pending a lane-B-only
+artifact disposition and consumes no implementation slot. No timing, speedup,
+AudioWorklet, artifact, pin, PR, merge or delivery claim is granted.
