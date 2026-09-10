@@ -217,3 +217,41 @@ earns no qualification or delivery credit, created no execution roots, and
 did not create E2 or a lease. The next gate is the detached E2 at
 `/home/bl/misofm/engine-rt9-resident-artifact-717-qualify` with a reviewed
 lease before any execution root or command.
+
+## Astra LOW ATTEMPT 1 PASS — qualification only
+
+Astra LOW returned ATTEMPT 1 PASS at overlay/E2 head
+`8b8fc4b41cda90a02a8ec78280a75523b0611f73` using the immutable lease
+`/tmp/cp1-resident-input-artifact-717.lease` (SHA-256
+`bc6d08313c92b0c52afa53604e152fa6c0685f36efdc434acd3d36b33dbb0080`). The
+rejected lease drafts remain preserved at
+`/tmp/cp1-resident-input-artifact-717.lease.invalid-marker-guard` and
+`/tmp/cp1-resident-input-artifact-717.lease.invalid-hermetic-guard`. Named
+executor `/root/issue717_astra_xhigh_exec` recorded transcript
+`/home/bl/.codex2/sessions/2026/09/10/rollout-2026-09-10T08-00-02-01a08a54-b541-7c90-93c0-f9682c13b146.jsonl`
+with SHA-256
+`298e154d8e14a11b2ac7d78df30da6b508bc7474d5badfc41ef5f836f4c711f3`.
+
+All 18 commands ran once, in order, with exit 0, including one builder;
+12 permitted empty continuations occurred across six already-started
+persistent sessions. The executor reported the three qualified browser
+versions `chromium 151.0.7922.34`, `firefox 153.0`, and `webkit 26.5`.
+The data-only terminal result SHA-256 is
+`470fb962a994d3f58f4e5e7ac3f1e29395501644e142e53bfe0138ea2b42c9e6`, the
+independent acknowledgement marker is
+`da4769119aa609d7631dc3331f1ff2ac9c59e1f0a6e282a44c8964523b271e69`, and
+the release marker is
+`fdc935e6a3f33abdcfb4f5d7a335d408b2b988e7a5f8411d9f73349d1fab39be`;
+revocation is absent. The six artifact hashes remain exactly:
+
+    40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+    445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  miso-engine-v1-audio-worklet-host.d.ts
+    21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a  miso-engine-v1-audio-worklet-host.js
+    225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+    6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d  miso-engine-v1-parameter-metadata.json
+    5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574  miso-engine-v1-audio-worklet.simd128.wasm
+
+E2 remained clean and detached. This is qualification PASS only; required PR
+CI, guarded merge, post-main qualification, GitHub synchronization, and
+clean-worktree removal remain pending. No timing, performance, full-RT9, or
+product-change claim is made.

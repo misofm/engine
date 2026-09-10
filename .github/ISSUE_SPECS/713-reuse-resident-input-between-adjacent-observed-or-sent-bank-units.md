@@ -465,3 +465,14 @@ the aggregate therefore failed. PR #716 is closed with its branch and run
 preserved. The source PASS remains valid, but this earns no delivery or timing
 credit. A new lane-B successor is required; #714 remains queued. No full-RT9,
 artifact, pin, or performance claim is made.
+
+## Lane-B #717 ATTEMPT 1 — Astra LOW PASS
+
+The lane-B successor #717 received Astra LOW ATTEMPT 1 PASS at clean detached
+E2 head `8b8fc4b41cda90a02a8ec78280a75523b0611f73`. Its qualified Wasm digest
+is `5695fbc4d72fae4a78b5acd1cf8970c489163703a11ac5351974ce05a90b1574`, and
+the inherited product/test identity remains unchanged at
+`7576d1b6c794f01df4abeb7256a8309d45879b21`. Qualification PASS carries no
+delivery credit: the combined PR, required CI, guarded merge, post-main
+qualification, GitHub synchronization, and clean-worktree removal remain
+pending. No timing or full-RT9 claim is made.
