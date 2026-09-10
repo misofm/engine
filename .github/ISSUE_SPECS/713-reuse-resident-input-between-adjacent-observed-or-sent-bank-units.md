@@ -288,5 +288,15 @@ scope reviews. No RT-9 full-delivery or performance credit is claimed.
 - Astra LOW returned **SCOPE FAIL** for the copy-only API correction
   `ee1fab399cde253e87303426e90c31858a3725f8`; no implementation ran and no
   attempt was consumed.
-- `f55b1e4e32e5e294d7cb1a16ff0786336496cfc2` is the current correction under
-  review. It is still scope work only; no implementation attempt is consumed.
+- Astra LOW returned **SCOPE FAIL** for correction
+  `f55b1e4e32e5e294d7cb1a16ff0786336496cfc2`; the extra-reader/send/observer
+  eligibility, the structural single-caller gate, and the prior failure history
+  were not yet frozen precisely enough. No implementation ran and no attempt
+  was consumed.
+- Astra LOW returned **implementation-scope PASS** at clean
+  `1bd33f9bb2243d9aa89378f39f06d340aa7209d7`. Astra XHIGH alone is authorized
+  to implement, only after the borrow-safety, layout/retained-peak, and
+  accounting preflight, and only within the frozen paths and gates above.
+
+Zero implementation attempts are consumed. This PASS authorizes neither full
+RT-9 delivery nor timing, artifact, AudioWorklet-pin, or performance authority.
