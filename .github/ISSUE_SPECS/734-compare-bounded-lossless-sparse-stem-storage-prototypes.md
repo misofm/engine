@@ -68,3 +68,7 @@ The corrected corpus was admitted, and every PCM identity matches the independen
 ## Real-corpus qualification
 
 All 490 full-stem PCM reconstructions, all 3,920 common frozen seek windows, and all 43 representative-copy corruption/locality cases passed. Root preserved the private correctness evidence and an execution freeze binding code, corpus, environment, reporter and exact command, then pushed the checkpoint. The single benchmark invocation has started with one warmup and two measured rounds. No timing result or completion claim is made until the complete record passes validation and final Sol review.
+
+## Completed measurements; report-only successor
+
+The single frozen invocation completed all 93 operations and its completion marker; closed record validation passed. Raw evidence is preserved upstream, and the codec/workload/configuration hashes remained unchanged through completion. The report exporter then failed on an explicitly unavailable dense-FLAC metadata count. The completed measurements are valid; issue #735 owns the minimal nullable-field repair and publication from the preserved raw record. No benchmark rerun is authorized. This parent remains open through repaired evidence and final Sol review.
