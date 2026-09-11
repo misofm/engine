@@ -545,3 +545,19 @@ in /tmp/issue739-luna-descendants.md and distinct logs. Only scoped tests
 and explanatory primitive-corpus comments changed; no production algorithm
 or corpus digest changed. Final consolidated public boundary assertions,
 full affected native/policy gates and Astra medium verdict remain.
+
+
+## Consolidated public-boundary correction — 2026-09-11
+
+Luna xhigh implemented the six consolidated review corrections in existing
+product/oracle bodies: exact accepted caps and bypass bank dry behavior,
+changed-valid-left/invalid-right rollback witnesses, irregular current PCM
+atquantum1/128, separate low/high saved-envelope comparisons, within-block
+future-suffix causality and reference nonvacuity. Product10PASS, identity8PASS,
+fmtPASS. An initial too-short reference-sensitivity probe failed and was
+corrected to a128-sample active probe; both results are retained in
+/tmp/issue739-luna-public-final-correction.md and its logs.
+Root full affected descendants287PASS/4ignored; multiband debug/release each
+47PASS/2ignored. Final source artifact probe remains byte-identical to the
+qualified pin. Astra medium found no descendant/artifact blockers; final
+strict checks and one complete-attempt verdict remain.

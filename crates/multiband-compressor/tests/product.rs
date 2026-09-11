@@ -68,6 +68,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         let initial = values();
         let mut prepared = request(&initial);
         prepared.sample_rate = rate;
+        prepared.limits.maximum_total_state_bytes = 376;
+        // The contract requires a positive capacity limit even when the prepared effect needs no
+        // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
+        prepared.limits.maximum_scratch_bytes = 1;
         let mut effect = MultibandCompressorFactory
             .prepare(prepared)
             .expect("prepare");
@@ -113,6 +117,8 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
 
         let mut bypass_request = request_with(&initial, LinkMode::DualMono, 128, true);
         bypass_request.sample_rate = rate;
+        bypass_request.limits.maximum_total_state_bytes = total;
+        bypass_request.limits.maximum_scratch_bytes = 1;
         let mut bypass = MultibandCompressorFactory
             .prepare(bypass_request)
             .expect("bypass prepare");
@@ -145,6 +151,8 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                 .collect::<Vec<_>>();
             for request in &mut bank_requests {
                 request.sample_rate = rate;
+                request.limits.maximum_total_state_bytes = total;
+                request.limits.maximum_scratch_bytes = 1;
             }
             let mut bank = MultibandCompressorFactory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -158,6 +166,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             assert_eq!(
                 bank.metadata().program_key.state_sizes,
                 metadata.state_sizes
+            );
+            assert_eq!(
+                bank.metadata().program_key.latency,
+                effect_contract::LatencySamples(0)
             );
             let mut bank_left = vec![0.25f32; 128 * lanes];
             let mut bank_right = vec![-0.25f32; 128 * lanes];
@@ -178,12 +190,99 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             );
             assert!(bank_left.iter().all(|sample| sample.is_finite()));
             assert!(bank_right.iter().all(|sample| sample.is_finite()));
+
+            let mut bypass_bank_requests = (0..lanes)
+                .map(|_| request_with(&initial, LinkMode::DualMono, 128, true))
+                .collect::<Vec<_>>();
+            for request in &mut bypass_bank_requests {
+                request.sample_rate = rate;
+                request.limits.maximum_total_state_bytes = total;
+                request.limits.maximum_scratch_bytes = 1;
+            }
+            let mut bypass_bank = MultibandCompressorFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: backend_for(width),
+                    width,
+                    requests: &bypass_bank_requests,
+                })
+                .expect("bypass bank prepare")
+                .expect("bypass bank");
+            assert_eq!(
+                bypass_bank.metadata().program_key.latency,
+                effect_contract::LatencySamples(0)
+            );
+            let mut bypass_bank_left = vec![0.0f32; 128 * lanes];
+            let mut bypass_bank_right = vec![0.0f32; 128 * lanes];
+            for frame in 0..128 {
+                for lane in 0..lanes {
+                    let index = frame * lanes + lane;
+                    bypass_bank_left[index] = if (frame + lane) % 3 == 0 {
+                        -0.0
+                    } else {
+                        0.125 * (lane as f32 + 1.0)
+                    };
+                    bypass_bank_right[index] = if (frame + lane) % 4 == 0 {
+                        -0.0
+                    } else {
+                        -0.25 * (lane as f32 + 1.0)
+                    };
+                }
+            }
+            let bypass_bank_left_input = bypass_bank_left.clone();
+            let bypass_bank_right_input = bypass_bank_right.clone();
+            bypass_bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bypass_bank_left,
+                    &mut bypass_bank_right,
+                    None,
+                    128,
+                    width,
+                    0,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bypass bank block"),
+            );
+            assert!(
+                bypass_bank_left
+                    .iter()
+                    .zip(bypass_bank_left_input.iter())
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+            );
+            assert!(
+                bypass_bank_right
+                    .iter()
+                    .zip(bypass_bank_right_input.iter())
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+            );
         }
         let mut below = request(&initial);
         below.sample_rate = rate;
         below.limits.maximum_total_state_bytes = total - 1;
+        below.limits.maximum_scratch_bytes = 1;
         assert_eq!(
             MultibandCompressorFactory.prepare(below).err(),
+            Some(EffectPrepareError {
+                code: "effect.resource.limit"
+            })
+        );
+        let mut below_bank_requests = (0..BankWidth::Four.lanes() as usize)
+            .map(|_| request(&initial))
+            .collect::<Vec<_>>();
+        for request in &mut below_bank_requests {
+            request.sample_rate = rate;
+            request.limits.maximum_total_state_bytes = total - 1;
+            request.limits.maximum_scratch_bytes = 1;
+        }
+        assert_eq!(
+            MultibandCompressorFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: backend_for(BankWidth::Four),
+                    width: BankWidth::Four,
+                    requests: &below_bank_requests,
+                })
+                .err(),
             Some(EffectPrepareError {
                 code: "effect.resource.limit"
             })
@@ -308,6 +407,54 @@ fn unity_gain_output_is_the_causal_lr4_sum() {
         );
     }
     eprintln!("E0b worst_error={worst:e}");
+
+    for quantum in [1u32, 128] {
+        let input = (0..256)
+            .map(|index| {
+                if index == 0 {
+                    0.37
+                } else if index % 5 == 0 {
+                    -0.21
+                } else if index % 3 == 0 {
+                    0.13
+                } else {
+                    0.01 * (index % 17) as f32 - 0.08
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut actual = input.clone();
+        let mut actual_right = input.clone();
+        let mut effect = MultibandCompressorFactory
+            .prepare(request_with(&initial, LinkMode::DualMono, quantum, false))
+            .expect("irregular unity effect");
+        let mut first_sample = 0u64;
+        while first_sample < input.len() as u64 {
+            let frames = (input.len() as u64 - first_sample).min(u64::from(quantum)) as usize;
+            let start = first_sample as usize;
+            process(
+                effect.as_mut(),
+                &mut actual[start..start + frames],
+                &mut actual_right[start..start + frames],
+                first_sample,
+                &[],
+                quantum,
+            );
+            first_sample += frames as u64;
+        }
+        let mut reference = ReferenceLr4Crossover::new(48_000.0, 1_000.0).expect("reference");
+        for (index, sample) in input.iter().enumerate() {
+            let (low, high) = reference.process_sample(f64::from(*sample));
+            let expected = (low + high) as f32;
+            assert!(
+                (actual[index] - expected).abs() <= 2.0e-5,
+                "quantum={quantum} frame={index}"
+            );
+            assert!(
+                (actual_right[index] - expected).abs() <= 2.0e-5,
+                "quantum={quantum} right frame={index}"
+            );
+        }
+    }
 }
 
 /// An independent LR4 plus mathematical dynamics oracle exercises both active envelopes at the
@@ -343,6 +490,13 @@ fn active_causal_oracle_engages_releases_and_starts_on_current_sample() {
     let mut expected = Vec::with_capacity(FRAMES);
     let mut low_envelope = Vec::with_capacity(FRAMES);
     let mut high_envelope = Vec::with_capacity(FRAMES);
+    let state_word = |payload: &[u8], word: usize| -> f64 {
+        f64::from(f32::from_le_bytes(
+            payload[word * 4..word * 4 + 4]
+                .try_into()
+                .expect("state word"),
+        ))
+    };
     for start in (0..FRAMES).step_by(128) {
         let end = start + 128;
         for sample in &input[start..end] {
@@ -367,6 +521,21 @@ fn active_causal_oracle_engages_releases_and_starts_on_current_sample() {
             "block ending {end}: observed={} oracle={oracle_reduction}",
             observed.left
         );
+        let saved = snapshot(effect.as_ref());
+        for (channel, payload) in [("left", &saved.1), ("right", &saved.2)] {
+            let low = state_word(payload, 1);
+            let high = state_word(payload, 2);
+            assert!(
+                (low - low_envelope[end - 1]).abs() <= 0.005,
+                "block ending {end} {channel} low gain: state={low} oracle={}",
+                low_envelope[end - 1]
+            );
+            assert!(
+                (high - high_envelope[end - 1]).abs() <= 0.005,
+                "block ending {end} {channel} high gain: state={high} oracle={}",
+                high_envelope[end - 1]
+            );
+        }
     }
     let mut worst = 0.0f32;
     for (index, (actual, wanted)) in output.iter().zip(expected.iter()).enumerate() {
@@ -388,6 +557,12 @@ fn active_causal_oracle_engages_releases_and_starts_on_current_sample() {
     assert!(
         high_envelope[4_095] > high_min + 1.0,
         "high envelope did not release"
+    );
+    let low_burst_rms = rms(&expected[..1_024]);
+    let high_burst_rms = rms(&expected[2_048..3_072]);
+    assert!(
+        (low_burst_rms - high_burst_rms).abs() > 1.0e-4,
+        "low/high burst outputs were indistinguishable: low={low_burst_rms} high={high_burst_rms}"
     );
     eprintln!("active oracle worst_error={worst:e}");
 
@@ -422,12 +597,40 @@ fn active_causal_oracle_engages_releases_and_starts_on_current_sample() {
     );
     assert!((first[0] - wanted).abs() <= 2.0e-5);
     assert!(first[0].abs() < 0.99, "first sample was not reduced");
+
+    let probe = (0..128)
+        .map(|index| match index % 5 {
+            0 => 0.7,
+            1 => -0.2,
+            2 => 0.3,
+            3 => 0.05,
+            _ => -0.4,
+        })
+        .collect::<Vec<_>>();
+    let mut reference_a = support::oracle::ActiveBands::new(
+        48_000.0, 1_000.0, -18.0, 20.0, 0.1, 5.0, -45.0, 20.0, 0.1, 5.0,
+    );
+    let mut reference_b = support::oracle::ActiveBands::new(
+        48_000.0, 1_000.0, -17.0, 20.0, 0.1, 5.0, -45.0, 20.0, 0.1, 5.0,
+    );
+    let sensitivity = probe
+        .iter()
+        .map(|sample| {
+            let (a, _, _) = reference_a.process(*sample);
+            let (b, _, _) = reference_b.process(*sample);
+            (a - b).abs()
+        })
+        .fold(0.0f32, f32::max);
+    assert!(
+        sensitivity > 1.0e-6,
+        "independent oracle threshold perturbation was insensitive"
+    );
 }
 
 /// Equal current prefixes stay bit-identical when a future suffix changes, proving causality.
 #[test]
 fn active_prefix_has_no_future_anticipation() {
-    const PREFIX: usize = 128;
+    const PREFIX: usize = 64;
     let active = active_values();
     let mut first = vec![0.0f32; 512];
     let mut second = first.clone();
@@ -467,6 +670,9 @@ fn active_prefix_has_no_future_anticipation() {
     }
     assert_eq!(&first[..PREFIX], &second[..PREFIX]);
     assert_eq!(&first_right[..PREFIX], &second_right[..PREFIX]);
+    assert!(first[..PREFIX].iter().any(|sample| *sample != 0.0));
+    assert_ne!(&first[PREFIX..128], &second[PREFIX..128]);
+    assert!(second[PREFIX..128].iter().any(|sample| sample.abs() > 0.0));
 }
 
 /// E0c. A bypassed instance is a causal dry path, and signed zero survives it.
@@ -507,6 +713,7 @@ fn bypass_latency_automation_and_restore_are_transactional() {
 
     let saved = snapshot(effect.as_ref());
     let mut malformed = saved.clone();
+    malformed.1[..4].copy_from_slice(&2_000.0f32.to_bits().to_le_bytes());
     malformed.2[..4].fill(u8::MAX);
     assert!(restore(effect.as_mut(), 1, &malformed, sizes).is_err());
     assert_eq!(snapshot(effect.as_ref()), saved);
@@ -623,6 +830,7 @@ fn bank_rejected_restore_changes_nothing_at_each_launch_rate() {
             .map(|track| support::snapshot_track(bank.as_ref(), track, sizes))
             .collect::<Vec<_>>();
         let mut malformed = saved[0].clone();
+        malformed.1[..4].copy_from_slice(&2_000.0f32.to_bits().to_le_bytes());
         malformed.2[..4].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
         let payload = StatePayloadInput::new(&malformed.0, &malformed.1, &malformed.2, sizes)
             .expect("compact malformed payload");

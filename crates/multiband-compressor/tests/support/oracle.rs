@@ -12,7 +12,7 @@ fn frozen_retention(time_ms: f64, sample_rate: u32) -> f64 {
     math::expf(-1.0 / tau_samples) as f64
 }
 
-/// Independent mathematical two-band curve and log-domain smoother over [`ActiveLr4`].
+/// Independent mathematical two-band curve and log-domain smoother over [`ReferenceLr4Crossover`].
 pub struct ActiveBands {
     crossover: ReferenceLr4Crossover,
     low_state: f64,
