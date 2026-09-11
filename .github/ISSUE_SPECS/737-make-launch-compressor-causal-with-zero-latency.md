@@ -305,3 +305,11 @@ to 195. The already verified metadata export proves this is the intended single-
 delta. Authorize this necessary current-metadata test update without weakening the
 lattice laws or changing another parameter; preserve the failing receipt at
 `/tmp/issue737-local-gates`. Remaining descendant/artifact gates must still complete.
+
+The catalog-count correction passes all 10 focused lattice tests, without changing
+any lattice law (`/home/bl/issue737-luna-catalog-receipts`). The broader run has not
+yet completed. Artifact qualification additionally found retired ID 8 in the current
+`hosts/host-web/tests/browser-v1/observation-session.json`; root owns its canonical
+transition and independently qualified current native/Wasm PCM and resource pins.
+The observed boot refusal and raw oracle diagnostics are preserved in
+`/tmp/issue737-artifact`, not hidden as an artifact PASS.

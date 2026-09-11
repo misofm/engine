@@ -32,7 +32,7 @@ fn member(points: &[LatticePoint], value: f32) -> bool {
 fn the_launch_catalog_is_not_empty_and_every_row_is_swept() {
     let rows = rows();
     // The count is not a contract, but a silently emptied sweep is the failure mode this catches.
-    assert_eq!(rows.len(), 66, "shipped controllable parameter rows");
+    assert_eq!(rows.len(), 65, "shipped controllable parameter rows");
     assert_eq!(
         launch_native_effect_registry().expect("registry").len(),
         8,
@@ -179,7 +179,7 @@ fn every_lattice_point_reaches_the_engine_through_the_one_blessed_conversion() {
             checked += 1;
         }
     }
-    assert!(checked >= 198, "three points on each of 66 rows: {checked}");
+    assert!(checked >= 195, "three points on each of 65 rows: {checked}");
 }
 
 #[test]
