@@ -39,7 +39,7 @@ preparation diagnostics and covered valid/invalid compressor ratio, unknown
 identity/parameter, earlier-stage skips, CLI exit and no canonical output on
 failure. Schema-only canonical fixture expectations were classified without
 changing sealed input bytes. Authoring guidance reflects the bounded guarantee.
-Focused formatting and all 10 validator integration tests passed. Actual command,
+Focused formatting and all 10 validator tests passed. Actual command,
 environment, exit and output receipts: `/tmp/issue211-attempt1`.
 Root owns this exact-path checkpoint; independent Astra XHIGH verdict pending.
 
@@ -56,7 +56,7 @@ the test correction and this record change. Independent attempt2 verdict pending
 ## Independent Astra XHIGH attempt 2 PASS
 
 Source7463c0d3c7c883f1e949975eaeb06cd03710c4c1 approved. Reviewer accepted
-formatting, locked strict Clippy and 10 integration tests, and independently
+formatting, locked strict Clippy and 10 validator tests, and independently
 passed nine CLI controls covering ports, quality, link modes, third-party
 refusal, diagnostic ordering, exit status and canonical suppression. Shared
 registry/preparer, caps, earlier-stage skips and sealed fixture bytes verified.
@@ -72,3 +72,14 @@ source. Preserve both histories and evidence; no new product change is authorize
 Verify validator behavior against the corrected parser on this combined tree,
 then independent exact-head review and required PR/full-workspace/main CI.
 Both issues remain open until qualification and upstream synchronization finish.
+
+## Combined integration Astra XHIGH PASS
+
+Reviewed headfce9c6276dd5caf277035a250966aa86599a637f preserves both accepted
+implementations and histories. Combined validator suite passed all10 tests.
+An empty-object CLI probe failed at grammar stage with json.syntax at
+$.render_profile, stages2–5 skipped and no canonical stdout. Only the validator
+adds the existing effect-compiler dependency; artifact package closures exclude
+it. All six retained artifact hashes and eight qualification receipts remain
+applicable. Evidence: `/tmp/issue211-387-combined-verification/integration.json`.
+Only this review record follows; required PR/main qualification remains.

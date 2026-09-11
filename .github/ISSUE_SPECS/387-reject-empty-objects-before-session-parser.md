@@ -131,3 +131,14 @@ source. Preserve both histories and evidence; no new product change is authorize
 Verify validator behavior against the corrected parser on this combined tree,
 then independent exact-head review and required PR/full-workspace/main CI.
 Both issues remain open until qualification and upstream synchronization finish.
+
+## Combined integration Astra XHIGH PASS
+
+Reviewed headfce9c6276dd5caf277035a250966aa86599a637f preserves both accepted
+implementations and histories. Combined validator suite passed all10 tests.
+An empty-object CLI probe failed at grammar stage with json.syntax at
+$.render_profile, stages2–5 skipped and no canonical stdout. Only the validator
+adds the existing effect-compiler dependency; artifact package closures exclude
+it. All six retained artifact hashes and eight qualification receipts remain
+applicable. Evidence: `/tmp/issue211-387-combined-verification/integration.json`.
+Only this review record follows; required PR/main qualification remains.
