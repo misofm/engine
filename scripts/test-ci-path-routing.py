@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import pathlib
+import importlib.util
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -209,6 +212,8 @@ def workspace() -> pathlib.Path:
     (root / "scripts").mkdir()
     shutil.copy2(ROOT / ".github/workflows/qualification.yml",
                  root / ".github/workflows/qualification.yml")
+    shutil.copy2(ROOT / ".github/workflows/nightly.yml",
+                 root / ".github/workflows/nightly.yml")
     shutil.copy2(ROUTER, root / "scripts/ci-path-router.py")
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
     shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
@@ -257,7 +262,44 @@ def commit_file(root: pathlib.Path, path: str, contents: str, message: str) -> s
     return git(root, "rev-parse", "HEAD")
 
 
+def test_nightly_budget_selection() -> None:
+    spec = importlib.util.spec_from_file_location("ci_checker", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    body = checker.nightly_budget_script(ROOT)
+    expected = [command.split()[1:] for command in checker.NIGHTLY_BUDGET_COMMANDS]
+    with tempfile.TemporaryDirectory(prefix="nightly-budget-selection-") as directory:
+        scratch = pathlib.Path(directory)
+        cargo = scratch / "cargo"
+        cargo.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "p = pathlib.Path(os.environ['BUDGET_CALL_LOG'])\n"
+            "rows = p.read_text().splitlines() if p.exists() else []\n"
+            "with p.open('a') as output: output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "sys.exit(37 if len(rows) + 1 == int(os.environ['FAIL_CALL']) else 0)\n"
+        )
+        cargo.chmod(0o755)
+        for fail_call in range(5):
+            log = scratch / f"calls-{fail_call}.jsonl"
+            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+                       BUDGET_CALL_LOG=str(log), FAIL_CALL=str(fail_call))
+            result = subprocess.run(["bash", "-c", body], env=env, check=False)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            assert result.returncode == (37 if fail_call else 0)
+            assert calls == expected[:fail_call or 4]
+    for command in checker.NIGHTLY_BUDGET_COMMANDS:
+        workflow_mutation_fails("nightly.yml", command, "true")
+    workflow_mutation_fails("nightly.yml", "--ignored --exact", "--ignored")
+    workflow_mutation_fails("nightly.yml", checker.NIGHTLY_BUDGET_COMMANDS[0],
+                            "cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored")
+    workflow_mutation_fails("nightly.yml", "          set -euo pipefail\n" +
+                            "          " + checker.NIGHTLY_BUDGET_COMMANDS[0],
+                            "          " + checker.NIGHTLY_BUDGET_COMMANDS[0])
+
+
 def main() -> int:
+    test_nightly_budget_selection()
     test_new_router_behaviours()
     print("new dsp-research/SDK-script/--flags mutation cases passed")
 

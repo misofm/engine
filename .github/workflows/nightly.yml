@@ -279,12 +279,14 @@ jobs:
       # PRs; the timing half becomes `#[ignore]` and runs here, in release, once a day, with the
       # number recorded against a product budget instead of a debug-build guess.
       #
-      # `-- --ignored` over these three crates selects exactly the four
-      # `#[ignore = "release-mode budget; runs nightly"]` tests (verified by `--list --ignored`
-      # at the time of writing); if an unrelated `#[ignore]` test is ever added to one of them,
-      # narrow this to an explicit test-name list.
+      # Exact selectors keep unrelated opt-in timing tests out of this product-budget job.
       - name: Release-mode wall-clock budget tests
-        run: cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release
+          cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release
+          cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
+          cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release
 
   failure-notice:
     name: report nightly failure as an issue

@@ -34,6 +34,19 @@ reviewed-head PR/main CI, upstream evidence, verified remote closure and clean
 worktree removal remain mandatory. Root owns artifact pins; no pin change expected.
 No compiler captures or performance improvement claim.
 
+## Attempt 1 workflow checkpoint
+
+The release-budget step now targets the four intended test functions with their
+explicit package and lib/integration-test target, `--ignored --exact`, and shell
+failure propagation. Thresholds and test bodies are unchanged. Existing required
+CI policy machinery checks the exact selection; its hermetic regression captures
+all four stub invocations, rejects broad/missing selectors and missing commands,
+and injects a failing exit at each position to prove no failure is hidden.
+
+This checkpoint contains selection and policy changes only. Actual one-shot budget
+qualification and replay of both saved crashes follow after the root checkpoint;
+neither is claimed complete by the hermetic test.
+
 ## Historical issue body
 
 The scheduled nightly workflow failed.
