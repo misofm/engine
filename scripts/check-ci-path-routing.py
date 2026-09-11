@@ -358,10 +358,36 @@ def check_retired_workflows_absent(root: pathlib.Path) -> None:
                 f"{name}: retired workflow must not exist (design #359 §12 stage 3)")
 
 
+NIGHTLY_BUDGET_COMMANDS = [
+    'cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release',
+    'cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release',
+    'cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release',
+    'cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release',
+]
+
+
+def nightly_budget_script(root: pathlib.Path) -> str:
+    text = (root / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    block = job(text, "release-budgets")
+    marker = "      - name: Release-mode wall-clock budget tests\n        run: |\n"
+    require(block.count(marker) == 1, "nightly: missing exact budget step")
+    body = block.split(marker, 1)[1]
+    require(all(not line.strip() or line.startswith("          ")
+                for line in body.splitlines()), "nightly: unexpected budget step content")
+    return "\n".join(line[10:] for line in body.splitlines() if line.strip()) + "\n"
+
+
+def check_nightly_budgets(root: pathlib.Path) -> None:
+    expected = "set -euo pipefail\n" + "\n".join(NIGHTLY_BUDGET_COMMANDS) + "\n"
+    require(nightly_budget_script(root) == expected,
+            "nightly: run each of the four exact release budgets once with failure propagation")
+
+
 def check(root: pathlib.Path) -> None:
     check_retired_workflows_absent(root)
     check_classifier_contract(root)
     check_qualification_workflow(root)
+    check_nightly_budgets(root)
 
 
 def main() -> int:
