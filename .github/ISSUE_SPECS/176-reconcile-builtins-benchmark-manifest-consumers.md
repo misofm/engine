@@ -89,3 +89,16 @@ The stale pins are repaired on branch `floor-phase2-contract` in commit `6fa5453
 
 1. The three values live in five places each. A single source (the manifest row itself, read at run time) would make this class of rot impossible.
 2. `preflight-*.sh` being outside the sweep is a deliberate, documented cost decision. It is correct for runtime, but it means a preflight can rot silently for months. A cheap hermetic row that checks only the `require_hash` constants against the working tree — no build, no launch — would have caught this the day it landed.
+
+## Independent review and joint delivery checkpoint
+
+Astra XHIGH attempt1 SOURCE PASS atcc11fea32076d275647256f5028c959424d64963.
+The real CLI rejects the original stale preflight pin and passes after exact
+restoration. Required CI routing contract/mutations pass. All builtins fixture
+tree objects and PCM/meter identities are unchanged; LOW lifecycle/audit/Clippy
+receipts match the committed diff and carry forward. Source/GH/current-base
+parity verified. Evidence: /tmp/issue176-xhigh-cc11fea3/review.md.
+
+Root merges the two accepted histories for one tooling delivery. No shipped
+engine/SDK source or artifact pin changed. Combined exact-head review, required
+PR/main qualification and synchronized closure remain pending.

@@ -36,3 +36,15 @@ Shell syntax, real-tree baseline and full policy harness exited0. The harness
 includes synthetic benchmark108/fake-launch lifecycle controls, not timed work.
 Receipts: /tmp/issue285-attempt1 (actual argv/env/source/exit/logs). Independent
 review and required PR/main qualification remain pending.
+
+## Independent review and joint delivery checkpoint
+
+Astra XHIGH attempt1 SOURCE PASS at3625c5d2. Fourteen independent controls
+prove old/new npm regression, source-artifact refusal, root-target behavior and
+empty/nonempty traversal-error refusal. Successful LOW baseline/full-policy
+receipts reused. Exact head/base and GitHub parity verified. Review and actual
+commands/source/exits/logs: /tmp/issue285-xhigh-o4odaeua/review.md.
+
+Root merges the two accepted histories for one tooling delivery. No shipped
+engine/SDK source or artifact pin changed. Combined exact-head review, required
+PR/main qualification and synchronized closure remain pending.
