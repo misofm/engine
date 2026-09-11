@@ -272,9 +272,24 @@ ran exactly once; no rerun is allowed. Clock overhead is included; no old-baseli
 speedup, floor, cycle, capacity or new numerical-budget claim is made. Raw data:
 `/tmp/issue737-cpu-measurement`; independent verdict:
 `/home/bl/issue737-sol-attempt1-cpu-recorder-review/CPU_QUALIFICATION_PASS.md`.
-The example checkpoint is separately pushed and will be integrated before delivery.
+The example checkpoint is integrated on the delivery branch as `726ad4e7` (original frozen measurement source `60aa3894`).
 
 Listening status verified on GitHub: #046 is CLOSED as superseded by #088; its
 listening handoff belongs to OPEN #026 release qualification. Changed causal attack
 behavior still awaits matched-loudness blinded listening there. Objective reference,
 transient and causality tests are not human listening evidence.
+
+
+## Current browser artifact identity
+
+Root's candidate probe and ordinary rebuilt artifact agree on Wasm SHA-256
+`5d9e9ad045ee502eb34fe50fd55faec1aad582d650b6297d11c130170a69af6d`.
+Current parameter metadata is
+`95a209a20f18211e8dbb45fe024242d813fc4e1abfe7214a7d7c392eafe2cbf8`;
+its semantic delta is solely removed compressor ID 8. All four other shipped
+companions (host JS, worklet JS, host declarations and ABI layout) are byte-identical
+to the delivered baseline. Root updates the current Wasm pin for this intentional
+contract change. All six candidate artifacts and build receipts are preserved in
+`/tmp/issue737-artifact`. Supported browser/runtime qualification and CI remain
+pending; a matching content hash alone is not acceptance. No compiler captures
+or unrelated generated output are committed.
