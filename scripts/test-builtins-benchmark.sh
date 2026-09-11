@@ -4,12 +4,53 @@ set -euo pipefail
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
+# Required CI runs only this real-tree check; the lifecycle suite below remains hermetic.
+[[ "$#" == 0 || ( "$#" == 1 && "$1" == --check-manifest-consumers ) ]] || {
+  printf 'usage: %s [--check-manifest-consumers]\n' "$0" >&2; exit 2;
+}
+if [[ "${1:-}" == --check-manifest-consumers ]]; then
+  python3 - "$repository_root" <<'PYTHON'
+import hashlib
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+expected = hashlib.sha256((root / "fixtures/builtins/v1/MANIFEST.tsv").read_bytes()).hexdigest()
+# Match each declaration, including the synthetic preflight hash stub and seal row.
+consumers = [
+    ("scripts/preflight-builtins-benchmark.sh", r"^manifest_sha256=([0-9a-f]{64})$"),
+    ("scripts/test-builtins-benchmark.sh", r'^manifest64="([0-9a-f]{64})"$'),
+    ("scripts/test-builtins-benchmark.sh", r'MANIFEST\.tsv\)\s+hash=([0-9a-f]{64})'),
+    ("scripts/test-builtins-benchmark.sh", r'fixture_manifest_sha256:"([0-9a-f]{64})"'),
+    ("scripts/builtins-benchmark-record-validator.jq", r'def frozen_manifest_sha256:\s+"([0-9a-f]{64})";'),
+    ("tools/audit/src/builtins_graph.rs", r'const ACCEPTED_MANIFEST_SHA256: &str =\s+"([0-9a-f]{64})";'),
+    ("tools/bench/src/builtins.rs", r'const INPUT_MANIFEST_SHA256: &str =\s+"([0-9a-f]{64})";'),
+]
+
+def fresh(source, pattern):
+    return re.findall(pattern, source, re.MULTILINE) == [expected]
+
+for name, pattern in consumers:
+    source = (root / name).read_text()
+    if not fresh(source, pattern):
+        sys.exit(f"stale or missing builtins manifest consumer: {name} ({pattern})")
+    match = re.search(pattern, source, re.MULTILINE)
+    # Mutate just the captured constant, then exercise the same freshness predicate.
+    stale = "0" * 64 if expected != "0" * 64 else "1" * 64
+    mutated = source[:match.start(1)] + stale + source[match.end(1):]
+    if fresh(mutated, pattern):
+        sys.exit(f"stale-constant negative control accepted: {name}")
+print(f"builtins manifest consumers: PASS ({len(consumers)} declarations; stale controls rejected)")
+PYTHON
+  exit 0
+fi
 command -v jq >/dev/null || { printf 'jq is required for benchmark validator tests\n' >&2; exit 1; }
 
 hash64="4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9"
 binary64="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 output64="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-manifest64="ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b"
+manifest64="31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796"
 commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
@@ -600,7 +641,7 @@ case "$1" in
   *Cargo.lock)
     hash=4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a ;;
   *fixtures/builtins/v1/MANIFEST.tsv)
-    hash=ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b ;;
+    hash=31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796 ;;
   *fixtures/builtins/v1/pcm/graph-taps.f32le)
     hash=508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19 ;;
   *fixtures/builtins/v1/meters/graph-taps.jsonl)
@@ -660,7 +701,7 @@ write_fake_nonbenchmark() {
       lifecycle_sha256:$lifecycle,
       record_validator_sha256:"45f2e0196b4e457a633980653536bb397af7f8ebc82ea69f49c8812dfa7dd9a6",
       aggregate_validator_sha256:"6085e740f15d7902fca4443d761cfb8e29df7168ba12f632c7946db56a3e1b63",
-      fixture_manifest_sha256:"ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b",
+      fixture_manifest_sha256:"31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796",
       graph_pcm_sha256:"508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19",
       graph_meter_sha256:"958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f",
       accepted_issue068_source_sha256:"0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19",

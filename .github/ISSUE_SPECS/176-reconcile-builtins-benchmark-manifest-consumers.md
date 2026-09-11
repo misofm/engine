@@ -29,6 +29,29 @@ Required exact-head PR and main qualification, upstream evidence and verified Gi
 closure precede clean delivered-worktree removal. Root owns delivery and any artifact
 qualification; these tooling-only slices should not require a new shipped pin.
 
+## Attempt 1 implementation record — 2026-09-11
+
+The current mismatch is manifest provenance only: the four outdated consumers now
+use `31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796`,
+matching the unchanged real manifest and the already-current bench consumer. The
+historical three-pin account below describes an earlier tree, not this repair.
+Fixture bytes and graph PCM/meter pins are unchanged.
+
+The existing benchmark test script now exposes `--check-manifest-consumers`, a
+no-build real-tree check of seven declarations across five consumers (including
+the synthetic preflight hash stub and seal row). It computes the manifest digest,
+requires exactly one matching declaration per selector, and rejects a separately
+mutated stale constant through the same predicate for every declaration. Required
+qualification runs only this cheap mode; the full existing hermetic lifecycle
+suite remains available without running a real benchmark.
+
+No historical lock, validator, source, or artifact seals were repinned. This repair
+does not claim that the historical exactly-once preflight is runnable on the current
+branch or that all benchmark infrastructure is repaired. No fixture generation,
+timed benchmark, DSP change, or performance claim belongs to this checkpoint.
+Validation command/output evidence is preserved externally by the implementation
+workflow; independent review and delivery evidence follow separately.
+
 ## Historical issue body
 
 ## Summary

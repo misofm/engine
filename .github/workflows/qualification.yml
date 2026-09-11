@@ -315,6 +315,8 @@ jobs:
       # binaries; only the hermetic mutation-test suite stays here.
       - name: Standing builtins fixture manifest mutation tests
         run: bash scripts/test-builtins-fixtures.sh
+      - name: Builtins benchmark real-tree manifest consumers
+        run: bash scripts/test-builtins-benchmark.sh --check-manifest-consumers
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
       # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
