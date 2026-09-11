@@ -114,3 +114,26 @@ actual prepared process calls. Failed phases preserve argv and exit records.
 The runner forwards existing metadata after the explicit perf wrapper.
 Astra source and actual release/preflight review remains pending; this is not
 a measurement or final verification PASS.
+
+## Attempt 1 — Astra medium FAIL before timing
+
+Astra medium records FAIL for source90d7975d. Shared metadata ends in a comma;
+placing it last emitted invalid JSON. Validator additionally accepted wrong
+sample rate/round, nonfinite percentile and negative ratio evidence. Required
+negative controls and an actual emitted-record parse check were incomplete.
+No production DSP, frozen stimulus, bank binding or process timing-boundary
+blocker was found. These findings authorize one bounded second attempt over
+the same four implementation paths: repair serialization, enforce frozen
+schema/finite valid numerics, and add the missing discriminating controls.
+Do not change stimulus, counts, timers, dependencies, production code or scope.
+
+Root release build PASS. Actual wrapper/CPU15 runner --preflight exited1:
+`phase subject-preflight stdout line 1 is not JSON`. Raw evidence remains
+`/tmp/.issue746-preflight-ne9i3y5b`; transcript is
+`/tmp/issue746-a1-real-preflight.log`, hashes
+`/tmp/issue746-a1-preflight-sha256.json`, full verdict
+`/tmp/issue746-astra-a1-verdict.md`. Subject stdout SHA256
+04dfc81297be0d8aae487a6724a8cf9427113bf868743900f5e3bd45dab45e18.
+The final measurement directory was not created. No warmup or measured DSP
+ran; the exactly-once measurement allowance is unused. This failure is retained
+without relabeling the earlier focused test reports as sufficient qualification.
