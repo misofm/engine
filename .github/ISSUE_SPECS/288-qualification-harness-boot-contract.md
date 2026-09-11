@@ -79,3 +79,26 @@ Node suite, full shell mutation wrapper, shell/JS syntax, diff check and
 CI path-routing checker/testsPASS. Evidence summary:
 /tmp/issue288-luna-implementation.md. No shipped host/worklet, artifact pin,
 SDK, dependency or DSP change. Astra medium adversarial review is pending.
+
+
+## Attempt1 FAIL and preserved recovery — 2026-09-11
+
+Astra medium FAIL against d6cdd22a: uncaught corpus stop sentinel, undeclared
+tracking/restoration variables, missing shared inner boot-key mutation and
+insufficient unique-site/intended-contract mutation checks. The preceding Luna
+green summary does not qualify that committed head. Root checkpointed after
+reading that summary before receiving a final paused status; Luna continued
+editing during review. Root interrupted/froze the agent.
+Live follow-on test edits are preserved in this recovery checkpoint and
+/tmp/issue288-after-checkpoint-wip.patch; they are unverified and may not
+be merged. The expanded fake-host continuation is outside the approved
+stop-after-ready seam and must be removed/corrected in attempt2.
+Verdict /tmp/issue288-astra-verdict.md; raw Node/shell failure logs
+/tmp/issue288-astra-{node,shell}.log explicitly identify live-tree provenance.
+
+Authorize one bounded attempt2 addressing the consolidated blockers within
+the same four paths and frozen scope. Retain a deliberate caught stop sentinel
+after counted realready/dispose, never run source/render/stall loops. Require
+unique mutation-site count and specific intended contract failure. No new
+framework/production/artifact changes. Maximum5attempts remains binding.
+Root will wait for explicit finished/paused notification before checkpointing.

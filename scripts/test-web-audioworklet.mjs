@@ -1184,6 +1184,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
   const originalValidate = WebAssembly.validate;
   const originalSampleRate = globalThis.sampleRate;
   const originalRenderQuantumSize = globalThis.renderQuantumSize;
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
   const qualificationUrlWithCacheKey = `${qualificationUrl.href}?boot-contract-test`;
   const {
     createMisoAudioWorkletHost,
@@ -1192,6 +1193,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
   const observed = [];
   const nodes = [];
   const fetchUrls = [];
+  let sentinelStops = 0;
   let realReady = 0;
   let realDisposed = 0;
 
@@ -1241,6 +1243,11 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       };
     }
 
+    async startRendering() {
+      return {
+        getChannelData: () => new Float32Array(this.length),
+      };
+    }
   }
 
   class QualificationNode {
@@ -1276,12 +1283,48 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     }
   }
 
-  class QualificationStop extends Error {
-    constructor(label) {
-      super(`qualification boot probe stopped before ${label} loop`);
-      this.label = label;
-    }
-  }
+  const sentinelNode = Object.freeze({
+    connect() {},
+  });
+  const sentinelHost = Object.freeze({
+    backend: "simd128",
+    node: sentinelNode,
+    submitSource: async () => ({ result: 0 }),
+    sessionMap: async () => ({
+      tracks: ["qualification-track"],
+      sources: [],
+      metersAttached: true,
+    }),
+    meters: async (request) => {
+      request.onFrame?.({
+        peaks: new Float32Array(2),
+        trackGrDb: new Float32Array([0]),
+        masterGrDb: 0,
+        firstSample: 0n,
+        endSample: 0n,
+      });
+      return { result: 0 };
+    },
+    telemetry: async () => ({ result: 0 }),
+    command: async (request) => ({
+      result: 0,
+      reason: 0,
+      admitted: request.commands?.length ?? 0,
+      appliedAtSample: 0n,
+    }),
+    observe: async () => ({
+      result: 0,
+      reason: 0,
+      bindings: [{ frameSlot: 0, windowBlocks: 2 }],
+    }),
+    status: async () => ({
+      nextAbsoluteSample: 0n,
+      renderedQuanta: 0n,
+    }),
+    dispose: async () => {
+      sentinelStops += 1;
+    },
+  });
 
   globalThis.OfflineAudioContext = QualificationOfflineAudioContext;
   globalThis.AudioWorkletNode = QualificationNode;
@@ -1348,7 +1391,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
         tag: "miso.unsupported.v1", requestId: 0, result: 7, capability: "simd128",
       });
     }
-    throw new QualificationStop(label);
+    return sentinelHost;
   };
 
   try {
