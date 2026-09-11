@@ -100,3 +100,17 @@ on dedicated codex/gate-active-cpu-746 with checkpoint pushes.
 No timed gate workload has run; the existing external wrapper's true-only
 probe proves counter access, not benchmark qualification. Root must obtain
 preflight review before the sole timed invocation.
+
+## Attempt 1 — implementation checkpoint
+
+Luna xhigh explicitly completed and paused after implementing the four approved
+benchmark paths. Reported PASS: locked bench check, strict all-target Clippy,
+focused gate_active tests (4), fmt/diff checks, bench-policy check/self-test,
+and hermetic Python runner tests. The subject's actual scalar/W8 activity
+preflight ran only 128 untimed blocks per width. No warmup or measured DSP ran.
+Root inspected the exact path set and diff cleanliness before checkpointing.
+Block construction is outside the timer; shared timed/untimed helpers wrap
+actual prepared process calls. Failed phases preserve argv and exit records.
+The runner forwards existing metadata after the explicit perf wrapper.
+Astra source and actual release/preflight review remains pending; this is not
+a measurement or final verification PASS.
