@@ -56,3 +56,68 @@ persistence, overwrite refusal and payload/window comparisons remain unchanged.
 
 No timed invocation belongs to this checkpoint. Non-timed evidence and independent
 source/validator freeze precede the sole new timing invocation.
+
+## Attempt 1 reviewed one-shot result
+
+Astra XHIGH approved source/preflight/command/validator freeze at pushed clean
+`6a4e45c93d87378f73be529bc3a2ed3c847c74ef`. Root ran the approved invocation
+exactly once; exit zero, one test passed. Independent post-run review PASS checks
+all 11 records, exact keys/types/order, 8192 accumulator blocks, paired payload
+hashes, and 256 windows in every poll row. No timed retry or tuning occurred.
+
+Compiler: rustc 1.97.1 (8bab26f4f68e0e26f0bb7960be334d5b520ea452), native
+`x86_64-unknown-linux-gnu`, release, repository `+avx2,+fma` flags. Exact command:
+
+```sh
+CARGO_TARGET_DIR=/tmp/issue522-attempt1-target \
+MISO_ENGINE_METER_TIMING_MODE=run \
+MISO_ENGINE_METER_TIMING_OUTPUT=/tmp/issue522-timing-qaqo72bn/timing.jsonl \
+cargo test --locked --release -p host-web --lib -- --ignored --exact tests::selective_meter_and_readiness_descriptive_timing
+```
+
+Run directory was `/home/bl/misofm/engine-meter-timing-final-chunk`. The recorder
+required the exact clean revision and fresh output/sentinel/log paths. Full argv,
+PATH, inherited build environment, source/runner/freeze hashes, exit and raw log
+are retained at `/tmp/issue522-timing-qaqo72bn`; independent review records are
+`xhigh-freeze.json` and `xhigh-post-run.json`. Non-timed release boundary regression
+and serialization/persistence/overwrite preflight each passed one test before the
+freeze (`/tmp/issue522-attempt1-preflight`).
+
+Measured totals for the frozen 8192 blocks, in milliseconds:
+
+| Mode | Round 0 | Round 1 |
+| --- | ---: | ---: |
+| Accumulator disabled | 0.094645 | 0.090446 |
+| Sample peak | 17.835792 | 17.863036 |
+| Full metrics | 41.247948 | 41.261625 |
+| Legacy scan poll | 0.469334 | 0.457442 |
+| Readiness poll | 0.266380 | 0.266463 |
+
+These are isolated accumulator/Rust poll totals, including clock/test-counter
+overhead; they do not establish end-to-end browser callback performance or a new
+release budget. Both rounds preserve peak/full payload identity and legacy/ready
+poll payload identity; track-pop attempts are 73728 versus 2304, with zero effect
+scans. The workload remains nine streams, 128 frames, period 32, 256 windows,
+one warmup per mode and two measured rounds. Earlier #519/#520 failed evidence
+is unchanged and no result is attributed to that failed invocation.
+
+Raw persisted output (1664 bytes; SHA-256
+`5307dc0a16cb827fb60127c71ab5abacf34fe39e3873773216fc1d02cd13f186`):
+
+```jsonl
+{"kind":"header","label":"isolated metering ns for 9 streams; poll-only callback ns","measured_rounds":2,"period_blocks":32,"quantum":128,"schema":1,"warmups":1,"windows":256}
+{"blocks":8192,"elapsed_ns":94645,"kind":"accumulator","mode":"disabled","payload_hash":14695981039346656037,"round":0,"schema":1}
+{"blocks":8192,"elapsed_ns":17835792,"kind":"accumulator","mode":"peak","payload_hash":4028661150835562277,"round":0,"schema":1}
+{"blocks":8192,"elapsed_ns":41247948,"kind":"accumulator","mode":"full","payload_hash":4028661150835562277,"round":0,"schema":1}
+{"effect_scans":0,"elapsed_ns":469334,"emitted_windows":256,"kind":"poll","mode":"legacy_scan","payload_hash":8199157996960894757,"round":0,"schema":1,"track_pop_attempts":73728}
+{"effect_scans":0,"elapsed_ns":266380,"emitted_windows":256,"kind":"poll","mode":"readiness","payload_hash":8199157996960894757,"round":0,"schema":1,"track_pop_attempts":2304}
+{"blocks":8192,"elapsed_ns":90446,"kind":"accumulator","mode":"disabled","payload_hash":14695981039346656037,"round":1,"schema":1}
+{"blocks":8192,"elapsed_ns":17863036,"kind":"accumulator","mode":"peak","payload_hash":4028661150835562277,"round":1,"schema":1}
+{"blocks":8192,"elapsed_ns":41261625,"kind":"accumulator","mode":"full","payload_hash":4028661150835562277,"round":1,"schema":1}
+{"effect_scans":0,"elapsed_ns":457442,"emitted_windows":256,"kind":"poll","mode":"legacy_scan","payload_hash":8199157996960894757,"round":1,"schema":1,"track_pop_attempts":73728}
+{"effect_scans":0,"elapsed_ns":266463,"emitted_windows":256,"kind":"poll","mode":"readiness","payload_hash":8199157996960894757,"round":1,"schema":1,"track_pop_attempts":2304}
+```
+
+Integration review finds main `49b59e5a` changes only #213 corpus/spec paths;
+the fixture correction applies independently. Timings belong specifically to
+`6a4e45c9`. Final exact-head review and required PR/main CI remain delivery gates.
