@@ -1,10 +1,9 @@
 //! E6: the render path, both resets and both state-payload directions allocate nothing.
 //!
-//! Version 1's `reset(FullToDefaults)` was `*self = Self::new(..)`, which freed three boxed rings
-//! per lane and allocated three more — sixteen lanes' worth for a W8 bank — and its restore
-//! replaced the boxes instead of writing into them (#94 F9). `reset` is a `PreparedNativeEffect`
-//! method owned by the realtime plane, so that was a latent violation of the AGENTS.md rule that
-//! render performs no allocation. Everything below now allocates only in `prepare`.
+//! Version 1's `reset(FullToDefaults)` rebuilt boxed history per lane and its restore replaced the
+//! boxes instead of writing into them (#94 F9). `reset` is a `PreparedNativeEffect` method owned by
+//! the realtime plane, so that was a latent violation of the AGENTS.md rule that render performs no
+//! allocation. Everything below now allocates only in `prepare`.
 
 #![allow(unsafe_code)]
 
@@ -16,8 +15,8 @@ use std::alloc::{GlobalAlloc, System};
 use std::hint::black_box;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel, ResetKind,
-    StatePayloadInput, StatePayloadOutput,
+    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
+    PreparedAutomationSpan, ResetKind, StatePayloadInput, StatePayloadOutput,
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{new_sections, point, process, request_with, varied_values};
@@ -109,35 +108,6 @@ fn allocator_counts(operation: impl FnOnce()) -> (u64, u64, u64) {
     )
 }
 
-#[derive(Clone, Copy, Debug)]
-enum BankOffsetProfile {
-    Uniform,
-    Ragged,
-    Mixed,
-}
-
-fn bank_profile_values(
-    track: usize,
-    profile: BankOffsetProfile,
-) -> [effect_contract::InitialParameterValue; 24] {
-    let mut values = varied_values(track);
-    let (left, right) = match profile {
-        BankOffsetProfile::Uniform => (5.0, 5.0),
-        BankOffsetProfile::Ragged => {
-            const OFFSETS: [f32; 8] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
-            (OFFSETS[track], OFFSETS[track])
-        }
-        BankOffsetProfile::Mixed => {
-            const LEFT: [f32; 8] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
-            const RIGHT: [f32; 8] = [20.0, 10.0, 5.0, 0.0, 20.0, 10.0, 5.0, 0.0];
-            (LEFT[track], RIGHT[track])
-        }
-    };
-    values[2].value = left;
-    values[3].value = right;
-    values
-}
-
 #[test]
 fn tracking_allocator_proves_own_thread_allocation_and_free() {
     let (events, allocations, deallocations) = allocator_counts(|| {
@@ -160,9 +130,9 @@ fn the_scalar_render_path_allocates_nothing() {
     let sizes = effect.metadata().state_sizes;
     let mut left = support::signal(128, 0x0BAD_C0DE);
     let mut right = support::signal(128, 0x0BAD_BEEF);
-    let spans = [point(2, ParameterChannel::Left, 0, -30.0)];
+    let spans = [point(1, ParameterChannel::Left, 128, -30.0)];
     // Warm the allocator's own lazy state outside the measured region.
-    process(effect.as_mut(), &mut left, &mut right, 0, &spans, 128);
+    process(effect.as_mut(), &mut left, &mut right, 0, &[], 128);
     let mut sections = new_sections(sizes);
 
     let counted = events(|| {
@@ -194,14 +164,8 @@ fn the_scalar_render_path_allocates_nothing() {
 fn the_bank_render_path_allocates_nothing() {
     for width in [BankWidth::Four, BankWidth::Eight] {
         let lanes = width.lanes() as usize;
-        for profile in [
-            BankOffsetProfile::Uniform,
-            BankOffsetProfile::Ragged,
-            BankOffsetProfile::Mixed,
-        ] {
-            let sets = (0..lanes)
-                .map(|track| bank_profile_values(track, profile))
-                .collect::<Vec<_>>();
+        {
+            let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
             let requests = sets
                 .iter()
                 .map(|set| request_with(set, LinkMode::Average, 128, false))
@@ -215,33 +179,37 @@ fn the_bank_render_path_allocates_nothing() {
             let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
             let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
             let offsets = vec![0u32; lanes + 1];
+            let automation = [point(1, ParameterChannel::Left, 128, -30.0)];
+            let mut automation_offsets = vec![0u32; lanes + 1];
+            automation_offsets[1..].fill(1);
             let mut sections = new_sections(sizes);
             let run = |bank: &mut dyn effect_contract::PreparedNativeEffectBank,
                        left: &mut [f32],
                        right: &mut [f32],
-                       first: u64| {
+                       first: u64,
+                       spans: &[PreparedAutomationSpan],
+                       offsets: &[u32]| {
                 bank.process_bank(
                     EffectBankProcessBlock::new(
-                        left,
-                        right,
-                        None,
-                        128,
-                        width,
-                        first,
-                        &[],
-                        &offsets,
-                        128,
+                        left, right, None, 128, width, first, spans, offsets, 128,
                     )
                     .expect("bank block"),
                 );
             };
-            run(bank.as_mut(), &mut left, &mut right, 0);
+            run(bank.as_mut(), &mut left, &mut right, 0, &[], &offsets);
 
             let counted = events(|| {
-                run(bank.as_mut(), &mut left, &mut right, 128);
+                run(
+                    bank.as_mut(),
+                    &mut left,
+                    &mut right,
+                    128,
+                    &automation,
+                    &automation_offsets,
+                );
                 bank.reset(ResetKind::DiscontinuityKeepParameters);
                 bank.reset(ResetKind::FullToDefaults);
-                run(bank.as_mut(), &mut left, &mut right, 256);
+                run(bank.as_mut(), &mut left, &mut right, 256, &[], &offsets);
                 bank.snapshot_track_state_payload(
                     1,
                     StatePayloadOutput::new(
@@ -261,10 +229,7 @@ fn the_bank_render_path_allocates_nothing() {
                 )
                 .expect("restore");
             });
-            assert_eq!(
-                counted, 0,
-                "{width:?} {profile:?} allocated {counted} times"
-            );
+            assert_eq!(counted, 0, "{width:?} allocated {counted} times");
         }
     }
 }

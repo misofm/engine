@@ -5,6 +5,8 @@
 //! the lane-identity and partition gates meaningful.
 
 #![allow(dead_code, unreachable_pub)]
+pub mod oracle;
+
 use lane::Backend;
 
 use effect_contract::{
@@ -16,7 +18,7 @@ use effect_contract::{
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 
 /// Parameters in the frozen order.
-pub const PARAMETER_COUNT: usize = 12;
+pub const PARAMETER_COUNT: usize = 11;
 
 /// The descriptor's own defaults, as an initial-value table.
 pub fn values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
@@ -33,50 +35,48 @@ pub fn values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
 
 /// Eight deliberately different parameter sets, so no two bank lanes share a program.
 ///
-/// Track 0 gets zero lookahead, track 1 five milliseconds and track 2 twenty, which is what makes
-/// the per-track detector gather load-bearing; the ratios and thresholds put each track on a
-/// different arm of the static curve, and track 7 sits at unity so the identity path is covered.
+/// The ratios, thresholds and time constants put each track on a different arm of the static curve,
+/// and track 7 sits at unity so the identity path is covered.
 pub fn varied_values(track: usize) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
     let mut prepared = values();
     for lane in 0..2 {
-        prepared[2 + lane].value = [0.0, 5.0, 20.0][track % 3];
         match track % 4 {
             0 => {
-                prepared[6 + lane].value = 1.0;
-                prepared[12 + lane].value = 0.25;
-                prepared[16 + lane].value = 1.0;
-                prepared[22 + lane].value = 0.25;
+                prepared[4 + lane].value = 1.0;
+                prepared[10 + lane].value = 0.25;
+                prepared[14 + lane].value = 1.0;
+                prepared[20 + lane].value = 0.25;
             }
             1 => {
-                prepared[4 + lane].value = -45.0;
-                prepared[6 + lane].value = 20.0;
-                prepared[8 + lane].value = 0.1;
-                prepared[10 + lane].value = 5.0;
-                prepared[16 + lane].value = 1.0;
+                prepared[2 + lane].value = -45.0;
+                prepared[4 + lane].value = 20.0;
+                prepared[6 + lane].value = 0.1;
+                prepared[8 + lane].value = 5.0;
+                prepared[14 + lane].value = 1.0;
             }
             2 => {
-                prepared[6 + lane].value = 1.0;
-                prepared[14 + lane].value = -45.0;
-                prepared[16 + lane].value = 20.0;
-                prepared[18 + lane].value = 0.1;
-                prepared[20 + lane].value = 5.0;
+                prepared[4 + lane].value = 1.0;
+                prepared[12 + lane].value = -45.0;
+                prepared[14 + lane].value = 20.0;
+                prepared[16 + lane].value = 0.1;
+                prepared[18 + lane].value = 5.0;
             }
             _ => {
-                prepared[4 + lane].value = -42.0;
-                prepared[6 + lane].value = 12.0;
-                prepared[8 + lane].value = 0.2;
-                prepared[14 + lane].value = -36.0;
-                prepared[16 + lane].value = 8.0;
-                prepared[18 + lane].value = 0.3;
+                prepared[2 + lane].value = -42.0;
+                prepared[4 + lane].value = 12.0;
+                prepared[6 + lane].value = 0.2;
+                prepared[12 + lane].value = -36.0;
+                prepared[14 + lane].value = 8.0;
+                prepared[16 + lane].value = 0.3;
             }
         }
     }
     if track == 7 {
         for lane in 0..2 {
-            prepared[6 + lane].value = 1.0;
-            prepared[12 + lane].value = 0.0;
-            prepared[16 + lane].value = 1.0;
-            prepared[22 + lane].value = 0.0;
+            prepared[4 + lane].value = 1.0;
+            prepared[10 + lane].value = 0.0;
+            prepared[14 + lane].value = 1.0;
+            prepared[20 + lane].value = 0.0;
         }
     }
     prepared

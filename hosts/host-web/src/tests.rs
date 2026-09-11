@@ -28,6 +28,24 @@ fn one_track_compressor_session(quantum: u32) -> String {
     canonical_session_json(&model).expect("canonical compressor session")
 }
 
+fn one_track_multiband_session(quantum: u32) -> String {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("accepted compressor fixture");
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 4;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let effect = &mut model.tracks[0].dynamic.effects[0];
+    effect.identity = session::EffectIdentity::Native {
+        effect_id: session::StableId::parse("miso.multiband-compressor")
+            .expect("multiband effect ID"),
+    };
+    effect.params.clear();
+    canonical_session_json(&model).expect("canonical multiband session")
+}
+
 /// The browser fixture's identity session, re-shaped for one test.
 ///
 /// Identity end to end: no polarity, trim, HPF or LPF, no effects in any rack, unity fader, and a
@@ -72,6 +90,24 @@ fn compressor_console_host(quantum: u32) -> AudioWorkletEngineHost {
     .unwrap_or_else(|failure| {
         panic!(
             "compressor boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+fn multiband_console_host(quantum: u32) -> AudioWorkletEngineHost {
+    let document = one_track_multiband_session(quantum);
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: quantum,
+            console_command_queue_records: 4,
+            ..boot_options(quantum)
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "multiband boot: {}",
             String::from_utf8_lossy(failure.diagnostic())
         )
     })
@@ -1737,6 +1773,104 @@ fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
     feed_compressor_block(&mut baseline, QUANTUM, 1);
     feed_compressor_block(&mut candidate, QUANTUM, 1);
     assert_eq!(candidate.output_pcm(), baseline.output_pcm());
+}
+
+#[test]
+fn real_multiband_id_two_rejects_without_ack_or_revision_change() {
+    const QUANTUM: u32 = 128;
+    let mut baseline = multiband_console_host(QUANTUM);
+    let mut candidate = multiband_console_host(QUANTUM);
+
+    feed_compressor_block(&mut baseline, QUANTUM, 0);
+    feed_compressor_block(&mut candidate, QUANTUM, 0);
+    let session_before = candidate
+        .ready
+        .as_ref()
+        .expect("ready multiband session")
+        .session
+        .canonical_json()
+        .to_owned();
+    let resources_before = *candidate.resources();
+    let tracks_before = candidate.console_tracks().to_vec();
+    let sources_before = candidate.session_source_count();
+    let status_before = *candidate.status();
+
+    // A valid low-threshold update shares one transaction with the retired lookahead ID 2.
+    // The actual multiband descriptor must reject the whole batch before either record is
+    // acknowledged or the control/render revision advances.
+    stage_command(
+        &mut candidate,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        3,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut candidate,
+        1,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        2,
+        0,
+        [1_000.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(candidate.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        candidate.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(candidate.command_report().rejected_index, 1);
+    assert_eq!(candidate.command_report().admitted, 0);
+    assert_eq!(
+        candidate.command_report().applied_at_sample,
+        status_before.next_absolute_sample
+    );
+    assert_eq!(
+        candidate
+            .ready
+            .as_ref()
+            .expect("ready multiband session")
+            .session
+            .canonical_json(),
+        session_before
+    );
+    assert_eq!(*candidate.resources(), resources_before);
+    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.session_source_count(), sources_before);
+    assert_eq!(
+        (
+            candidate.status().next_absolute_sample,
+            candidate.status().rendered_quanta,
+        ),
+        (
+            status_before.next_absolute_sample,
+            status_before.rendered_quanta,
+        )
+    );
+
+    // The valid threshold update was not admitted behind ID 2: the next block remains identical
+    // to the untouched host, including the render clock.
+    feed_compressor_block(&mut baseline, QUANTUM, 1);
+    feed_compressor_block(&mut candidate, QUANTUM, 1);
+    assert_eq!(candidate.output_pcm(), baseline.output_pcm());
+    assert_eq!(
+        (
+            candidate.status().next_absolute_sample,
+            candidate.status().rendered_quanta,
+        ),
+        (
+            baseline.status().next_absolute_sample,
+            baseline.status().rendered_quanta,
+        )
+    );
 }
 
 #[test]

@@ -19,10 +19,8 @@
 //! state, and `tests/lr4_two_section_mapping_f64.rs` pins the identity in `f64` against the
 //! independent four-section oracle and against the closed-form all-pass.
 //!
-//! Both bands go through a `Fs/50` ring, which is the declared latency; the detector tap of each
-//! band is read `lookahead` samples earlier in the same ring. Each band then rides a
-//! Giannoulis-Massberg-Reiss static curve with a fixed 6 dB knee and a branching smoother, and the
-//! two gained bands are summed.
+//! Each band rides the current sample through a Giannoulis-Massberg-Reiss static curve with a
+//! fixed 6 dB knee and a branching smoother, and the two gained bands are summed.
 //!
 //! # What this crate does *not* contain
 //!
@@ -71,16 +69,16 @@ mod split;
 use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_levels};
 
 /// Parameters in the frozen V1 order.
-const PARAMETER_COUNT: usize = 12;
+const PARAMETER_COUNT: usize = 11;
 
-/// Ramped parameters: everything but the two preparation-time ones.
+/// Ramped parameters: every parameter except the preparation-time crossover.
 const RAMP_COUNT: usize = 10;
 
 /// State-payload words each ramp occupies: current, target, step, remaining.
 const RAMP_WORDS: usize = 4;
 
-/// Fixed scalar words of one channel's state payload, before the two rings.
-const LANE_HEADER_WORDS: usize = 48;
+/// Fixed scalar words of one channel's state payload.
+const LANE_HEADER_WORDS: usize = 47;
 
 /// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
 /// the audit's F1, F4 and D11 corrections.
@@ -178,19 +176,6 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
         8_000.0,
         1_000.0,
         ParameterMapping::Logarithmic,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
-    parameter(
-        2,
-        "lookahead",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        20.0,
-        5.0,
-        ParameterMapping::Linear,
         AutomationRate::None,
         SmoothingRule::None,
         0,
@@ -342,23 +327,17 @@ const PORTS: [PortDescriptor; 2] = [
     },
 ];
 
-/// Bytes of one channel's state payload at `sample_rate`.
-///
-/// `48` fixed words — crossover, lookahead, two smoother words, ten four-word ramps (D11 adds the
-/// precomputed step) and four filter words — followed by the low and high rings of `Fs/50 + 1`
-/// samples each. Version 1 carried three three-word ramps' worth less, eight filter words and a
-/// third ring for the dry signal, which #94 F1 and F4 removed.
-const fn lane_bytes(sample_rate: u32) -> u32 {
-    let ring = sample_rate / 50 + 1;
-    (LANE_HEADER_WORDS as u32 + 2 * ring) * 4
+/// Bytes of one channel's state payload.
+const fn lane_bytes() -> u32 {
+    LANE_HEADER_WORDS as u32 * 4
 }
 
 const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
-    let bytes = lane_bytes(sample_rate);
+    let bytes = lane_bytes();
     effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
-        latency: LatencySamples((sample_rate / 50) as u64),
+        latency: LatencySamples(0),
         tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             // No common section. The shared codec's two-word versioned header moves `common_bytes`
@@ -439,7 +418,7 @@ const fn spec(index: usize) -> ParameterSpec {
     ParameterSpec::continuous(minimum, maximum, descriptor.default_value)
 }
 
-/// Domains of the twelve parameters, in descriptor order.
+/// Domains of the eleven parameters, in descriptor order.
 const SPECS: [ParameterSpec; PARAMETER_COUNT] = [
     spec(0),
     spec(1),
@@ -452,7 +431,6 @@ const SPECS: [ParameterSpec; PARAMETER_COUNT] = [
     spec(8),
     spec(9),
     spec(10),
-    spec(11),
 ];
 
 /// `true` if `value` is finite and either zero or normal.
@@ -590,24 +568,6 @@ pub fn lr4_coefficients<L: Lane>(sample_rate: u32, crossover_hz: f32) -> Option<
     })
 }
 
-/// The detector tap's offset from the write cursor, in ring slots.
-///
-/// The output tap is one slot ahead of the cursor, which is `ring_len - 1 = Fs/50` samples of
-/// delay: the declared latency. The detector tap is `lookahead` samples earlier still, so its
-/// offset is `1 + lookahead` and lies in `[1, ring_len]` — which is what makes the single
-/// compare-and-subtract wrap in [`Instance::detector`] correct.
-fn detector_offset(lookahead_ms: f32, sample_rate: u32, ring_len: usize) -> Option<usize> {
-    if !parameter_value_valid(&SPECS[1], lookahead_ms) || sample_rate == 0 || ring_len < 2 {
-        return None;
-    }
-    let samples = math::floor(f64::from(lookahead_ms) * f64::from(sample_rate) / 1_000.0 + 0.5);
-    if !samples.is_finite() || samples < 0.0 {
-        return None;
-    }
-    let latency = ring_len - 1;
-    Some(1 + (samples as usize).min(latency))
-}
-
 // ---------------------------------------------------------------------------------------------
 // Instance
 // ---------------------------------------------------------------------------------------------
@@ -687,6 +647,7 @@ struct SegmentPlan {
 /// Everything one channel of one bank owns.
 struct Side<L: Lane, const W: usize> {
     coefficients: Lr4Coef<L>,
+    prepared_coefficients: Lr4Coef<L>,
     filter: Lr4State<L>,
     /// The branching smoother's state, in dB, per band.
     gain_db: [L; 2],
@@ -694,47 +655,34 @@ struct Side<L: Lane, const W: usize> {
     cache: [[BandCache; 2]; W],
     /// `(c1, a2, a3)` per track, kept so a reset does not have to redesign (#94 F9).
     designed: [[f32; 3]; W],
+    prepared_designed: [[f32; 3]; W],
     crossover_hz: [f32; W],
-    lookahead_ms: [f32; W],
-    detector_offset: [usize; W],
-    /// `ring_len * W` samples, slot-major: slot `s` of lane `l` is at `s * W + l`.
-    low_ring: Box<[f32]>,
-    high_ring: Box<[f32]>,
     defaults: [[f32; PARAMETER_COUNT]; W],
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
-    fn new(
-        defaults: [[f32; PARAMETER_COUNT]; W],
-        sample_rate: u32,
-        ring_len: usize,
-    ) -> Option<Self> {
+    fn new(defaults: [[f32; PARAMETER_COUNT]; W], sample_rate: u32) -> Option<Self> {
         let mut designed = [[0.0; 3]; W];
         let mut crossover_hz = [0.0; W];
-        let mut lookahead_ms = [0.0; W];
-        let mut offsets = [0usize; W];
         let mut ramps = [[LinearRamp::fixed(0.0); RAMP_COUNT]; W];
         for track in 0..W {
             designed[track] = design_lr4(sample_rate, defaults[track][0])?;
             crossover_hz[track] = defaults[track][0];
-            lookahead_ms[track] = defaults[track][1];
-            offsets[track] = detector_offset(defaults[track][1], sample_rate, ring_len)?;
             for index in 0..RAMP_COUNT {
-                ramps[track][index] = LinearRamp::fixed(defaults[track][index + 2]);
+                ramps[track][index] = LinearRamp::fixed(defaults[track][index + 1]);
             }
         }
+        let prepared_coefficients = lane_coefficients::<L, W>(&designed);
         Some(Self {
-            coefficients: lane_coefficients::<L, W>(&designed),
+            coefficients: prepared_coefficients,
+            prepared_coefficients,
             filter: Lr4State::default(),
             gain_db: [L::zero(); 2],
             ramps,
             cache: [[BandCache::empty(); 2]; W],
             designed,
+            prepared_designed: designed,
             crossover_hz,
-            lookahead_ms,
-            detector_offset: offsets,
-            low_ring: alloc_ring(ring_len * W),
-            high_ring: alloc_ring(ring_len * W),
             defaults,
         })
     }
@@ -743,8 +691,6 @@ impl<L: Lane, const W: usize> Side<L, W> {
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
         self.gain_db = [L::zero(); 2];
-        self.low_ring.fill(0.0);
-        self.high_ring.fill(0.0);
         for track in 0..W {
             for ramp in &mut self.ramps[track] {
                 ramp.snap();
@@ -752,27 +698,19 @@ impl<L: Lane, const W: usize> Side<L, W> {
         }
     }
 
-    /// Returns to the prepared defaults without allocating or redesigning (#94 F9).
-    fn full_reset(&mut self, sample_rate: u32, ring_len: usize) {
+    /// Returns to the prepared defaults without allocating or redesigning.
+    fn full_reset(&mut self) {
         self.discontinuity_reset();
-        self.coefficients = lane_coefficients::<L, W>(&self.designed);
+        self.designed = self.prepared_designed;
+        self.coefficients = self.prepared_coefficients;
         for track in 0..W {
             self.crossover_hz[track] = self.defaults[track][0];
-            self.lookahead_ms[track] = self.defaults[track][1];
-            self.detector_offset[track] =
-                detector_offset(self.defaults[track][1], sample_rate, ring_len)
-                    .unwrap_or(self.detector_offset[track]);
             for index in 0..RAMP_COUNT {
-                self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 2]);
+                self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 1]);
             }
             self.cache[track] = [BandCache::empty(); 2];
         }
     }
-}
-
-/// Allocates one zeroed ring. The only allocation in the crate, and it happens at prepare.
-fn alloc_ring(samples: usize) -> Box<[f32]> {
-    vec![0.0; samples].into_boxed_slice()
 }
 
 /// Splats the per-track designs into one lane coefficient set.
@@ -798,8 +736,6 @@ struct Instance<L: Lane, const W: usize> {
     sample_rate: u32,
     bypass: bool,
     link: LinkMode,
-    ring_len: usize,
-    cursor: usize,
     nonfinite: NonFiniteReport,
     /// Index 0 is the left channel, index 1 the right.
     sides: [Side<L, W>; 2],
@@ -812,31 +748,22 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         metadata: PreparedEffectMetadata,
     ) -> Option<Self> {
         debug_assert_eq!(L::WIDTH, W);
-        let ring_len = usize::try_from(metadata.sample_rate / 50)
-            .ok()?
-            .checked_add(1)?;
-        if ring_len < 2 {
-            return None;
-        }
         Some(Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
             link: metadata.link_mode,
-            ring_len,
-            cursor: 0,
             nonfinite: NonFiniteReport::new(),
             sides: [
-                Side::new(left, metadata.sample_rate, ring_len)?,
-                Side::new(right, metadata.sample_rate, ring_len)?,
+                Side::new(left, metadata.sample_rate)?,
+                Side::new(right, metadata.sample_rate)?,
             ],
         })
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        self.cursor = 0;
         for side in &mut self.sides {
             match kind {
-                ResetKind::FullToDefaults => side.full_reset(self.sample_rate, self.ring_len),
+                ResetKind::FullToDefaults => side.full_reset(),
                 ResetKind::DiscontinuityKeepParameters => side.discontinuity_reset(),
             }
         }
@@ -846,119 +773,6 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 // ---------------------------------------------------------------------------------------------
 // Render path
 // ---------------------------------------------------------------------------------------------
-
-/// `index` reduced into `[0, modulus)`, given `index < 2 * modulus`.
-///
-/// One compare and one subtract. The version-1 code used three integer modulos per lane per sample
-/// on a ring length that is never a power of two, each of them a hardware divide (#94 F8).
-#[inline(always)]
-fn wrap(index: usize, modulus: usize) -> usize {
-    debug_assert!(index < 2 * modulus);
-    if index >= modulus {
-        index - modulus
-    } else {
-        index
-    }
-}
-
-/// Classifies one channel's detector offsets for the current segment.
-///
-/// The first read and the loop together inspect exactly `W` offsets, once per segment. The result
-/// is transient: changing a prepared parameter or restoring state therefore takes effect at the
-/// next segment without any cache invalidation.
-#[inline(always)]
-fn detector_offsets_uniform<const W: usize>(offsets: &[usize; W]) -> bool {
-    let first = offsets[0];
-    let mut track = 1;
-    while track < W {
-        if offsets[track] != first {
-            return false;
-        }
-        track += 1;
-    }
-    true
-}
-
-#[cfg(test)]
-const DETECTOR_OBSERVATION_CAPACITY: usize = 64;
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-struct DetectorObservation {
-    uniform_calls: usize,
-    ragged_calls: usize,
-    entries: usize,
-    widths: [u8; DETECTOR_OBSERVATION_CAPACITY],
-    words: [[u32; 8]; DETECTOR_OBSERVATION_CAPACITY],
-}
-
-#[cfg(test)]
-impl DetectorObservation {
-    const fn new() -> Self {
-        Self {
-            uniform_calls: 0,
-            ragged_calls: 0,
-            entries: 0,
-            widths: [0; DETECTOR_OBSERVATION_CAPACITY],
-            words: [[0; 8]; DETECTOR_OBSERVATION_CAPACITY],
-        }
-    }
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static DETECTOR_OBSERVATION: core::cell::Cell<DetectorObservation> =
-        const { core::cell::Cell::new(DetectorObservation::new()) };
-}
-
-#[cfg(test)]
-#[inline(never)]
-fn record_detector_observation<L: Lane>(uniform: bool, value: L) {
-    DETECTOR_OBSERVATION.with(|observation| {
-        let mut current = observation.get();
-        if uniform {
-            current.uniform_calls += 1;
-        } else {
-            current.ragged_calls += 1;
-        }
-        if current.entries < DETECTOR_OBSERVATION_CAPACITY {
-            let entry = current.entries;
-            current.widths[entry] = L::WIDTH as u8;
-            value.store_bits(&mut current.words[entry][..L::WIDTH]);
-            current.entries += 1;
-        }
-        observation.set(current);
-    });
-}
-
-/// The per-track detector tap of one ring, gathered into one lane.
-///
-/// The only non-contiguous access on the render path, and it is loads only: lookahead is a
-/// per-track parameter, so each track reads a different slot of the shared ring.
-#[inline(always)]
-fn detector_tap<L: Lane, const W: usize>(
-    ring: &[f32],
-    cursor: usize,
-    offsets: &[usize; W],
-    ring_len: usize,
-    uniform: bool,
-) -> L {
-    if uniform {
-        let row = wrap(cursor + offsets[0], ring_len);
-        let value = L::load(&ring[row * W..]);
-        #[cfg(test)]
-        record_detector_observation(true, value);
-        return value;
-    }
-    let mut values = [0.0f32; 8];
-    for track in 0..W {
-        values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
-    }
-    let value = L::load(&values[..W]);
-    #[cfg(test)]
-    record_detector_observation(false, value);
-    value
-}
 
 /// One band's amplitude for one frame: detector level, static curve, smoother, makeup.
 ///
@@ -1015,9 +829,9 @@ fn band_amplitude<L: Lane>(
 /// One segment: `frames` frames over which no ramp arrives at its target.
 ///
 /// The whole render path is here. `LINK` and `BYPASS` are compile-time, because both are fixed
-/// when the effect is prepared; a bypassed instance is a pure `Fs/50` delay through the low ring
-/// and runs neither the crossover nor the dynamics, and it still advances its ramps so that its
-/// parameter state does not depend on whether it was bypassed.
+/// when the effect is prepared; a bypassed instance is a pure dry path and runs neither the
+/// crossover nor the dynamics, and it still advances its ramps so that its parameter state does
+/// not depend on whether it was bypassed.
 ///
 /// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
 /// It says whether any ramp of any track of either channel still has samples to produce over this
@@ -1039,8 +853,6 @@ fn band_amplitude<L: Lane>(
 #[allow(clippy::too_many_arguments)]
 fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, const RAMPING: bool>(
     sides: &mut [Side<L, W>; 2],
-    cursor: &mut usize,
-    ring_len: usize,
     left: &mut [f32],
     right: &mut [f32],
     frames: usize,
@@ -1054,9 +866,6 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     let mut filter_far = far.filter;
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
-    let mut position = *cursor;
-    let near_detector_uniform = detector_offsets_uniform(&near.detector_offset);
-    let far_detector_uniform = detector_offsets_uniform(&far.detector_offset);
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_COUNT {
@@ -1066,57 +875,17 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
                     segments[1].current[index].add(segments[1].step[index]);
             }
         }
-        let slot = position * W;
-        let delayed = wrap(position + 1, ring_len) * W;
         let input_near = L::load(&left[frame * W..]);
         let input_far = L::load(&right[frame * W..]);
         if BYPASS {
-            input_near.store(&mut near.low_ring[slot..]);
-            input_far.store(&mut far.low_ring[slot..]);
-            L::load(&near.low_ring[delayed..]).store(&mut left[frame * W..]);
-            L::load(&far.low_ring[delayed..]).store(&mut right[frame * W..]);
-            position = wrap(position + 1, ring_len);
+            input_near.store(&mut left[frame * W..]);
+            input_far.store(&mut right[frame * W..]);
             continue;
         }
         let (low_near, high_near) = lr4_step(input_near, &near.coefficients, &mut filter_near);
         let (low_far, high_far) = lr4_step(input_far, &far.coefficients, &mut filter_far);
-        low_near.store(&mut near.low_ring[slot..]);
-        high_near.store(&mut near.high_ring[slot..]);
-        low_far.store(&mut far.low_ring[slot..]);
-        high_far.store(&mut far.high_ring[slot..]);
-
-        let detector_near_low = detector_tap::<L, W>(
-            &near.low_ring,
-            position,
-            &near.detector_offset,
-            ring_len,
-            near_detector_uniform,
-        );
-        let detector_near_high = detector_tap::<L, W>(
-            &near.high_ring,
-            position,
-            &near.detector_offset,
-            ring_len,
-            near_detector_uniform,
-        );
-        let detector_far_low = detector_tap::<L, W>(
-            &far.low_ring,
-            position,
-            &far.detector_offset,
-            ring_len,
-            far_detector_uniform,
-        );
-        let detector_far_high = detector_tap::<L, W>(
-            &far.high_ring,
-            position,
-            &far.detector_offset,
-            ring_len,
-            far_detector_uniform,
-        );
-        let (linked_near_low, linked_far_low) =
-            link_levels::<L, LINK>(detector_near_low, detector_far_low);
-        let (linked_near_high, linked_far_high) =
-            link_levels::<L, LINK>(detector_near_high, detector_far_high);
+        let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
+        let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
         let amplitude_near_low = band_amplitude(
             linked_near_low,
@@ -1147,21 +916,19 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
             &mut gain_far[HIGH_BAND],
         );
 
-        let output_near = L::load(&near.low_ring[delayed..])
+        let output_near = low_near
             .mul(amplitude_near_low)
-            .add(L::load(&near.high_ring[delayed..]).mul(amplitude_near_high));
-        let output_far = L::load(&far.low_ring[delayed..])
+            .add(high_near.mul(amplitude_near_high));
+        let output_far = low_far
             .mul(amplitude_far_low)
-            .add(L::load(&far.high_ring[delayed..]).mul(amplitude_far_high));
+            .add(high_far.mul(amplitude_far_high));
         output_near.store(&mut left[frame * W..]);
         output_far.store(&mut right[frame * W..]);
-        position = wrap(position + 1, ring_len);
     }
     near.filter = filter_near;
     far.filter = filter_far;
     near.gain_db = gain_near;
     far.gain_db = gain_far;
-    *cursor = position;
 }
 
 /// Splits the block at ramp arrivals and runs each segment, ramped or flat.
@@ -1184,7 +951,6 @@ fn process_block<
     frames: usize,
 ) {
     let sample_rate = instance.sample_rate;
-    let ring_len = instance.ring_len;
     let mut position = 0;
     while position < frames {
         let plan = instance.plan_segment(frames - position);
@@ -1197,8 +963,6 @@ fn process_block<
         if plan.ramping || FORCE_RAMPING {
             run_segment::<L, W, LINK, BYPASS, true>(
                 &mut instance.sides,
-                &mut instance.cursor,
-                ring_len,
                 &mut left[position * W..(position + length) * W],
                 &mut right[position * W..(position + length) * W],
                 length,
@@ -1213,8 +977,6 @@ fn process_block<
             assert!(instance.flat_path_is_identity());
             run_segment::<L, W, LINK, BYPASS, false>(
                 &mut instance.sides,
-                &mut instance.cursor,
-                ring_len,
                 &mut left[position * W..(position + length) * W],
                 &mut right[position * W..(position + length) * W],
                 length,
@@ -1417,9 +1179,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         reports: &mut [ProcessReport],
     ) {
         let sides = &mut self.sides;
-        let cursor = &mut self.cursor;
         let accepted = bank::finish_block::<L>(left, right, &mut self.nonfinite, || {
-            *cursor = 0;
             for side in sides.iter_mut() {
                 side.discontinuity_reset();
             }
@@ -1468,7 +1228,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 .checked_mul(2)
                 .and_then(|value| value.checked_add(side as u32));
             let ramp = parameter
-                .checked_sub(2)
+                .checked_sub(1)
                 .filter(|value| *value < RAMP_COUNT && parameter < PARAMETER_COUNT);
             let valid = ramp.is_some()
                 && index < capacity as usize
@@ -1504,14 +1264,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 // State payload, current layout
 // ---------------------------------------------------------------------------------------------
 //
-// Per channel: crossover, lookahead, the two smoother words, ten four-word ramps, the four filter
-// words, then the low and high rings written **oldest first**. Writing the rings in time order
-// rather than in cursor order is what makes a scalar snapshot and a bank-track snapshot of the
-// same history byte-identical, and it is why there is no cursor word: a track restored into a bank
-// whose cursor is elsewhere is rotated into place by the restore itself.
+// Per channel: crossover, the two smoother words, ten four-word ramps, and the four filter words.
 
 /// Word offset of the first filter word.
-const FILTER_WORD: usize = 4 + RAMP_COUNT * RAMP_WORDS;
+const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
 
 /// One lane of a lane-wide value.
 #[inline]
@@ -1533,28 +1289,19 @@ fn set_lane_value<L: Lane>(value: L, track: usize, replacement: f32) -> L {
 /// One channel's validated state, staged so that a rejected restore changes nothing.
 struct StagedSide {
     crossover_hz: f32,
-    lookahead_ms: f32,
     designed: [f32; 3],
-    detector_offset: usize,
     gains: [f32; 2],
     ramps: [LinearRamp; RAMP_COUNT],
     filter: [f32; 4],
 }
 
-fn write_side<L: Lane, const W: usize>(
-    bytes: &mut [u8],
-    side: &Side<L, W>,
-    track: usize,
-    cursor: usize,
-    ring_len: usize,
-) {
+fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, track: usize) {
     write_f32(bytes, 0, side.crossover_hz[track]);
-    write_f32(bytes, 1, side.lookahead_ms[track]);
-    write_f32(bytes, 2, lane_value(side.gain_db[LOW_BAND], track));
-    write_f32(bytes, 3, lane_value(side.gain_db[HIGH_BAND], track));
+    write_f32(bytes, 1, lane_value(side.gain_db[LOW_BAND], track));
+    write_f32(bytes, 2, lane_value(side.gain_db[HIGH_BAND], track));
     for index in 0..RAMP_COUNT {
         let ramp = side.ramps[track][index];
-        let word = 4 + index * RAMP_WORDS;
+        let word = 3 + index * RAMP_WORDS;
         write_f32(bytes, word, ramp.current);
         write_f32(bytes, word + 1, ramp.target);
         write_f32(bytes, word + 2, ramp.step);
@@ -1569,33 +1316,17 @@ fn write_side<L: Lane, const W: usize>(
     for (index, value) in filter.into_iter().enumerate() {
         write_f32(bytes, FILTER_WORD + index, lane_value(value, track));
     }
-    for index in 0..ring_len {
-        let slot = wrap(cursor + 1 + index, ring_len) * W + track;
-        write_f32(bytes, LANE_HEADER_WORDS + index, side.low_ring[slot]);
-        write_f32(
-            bytes,
-            LANE_HEADER_WORDS + ring_len + index,
-            side.high_ring[slot],
-        );
-    }
 }
 
-/// Validates one channel's fixed words. Ring words are validated separately, in place.
-fn stage_side(
-    bytes: &[u8],
-    sample_rate: u32,
-    ring_len: usize,
-) -> Result<StagedSide, StatePayloadError> {
+/// Validates one channel's fixed words.
+fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayloadError> {
     let crossover_hz = read_f32(bytes, 0);
-    let lookahead_ms = read_f32(bytes, 1);
-    if !parameter_state_valid(0, crossover_hz) || !parameter_state_valid(1, lookahead_ms) {
+    if !parameter_state_valid(0, crossover_hz) {
         return Err(state_error("effect.state.parameter"));
     }
     let designed =
         design_lr4(sample_rate, crossover_hz).ok_or(state_error("effect.state.coefficient"))?;
-    let detector_offset = detector_offset(lookahead_ms, sample_rate, ring_len)
-        .ok_or(state_error("effect.state.parameter"))?;
-    let gains = [read_f32(bytes, 2), read_f32(bytes, 3)];
+    let gains = [read_f32(bytes, 1), read_f32(bytes, 2)];
     if gains
         .into_iter()
         .any(|value| !normal_or_zero(value) || !(-100.0..=0.0).contains(&value))
@@ -1604,7 +1335,7 @@ fn stage_side(
     }
     let mut ramps = [LinearRamp::fixed(0.0); RAMP_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
-        let word = 4 + index * RAMP_WORDS;
+        let word = 3 + index * RAMP_WORDS;
         let current = read_f32(bytes, word);
         let target = read_f32(bytes, word + 1);
         let step = read_f32(bytes, word + 2);
@@ -1612,8 +1343,8 @@ fn stage_side(
         // `LinearRamp`'s invariant, enforced rather than assumed: a ramp at rest is at its target
         // and has no increment. A payload that says otherwise would have the segment driver add a
         // stale step to a resting parameter for ever.
-        if !parameter_state_valid(index + 2, current)
-            || !parameter_state_valid(index + 2, target)
+        if !parameter_state_valid(index + 1, current)
+            || !parameter_state_valid(index + 1, target)
             || !normal_or_zero(step)
             || remaining > SMOOTHING_SAMPLES
             || (remaining == 0 && (step != 0.0 || current.to_bits() != target.to_bits()))
@@ -1634,35 +1365,19 @@ fn stage_side(
             return Err(state_error("effect.state.filter"));
         }
     }
-    for index in 0..2 * ring_len {
-        if !normal_or_zero(read_f32(bytes, LANE_HEADER_WORDS + index)) {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
     Ok(StagedSide {
         crossover_hz,
-        lookahead_ms,
         designed,
-        detector_offset,
         gains: [normalize_zero(gains[0]), normalize_zero(gains[1])],
         ramps,
         filter,
     })
 }
 
-/// Applies a staged channel. Never allocates: the rings are written in place (#94 F9).
-fn commit_side<L: Lane, const W: usize>(
-    side: &mut Side<L, W>,
-    staged: &StagedSide,
-    bytes: &[u8],
-    track: usize,
-    cursor: usize,
-    ring_len: usize,
-) {
+/// Applies a staged channel. Never allocates.
+fn commit_side<L: Lane, const W: usize>(side: &mut Side<L, W>, staged: &StagedSide, track: usize) {
     side.crossover_hz[track] = staged.crossover_hz;
-    side.lookahead_ms[track] = staged.lookahead_ms;
     side.designed[track] = staged.designed;
-    side.detector_offset[track] = staged.detector_offset;
     side.coefficients = lane_coefficients::<L, W>(&side.designed);
     side.gain_db[LOW_BAND] = set_lane_value(side.gain_db[LOW_BAND], track, staged.gains[LOW_BAND]);
     side.gain_db[HIGH_BAND] =
@@ -1673,11 +1388,6 @@ fn commit_side<L: Lane, const W: usize>(
     side.filter.a.ic2 = set_lane_value(side.filter.a.ic2, track, staged.filter[1]);
     side.filter.b.ic1 = set_lane_value(side.filter.b.ic1, track, staged.filter[2]);
     side.filter.b.ic2 = set_lane_value(side.filter.b.ic2, track, staged.filter[3]);
-    for index in 0..ring_len {
-        let slot = wrap(cursor + 1 + index, ring_len) * W + track;
-        side.low_ring[slot] = read_f32(bytes, LANE_HEADER_WORDS + index);
-        side.high_ring[slot] = read_f32(bytes, LANE_HEADER_WORDS + ring_len + index);
-    }
 }
 
 fn state_error(code: &'static str) -> StatePayloadError {
@@ -1700,7 +1410,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// `expected_sizes`, which unconditionally reserves the two versioned header words this crate
     /// does not carry (W2-D2). The word codec itself is the shared one.
     fn validate_lengths(&self, sections: (usize, usize, usize)) -> Result<(), StatePayloadError> {
-        let lane = (LANE_HEADER_WORDS + 2 * self.ring_len) * state_payload_word_bytes();
+        let lane = LANE_HEADER_WORDS * state_payload_word_bytes();
         if sections.0 != 0 || sections.1 != lane || sections.2 != lane {
             return Err(state_error(STATE_LENGTH_CODE));
         }
@@ -1715,20 +1425,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     ) -> Result<(), StatePayloadError> {
         self.validate_lengths((output.common.len(), output.left.len(), output.right.len()))?;
         debug_assert_eq!(output.left.len(), sizes.left_bytes as usize);
-        write_side(
-            output.left,
-            &self.sides[0],
-            track,
-            self.cursor,
-            self.ring_len,
-        );
-        write_side(
-            output.right,
-            &self.sides[1],
-            track,
-            self.cursor,
-            self.ring_len,
-        );
+        write_side(output.left, &self.sides[0], track);
+        write_side(output.right, &self.sides[1], track);
         Ok(())
     }
 
@@ -1742,24 +1440,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             return Err(state_error(STATE_VERSION_CODE));
         }
         self.validate_lengths((input.common.len(), input.left.len(), input.right.len()))?;
-        let left = stage_side(input.left, self.sample_rate, self.ring_len)?;
-        let right = stage_side(input.right, self.sample_rate, self.ring_len)?;
-        commit_side(
-            &mut self.sides[0],
-            &left,
-            input.left,
-            track,
-            self.cursor,
-            self.ring_len,
-        );
-        commit_side(
-            &mut self.sides[1],
-            &right,
-            input.right,
-            track,
-            self.cursor,
-            self.ring_len,
-        );
+        let left = stage_side(input.left, self.sample_rate)?;
+        let right = stage_side(input.right, self.sample_rate)?;
+        commit_side(&mut self.sides[0], &left, track);
+        commit_side(&mut self.sides[1], &right, track);
         Ok(())
     }
 }
@@ -2042,121 +1726,13 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 }
 
 #[cfg(test)]
-mod detector_access_tests {
+mod reset_tests {
     use super::*;
 
-    const RING_LEN: usize = 7;
-
-    fn patterned_ring<const W: usize>() -> Vec<f32> {
-        let mut ring = vec![0.0f32; RING_LEN * W];
-        for (index, word) in ring.iter_mut().enumerate() {
-            // Keep every row/lane word distinct. The first row also carries directed +0/-0
-            // values so the wrap case checks sign bits rather than numeric equality.
-            let bits = match index {
-                0 => 0x0000_0000,
-                1 => 0x8000_0000,
-                _ => 0x3f80_0000 + index as u32,
-            };
-            *word = f32::from_bits(bits);
-        }
-        ring
-    }
-
-    fn assert_rows_are_distinct<const W: usize>(ring: &[f32]) {
-        for left in 0..RING_LEN {
-            for right in left + 1..RING_LEN {
-                assert!(
-                    (0..W).any(|track| {
-                        ring[left * W + track].to_bits() != ring[right * W + track].to_bits()
-                    }),
-                    "rows {left} and {right} must remain distinguishable"
-                );
-            }
-        }
-        assert_eq!(ring[0].to_bits(), 0x0000_0000, "directed +0 fixture word");
-        if W > 1 {
-            assert_eq!(ring[1].to_bits(), 0x8000_0000, "directed -0 fixture word");
-        }
-    }
-
-    /// Independent old-index oracle: this deliberately spells out the one subtract rather than
-    /// calling the production `wrap`, so a changed access route cannot make its own oracle pass.
-    fn old_detector_words<const W: usize>(
-        ring: &[f32],
-        cursor: usize,
-        offsets: &[usize; W],
-        ring_len: usize,
-    ) -> [u32; W] {
-        core::array::from_fn(|track| {
-            let index = cursor + offsets[track];
-            let row = if index >= ring_len {
-                index - ring_len
-            } else {
-                index
-            };
-            ring[row * W + track].to_bits()
-        })
-    }
-
-    fn lane_words<L: Lane, const W: usize>(value: L) -> [u32; W] {
-        let mut words = [0u32; 8];
-        value.store_bits(&mut words[..W]);
-        core::array::from_fn(|track| words[track])
-    }
-
-    fn assert_tap_case<L: Lane, const W: usize>(
-        ring: &[f32],
-        cursor: usize,
-        offsets: [usize; W],
-        expected_uniform: bool,
-        label: &str,
-    ) {
-        assert_eq!(
-            detector_offsets_uniform(&offsets),
-            expected_uniform,
-            "{label}: classification"
-        );
-        let expected = old_detector_words(ring, cursor, &offsets, RING_LEN);
-        let selected = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, expected_uniform);
-        assert_eq!(lane_words(selected), expected, "{label}: selected route");
-
-        let fallback = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, false);
-        assert_eq!(lane_words(fallback), expected, "{label}: old fallback");
-    }
-
-    fn width_word_witness<L: Lane, const W: usize>() {
-        let ring = patterned_ring::<W>();
-        assert_rows_are_distinct::<W>(&ring);
-        let uniform_one = [1usize; W];
-        let uniform_interior = [3usize; W];
-        let uniform_ring_end = [RING_LEN; W];
-        assert_tap_case::<L, W>(&ring, 0, uniform_one, true, "O=1");
-        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_one, true, "O=1 wrap");
-        assert_tap_case::<L, W>(&ring, 2, uniform_interior, true, "interior");
-        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_ring_end, true, "O=B wrap");
-
-        if W > 1 {
-            let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
-            assert_tap_case::<L, W>(&ring, RING_LEN - 1, ragged, false, "ragged wrap");
-
-            // Distinct uniform channel words are both eligible, while they must not be merged.
-            let near_uniform = [2usize; W];
-            let far_uniform = [5usize; W];
-            assert_tap_case::<L, W>(&ring, 1, near_uniform, true, "near uniform");
-            assert_tap_case::<L, W>(&ring, 1, far_uniform, true, "far unequal uniform");
-
-            // Exercise both channel directions of the mixed uniform/ragged contract.
-            assert_tap_case::<L, W>(&ring, 4, near_uniform, true, "uniform/ragged uniform");
-            assert_tap_case::<L, W>(&ring, 4, ragged, false, "uniform/ragged ragged");
-            assert_tap_case::<L, W>(&ring, 5, ragged, false, "ragged/uniform ragged");
-            assert_tap_case::<L, W>(&ring, 5, far_uniform, true, "ragged/uniform uniform");
-        }
-    }
-
-    fn default_initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+    fn defaults() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         core::array::from_fn(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
-            channel: if index % 2 == 0 {
+            channel: if index.is_multiple_of(2) {
                 ParameterChannel::Left
             } else {
                 ParameterChannel::Right
@@ -2165,9 +1741,7 @@ mod detector_access_tests {
         })
     }
 
-    fn test_metadata(
-        initial_values: &[InitialParameterValue; PARAMETER_COUNT * 2],
-    ) -> PreparedEffectMetadata {
+    fn metadata(values: &[InitialParameterValue; PARAMETER_COUNT * 2]) -> PreparedEffectMetadata {
         expected_prepared_metadata(
             &MULTIBAND_COMPRESSOR_DESCRIPTOR,
             PrepareEffectRequest {
@@ -2179,7 +1753,7 @@ mod detector_access_tests {
                 ports: effect_contract::PreparedPorts {
                     sidechain: effect_contract::PreparedSidechainPort::None,
                 },
-                initial_values,
+                initial_values: values,
                 limits: effect_contract::PrepareEffectLimits {
                     maximum_total_state_bytes: u64::MAX,
                     maximum_scratch_bytes: u64::MAX,
@@ -2190,191 +1764,80 @@ mod detector_access_tests {
         .expect("test metadata")
     }
 
-    fn clear_detector_observation() {
-        DETECTOR_OBSERVATION.with(|observation| observation.set(DetectorObservation::new()));
-    }
-
-    fn detector_observation() -> DetectorObservation {
-        DETECTOR_OBSERVATION.with(|observation| observation.get())
-    }
-
-    fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
-        assert_eq!(ring.len() % W, 0);
-        for (index, sample) in ring.iter_mut().enumerate() {
-            let bits = match (identity, index) {
-                (0, 0) => 0x0000_0000,
-                (0, 1) => 0x8000_0000,
-                _ => 0x3f80_0000 + identity * 0x0010_0000 + index as u32,
-            };
-            *sample = f32::from_bits(bits);
-        }
-    }
-
-    fn seed_instance_rings<L: Lane, const W: usize>(instance: &mut Instance<L, W>) {
-        seed_ring::<W>(&mut instance.sides[0].low_ring, 0);
-        seed_ring::<W>(&mut instance.sides[0].high_ring, 1);
-        seed_ring::<W>(&mut instance.sides[1].low_ring, 2);
-        seed_ring::<W>(&mut instance.sides[1].high_ring, 3);
-    }
-
-    fn padded_words<const W: usize>(words: [u32; W]) -> [u32; 8] {
-        let mut padded = [0u32; 8];
-        padded[..W].copy_from_slice(&words);
-        padded
-    }
-
-    fn push_expected_tap<const W: usize>(
-        expected: &mut Vec<[u32; 8]>,
-        ring: &[f32],
-        cursor: usize,
-        offsets: &[usize; W],
-        ring_len: usize,
-    ) {
-        expected.push(padded_words(old_detector_words(
-            ring, cursor, offsets, ring_len,
-        )));
-    }
-
-    fn expected_callsite_words<const W: usize>(
-        rings: [&[f32]; 4],
-        near_offsets: &[usize; W],
-        far_offsets: &[usize; W],
-        ring_len: usize,
-        frames: usize,
-    ) -> Vec<[u32; 8]> {
-        let mut expected = Vec::with_capacity(frames * 4);
-        for cursor in 0..frames {
-            push_expected_tap(&mut expected, rings[0], cursor, near_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[1], cursor, near_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[2], cursor, far_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[3], cursor, far_offsets, ring_len);
-        }
-        expected
-    }
-
-    fn assert_actual_observation<const W: usize>(
-        expected: &[[u32; 8]],
-        expected_uniform_calls: usize,
-        expected_ragged_calls: usize,
-        label: &str,
-    ) {
-        let observed = detector_observation();
-        assert_eq!(
-            observed.entries,
-            expected.len(),
-            "{label}: observed entry count"
-        );
-        for (index, expected_words) in expected.iter().enumerate() {
-            assert_eq!(
-                observed.widths[index] as usize, W,
-                "{label}: observed width at entry {index}"
-            );
-            assert_eq!(
-                observed.words[index], *expected_words,
-                "{label}: actual accessed words at entry {index}"
-            );
-        }
-        assert_eq!(
-            observed.uniform_calls, expected_uniform_calls,
-            "{label}: executed uniform calls"
-        );
-        assert_eq!(
-            observed.ragged_calls, expected_ragged_calls,
-            "{label}: executed ragged calls"
-        );
-    }
-
-    fn prepared_callsite_case<L: Lane, const W: usize>(
-        metadata: PreparedEffectMetadata,
-        left_defaults: [f32; PARAMETER_COUNT],
-        right_defaults: [f32; PARAMETER_COUNT],
-        near_offsets: [usize; W],
-        far_offsets: [usize; W],
-        label: &str,
-    ) {
-        const FRAMES: usize = 3;
-        let mut instance = Instance::<L, W>::new([left_defaults; W], [right_defaults; W], metadata)
-            .expect("prepared witness instance");
-        instance.sides[0].detector_offset = near_offsets;
-        instance.sides[1].detector_offset = far_offsets;
-        seed_instance_rings(&mut instance);
-        let ring_copies = [
-            instance.sides[0].low_ring.to_vec(),
-            instance.sides[0].high_ring.to_vec(),
-            instance.sides[1].low_ring.to_vec(),
-            instance.sides[1].high_ring.to_vec(),
-        ];
-        let expected = expected_callsite_words(
-            [
-                &ring_copies[0],
-                &ring_copies[1],
-                &ring_copies[2],
-                &ring_copies[3],
-            ],
-            &near_offsets,
-            &far_offsets,
-            instance.ring_len,
-            FRAMES,
-        );
-        let near_uniform = detector_offsets_uniform(&near_offsets);
-        let far_uniform = detector_offsets_uniform(&far_offsets);
-        let expected_uniform_calls = 2 * FRAMES * (near_uniform as usize + far_uniform as usize);
-        let expected_ragged_calls =
-            2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
-        let mut left = vec![0.25f32; FRAMES * W];
-        let mut right = vec![-0.5f32; FRAMES * W];
-        let mut reports = [ProcessReport::default(); W];
-        clear_detector_observation();
-        render::<L, W, false>(&mut instance, &mut left, &mut right, FRAMES, &mut reports);
-        assert_actual_observation::<W>(
-            &expected,
-            expected_uniform_calls,
-            expected_ragged_calls,
-            label,
-        );
-    }
-
-    fn prepared_callsite_witness<L: Lane, const W: usize>() {
-        let initial_values = default_initial_values();
-        let metadata = test_metadata(&initial_values);
-        let (left_defaults, right_defaults) = initial_defaults(&initial_values).expect("defaults");
-        let uniform_near = [1usize; W];
-        let uniform_far = [2usize; W];
-        let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
-
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            uniform_near,
-            uniform_far,
-            "prepared uniform channels",
-        );
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            ragged,
-            uniform_far,
-            "prepared ragged-left uniform-right",
-        );
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            uniform_near,
-            ragged,
-            "prepared uniform-left ragged-right",
-        );
+    fn snapshot(
+        instance: &Instance<f32, 1>,
+        sizes: StatePayloadSizes,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut common = vec![0; sizes.common_bytes as usize];
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        instance
+            .snapshot(
+                0,
+                StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                    .expect("snapshot sizes"),
+                sizes,
+            )
+            .expect("snapshot");
+        (common, left, right)
     }
 
     #[test]
-    fn detector_access_matches_old_words_and_prepared_callsite_route() {
-        width_word_witness::<f32, 1>();
-        width_word_witness::<Simd4, 4>();
-        width_word_witness::<Simd8, 8>();
-        prepared_callsite_witness::<f32, 1>();
-        prepared_callsite_witness::<Simd4, 4>();
-        prepared_callsite_witness::<Simd8, 8>();
+    fn full_reset_restores_prepared_crossover_coefficients() {
+        let values = defaults();
+        let prepared_metadata = metadata(&values);
+        let sizes = prepared_metadata.state_sizes;
+        let (left, right) = initial_defaults(&values).expect("defaults");
+        let mut receiver =
+            Instance::<f32, 1>::new([left], [right], prepared_metadata).expect("receiver instance");
+        let (common, mut restored_left, mut restored_right) = snapshot(&receiver, sizes);
+        write_f32(&mut restored_left, 0, 2_000.0);
+        write_f32(&mut restored_right, 0, 2_000.0);
+        receiver
+            .restore(
+                0,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput::new(&common, &restored_left, &restored_right, sizes)
+                    .expect("restore sizes"),
+            )
+            .expect("different-crossover restore");
+        receiver.reset(ResetKind::FullToDefaults);
+
+        let fresh_metadata = metadata(&values);
+        let (fresh_left_defaults, fresh_right_defaults) =
+            initial_defaults(&values).expect("fresh defaults");
+        let mut fresh = Instance::<f32, 1>::new(
+            [fresh_left_defaults],
+            [fresh_right_defaults],
+            fresh_metadata,
+        )
+        .expect("fresh instance");
+        let mut receiver_left = vec![0.25f32; 64];
+        let mut receiver_right = vec![-0.125f32; 64];
+        let mut fresh_left = receiver_left.clone();
+        let mut fresh_right = receiver_right.clone();
+        let mut receiver_reports = [ProcessReport::default()];
+        let mut fresh_reports = [ProcessReport::default()];
+        render::<f32, 1, false>(
+            &mut receiver,
+            &mut receiver_left,
+            &mut receiver_right,
+            64,
+            &mut receiver_reports,
+        );
+        render::<f32, 1, false>(
+            &mut fresh,
+            &mut fresh_left,
+            &mut fresh_right,
+            64,
+            &mut fresh_reports,
+        );
+        assert_eq!(receiver_left, fresh_left, "full reset left PCM");
+        assert_eq!(receiver_right, fresh_right, "full reset right PCM");
+        assert_eq!(
+            snapshot(&receiver, sizes),
+            snapshot(&fresh, sizes),
+            "full reset state payload"
+        );
     }
 }

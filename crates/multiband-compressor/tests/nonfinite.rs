@@ -5,10 +5,8 @@
 //! `effect_runtime::bank`'s once-per-block scan: a block whose *output* leaves the
 //! bounds is zeroed, the state is reset and the failure is counted.
 //!
-//! The declared latency is `Fs/50`, so a bad input sample is not a bad output sample in the same
-//! block: it reaches the output 960 samples later at 48 kHz. That is the whole reason the check
-//! belongs at the output and not at the input, and it is why these gates run enough blocks for the
-//! fault to arrive.
+//! The effect is causal with zero declared latency, so a bad input is attributed to the current
+//! block. The once-per-block output boundary still owns the rejection, zeroing and reset.
 
 mod support;
 
@@ -20,8 +18,6 @@ use multiband_compressor::MultibandCompressorFactory;
 use support::{request_with, snapshot, varied_values};
 
 const FRAMES: usize = 128;
-const LATENCY: usize = 960;
-
 fn prepared() -> Box<dyn PreparedNativeEffect> {
     let initial = varied_values(1);
     MultibandCompressorFactory
@@ -72,7 +68,7 @@ fn a_nonfinite_block_is_zeroed_reset_and_counted() {
     // check exists for a diverging recurrence, not for a loud sample.
     for injected in [f32::NAN, f32::INFINITY, -1.0e31] {
         let (left, recovered) = run(Some((AT, injected)), BLOCKS);
-        let failing = (AT + LATENCY) / FRAMES;
+        let failing = AT / FRAMES;
         assert_eq!(
             recovered.iter().filter(|count| **count != 0).count(),
             1,
@@ -110,7 +106,7 @@ fn recovery_restores_a_fresh_instance() {
     let mut left = support::signal(BLOCKS * FRAMES, 0x0505_0505);
     let mut right = support::signal(BLOCKS * FRAMES, 0x0606_0606);
     left[37] = f32::NAN;
-    let failing = (37 + LATENCY) / FRAMES;
+    let failing = 37 / FRAMES;
     for block in 0..=failing {
         let start = block * FRAMES;
         faulted.process(
@@ -203,7 +199,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
     let mut left = support::signal(FRAMES * 8 * BLOCKS, 0x1111_2222);
     let mut right = support::signal(FRAMES * 8 * BLOCKS, 0x3333_4444);
     left[5 * 8 + 3] = f32::NAN;
-    let failing = (5 + LATENCY) / FRAMES;
+    let failing = 5 / FRAMES;
     for block in 0..BLOCKS {
         let start = block * FRAMES * 8;
         let report = bank.process_bank(

@@ -3,7 +3,7 @@
 //! `tests/cross_target_digest.rs` hashes each case and compares it against [`DIGESTS`];
 //! `tools/wasm-gate-corpus` replays the identical cases under wasmtime, at the wasm
 //! scalar and `simd128` backends, against these same pins. Together that is the cross-target half
-//! of decision D5 for this effect: the crossover's fused all-pass tap, the D7 flush of its six
+//! of decision D5 for this effect: the crossover's recursive all-pass sections, the D7 flush of its six
 //! recursive words, the lane `log2`/`exp2` its detector and its makeup ride, the branching
 //! smoother and the detector link all produce the same bits in a browser as on a native host.
 //!
@@ -12,8 +12,8 @@
 //! Every case is a **pure function of its per-point inputs**. A recurrence at width `W` runs `W`
 //! interleaved sub-sequences, so its digest would depend on the width and one pin could not serve
 //! every backend. The filter and smoother cases therefore take their previous state as an input
-//! draw, which is what their numerics actually depend on. The *composition* — rings, per-track
-//! detector taps, segment splitting — is not here; it is proven width-independent natively by
+//! draw, which is what their numerics actually depend on. The *composition* — per-track detector
+//! state and segment splitting — is not here; it is proven width-independent natively by
 //! `tests/identity.rs`, which compares whole rendered blocks at `WIDTH = 1`, 4 and 8 by `to_bits`.
 //!
 //! # No NaN, no infinity

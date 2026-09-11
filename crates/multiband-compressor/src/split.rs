@@ -12,7 +12,7 @@
 //!
 //! * every rendered sample of every block, by bit pattern (`-0.0` and `+0.0` are different
 //!   answers here, which is the whole reason the flat path excludes `-0.0`); and
-//! * the entire instance afterwards — ramps, smoother, filter, rings, cursor, coefficient caches —
+//! * the entire instance afterwards — ramps, smoother, filter, coefficient caches —
 //!   by [`fingerprint`]. Output equality alone would not catch a ramp left one sample short.
 //!
 //! The scenarios are the split's boundaries: a ramp already in flight when the block opens, a ramp
@@ -93,26 +93,24 @@ fn defaults() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
 
 /// Per-track values that put no two lanes on the same program.
 ///
-/// Lookahead cycles through 0, 5 and 20 ms so the per-track detector gather is load-bearing, and
-/// the thresholds, ratios and makeups spread the lanes across the static curve. The left and right
-/// channels are deliberately given different values: a channel-symmetric bank would not notice a
-/// split that confused the two sides.
+/// Thresholds, ratios, attacks, releases and makeups spread the lanes across the static curve. The
+/// left and right channels are deliberately given different values: a channel-symmetric bank would
+/// not notice a split that confused the two sides.
 fn varied(track: usize) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
     let mut values = defaults();
     let offset = track as f32;
     for channel in 0..2 {
         let tilt = offset + channel as f32 * 0.5;
-        values[2 + channel].value = [0.0, 5.0, 20.0][track % 3];
-        values[4 + channel].value = -30.0 - tilt;
-        values[6 + channel].value = 2.0 + tilt * 0.5;
-        values[8 + channel].value = 5.0 + tilt;
-        values[10 + channel].value = 80.0 + tilt * 3.0;
-        values[12 + channel].value = 1.0 + tilt * 0.25;
-        values[14 + channel].value = -24.0 - tilt;
-        values[16 + channel].value = 3.0 + tilt * 0.25;
-        values[18 + channel].value = 1.0 + tilt;
-        values[20 + channel].value = 120.0 + tilt * 5.0;
-        values[22 + channel].value = -1.0 - tilt * 0.25;
+        values[2 + channel].value = -30.0 - tilt;
+        values[4 + channel].value = 2.0 + tilt * 0.5;
+        values[6 + channel].value = 5.0 + tilt;
+        values[8 + channel].value = 80.0 + tilt * 3.0;
+        values[10 + channel].value = 1.0 + tilt * 0.25;
+        values[12 + channel].value = -24.0 - tilt;
+        values[14 + channel].value = 3.0 + tilt * 0.25;
+        values[16 + channel].value = 1.0 + tilt;
+        values[18 + channel].value = 120.0 + tilt * 5.0;
+        values[20 + channel].value = -1.0 - tilt * 0.25;
     }
     values
 }
@@ -155,11 +153,11 @@ fn stimulus(sample: usize, track: usize, channel: usize) -> f32 {
 
 /// Every mutable word of an instance, as bit patterns, in a fixed order.
 ///
-/// This is deliberately the whole of the state and not a summary: the ramps (so a split that
-/// stopped a ramp one sample early is caught), the branching smoother, the crossover filter, both
-/// delay rings, the cursor, and the derived per-track coefficient caches.
+/// This is deliberately the whole of the mutable state and not a summary: the ramps (so a split
+/// that stopped a ramp one sample early is caught), the branching smoother, crossover filter, and
+/// derived per-track coefficient caches.
 fn fingerprint<L: Lane, const W: usize>(instance: &Instance<L, W>) -> Vec<u32> {
-    let mut words = vec![instance.cursor as u32];
+    let mut words = Vec::new();
     for side in &instance.sides {
         for lane in [
             side.coefficients.nc1,
@@ -194,11 +192,6 @@ fn fingerprint<L: Lane, const W: usize>(instance: &Instance<L, W>) -> Vec<u32> {
                 words.push(value.to_bits());
             }
             words.push(side.crossover_hz[track].to_bits());
-            words.push(side.lookahead_ms[track].to_bits());
-            words.push(side.detector_offset[track] as u32);
-        }
-        for value in side.low_ring.iter().chain(side.high_ring.iter()) {
-            words.push(value.to_bits());
         }
     }
     words
@@ -231,7 +224,7 @@ fn run<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
                     .map(|event| PreparedAutomationSpan {
                         kind: AutomationSpanKind::Point,
                         channel: event.channel,
-                        parameter_index: (event.ramp + 2) as u32,
+                        parameter_index: (event.ramp + 1) as u32,
                         start_sample: (block * frames) as u64,
                         end_sample: (block * frames) as u64,
                         start_value: event.value,
@@ -420,8 +413,32 @@ fn the_split_is_partition_invariant() {
     let whole = run::<Simd4, 4, false>(LinkMode::Maximum, false, 1, 128, SCHEDULE);
     let halves = run::<Simd4, 4, false>(LinkMode::Maximum, false, 2, 64, SCHEDULE);
     let quarters = run::<Simd4, 4, false>(LinkMode::Maximum, false, 4, 32, SCHEDULE);
-    assert_eq!(whole, halves, "one block against two");
-    assert_eq!(whole, quarters, "one block against four");
+    assert_eq!(
+        global_sample_order(&whole, 1, 128, 4),
+        global_sample_order(&halves, 2, 64, 4),
+        "one block against two"
+    );
+    assert_eq!(
+        global_sample_order(&whole, 1, 128, 4),
+        global_sample_order(&quarters, 4, 32, 4),
+        "one block against four"
+    );
+}
+
+/// Reorder the block-major test output into one left plane followed by one right plane so that
+/// partition comparisons compare the same global samples. The closing fingerprint stays last.
+fn global_sample_order(values: &[u32], blocks: usize, frames: usize, width: usize) -> Vec<u32> {
+    let block_words = frames * width;
+    let sample_words = blocks * block_words * 2;
+    let mut ordered = Vec::with_capacity(values.len());
+    for channel in 0..2 {
+        for block in 0..blocks {
+            let start = block * block_words * 2 + channel * block_words;
+            ordered.extend_from_slice(&values[start..start + block_words]);
+        }
+    }
+    ordered.extend_from_slice(&values[sample_words..]);
+    ordered
 }
 
 /// The flat path's precondition, stated directly rather than only asserted in debug builds.
@@ -445,7 +462,7 @@ fn a_settled_bank_meets_the_flat_paths_precondition() {
     let spans = [PreparedAutomationSpan {
         kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,
-        parameter_index: (LOW_MAKEUP + 2) as u32,
+        parameter_index: (LOW_MAKEUP + 1) as u32,
         start_sample: 0,
         end_sample: 0,
         start_value: -0.0,
@@ -485,9 +502,7 @@ fn a_settled_bank_meets_the_flat_paths_precondition() {
 /// detector happens to be doing. A window that does not advance renders the value it started from
 /// until the snap, which is exactly what the assertion below distinguishes.
 fn each_channel_advances_its_own_ramps<L: Lane, const W: usize>(label: &str) {
-    // The effect declares `Fs/50` of lookahead latency — 960 samples at 48 kHz — so the ring has
-    // to be full before any of this is observable at all. The window is opened well past that, and
-    // the block it opens on is the block compared.
+    // Open the window near the end of the run; the block it opens on is the block compared.
     const FRAMES: usize = 128;
     const BLOCKS: usize = 14;
     const OPENED: usize = 12;
@@ -570,7 +585,7 @@ fn a_window_lands_on_its_target_on_the_exact_sample() {
     let spans = [PreparedAutomationSpan {
         kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,
-        parameter_index: (LOW_MAKEUP + 2) as u32,
+        parameter_index: (LOW_MAKEUP + 1) as u32,
         start_sample: 0,
         end_sample: 0,
         start_value: TARGET,
@@ -704,7 +719,7 @@ fn traffic<L: Lane, const W: usize>(instance: &mut Instance<L, W>, arm: Arm, blo
                 spans.push(PreparedAutomationSpan {
                     kind: AutomationSpanKind::Point,
                     channel,
-                    parameter_index: (ramp + 2) as u32,
+                    parameter_index: (ramp + 1) as u32,
                     start_sample: first,
                     end_sample: first,
                     start_value: value,
