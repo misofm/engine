@@ -138,3 +138,14 @@ nonbanked, one lane, lane_tracks [""], upstream_of_seam_stages0 and lane_eligibl
 correction authorized. Reuse rack PCM/pairing/poison passes; run corrected
 chain_shape followed by outstanding strict gates, then independent review.
 This is attempt2 of the user-authorized five-attempt maximum.
+
+## Attempt 2 focused green checkpoint
+
+Astra LOW corrected only chain_shape.rs census/derivation and added the master
+identity discriminant. Initial E0277 from comparing Box<str> with str is preserved
+in /tmp/issue221-attempt2; XHIGH classified its exact type-correct assertion fix
+as ordinary compiler feedback within unfinished attempt2, with no gate change.
+Fresh corrected receipts show21/21 console tests, strict locked all-target/
+all-feature Clippy for graph/rack/console-workload, and formatting passed. No
+lint warnings. Production unchanged since the reviewed attempt1 source.
+Independent final review and representative debug/release verification remain.

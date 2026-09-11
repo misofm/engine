@@ -464,6 +464,18 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     // session, which is what makes this a mixed cohort rather than a relabelled one.
     let counted = |workload| {
         let runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        let rows = runtime.unit_eligibility();
+        let master = rows.last().expect("master row");
+        assert!(!master.banked, "master is a plain unit");
+        assert_eq!(master.lanes(), 1);
+        assert_eq!(master.lane_tracks.len(), 1);
+        assert_eq!(master.lane_tracks[0].as_ref(), "");
+        assert_eq!(master.upstream_of_seam_stages, 0);
+        assert_eq!(
+            master.lane_eligible.as_ref(),
+            &[true],
+            "the identity master supplies the extra vacuous witness"
+        );
         (
             runtime.structural_mono_tracks(),
             runtime.symmetry_counters(),
@@ -471,7 +483,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     };
     assert_eq!(
         counted(Workload::SixtyFourTrackConsoleMono),
-        (64, [64, 129]),
+        (64, [65, 129]),
         "every track of the mono fixture is collapse-eligible"
     );
     // The half-mono row's own census, derived rather than pinned -- and it is the standing worked
@@ -479,20 +491,21 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     //
     // The uniform mono row counts 129 "lanes": 64 bank-chain lanes, 64 source-input ops and the
     // master, its 64 route ops having been absorbed by the #218 fold and never built as units at
-    // all. The half-mono row's fold declines (see
+    // all. Its identity master contributes one eligible, vacuous witness in addition to the 64
+    // eligible bank-chain lanes; it adds no collapse-eligible track. The half-mono row's fold declines (see
     // `every_standing_workload_folds_one_route_per_track` for the association-order derivation),
     // so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
     // `ChannelSymmetryWitness::SYMMETRIC` -- it is not per-track upstream work, so nothing about
     // it can make two channels disagree -- which adds 64 to the eligible half as well.
     //
-    // So the pair moves from `[64, 129]` to `[128, 193]` on a row where **not one track's
+    // So the pair moves from `[65, 129]` to `[129, 193]` on a row where **not one track's
     // symmetry changed**: 32 of its tracks are collapse-eligible before and after, which is what
     // `structural_mono_tracks` still reports and what the per-cohort rows below actually measure.
     // Two censuses are comparable only when the plans' unit inventories are; this is that caveat
     // with numbers on it.
     assert_eq!(
         counted(Workload::SixtyFourTrackConsoleHalfMono),
-        (32, [64 + 64, 129 + 64]),
+        (32, [65 + 64, 129 + 64]),
         "half the tracks of the half-mono row read two source channels; the census additionally \
          carries the 64 route ops this row's declined fold left dispatched"
     );
