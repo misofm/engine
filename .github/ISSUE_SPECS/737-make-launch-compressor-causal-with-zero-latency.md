@@ -338,3 +338,16 @@ I/O and syscall counters. Existing trace validation independently finds one mark
 interval and zero syscall violations (`/tmp/issue737-realtime`). Workspace/realtime/
 lane/audit-leak/artifact-leak/unfused policies, formatting, canonical console fixtures
 and generated SDK checks pass (`/tmp/issue737-policy-gates`).
+
+
+## Full descendant and browser-matrix completion checkpoint
+
+The full affected-crate all-target `--no-fail-fast` sweep now passes after the catalog
+and browser correctness-fixture corrections (`/tmp/issue737-local-gates/descendants-final*`).
+Hermetic host, all 192 SDK headless tests and SDK package qualification pass. Browser
+matrix execution correctly refused a second current observation fixture still naming
+ID 8. A systematic current-JSON inventory found exactly that remaining row in
+`hosts/host-web/qualification/observation-session.json`; root removes it through the
+canonical writer with all other decoded fields identical. Session/source identities
+pass (`/tmp/issue737-qualification-fixture`). No binary change is needed. The failed
+browser run is preserved; a rerun on this corrected current fixture remains required.

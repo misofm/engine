@@ -22,34 +22,6 @@
       "frames": "2048"
     }
   ],
-  "submixes": [],
-  "outputs": [
-    {
-      "id": "main-out"
-    }
-  ],
-  "routes": [
-    {
-      "id": "track-main",
-      "source": {
-        "kind": "track",
-        "track_id": "track",
-        "tap": "post_matrix"
-      },
-      "destination": {
-        "kind": "output_input",
-        "output_id": "main-out"
-      },
-      "channel_matrix": {
-        "ll": 1.0,
-        "lr": 0.0,
-        "rl": 0.0,
-        "rr": 1.0
-      },
-      "gain_db": 0.0
-    }
-  ],
-  "automation": [],
   "tracks": [
     {
       "id": "track",
@@ -128,12 +100,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 5.0
               }
             ],
             "sidechain": {
@@ -157,5 +123,33 @@
         "smoothing_samples": 0
       }
     }
-  ]
+  ],
+  "submixes": [],
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [
+    {
+      "id": "track-main",
+      "source": {
+        "kind": "track",
+        "track_id": "track",
+        "tap": "post_matrix"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0
+    }
+  ],
+  "automation": []
 }
