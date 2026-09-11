@@ -1,11 +1,18 @@
 # Session schema V1
 
 `session` accepts strict RFC 8259 JSON through exact-pinned `json-syntax 0.12.5`, after a
-contract-owned duplicate-key and nesting-depth preflight. Comments, trailing commas, multiple
+contract-owned duplicate-key, nesting-depth and empty-object preflight. Comments, trailing commas, multiple
 top-level values, BOMs, invalid escapes, unpaired surrogates and non-JSON numeric tokens refuse.
 A duplicate member refuses before its value is parsed or retained, at the decoded member path,
 with a byte span over the second key. The root object is depth one; opening any object or array at
 depth 129 refuses before that subtree is built.
+
+An empty object (including whitespace-only `{ }`) refuses with `json.syntax` at its decoded
+field/index path and a byte span covering both braces. Empty objects are valid JSON but no V1
+schema object admits one: records require explicit fields and tagged unions require their tag.
+This is a temporary workaround for json-syntax 0.12.5 leaving empty-object CodeMap entries
+unfinished, which can corrupt diagnostics or panic during the typed walk (#387; dependency
+repair is #391). Empty arrays and braces inside strings retain their existing semantics.
 
 Canonical output is defined by the schema walk, not generic map order, RFC 8785/JCS, or a serde
 serializer. It is UTF-8 without BOM, uses LF and two-space indentation, has no tabs or trailing

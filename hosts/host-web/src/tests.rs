@@ -482,6 +482,62 @@ fn malformed_config_and_atomic_compile_failure_are_sticky() {
     assert!(!failure.diagnostic().is_empty());
 }
 
+/// Issue #387: json-syntax 0.12.5 never calls `end_fragment` for an empty JSON object, so the
+/// reserved `CodeMap` entry keeps `volume = 0` and every later member is read one slot off --
+/// `session::parse::Parser::keys` used to hit `Option::unwrap()` on the resulting `None`, which
+/// traps the AudioWorklet module under this workspace's `panic = "abort"` release profile
+/// (`scripts/build-web-audioworklet.sh` builds `--release`). The session preflight now refuses
+/// `{}` anywhere in the document before the typed walk, so `AudioWorkletEngineHost::boot` --
+/// the same call `miso_engine_web_v1_boot` (`hosts/host-web/src/ffi.rs`) makes -- returns a
+/// documented `RESULT_REFUSED_DOCUMENT` diagnostic instead of unwinding into the abort.
+#[test]
+fn empty_object_document_boots_to_a_diagnostic_not_a_trap() {
+    let document = one_track_session(128);
+    let start = document
+        .find("\"render_profile\": {")
+        .expect("render_profile key");
+    let open = start + "\"render_profile\": ".len();
+    let mut depth = 0i32;
+    let mut cursor = open;
+    let close = loop {
+        match document.as_bytes()[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break cursor + 1;
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    };
+    let mutated = format!("{}{{}}{}", &document[..open], &document[close..]);
+    assert_ne!(mutated, document, "render_profile was not actually emptied");
+
+    let failure = AudioWorkletEngineHost::boot(mutated.as_bytes(), boot_options(128))
+        .err()
+        .expect("empty object must refuse, not abort");
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
+    assert_eq!(failure.diagnostic(), b"json.syntax\t$.render_profile\n");
+
+    // The same document through the raw C ABI boot entry the wasm artifact exports: staged,
+    // booted, and refused without ever reaching a live handle.
+    assert_eq!(miso_engine_web_v1_dispose(0), RESULT_OK);
+    crate::ffi::test_stage_document(mutated.as_bytes());
+    assert_eq!(
+        miso_engine_web_v1_boot(mutated.len() as u32),
+        0,
+        "a refused boot never returns a live handle"
+    );
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
+    assert!(
+        miso_engine_web_v1_boot_diagnostic_bytes() > 0,
+        "the refusal leaves a nonempty diagnostic prefix for the host to read"
+    );
+    assert_eq!(miso_engine_web_v1_status_ptr(0), 0);
+}
+
 #[test]
 fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     let mut document = one_track_session(128);
