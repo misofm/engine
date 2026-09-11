@@ -5613,6 +5613,125 @@ mod tests {
             "bypassing the delayed limiter preserves its compensation"
         );
     }
+    #[test]
+    fn mixed_causal_gate_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
+        let mut model = accepted_gate_expander_graph_fixture();
+        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
+        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed gate/limiter fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, caps)
+            .expect("prepared mixed effects");
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "gate-expander")
+                .count(),
+            9
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .count(),
+            1
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "gate-expander")
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .all(|entry| entry.metadata.latency == LatencySamples(486))
+        );
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_017,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed gate/limiter graph: {:?}", failure.diagnostics));
+        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert!(
+            artifact
+                .graph
+                .inserted_delays
+                .iter()
+                .any(|delay| { delay.samples == LatencySamples(486) })
+        );
+        for route in &artifact.graph.route_timings {
+            let route_id = route.route_id.as_str();
+            if route_id == "eq9-main" {
+                assert_eq!(route.source_arrival, LatencySamples(486));
+                assert_eq!(route.compensation_delay, LatencySamples(0));
+                assert_eq!(route.destination_arrival, LatencySamples(486));
+            } else if route_id.ends_with("-main") {
+                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
+                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
+                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+            }
+        }
+
+        // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency gate
+        // paths remain aligned with the real delayed processor and the output latency is stable.
+        let mut bypass_model = model;
+        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed bypass fixture");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+            .expect("prepared mixed gate bypass effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_018,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(
+            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            "bypassing the delayed limiter preserves PDC route timing"
+        );
+        assert_eq!(
+            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            "bypassing the delayed limiter preserves its compensation"
+        );
+    }
 
     /// Phase 1b: a native effect carrying the homogeneous-bank kernel contract banks in the
     /// **dynamic** rack, and every rendered sample is bit-identical to the per-node path.
@@ -8467,7 +8586,7 @@ mod tests {
             .expect("prepared gate/expander effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(480)
+            entry.metadata.latency == LatencySamples(0)
                 && entry.metadata.tail == TailSamples::Finite(0)
         }));
         let scalar_effects =
@@ -8593,7 +8712,8 @@ mod tests {
             })
             .unwrap_or_else(|failure| panic!("gate/expander scalar bind: {}", failure.code));
         let frames = envelope.quantum.0 as usize;
-        let mut rendered_after_latency = false;
+        let mut rendered_nonzero = false;
+        let mut first_block_nonzero = false;
         for block in 0..16_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
             let mut scalar_pcm = vec![0.0_f32; frames * 2];
@@ -8632,13 +8752,15 @@ mod tests {
                     .collect::<Vec<_>>(),
                 "bank and scalar gate/expander paths remain exact through carried state"
             );
-            if block >= 3 {
-                rendered_after_latency |= bank_pcm.iter().any(|sample| *sample != 0.0);
+            rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
+            if block == 0 {
+                first_block_nonzero = bank_pcm.iter().any(|sample| *sample != 0.0);
             }
         }
+        assert!(rendered_nonzero, "the active gate fixture rendered audio");
         assert!(
-            rendered_after_latency,
-            "the fixed ten-millisecond gate/expander delay renders only after its latency"
+            first_block_nonzero,
+            "the zero-latency gate renders current input in the first block"
         );
 
         let mut bypass_model = model.clone();
@@ -8664,7 +8786,7 @@ mod tests {
             bypass_effects
                 .entries
                 .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(480))
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
             dispatch: host_dispatch(),

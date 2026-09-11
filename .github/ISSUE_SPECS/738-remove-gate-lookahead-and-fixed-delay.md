@@ -145,3 +145,26 @@ remain identical; generated ABI/provenance and ABI-layout asset are byte-identic
 `check-sdk-generated.sh` and `check-sdk-types.sh` pass. External export/delta
 are in `/tmp/issue738-metadata`, gate receipts in `/tmp/issue738-gates`.
 No synthetic metadata self-test fixture or historical artifact is resealed.
+
+
+## Attempt 1 integration checkpoint and remaining evidence repair
+
+Luna XHIGH's bounded integration tranche passes native-session6, parameter-lattice10,
+descriptor qualification8, graph compiler69 and host-web77 tests (2 ignored), plus
+checks/formatting/diff checks. Actual gate stableID8 rejects before native publication
+and in the host's atomic command batch; valid threshold plus retiredID8 admitszero
+and preserves model/resources/next-block PCM, allowing only refusal-status reporting.
+The reconstructed old gate descriptor/envelope verifies structurally under its old
+binding and rejects under the current binding with Descriptor; this is not a claim
+of replaying the old DSP implementation. Graph gates prove active first-block output
+and zero gate contribution beside an unchanged486-sample limiter with preserved PDC
+and bypass timing. Current lattice counts are64rows/192checks.
+Receipts: `/tmp/issue738-luna-tranche3.md` and `/tmp/issue738-luna-tranche3-logs/`.
+
+Sol independently passed the earlier oracle run but found Maximum/Average fixtures
+always open and other focused tests insufficiently discriminatory. Corpus sealing
+remains withheld. A separate isolated Luna XHIGH test-only repair at
+`engine-causal-gate-738-tests` owns those already-frozen hold/state/fault/W4/identity
+witnesses; integration owns disjoint paths. No final PASS or new production defect
+is asserted. Root must integrate the repaired checkpoint and obtain Sol approval
+before accepting current scalar corpus pins and final target/artifact qualification.
