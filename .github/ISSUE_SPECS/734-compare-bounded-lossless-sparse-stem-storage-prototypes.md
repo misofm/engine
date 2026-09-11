@@ -2,7 +2,7 @@
 
 ## Outcome and boundary
 
-Build external research prototypes and produce a reproducible comparison of dense and sparse stem storage, exact PCM reconstruction, random access, and bounded decoder resources. This is a decision experiment, not an engine implementation or delivery-codec addition. The user authorized real-corpus proof of concepts and chose to align file beginnings for the activity model.
+Build external research prototypes and produce a reproducible comparison of dense and sparse stem storage, exact PCM reconstruction, random access, and bounded decoder resources. This is a decision experiment, not an engine implementation or delivery-codec addition. The user authorized real-corpus proof of concepts and chose to align file beginnings for the activity model. Every required asset must be downloaded before session start: the network objective is complete offline-session availability, not progressive playback startup.
 
 All implementation, audio, dictionaries, detailed corpus identities, raw records and plots remain in the private artist-agent repository or local private artifact storage. Public evidence is limited to generic methods, aggregate results and limitations. No artist identity, filename, source hash, private path, recoverable audio or dictionary bytes may enter this issue/repository.
 
@@ -52,3 +52,9 @@ The private harness now exposes corpus freeze, all-variant preparation/qualifica
 Sol owns attempt 2, bounded to the gap correction, discriminating boundary/corruption controls, one shared frozen-window qualification path, strict freeze/record validation, truthful failure exits, and preflight/output/resource accounting. No corpus, format, compression parameter, or benchmark-protocol change is authorized by this revision.
 
 The private aligned-input census and original-prefix padding verification are upstream. They confirm the dataset preparation independently of the faulty prototype; they supply no codec or realtime performance evidence.
+
+## Delivery objective clarification
+
+The user clarified that all files required by a session are downloaded before startup. Compare complete package bytes, including every required manifest, index and dictionary; keep transfer bundling/request overhead distinct from local decoder-unit size. Existing dense files serve as baselines. A new sparse package remains the intended product candidate.
+
+An existing corrected lossless DEFLATE archive is approximately 147.3 MB. Its exact size may be reported as an untimed existing-artifact reference, so storage/transfer savings are not presented only against expanded WAV bytes. This does not add a timed variant or change the frozen workload. No actual network or progressive-startup claim is introduced.
