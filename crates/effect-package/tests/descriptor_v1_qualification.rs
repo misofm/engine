@@ -348,7 +348,7 @@ static OLD_GATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &OLD_GATE_PARAMETERS,
-    ports: &gate_expander::GATE_EXPANDER_DESCRIPTOR.ports,
+    ports: gate_expander::GATE_EXPANDER_DESCRIPTOR.ports,
     qualities: &OLD_GATE_QUALITIES,
     observations: &gate_expander::GATE_EXPANDER_OBSERVATIONS,
 };

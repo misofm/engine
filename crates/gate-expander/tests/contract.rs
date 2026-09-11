@@ -209,7 +209,7 @@ fn bypass_is_exact_identity_at_all_rates() {
         let mut effect = GateExpanderFactory.prepare(request).expect("prepare");
         let mut left = [f32::from_bits(0x8000_0000), 0.25, -0.5];
         let mut right = [-0.0, -0.25, 0.5];
-        let expected = (left.clone(), right.clone());
+        let expected = (left, right);
         render_scalar(effect.as_mut(), &mut left, &mut right, 3);
         assert_eq!(left, expected.0);
         assert_eq!(right, expected.1);
@@ -275,10 +275,11 @@ fn opening_and_future_suffixes_are_current_sample_causal() {
     );
 }
 
+#[allow(clippy::disallowed_methods)]
 fn detector_level_db(amplitude: f32) -> f32 {
     use gate_expander::kernel::{LEVEL_FLOOR, LEVEL_MAX_DB, LEVEL_MIN_DB};
     let level = math::fast_db::fast_level_db::<f32>(amplitude.max(LEVEL_FLOOR));
-    level.min(LEVEL_MAX_DB).max(LEVEL_MIN_DB)
+    level.clamp(LEVEL_MIN_DB, LEVEL_MAX_DB)
 }
 
 fn transition_values(threshold: f32, hysteresis: f32) -> support::Values {
@@ -596,32 +597,29 @@ fn production_hold_is_k_plus_one_and_retrigger_is_current_sample() {
     support::set_parameter(
         &mut values,
         5,
-        3.0 * 1000.0 / 48_000.0,
-        3.0 * 1000.0 / 48_000.0,
+        2.0 * 1000.0 / 48_000.0,
+        2.0 * 1000.0 / 48_000.0,
     );
     let mut effect = prepare(request(&values));
-    let mut left = vec![0.5, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 0.5];
+    let mut left = vec![0.5, 0.006, 1.0e-4, 1.0e-4, 1.0e-4, 0.5];
     let mut right = left.clone();
-    render_scalar(effect.as_mut(), &mut left, &mut right, 5);
+    render_scalar(effect.as_mut(), &mut left, &mut right, 6);
     assert_eq!(left[0].to_bits(), 0.5_f32.to_bits(), "trigger");
     assert_eq!(
         left[1].to_bits(),
-        1.0e-4_f32.to_bits(),
-        "first held sample remains open"
+        0.006_f32.to_bits(),
+        "in-band sample rearms the nonzero hold"
     );
     assert_eq!(
         left[2].to_bits(),
         1.0e-4_f32.to_bits(),
-        "second held sample remains open"
+        "first below-band sample remains open"
     );
     assert_eq!(
         left[3].to_bits(),
         1.0e-4_f32.to_bits(),
-        "third held sample remains open"
+        "second below-band sample remains open"
     );
-    assert!(
-        left[4].abs() < 1.0e-4,
-        "the sample after K held samples closes"
-    );
+    assert!(left[4].abs() < 1.0e-4, "the K+1th below-band sample closes");
     assert!(left[5] > left[4], "retrigger uses the current sample");
 }

@@ -215,3 +215,25 @@ host-web) pass. Sol permits scalar corpus derivation after the repaired oracle
 and width/nonvacuity checks, while three focused test-strengthening items and
 one fixture Clippy correction remain before final review. No production defect
 has been found in this review checkpoint.
+
+
+## Corpus and target qualification checkpoint
+
+Sol XHIGH approved corpus derivation/sealing after independently checking active
+nonclamped oracle attenuation in all three link modes: worst3.285e-4dB within
+0.02dB. Root preserved derive-mode output (intentional final exit101 after all
+six scalar/Simd4/Simd8 comparisons), sealed checkpoint06683913, and passed both
+ordinary determinism tests including nonvacuity.
+
+G5 passes native, actual scalar Wasm and simd128: each141cases/355comparisons,
+zero mismatches, with the existing detector residency gate passing. Raw output
+is `/tmp/issue738-wasm-gates/wasm-gates.jsonl`; root receipts remain in
+`/tmp/issue738-gates`. Browser matrix checkpoint9ca6e940 records Chromium151.0.7922.34,
+Firefox153.0 and WebKit26.5 PASS against candidate0668391387f2a1a9860cab278636bf48deb73fc8.
+The first browser command rejected a short commit ID before qualification; the
+canonical40-hex rerun passed. Both receipts remain preserved. Static artifact,
+resource parity, hermetic host, SDK headless/package, matrix regeneration, lane/
+realtime/workspace policies and strict gate/reference documentation all pass.
+
+Final focused test repair, debug/release replay, strict Clippy, singular Sol
+verdict and exact PR/main qualification remain before delivery.
