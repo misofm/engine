@@ -3545,26 +3545,26 @@ fn foldable_lane(
 /// * **the whole fold** -> `every_standing_workload_folds_one_route_per_track`, on a count. There
 ///   is no output difference to see: that is the point of the counter.
 ///
-/// Four clauses have **no** red test, and each is kept for a stated reason rather than a measured
-/// one. Saying so is the point of writing the ledger down:
+/// Historically four clauses had no red test in compiled-session fixtures. Issue #220 now
+/// drives the actual proof over the seeded corpus and bounded valid lowered-program shapes.
 ///
-/// * **sole readership of a chain's last slot.** Genuinely load-bearing -- a folded lane stops
-///   writing that buffer, so a second reader would carry the previous block -- but *shadowed* in
-///   every session a compiler can build. A second route from the same tap adds a summand the
-///   master's input list has, so the association proof declines on length first; a sidechain from
-///   that tap is read by an op scheduled *before* the route, so `readers[producer][0]` is not a
-///   route and the plain-route clause declines instead. Dropping the clause reddens nothing, and
-///   that is reported rather than dressed up.
-/// * **nothing in between names the master.** No compiled session reaches the hazard, and the
-///   reason is structural: the master's colour is the first colour the lowering frees, which is
-///   track zero's input buffer, and track zero is always in the *opening* cohort -- whose ops the
-///   scan excludes because they all precede the first master write. A later cohort naming the
-///   master's slot is expressible in a lowered program and not in a session, exactly as
-///   `scatter_target`'s compensation-delay clause is.
-/// * **one master op for the whole plan.** A session whose tracks reduce into several submixes
-///   could fold each submix separately; this folds one reduction or none. The proof would have to
-///   be run per master and the chains partitioned between them, and no fixture in the tree needs
-///   it. Dropping it is shadowed by the association proof's length check.
+/// * **sole readership of a chain's last slot** ->
+///   `route_fold_shadowed_clauses_over_valid_programs`, hazard 1. Removing the guard admits a
+///   fold whose last-slot buffer still has another reader after its route. Compiled-session
+///   ordering used to hide this: another route changed the association list, while a sidechain
+///   reader scheduled before the route made the first reader fail the plain-route check.
+///   The constructed order isolates the last-slot readership guard from those other refusals.
+/// * **nothing in between names the master** ->
+///   `route_fold_shadowed_clauses_over_valid_programs`, hazard 3. Removing the access check admits
+///   a fold that overwrites a reused buffer before an intervening reader consumes its old value.
+///   Existing compiled-session colouring hid this hazard in the opening cohort, which the scan
+///   correctly excludes. The constructed program puts that reader in a later unit instead.
+///   These are measured physical guard removals, not mutations of the independent oracle.
+/// * **candidate retention requires exclusive route readership** ->
+///   `route_fold_shadowed_clauses_over_valid_programs`, hazard 2. Removing the retain block admits
+///   a route with an additional reader while the master's ordered contributors still match.
+///   This does not independently prove the same-master equality conjunct: that conjunct remains
+///   logically shadowed by the association proof. This implementation folds one reduction only.
 /// * **the master buffer is distinct from every folded buffer.** The colouring cannot hand the
 ///   master a slot a folded lane still writes -- a chain's last slot is `program::is_dedicated`
 ///   storage and is never returned to the free list -- so this is a construction check, in the
@@ -4002,6 +4002,82 @@ fn cohort_runs(
         runs.push(run);
     }
     runs
+}
+
+#[cfg(test)]
+pub(crate) type RouteFoldObservation = (usize, Vec<(usize, usize, [u32; 4], bool)>);
+
+/// Observe the actual route-fold proof for unbound program fixtures. Constants are supplied by
+/// the fixture; no admission predicate is replicated here. Like the scatter seam, run layout
+/// comes from the independent program interpreter. Observers and prepared effects are absent.
+#[cfg(test)]
+pub(crate) fn route_folds_over_program(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    lanes: &BTreeMap<u32, (usize, usize)>,
+    runs: &[Vec<Vec<usize>>],
+    routes: &BTreeMap<GraphNodeId, RouteTransform>,
+) -> Option<RouteFoldObservation> {
+    let mut parts = RuntimeParts::new(
+        spec,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Default::default(),
+        Vec::new(),
+        1,
+    );
+    parts.routes.clone_from(routes);
+    parts.membership = lanes
+        .iter()
+        .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
+        .collect();
+    let units: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            let banked = lanes.contains_key(&program.ops[run[0][0]].node);
+            (
+                if banked {
+                    vec![Membership::Effect(0); run.len()]
+                } else {
+                    Vec::new()
+                },
+                run.iter().flatten().copied().collect(),
+            )
+        })
+        .collect();
+    route_fold(program, spec, &parts, &units).map(|fold| {
+        let mut routes = fold.retired.into_iter().collect::<Vec<_>>();
+        // Retirement is a set, but lane order is render order, not op-index order.
+        let (readers, _) = op_dataflow(program);
+        let lanes = fold
+            .runs
+            .into_iter()
+            .flat_map(|(run, folded)| {
+                runs[run]
+                    .last()
+                    .expect("last slot")
+                    .iter()
+                    .zip(folded)
+                    .map(|(producer, lane)| {
+                        let route = readers[*producer][0];
+                        routes.retain(|retired| *retired != route);
+                        (run, route, lane.coefficients.map(f32::to_bits), lane.store)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            routes.is_empty(),
+            "every retired route belongs to a folded lane"
+        );
+        (fold.master_op, lanes)
+    })
 }
 
 #[cfg(test)]
@@ -6169,80 +6245,4 @@ mod tests {
             "the folded route is a distinct rounding, not a coincidence"
         );
     }
-}
-
-#[cfg(test)]
-pub(crate) type RouteFoldObservation = (usize, Vec<(usize, usize, [u32; 4], bool)>);
-
-/// Observe the actual route-fold proof for unbound program fixtures. Constants are supplied by
-/// the fixture; no admission predicate is replicated here. Like the scatter seam, run layout
-/// comes from the independent program interpreter. Observers and prepared effects are absent.
-#[cfg(test)]
-pub(crate) fn route_folds_over_program(
-    program: &ExecutionProgram,
-    spec: &GraphSpec,
-    lanes: &BTreeMap<u32, (usize, usize)>,
-    runs: &[Vec<Vec<usize>>],
-    routes: &BTreeMap<GraphNodeId, RouteTransform>,
-) -> Option<RouteFoldObservation> {
-    let mut parts = RuntimeParts::new(
-        spec,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Default::default(),
-        Vec::new(),
-        1,
-    );
-    parts.routes.clone_from(routes);
-    parts.membership = lanes
-        .iter()
-        .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
-        .collect();
-    let units: Vec<_> = runs
-        .iter()
-        .map(|run| {
-            let banked = lanes.contains_key(&program.ops[run[0][0]].node);
-            (
-                if banked {
-                    vec![Membership::Effect(0); run.len()]
-                } else {
-                    Vec::new()
-                },
-                run.iter().flatten().copied().collect(),
-            )
-        })
-        .collect();
-    route_fold(program, spec, &parts, &units).map(|fold| {
-        let mut routes = fold.retired.into_iter().collect::<Vec<_>>();
-        // Retirement is a set, but lane order is render order, not op-index order.
-        let (readers, _) = op_dataflow(program);
-        let lanes = fold
-            .runs
-            .into_iter()
-            .flat_map(|(run, folded)| {
-                runs[run]
-                    .last()
-                    .expect("last slot")
-                    .iter()
-                    .zip(folded)
-                    .map(|(producer, lane)| {
-                        let route = readers[*producer][0];
-                        routes.retain(|retired| *retired != route);
-                        (run, route, lane.coefficients.map(f32::to_bits), lane.store)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert!(
-            routes.is_empty(),
-            "every retired route belongs to a folded lane"
-        );
-        (fold.master_op, lanes)
-    })
 }

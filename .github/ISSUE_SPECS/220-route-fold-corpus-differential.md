@@ -28,3 +28,21 @@ Evidence: `/tmp/issue220-attempt1` actual argv/env/source/log/exit records.
 Incidental lock ordering preserved externally and restored. Root checkpoints;
 independent XHIGH validity/oracle review, three physical guard removals, focused
 strict Clippy/broader graph tests and required PR/main qualification remain.
+
+## Attempt 1 review and bounded attempt 2
+
+Astra XHIGH verified independent oracle, valid program controls and exact source
+restoration. All three physical guard removals failed their intended assertion;
+debug and release-unwind graph suites each passed71 tests. Strict Clippy then
+failed items_after_test_module on the appended seam. Review also required the
+stale no-red ledger to describe new evidence precisely. Root authorized moving
+the seam before the existing test module and replacing the same25 comment lines.
+
+Astra LOW applied only those changes, preserving production line numbers and all
+predicates/oracles. Formatting, locked strict all-target/all-feature Clippy and
+both focused route/corpus tests passed. Existing non-fatal Clippy configuration
+warnings remain unchanged. Evidence: `/tmp/issue220-attempt2`. Candidate retention
+has evidence for exclusive route readership; its master-equality conjunct remains
+subsumed by whole-list association, without independent mutation credit. Earlier
+full-suite/control receipts: `/tmp/issue220-xhigh-review-9b00b42f/review.md`.
+Independent exact-correction review and required PR/main qualification remain.
