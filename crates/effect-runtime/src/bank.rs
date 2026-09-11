@@ -108,9 +108,9 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
 /// Measured, not assumed: a settled parametric-EQ bank handed one block of all `-0.0` writes back
 /// all `+0.0`. The SVF's `x - ic2` at `ic2 = +0.0` does give `-0.0`, but the output sum
 /// `m0*x + m1*v1 + m2*v2` mixes signed zeros and `(-0.0) + (+0.0)` is `+0.0` under
-/// round-to-nearest. The compressor reaches the same place by a different route: a `-0.0` block is
-/// written into its lookahead ring and emerges some seven blocks later, so skipping it changes a
-/// sample that is not even in this block.
+/// round-to-nearest. The compressor's causal detector and recursive gain state settle on a `-0.0`
+/// block, but skipping that block still changes the exact signed-zero output the kernel would have
+/// written.
 ///
 /// So a sign-blind predicate would let a claim earned on `+0.0` engage on a `-0.0` block, and the
 /// skip would leave the buffer holding `-0.0` where the kernel writes `+0.0` — different bit

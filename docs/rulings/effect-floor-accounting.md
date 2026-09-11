@@ -815,13 +815,13 @@ The class-B candidates this document identified, flagged and not chased:
 |---|---|---|
 | limiter | splat the reciprocal of `hot.window` once per block instead of dividing per sample | changes the rounding of every gain word |
 | limiter | a cheaper true-peak detector than the 12-tap x 4-phase Annex-2 estimator (109 of 138 lane-ops) | a different detection algorithm |
-| compressor | make the detector delay `D` part of the program key so the gather becomes a vector load | changes what a bank may contain, and so what a session renders |
+| compressor | make the detector delay `D` part of the program key (retired by issue #737) | the causal compressor has no detector-delay program dimension; the dated measured candidate remains evidence only |
 
-The third is the loop's most valuable open question and the least obviously class B: the gather is
-141 of 315 instructions per channel-frame, and the only reason it is scalar is that lookahead is
-deliberately per lane. Whether uniform-cohort admission — the mechanism the limiter's round 1
-already uses for exactly this reason — could apply to the compressor's detector tap is an owner
-question about the effect contract, not an optimisation.
+The compressor detector-delay/program-key candidate is retired by issue #737. The dated
+measurements above remain historical evidence, not a live optimization target or a claim about the
+causal launch contract. The old detector-gather accounting is retained only to explain the decision
+record; no current effect may reintroduce that latency dimension without a new owner ruling and
+issue.
 
 ---
 

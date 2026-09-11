@@ -161,8 +161,8 @@ fn each_launch_effect_sees_its_own_designed_words_disagree() {
             left: -3.0,
             right: -1.0,
         },
-        // `lookahead`, index 2: the limiter's twin of the compressor case above, and the one that
-        // covers the two words the ramp comparison cannot reach.
+        // `lookahead`, index 2: the limiter's independent window case, and the one that
+        // covers the two non-ramped words the comparison cannot reach.
         //
         // It is `AutomationRate::None` and `SmoothingRule::None`, so it is not ramped at all: it
         // reaches the kernel only as `lane[l]` -- the van Herk window geometry

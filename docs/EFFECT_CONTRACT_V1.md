@@ -213,7 +213,7 @@ The harness is built from the descriptor, not from the reference mock: the prepa
 `PreparedSidechainPort::None`), the impulse probe renders as many blocks as the declared latency
 needs, and lane isolation is compared against a silence-rendered control instance in dual-mono
 only — a linked detector is exactly what `Maximum` and `Average` declare. Launch effects run it:
-`compressor` (882 samples of lookahead, linked detector, a ring index that advances on
+`compressor` (zero latency, linked detector, recursive state that settles on
 silence) and `parametric-eq` (zero latency, header-carrying payload) each have a
 `tests/conformance.rs` asserting `report.launch_gates.failures.is_empty()`. A contract whose only
 conforming implementation is its own mock is not evidence. Deterministic tests execute at least 10,000

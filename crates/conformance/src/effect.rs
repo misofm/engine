@@ -1123,13 +1123,13 @@ pub fn run_effect_conformance(
                 let mut left = vec![0.0; frames];
                 let mut right = vec![0.0; frames];
 
-                // Issue #95: render as many blocks as the declared latency needs, not one.
-                // The audited probe rendered a single `quantum`-frame block and asserted the
-                // impulse landed inside it, which is only true for an effect whose latency is
-                // shorter than one quantum — the reference mock's three samples. The compressor
-                // declares 882 (20 ms of lookahead at 44.1 kHz), so the probe could never have
-                // passed for a real effect. Latency is a *sample count*, so the gate is the
-                // absolute index of the first non-zero output over the whole render.
+                // Issue #95: render enough blocks to cover the declared latency, including the zero-latency
+                // case.
+                // The audited probe rendered a single `quantum`-frame block and asserted the impulse landed inside
+                // it, which is only true for an effect whose latency is shorter than one quantum — the reference
+                // mock's three samples. A launch effect may declare a longer fixed latency, while causal effects
+                // declare zero; the probe therefore uses the descriptor's sample count and checks the first
+                // non-zero output over the complete bounded render.
                 let blocks_for_latency = expected.latency.0 as usize / frames + 1;
                 let mut within_bounds = true;
                 let mut panicked = false;
