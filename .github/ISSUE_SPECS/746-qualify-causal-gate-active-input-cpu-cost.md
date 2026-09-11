@@ -218,3 +218,13 @@ active-input descriptive qualification. Attempt1 remains FAIL before timing.
 The sole measurement allowance is now consumed; no rerun is needed or permitted
 under this record. Required PR/main qualification and GitHub closure remain
 pending delivery steps; no listening or floor claim is added.
+
+## Delivery complete — 2026-09-11
+
+PR751 merged reviewed d367b420 as main06167eb286f2d6ee46e82daf86936a24801347ee.
+Exact PR qualification34625139373 and resulting-main34625814610 both PASS.
+GitHub746 CLOSED verified; final evidence comment5638022249 and parent560
+comment5638022539 synchronize delivery. Root removed the clean pushed worktree,
+retaining branch/history and raw measurement/verdict evidence outside it.
+The scoped descriptive gate capability is delivered; no rerun/floor/listening
+claim follows. #748 activates separately from this delivered main.
