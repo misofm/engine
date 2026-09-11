@@ -568,24 +568,6 @@ pub fn lr4_coefficients<L: Lane>(sample_rate: u32, crossover_hz: f32) -> Option<
     })
 }
 
-/// The detector tap's offset from the write cursor, in ring slots.
-///
-/// The output tap is one slot ahead of the cursor, which is `ring_len - 1 = Fs/50` samples of
-/// delay: the declared latency. The detector tap is `lookahead` samples earlier still, so its
-/// offset is `1 + lookahead` and lies in `[1, ring_len]` — which is what makes the single
-/// compare-and-subtract wrap in [`Instance::detector`] correct.
-fn detector_offset(lookahead_ms: f32, sample_rate: u32, ring_len: usize) -> Option<usize> {
-    if !parameter_value_valid(&SPECS[1], lookahead_ms) || sample_rate == 0 || ring_len < 2 {
-        return None;
-    }
-    let samples = math::floor(f64::from(lookahead_ms) * f64::from(sample_rate) / 1_000.0 + 0.5);
-    if !samples.is_finite() || samples < 0.0 {
-        return None;
-    }
-    let latency = ring_len - 1;
-    Some(1 + (samples as usize).min(latency))
-}
-
 // ---------------------------------------------------------------------------------------------
 // Instance
 // ---------------------------------------------------------------------------------------------
@@ -679,10 +661,7 @@ struct Side<L: Lane, const W: usize> {
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
-    fn new(
-        defaults: [[f32; PARAMETER_COUNT]; W],
-        sample_rate: u32,
-    ) -> Option<Self> {
+    fn new(defaults: [[f32; PARAMETER_COUNT]; W], sample_rate: u32) -> Option<Self> {
         let mut designed = [[0.0; 3]; W];
         let mut crossover_hz = [0.0; W];
         let mut ramps = [[LinearRamp::fixed(0.0); RAMP_COUNT]; W];
@@ -850,9 +829,9 @@ fn band_amplitude<L: Lane>(
 /// One segment: `frames` frames over which no ramp arrives at its target.
 ///
 /// The whole render path is here. `LINK` and `BYPASS` are compile-time, because both are fixed
-/// when the effect is prepared; a bypassed instance is a pure `Fs/50` delay through the low ring
-/// and runs neither the crossover nor the dynamics, and it still advances its ramps so that its
-/// parameter state does not depend on whether it was bypassed.
+/// when the effect is prepared; a bypassed instance is a pure dry path and runs neither the
+/// crossover nor the dynamics, and it still advances its ramps so that its parameter state does
+/// not depend on whether it was bypassed.
 ///
 /// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
 /// It says whether any ramp of any track of either channel still has samples to produce over this
@@ -905,10 +884,8 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
         }
         let (low_near, high_near) = lr4_step(input_near, &near.coefficients, &mut filter_near);
         let (low_far, high_far) = lr4_step(input_far, &far.coefficients, &mut filter_far);
-        let (linked_near_low, linked_far_low) =
-            link_levels::<L, LINK>(low_near, low_far);
-        let (linked_near_high, linked_far_high) =
-            link_levels::<L, LINK>(high_near, high_far);
+        let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
+        let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
         let amplitude_near_low = band_amplitude(
             linked_near_low,
@@ -1202,9 +1179,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         reports: &mut [ProcessReport],
     ) {
         let sides = &mut self.sides;
-        let cursor = &mut self.cursor;
         let accepted = bank::finish_block::<L>(left, right, &mut self.nonfinite, || {
-            *cursor = 0;
             for side in sides.iter_mut() {
                 side.discontinuity_reset();
             }
@@ -1253,7 +1228,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 .checked_mul(2)
                 .and_then(|value| value.checked_add(side as u32));
             let ramp = parameter
-                .checked_sub(2)
+                .checked_sub(1)
                 .filter(|value| *value < RAMP_COUNT && parameter < PARAMETER_COUNT);
             let valid = ramp.is_some()
                 && index < capacity as usize
@@ -1320,11 +1295,7 @@ struct StagedSide {
     filter: [f32; 4],
 }
 
-fn write_side<L: Lane, const W: usize>(
-    bytes: &mut [u8],
-    side: &Side<L, W>,
-    track: usize,
-) {
+fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, track: usize) {
     write_f32(bytes, 0, side.crossover_hz[track]);
     write_f32(bytes, 1, lane_value(side.gain_db[LOW_BAND], track));
     write_f32(bytes, 2, lane_value(side.gain_db[HIGH_BAND], track));
@@ -1348,10 +1319,7 @@ fn write_side<L: Lane, const W: usize>(
 }
 
 /// Validates one channel's fixed words.
-fn stage_side(
-    bytes: &[u8],
-    sample_rate: u32,
-) -> Result<StagedSide, StatePayloadError> {
+fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayloadError> {
     let crossover_hz = read_f32(bytes, 0);
     if !parameter_state_valid(0, crossover_hz) {
         return Err(state_error("effect.state.parameter"));
@@ -1407,12 +1375,7 @@ fn stage_side(
 }
 
 /// Applies a staged channel. Never allocates.
-fn commit_side<L: Lane, const W: usize>(
-    side: &mut Side<L, W>,
-    staged: &StagedSide,
-    bytes: &[u8],
-    track: usize,
-) {
+fn commit_side<L: Lane, const W: usize>(side: &mut Side<L, W>, staged: &StagedSide, track: usize) {
     side.crossover_hz[track] = staged.crossover_hz;
     side.designed[track] = staged.designed;
     side.coefficients = lane_coefficients::<L, W>(&side.designed);
@@ -1447,7 +1410,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// `expected_sizes`, which unconditionally reserves the two versioned header words this crate
     /// does not carry (W2-D2). The word codec itself is the shared one.
     fn validate_lengths(&self, sections: (usize, usize, usize)) -> Result<(), StatePayloadError> {
-        let lane = (LANE_HEADER_WORDS + 2 * self.ring_len) * state_payload_word_bytes();
+        let lane = LANE_HEADER_WORDS * state_payload_word_bytes();
         if sections.0 != 0 || sections.1 != lane || sections.2 != lane {
             return Err(state_error(STATE_LENGTH_CODE));
         }
@@ -1462,20 +1425,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     ) -> Result<(), StatePayloadError> {
         self.validate_lengths((output.common.len(), output.left.len(), output.right.len()))?;
         debug_assert_eq!(output.left.len(), sizes.left_bytes as usize);
-        write_side(
-            output.left,
-            &self.sides[0],
-            track,
-            self.cursor,
-            self.ring_len,
-        );
-        write_side(
-            output.right,
-            &self.sides[1],
-            track,
-            self.cursor,
-            self.ring_len,
-        );
+        write_side(output.left, &self.sides[0], track);
+        write_side(output.right, &self.sides[1], track);
         Ok(())
     }
 
@@ -1489,24 +1440,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             return Err(state_error(STATE_VERSION_CODE));
         }
         self.validate_lengths((input.common.len(), input.left.len(), input.right.len()))?;
-        let left = stage_side(input.left, self.sample_rate, self.ring_len)?;
-        let right = stage_side(input.right, self.sample_rate, self.ring_len)?;
-        commit_side(
-            &mut self.sides[0],
-            &left,
-            input.left,
-            track,
-            self.cursor,
-            self.ring_len,
-        );
-        commit_side(
-            &mut self.sides[1],
-            &right,
-            input.right,
-            track,
-            self.cursor,
-            self.ring_len,
-        );
+        let left = stage_side(input.left, self.sample_rate)?;
+        let right = stage_side(input.right, self.sample_rate)?;
+        commit_side(&mut self.sides[0], &left, track);
+        commit_side(&mut self.sides[1], &right, track);
         Ok(())
     }
 }
@@ -1789,344 +1726,6 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 }
 
 #[cfg(test)]
-mod detector_access_tests {
-    use super::*;
-
-    const RING_LEN: usize = 7;
-
-    fn patterned_ring<const W: usize>() -> Vec<f32> {
-        let mut ring = vec![0.0f32; RING_LEN * W];
-        for (index, word) in ring.iter_mut().enumerate() {
-            // Keep every row/lane word distinct. The first row also carries directed +0/-0
-            // values so the wrap case checks sign bits rather than numeric equality.
-            let bits = match index {
-                0 => 0x0000_0000,
-                1 => 0x8000_0000,
-                _ => 0x3f80_0000 + index as u32,
-            };
-            *word = f32::from_bits(bits);
-        }
-        ring
-    }
-
-    fn assert_rows_are_distinct<const W: usize>(ring: &[f32]) {
-        for left in 0..RING_LEN {
-            for right in left + 1..RING_LEN {
-                assert!(
-                    (0..W).any(|track| {
-                        ring[left * W + track].to_bits() != ring[right * W + track].to_bits()
-                    }),
-                    "rows {left} and {right} must remain distinguishable"
-                );
-            }
-        }
-        assert_eq!(ring[0].to_bits(), 0x0000_0000, "directed +0 fixture word");
-        if W > 1 {
-            assert_eq!(ring[1].to_bits(), 0x8000_0000, "directed -0 fixture word");
-        }
-    }
-
-    /// Independent old-index oracle: this deliberately spells out the one subtract rather than
-    /// calling the production `wrap`, so a changed access route cannot make its own oracle pass.
-    fn old_detector_words<const W: usize>(
-        ring: &[f32],
-        cursor: usize,
-        offsets: &[usize; W],
-        ring_len: usize,
-    ) -> [u32; W] {
-        core::array::from_fn(|track| {
-            let index = cursor + offsets[track];
-            let row = if index >= ring_len {
-                index - ring_len
-            } else {
-                index
-            };
-            ring[row * W + track].to_bits()
-        })
-    }
-
-    fn lane_words<L: Lane, const W: usize>(value: L) -> [u32; W] {
-        let mut words = [0u32; 8];
-        value.store_bits(&mut words[..W]);
-        core::array::from_fn(|track| words[track])
-    }
-
-    fn assert_tap_case<L: Lane, const W: usize>(
-        ring: &[f32],
-        cursor: usize,
-        offsets: [usize; W],
-        expected_uniform: bool,
-        label: &str,
-    ) {
-        assert_eq!(
-            detector_offsets_uniform(&offsets),
-            expected_uniform,
-            "{label}: classification"
-        );
-        let expected = old_detector_words(ring, cursor, &offsets, RING_LEN);
-        let selected = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, expected_uniform);
-        assert_eq!(lane_words(selected), expected, "{label}: selected route");
-
-        let fallback = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, false);
-        assert_eq!(lane_words(fallback), expected, "{label}: old fallback");
-    }
-
-    fn width_word_witness<L: Lane, const W: usize>() {
-        let ring = patterned_ring::<W>();
-        assert_rows_are_distinct::<W>(&ring);
-        let uniform_one = [1usize; W];
-        let uniform_interior = [3usize; W];
-        let uniform_ring_end = [RING_LEN; W];
-        assert_tap_case::<L, W>(&ring, 0, uniform_one, true, "O=1");
-        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_one, true, "O=1 wrap");
-        assert_tap_case::<L, W>(&ring, 2, uniform_interior, true, "interior");
-        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_ring_end, true, "O=B wrap");
-
-        if W > 1 {
-            let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
-            assert_tap_case::<L, W>(&ring, RING_LEN - 1, ragged, false, "ragged wrap");
-
-            // Distinct uniform channel words are both eligible, while they must not be merged.
-            let near_uniform = [2usize; W];
-            let far_uniform = [5usize; W];
-            assert_tap_case::<L, W>(&ring, 1, near_uniform, true, "near uniform");
-            assert_tap_case::<L, W>(&ring, 1, far_uniform, true, "far unequal uniform");
-
-            // Exercise both channel directions of the mixed uniform/ragged contract.
-            assert_tap_case::<L, W>(&ring, 4, near_uniform, true, "uniform/ragged uniform");
-            assert_tap_case::<L, W>(&ring, 4, ragged, false, "uniform/ragged ragged");
-            assert_tap_case::<L, W>(&ring, 5, ragged, false, "ragged/uniform ragged");
-            assert_tap_case::<L, W>(&ring, 5, far_uniform, true, "ragged/uniform uniform");
-        }
-    }
-
-    fn default_initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
-        core::array::from_fn(|index| InitialParameterValue {
-            parameter_index: (index / 2) as u32,
-            channel: if index % 2 == 0 {
-                ParameterChannel::Left
-            } else {
-                ParameterChannel::Right
-            },
-            value: MULTIBAND_COMPRESSOR_PARAMETERS[index / 2].default_value,
-        })
-    }
-
-    fn test_metadata(
-        initial_values: &[InitialParameterValue; PARAMETER_COUNT * 2],
-    ) -> PreparedEffectMetadata {
-        expected_prepared_metadata(
-            &MULTIBAND_COMPRESSOR_DESCRIPTOR,
-            PrepareEffectRequest {
-                sample_rate: 48_000,
-                quantum: 128,
-                quality: EffectQuality::Normal,
-                bypass: false,
-                link_mode: LinkMode::DualMono,
-                ports: effect_contract::PreparedPorts {
-                    sidechain: effect_contract::PreparedSidechainPort::None,
-                },
-                initial_values,
-                limits: effect_contract::PrepareEffectLimits {
-                    maximum_total_state_bytes: u64::MAX,
-                    maximum_scratch_bytes: u64::MAX,
-                    maximum_automation_spans_per_block: 32,
-                },
-            },
-        )
-        .expect("test metadata")
-    }
-
-    fn clear_detector_observation() {
-        DETECTOR_OBSERVATION.with(|observation| observation.set(DetectorObservation::new()));
-    }
-
-    fn detector_observation() -> DetectorObservation {
-        DETECTOR_OBSERVATION.with(|observation| observation.get())
-    }
-
-    fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
-        assert_eq!(ring.len() % W, 0);
-        for (index, sample) in ring.iter_mut().enumerate() {
-            let bits = match (identity, index) {
-                (0, 0) => 0x0000_0000,
-                (0, 1) => 0x8000_0000,
-                _ => 0x3f80_0000 + identity * 0x0010_0000 + index as u32,
-            };
-            *sample = f32::from_bits(bits);
-        }
-    }
-
-    fn seed_instance_rings<L: Lane, const W: usize>(instance: &mut Instance<L, W>) {
-        seed_ring::<W>(&mut instance.sides[0].low_ring, 0);
-        seed_ring::<W>(&mut instance.sides[0].high_ring, 1);
-        seed_ring::<W>(&mut instance.sides[1].low_ring, 2);
-        seed_ring::<W>(&mut instance.sides[1].high_ring, 3);
-    }
-
-    fn padded_words<const W: usize>(words: [u32; W]) -> [u32; 8] {
-        let mut padded = [0u32; 8];
-        padded[..W].copy_from_slice(&words);
-        padded
-    }
-
-    fn push_expected_tap<const W: usize>(
-        expected: &mut Vec<[u32; 8]>,
-        ring: &[f32],
-        cursor: usize,
-        offsets: &[usize; W],
-        ring_len: usize,
-    ) {
-        expected.push(padded_words(old_detector_words(
-            ring, cursor, offsets, ring_len,
-        )));
-    }
-
-    fn expected_callsite_words<const W: usize>(
-        rings: [&[f32]; 4],
-        near_offsets: &[usize; W],
-        far_offsets: &[usize; W],
-        ring_len: usize,
-        frames: usize,
-    ) -> Vec<[u32; 8]> {
-        let mut expected = Vec::with_capacity(frames * 4);
-        for cursor in 0..frames {
-            push_expected_tap(&mut expected, rings[0], cursor, near_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[1], cursor, near_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[2], cursor, far_offsets, ring_len);
-            push_expected_tap(&mut expected, rings[3], cursor, far_offsets, ring_len);
-        }
-        expected
-    }
-
-    fn assert_actual_observation<const W: usize>(
-        expected: &[[u32; 8]],
-        expected_uniform_calls: usize,
-        expected_ragged_calls: usize,
-        label: &str,
-    ) {
-        let observed = detector_observation();
-        assert_eq!(
-            observed.entries,
-            expected.len(),
-            "{label}: observed entry count"
-        );
-        for (index, expected_words) in expected.iter().enumerate() {
-            assert_eq!(
-                observed.widths[index] as usize, W,
-                "{label}: observed width at entry {index}"
-            );
-            assert_eq!(
-                observed.words[index], *expected_words,
-                "{label}: actual accessed words at entry {index}"
-            );
-        }
-        assert_eq!(
-            observed.uniform_calls, expected_uniform_calls,
-            "{label}: executed uniform calls"
-        );
-        assert_eq!(
-            observed.ragged_calls, expected_ragged_calls,
-            "{label}: executed ragged calls"
-        );
-    }
-
-    fn prepared_callsite_case<L: Lane, const W: usize>(
-        metadata: PreparedEffectMetadata,
-        left_defaults: [f32; PARAMETER_COUNT],
-        right_defaults: [f32; PARAMETER_COUNT],
-        near_offsets: [usize; W],
-        far_offsets: [usize; W],
-        label: &str,
-    ) {
-        const FRAMES: usize = 3;
-        let mut instance = Instance::<L, W>::new([left_defaults; W], [right_defaults; W], metadata)
-            .expect("prepared witness instance");
-        instance.sides[0].detector_offset = near_offsets;
-        instance.sides[1].detector_offset = far_offsets;
-        seed_instance_rings(&mut instance);
-        let ring_copies = [
-            instance.sides[0].low_ring.to_vec(),
-            instance.sides[0].high_ring.to_vec(),
-            instance.sides[1].low_ring.to_vec(),
-            instance.sides[1].high_ring.to_vec(),
-        ];
-        let expected = expected_callsite_words(
-            [
-                &ring_copies[0],
-                &ring_copies[1],
-                &ring_copies[2],
-                &ring_copies[3],
-            ],
-            &near_offsets,
-            &far_offsets,
-            instance.ring_len,
-            FRAMES,
-        );
-        let near_uniform = detector_offsets_uniform(&near_offsets);
-        let far_uniform = detector_offsets_uniform(&far_offsets);
-        let expected_uniform_calls = 2 * FRAMES * (near_uniform as usize + far_uniform as usize);
-        let expected_ragged_calls =
-            2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
-        let mut left = vec![0.25f32; FRAMES * W];
-        let mut right = vec![-0.5f32; FRAMES * W];
-        let mut reports = [ProcessReport::default(); W];
-        clear_detector_observation();
-        render::<L, W, false>(&mut instance, &mut left, &mut right, FRAMES, &mut reports);
-        assert_actual_observation::<W>(
-            &expected,
-            expected_uniform_calls,
-            expected_ragged_calls,
-            label,
-        );
-    }
-
-    fn prepared_callsite_witness<L: Lane, const W: usize>() {
-        let initial_values = default_initial_values();
-        let metadata = test_metadata(&initial_values);
-        let (left_defaults, right_defaults) = initial_defaults(&initial_values).expect("defaults");
-        let uniform_near = [1usize; W];
-        let uniform_far = [2usize; W];
-        let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
-
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            uniform_near,
-            uniform_far,
-            "prepared uniform channels",
-        );
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            ragged,
-            uniform_far,
-            "prepared ragged-left uniform-right",
-        );
-        prepared_callsite_case::<L, W>(
-            metadata,
-            left_defaults,
-            right_defaults,
-            uniform_near,
-            ragged,
-            "prepared uniform-left ragged-right",
-        );
-    }
-
-    #[test]
-    fn detector_access_matches_old_words_and_prepared_callsite_route() {
-        width_word_witness::<f32, 1>();
-        width_word_witness::<Simd4, 4>();
-        width_word_witness::<Simd8, 8>();
-        prepared_callsite_witness::<f32, 1>();
-        prepared_callsite_witness::<Simd4, 4>();
-        prepared_callsite_witness::<Simd8, 8>();
-    }
-}
-
-#[cfg(test)]
 mod reset_tests {
     use super::*;
 
@@ -2142,9 +1741,7 @@ mod reset_tests {
         })
     }
 
-    fn metadata(
-        values: &[InitialParameterValue; PARAMETER_COUNT * 2],
-    ) -> PreparedEffectMetadata {
+    fn metadata(values: &[InitialParameterValue; PARAMETER_COUNT * 2]) -> PreparedEffectMetadata {
         expected_prepared_metadata(
             &MULTIBAND_COMPRESSOR_DESCRIPTOR,
             PrepareEffectRequest {
@@ -2191,8 +1788,8 @@ mod reset_tests {
         let prepared_metadata = metadata(&values);
         let sizes = prepared_metadata.state_sizes;
         let (left, right) = initial_defaults(&values).expect("defaults");
-        let mut receiver = Instance::<f32, 1>::new([left], [right], prepared_metadata)
-            .expect("receiver instance");
+        let mut receiver =
+            Instance::<f32, 1>::new([left], [right], prepared_metadata).expect("receiver instance");
         let (common, mut restored_left, mut restored_right) = snapshot(&receiver, sizes);
         write_f32(&mut restored_left, 0, 2_000.0);
         write_f32(&mut restored_right, 0, 2_000.0);

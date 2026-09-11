@@ -412,3 +412,18 @@ index subtraction: the old offset2 must become1 after retiring stable ID2.
 Frozen DSP/state/resources/tolerances and all final gates remain unchanged.
 Root owns generated SDK/catalog, artifacts, evidence and delivery; CPU748 and
 listening26 stay separate. No source/test/measurement PASS is claimed by scoping.
+
+
+## Resumed core/reset checkpoint — 2026-09-11
+
+Luna xhigh completed the interrupted lib.rs/split.rs tranche: compact 188-byte
+channel codec callers, staged restore, prepared-default reset coefficients, stale
+detector/ring removal, compact automation offset1 and causal split fixtures.
+A test-only global-plane adapter compares equal global sample order across block
+partitions; the existing block-major runner and active-channel probes remain.
+Locked crate check, library/split16passed/1ignored, workspace fmt check and diff
+check PASS. The inherited different-crossover reset discriminator is now green.
+Raw results: /tmp/issue739-luna-resume-core.{check,test,fmt}.log.
+This compiling checkpoint is not final product PASS: public suites/oracle, thin
+descendants, SDK/target/artifact evidence and Astra medium final review remain.
+No timing, corpus digest, tolerance or generated-artifact change occurred.
