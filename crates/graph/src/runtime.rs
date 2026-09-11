@@ -2231,11 +2231,6 @@ impl RuntimeParts {
     /// The scratch and the lane mask come from the run's first slot; every slot of a cohort
     /// covers the same lanes by construction, and `BankChain::new` re-checks it rather than
     /// trusting it.
-    #[cfg(test)]
-    fn chain_for(&mut self, run: &[Membership], members: usize) -> BankChain {
-        self.chain_for_with_fold(run, members, None)
-    }
-
     fn chain_for_with_fold(
         &mut self,
         run: &[Membership],
@@ -5011,7 +5006,7 @@ mod tests {
         assert_eq!(runtime.buffer(ARENA_BASE).1, &[-0.25, -0.25]);
     }
 
-    struct DecliningPairOwner(Arc<AtomicUsize>);
+    struct DecliningPairOwner(Arc<AtomicUsize>, bool);
     fn decline_pair(
         left: crate::BuiltinProcessor,
         right: crate::BuiltinProcessor,
@@ -5026,7 +5021,7 @@ mod tests {
             self
         }
         fn pair_factory(&self) -> Option<crate::BuiltinPairFactory> {
-            Some(decline_pair)
+            Some(if self.1 { accept_pair } else { decline_pair })
         }
         fn process(
             &mut self,
@@ -5040,6 +5035,31 @@ mod tests {
                 *sample += 1.0;
             }
             Ok(())
+        }
+    }
+    struct AcceptedPair(crate::BuiltinProcessor, crate::BuiltinProcessor);
+    fn accept_pair(
+        left: crate::BuiltinProcessor,
+        right: crate::BuiltinProcessor,
+    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
+        Ok(Box::new(AcceptedPair(left, right)))
+    }
+    impl GraphPreparedBuiltinBankProcessor for AcceptedPair {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            frames: u32,
+            sample: u64,
+        ) -> Result<(), RenderError> {
+            self.0.process(left, right, frames, sample)?;
+            self.1.process(left, right, frames, sample)
         }
     }
     struct PlainPairOwner(Arc<AtomicUsize>);
@@ -5066,93 +5086,123 @@ mod tests {
     }
 
     #[test]
-    fn a_declined_first_pair_retains_the_first_slots_scratch() {
-        let track = crate::StableGraphId::parse("decline").expect("id");
-        let fader = GraphNodeId::TrackStage {
-            track_id: track.clone(),
-            stage: TrackStage::PostFader,
-        };
-        let matrix = GraphNodeId::TrackStage {
-            track_id: track,
-            stage: TrackStage::PostMatrix,
-        };
-        let spec = GraphSpec {
-            nodes: vec![
-                crate::GraphNode {
-                    id: fader.clone(),
-                    latency: effect_contract::LatencySamples(0),
-                    tail: effect_contract::TailSamples::Finite(0),
-                },
-                crate::GraphNode {
-                    id: matrix.clone(),
-                    latency: effect_contract::LatencySamples(0),
-                    tail: effect_contract::TailSamples::Finite(0),
-                },
-            ],
-            ports: Vec::new(),
-            edges: Vec::new(),
-        };
-        let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
-            GraphPreparedBuiltinBank {
-                backend: lane::Backend::Simd4,
-                members: vec![member].into_boxed_slice(),
-                processor,
-                scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8).expect("scratch"),
+    fn prepared_fold_retains_first_slots_scratch_through_pair_success_and_decline() {
+        for accepted in [false, true] {
+            for folded in [false, true] {
+                let track = crate::StableGraphId::parse("decline").expect("id");
+                let fader = GraphNodeId::TrackStage {
+                    track_id: track.clone(),
+                    stage: TrackStage::PostFader,
+                };
+                let matrix = GraphNodeId::TrackStage {
+                    track_id: track,
+                    stage: TrackStage::PostMatrix,
+                };
+                let spec = GraphSpec {
+                    nodes: vec![
+                        crate::GraphNode {
+                            id: fader.clone(),
+                            latency: effect_contract::LatencySamples(0),
+                            tail: effect_contract::TailSamples::Finite(0),
+                        },
+                        crate::GraphNode {
+                            id: matrix.clone(),
+                            latency: effect_contract::LatencySamples(0),
+                            tail: effect_contract::TailSamples::Finite(0),
+                        },
+                    ],
+                    ports: Vec::new(),
+                    edges: Vec::new(),
+                };
+                let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
+                    GraphPreparedBuiltinBank {
+                        backend: lane::Backend::Simd4,
+                        members: vec![member].into_boxed_slice(),
+                        processor,
+                        scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8)
+                            .expect("scratch"),
+                    }
+                };
+                let first_calls = Arc::new(AtomicUsize::new(0));
+                let second_calls = Arc::new(AtomicUsize::new(0));
+                let mut parts = RuntimeParts::new(
+                    &spec,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    vec![
+                        bank(
+                            fader,
+                            Box::new(DecliningPairOwner(Arc::clone(&first_calls), accepted)),
+                        ),
+                        bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                    Default::default(),
+                    Vec::new(),
+                    8,
+                );
+                let configuration = folded.then(|| {
+                    rack::PreparedFoldConfiguration::new(
+                        BankWidth::Four,
+                        vec![true, false, false, false].into_boxed_slice(),
+                        vec![true, false, false, false].into_boxed_slice(),
+                    )
+                    .expect("borrowed shape configuration")
+                });
+                let mut chain = parts.chain_for_with_fold(
+                    &[Membership::Builtin(0), Membership::Builtin(1)],
+                    1,
+                    configuration,
+                );
+                assert_eq!(chain.width(), BankWidth::Four);
+                assert_eq!(
+                    chain.fold_lanes(),
+                    if folded {
+                        &[true, false, false, false][..]
+                    } else {
+                        &[]
+                    }
+                );
+                assert!(
+                    parts.builtin_banks.iter().all(Option::is_none),
+                    "both original owners moved once"
+                );
+                const FRAMES: usize = 2;
+                let mut lease = stereo_lease(FRAMES, 3);
+                lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+                lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+                let fold = [FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: true,
+                }];
+                let mut members = ArenaMembers {
+                    lease: &mut lease,
+                    inputs: &[1],
+                    outputs: &[2],
+                    fold: if folded { &fold } else { &[] },
+                    master: 2,
+                };
+                chain
+                    .run(&mut members, FRAMES as u32, 0)
+                    .expect("declined chain render");
+                assert_eq!(
+                    first_calls.load(Ordering::Relaxed),
+                    1,
+                    "first returned owner executes"
+                );
+                assert_eq!(
+                    second_calls.load(Ordering::Relaxed),
+                    1,
+                    "second returned owner executes"
+                );
+                assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
+                assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
             }
-        };
-        let first_calls = Arc::new(AtomicUsize::new(0));
-        let second_calls = Arc::new(AtomicUsize::new(0));
-        let mut parts = RuntimeParts::new(
-            &spec,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                bank(
-                    fader,
-                    Box::new(DecliningPairOwner(Arc::clone(&first_calls))),
-                ),
-                bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Default::default(),
-            Vec::new(),
-            8,
-        );
-        let mut chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
-        assert!(
-            parts.builtin_banks.iter().all(Option::is_none),
-            "both original owners moved once"
-        );
-        const FRAMES: usize = 2;
-        let mut lease = stereo_lease(FRAMES, 3);
-        lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
-        lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
-        let mut members = ArenaMembers {
-            lease: &mut lease,
-            inputs: &[1],
-            outputs: &[2],
-            fold: &[],
-            master: 0,
-        };
-        chain
-            .run(&mut members, FRAMES as u32, 0)
-            .expect("declined chain render");
-        assert_eq!(
-            first_calls.load(Ordering::Relaxed),
-            1,
-            "first returned owner executes"
-        );
-        assert_eq!(
-            second_calls.load(Ordering::Relaxed),
-            1,
-            "second returned owner executes"
-        );
-        assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
-        assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
+        }
     }
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).

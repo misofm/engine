@@ -98,3 +98,29 @@ before rejection, then successful same-owner retry with four folded lanes and
 known three-block PCM. Added folded-op mapping consistency rejection. Formatting
 and focused recovery test passed; receipts /tmp/issue221-attempt1-recovery.
 Rack PCM/pairing, console identity and strict gates remain before final review.
+
+## Attempt 1 implementation evidence — console identity gate pause
+
+Rack prepared-fold constructor/PCM tests (2), graph accepted/declined pairing test
+(1), and the existing poisoned zero-input Identity/Bound control (1) passed.
+`cargo test --locked -p console-workload --test chain_shape` exited 101: 20 passed,
+`the_half_mono_cohort_banks_like_a_uniform_one` failed at line 472 because the mono
+symmetry census was `(64, [65, 129])`, previously expected `(64, [64, 129])`.
+The helper now binds the master with the requested `GraphNodeBinding::identity`;
+its identity witness appears to explain the additional eligible unit. This is a
+hypothesis pending independent review, not a changed acceptance gate. Source edits
+stopped at this failure; strict Clippy was not launched by the sequential runner.
+Exact source/head/argv/environment/logs/exits are preserved externally in
+`/tmp/issue221-attempt1-pcm`. No benchmark or timing claim is made.
+
+## Attempt 1 preserved gate failure
+
+Rack old/new constructor PCM controls, pairing success/fallback and existing
+poisoned identity-buffer control passed. The required console helper now uses
+GraphNodeBinding::identity for non-source nodes. Console chain_shape compiled
+and passed20 tests, but the_half_mono_cohort_banks_like_a_uniform_one failed:
+mono eligible counters were [65,129], expected [64,129] at line472. Execution
+stopped before Clippy; no retry or correction was made. Preserve this useful
+compiling checkpoint and /tmp/issue221-attempt1-pcm logs/argv/env/exits. Astra
+XHIGH is reviewing whether the additional master identity explains the counter
+and what bounded correction is warranted; attempt PASS is not claimed.

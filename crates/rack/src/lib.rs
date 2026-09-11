@@ -4598,6 +4598,113 @@ mod tests {
         }
     }
 
+    /// The new constructor and the existing arming path render identical words for both bank
+    /// widths, including active holes, prefix subsets, full/partial staging and disarmed masks.
+    #[test]
+    fn prepared_fold_constructor_preserves_pcm_and_disarm() {
+        const FRAMES: u32 = 13;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for shape in 0..3 {
+                let mut active = vec![true; lanes];
+                if shape == 1 {
+                    active[lanes - 1] = false;
+                }
+                if shape == 2 {
+                    active[1] = false;
+                }
+                for subset in 0..3 {
+                    let fold: Vec<bool> = active
+                        .iter()
+                        .enumerate()
+                        .map(|(lane, active)| {
+                            *active
+                                && match subset {
+                                    0 => false,
+                                    1 => lane < 2,
+                                    _ => true,
+                                }
+                        })
+                        .collect();
+                    let scratch = || AoSoaScratch::new(width, FRAMES).expect("scratch");
+                    let slots = || vec![slot(active.clone(), Box::new(ScaleByLane))];
+                    let mut old =
+                        BankChain::new(scratch(), active.clone().into_boxed_slice(), slots())
+                            .expect("old");
+                    old.arm_fold(fold.clone().into_boxed_slice())
+                        .expect("old arm");
+                    let configuration = PreparedFoldConfiguration::new(
+                        width,
+                        active.clone().into_boxed_slice(),
+                        fold.into_boxed_slice(),
+                    )
+                    .expect("configuration");
+                    let mut new =
+                        BankChain::new_with_prepared_fold(scratch(), configuration, slots())
+                            .expect("new");
+                    assert_eq!(old.active, new.active);
+                    assert_eq!(old.fold_lanes(), new.fold_lanes());
+                    assert_eq!(old.staging_left.len(), new.staging_left.len());
+                    let provider = || PlanesWithFold {
+                        planes: Planes {
+                            left: (0..lanes)
+                                .map(|lane| {
+                                    (0..FRAMES)
+                                        .map(|frame| (lane as f32 + 0.125) * (frame as f32 - 2.0))
+                                        .collect()
+                                })
+                                .collect(),
+                            right: (0..lanes)
+                                .map(|lane| {
+                                    (0..FRAMES)
+                                        .map(|frame| (lane as f32 - 0.75) * (frame as f32 + 1.0))
+                                        .collect()
+                                })
+                                .collect(),
+                        },
+                        gains: (0..lanes).map(|lane| lane as f32 + 0.5).collect(),
+                        bus_left: vec![0.0; FRAMES as usize],
+                        bus_right: vec![0.0; FRAMES as usize],
+                        taken: Vec::new(),
+                        trace: Vec::new(),
+                        cohorts: Vec::new(),
+                    };
+                    for disarmed in [false, true] {
+                        if disarmed {
+                            old.arm_fold(vec![false; lanes].into_boxed_slice())
+                                .expect("disarm old");
+                            new.arm_fold(vec![false; lanes].into_boxed_slice())
+                                .expect("disarm new");
+                        }
+                        let mut expected = provider();
+                        let mut actual = provider();
+                        old.run(&mut expected, FRAMES, 0).expect("old run");
+                        new.run(&mut actual, FRAMES, 0).expect("new run");
+                        let words = |provider: &PlanesWithFold| {
+                            provider
+                                .planes
+                                .left
+                                .iter()
+                                .chain(&provider.planes.right)
+                                .flat_map(|plane| plane.iter())
+                                .chain(&provider.bus_left)
+                                .chain(&provider.bus_right)
+                                .map(|word| word.to_bits())
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(
+                            words(&expected),
+                            words(&actual),
+                            "{width:?}/{shape}/{subset}/{disarmed}"
+                        );
+                        assert_eq!(expected.trace, actual.trace);
+                        assert_eq!(expected.taken, actual.taken);
+                    }
+                }
+            }
+        }
+    }
+
     /// The fold epilogue: absent by default, and when armed it *replaces* the lane's plane write
     /// with the same words handed over.
     ///
