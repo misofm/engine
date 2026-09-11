@@ -35,7 +35,7 @@ This evidence makes no claim about realtime DSP savings, audio callback deadline
 
 ## Status
 
-Sol scope PASS recorded. Root verified existing numbered local specs have remote counterparts and prepared isolated public-record and private-prototype branches. The private prototype implementation is upstream; real-corpus qualification and timing remain pending.
+All ten prototypes, real-corpus qualification, the single descriptive run, repaired reporting and complete local download bundles are finished. Final Sol review and remote issue synchronization remain pending. Historical checkpoints below preserve earlier provisional/failing verdicts.
 
 ## Implementation checkpoint 1
 
@@ -72,3 +72,34 @@ All 490 full-stem PCM reconstructions, all 3,920 common frozen seek windows, and
 ## Completed measurements; report-only successor
 
 The single frozen invocation completed all 93 operations and its completion marker; closed record validation passed. Raw evidence is preserved upstream, and the codec/workload/configuration hashes remained unchanged through completion. The report exporter then failed on an explicitly unavailable dense-FLAC metadata count. The completed measurements are valid; issue #735 owns the minimal nullable-field repair and publication from the preserved raw record. No benchmark rerun is authorized. This parent remains open through repaired evidence and final Sol review.
+
+## Final measured evidence
+
+The corrected corpus contains 49 aligned stems, each 6,187,569 stereo PCM24 frames at 44.1 kHz. Exact zeros occupy 88.02% of source frames; 87.95% of frames lie in omittable runs of at least 20 ms. All 490 full reconstructions, 3,920 common seek windows and 43 corruption/locality cases passed.
+
+Actual complete ZIP_STORED archives were produced from every already-measured representation, with no codec rerun or outer recompression. Every archive's actual byte count matches the precomputed body-size model; manifests, indexes, dictionary bytes and conservative inspection copies are included.
+
+| Representation | Actual complete bundle MB | Decode and hash seconds, round 1 / round 2 |
+|---|---:|---:|
+| Dense WAV | 1819.195 | 1.240 / 1.243 |
+| Dense FLAC | 93.874 | 12.179 / 12.153 |
+| Dense independent Zstd, 1 second | 162.215 | 4.962 / 4.932 |
+| Sparse WAV files | 219.977 | 1.593 / 1.591 |
+| Sparse packed PCM | 219.698 | 1.410 / 1.411 |
+| Sparse FLAC units | 91.959 | 3.364 / 3.397 |
+| Sparse Zstd, 1 second | 167.299 | 1.983 / 1.970 |
+| Sparse Zstd with dictionary, 1 second | 168.226 | 1.968 / 1.939 |
+| Sparse Zstd, 250 milliseconds | 169.463 | 2.929 / 2.966 |
+| Sparse Zstd with dictionary, 250 milliseconds | 169.512 | 2.936 / 2.912 |
+
+MB is decimal. The existing corrected DEFLATE ZIP is 147.256 MB. The sparse-FLAC complete bundle is 37.55% smaller than that reference and 2.04% smaller than dense FLAC's bundle. Its mean full reconstruction/hash time is 3.380 seconds versus 12.166 seconds for dense FLAC on this local prototype. Sparse-FLAC encoding took 11.415 / 11.440 seconds versus dense FLAC's 8.336 / 8.324 seconds.
+
+Both dictionary variants failed the frozen 1% held-out net-saving gate: total size increased 0.808% for one-second units and 0.399% for 250-ms units. This is within-song evidence only. Dense-FLAC byte-read accounting remains unavailable, never zero.
+
+## Decision and production scope
+
+Recommend exact-zero intervals plus independent FLAC units in a complete offline-session package; omit dictionaries from the first product slice. Most download savings here come from FLAC compression, while explicit sparsity provides a further small size reduction and substantial measured prototype decode savings. Decoder units need not equal network objects: all 1,399 FLAC units are packaged into one local downloadable archive in this experiment.
+
+Keep production work separate: (1) an external canonical sparse asset packer/reader with byte-exact reconstruction and bounded validation; (2) one worker/host adapter feeding the existing bounded PCM ingress, with generation-tagged seeks, render-quantum reblocking, known-zero versus underrun semantics and duration-independent decoded memory; (3) actual complete-session transport qualification. Compact gap queue entries and DSP skipping require later independent evidence. Source silence alone cannot skip effect state/tails, lookahead/PDC, sidechains, automation or partially active SIMD banks.
+
+All claims are local descriptive evidence from exactly one warmup and two measured rounds. There was no machine isolation or cold-cache control. No actual network, Walrus, browser/mobile or render-callback timing was performed. No production engine code changed. Private reproducibility artifacts include raw operation records, corpus qualification, plots, bundle-size receipts and a decision/integration note; public records contain only sanitized aggregates.

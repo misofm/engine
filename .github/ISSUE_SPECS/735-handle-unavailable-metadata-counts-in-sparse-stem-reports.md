@@ -43,3 +43,9 @@ Make the private report adapter treat both a missing `metadata_bytes_read` field
 ## Decision record
 
 **Sol scope verdict: PASS to create and synchronize this minimal successor issue/spec.** The failure is isolated to nullable report aggregation after a valid completed benchmark. Repairing post-processing from immutable raw evidence is required by the frozen parent brief and does not authorize another timed invocation. One small implementation attempt should be sufficient; any need to alter the runner, raw record, codec artifacts, or benchmark protocol requires a new ruling rather than scope expansion.
+
+## Implementation and publication evidence
+
+Terra supplied the minimal two-file repair. Sol attempt 1 PASS: explicit-null and missing counts remain unavailable, numeric counts sum exactly, mixed numeric/unavailable rows fail closed, and the adapter has no codec/benchmark dispatch path. Root independently reran the focused synthetic regression and whitespace checks. The repair checkpoint is upstream in the private repository.
+
+The real report then succeeded once against the preserved raw record. All ten complete local download archives were materialized from existing artifacts and matched their prior size model. Publication records bind the original raw digest and demonstrate unchanged codec, workload, freeze, qualification and timing evidence. The earlier report failure is preserved. No benchmark or codec worker was rerun. Final Sol publication review and remote synchronization remain pending.
