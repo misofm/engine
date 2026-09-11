@@ -40,6 +40,25 @@ Record actual commands/env/source/exits/logs externally; stop unexpected failure
 Required reviewed-head PR and main qualification precede upstream issue closure
 and clean delivered worktree removal. Historical model names below are superseded.
 
+## Bounded rack API amendment — Astra XHIGH, 2026-09-11
+
+Inspection before implementation found no existing infallible fold-installation
+seam. Extend exact-path ownership to crates/rack/src/lib.rs and focused rack tests.
+Use an opaque prepared fold configuration that validates width, its owned/copied
+active mask, and requested fold mask during borrowed graph preflight. A narrow
+constructor variant consumes that configuration as the sole source of the new
+chain's active/fold masks: no second caller-supplied active mask and no transferable
+setter that can apply a proof to an arbitrary chain. Delegate ordinary scratch/slot
+shape checks to existing BankChain::new, then install the validated fold through a
+private infallible helper shared with arm_fold. Preserve existing arm_fold behavior.
+Graph carries each configuration in the same validated run plan into chain_for /
+build_chain, paired with the first run bank's exact width/active metadata through
+pairing/fallback. All fold-mask errors precede ownership consumption. The existing
+bank-shape constructor Result/expect is unchanged; no new post-consumption fold
+error or panic is permitted. Gates include width mismatch, inactive armed lane,
+all-false disarm, valid partial/full masks, and proof/configuration misuse prevention.
+This is a scope correction before source edits, not a failed implementation attempt.
+
 ## Historical issue body
 
 Required follow-up F2 from strip Job 3's verification: the `debug_assert!(false)` arms in `apply_route_fold` are commented as inert, but by the time any arm runs the route ops are already retired from unit emission — a reachable instance in RELEASE would be silent wrong audio (stale route buffers / vanished contribution), not a safe decline. Each arm was verified unreachable today (routes are singleton plain units; membership⇒Bank; active masks are planner prefixes), and the code runs at bind on the control plane — so the fix is cheap: make them hard bind errors. Also (F6, same area): console-workload's `GraphIdentity` do-nothing Bound processor should become `GraphNodeBinding::identity` per the new zero-input contract.
