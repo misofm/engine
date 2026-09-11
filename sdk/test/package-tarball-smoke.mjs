@@ -362,6 +362,61 @@ async function bootSnapshotSubmitRender(document, sourceId, channels) {
 
 await bootSnapshotSubmitRender(cliDocument, "stem", 2);
 
+// The public packed consumer must carry #737's causal compressor boundary.  This deliberately
+// compares both complete first quanta, without trimming or shifting either plane: the published
+// bypass variant is an identity transform and therefore has its first nonzero PCM at sample zero.
+const compressorCatalog = imported["."].CATALOG.effects.find((row) => row.id === "miso.compressor");
+assert.ok(compressorCatalog, "the packed catalog exports miso.compressor");
+assert.deepEqual(compressorCatalog.parameters.map((parameter) => parameter.id), [1, 2, 3, 4, 5, 6, 7]);
+assert.equal(
+  compressorCatalog.parameters.some((parameter) => parameter.id === 8 || parameter.name === "lookahead"),
+  false,
+  "the packed compressor catalog has no removed lookahead parameter",
+);
+const causalDocument = (withBypassedCompressor) => imported["."].session({
+  id: withBypassedCompressor ? "tarball.causal.compressor" : "tarball.causal.empty",
+  sampleRateHz: 48_000,
+})
+  .source("stem", {
+    channels: 2, bitDepth: "32f", frames: 128, content: `sha256:${"0".repeat(64)}`,
+  })
+  .track("track", {
+    source: "stem",
+    ...(withBypassedCompressor
+      ? { simd1: [imported["."].effect("miso.compressor", {}, { bypass: true })] }
+      : {}),
+  })
+  .output("main")
+  .route({
+    id: "main",
+    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    destination: { kind: "output_input", outputId: "main" },
+  })
+  .toJson();
+async function renderCausalPackedDocument(document) {
+  const offline = await imported["./headless"].createOfflineEngine(document);
+  try {
+    const frames = offline.shape().quantumFrames;
+    assert.equal(frames, 128);
+    const left = Float32Array.from({ length: frames }, (_unused, index) => 0.25 + index / 1024);
+    const right = Float32Array.from({ length: frames }, (_unused, index) => -0.5 - index / 2048);
+    assert.notEqual(left[0], right[0], "the source planes are asymmetric");
+    assert.equal(offline.submitSource({
+      sourceId: "stem", generation: 1n, startFrame: 0n, planes: [left, right], endOfRegion: true,
+    }).ok, true);
+    return offline.render();
+  } finally {
+    offline.dispose();
+  }
+}
+const causalEmpty = await renderCausalPackedDocument(causalDocument(false));
+const causalBypassed = await renderCausalPackedDocument(causalDocument(true));
+for (const plane of [causalEmpty.left, causalEmpty.right, causalBypassed.left, causalBypassed.right]) {
+  assert.equal(plane.findIndex((sample) => sample !== 0), 0, "first nonzero PCM is unshifted at sample zero");
+}
+assert.deepEqual(causalBypassed.left, causalEmpty.left, "bypassed compressor left PCM is unshifted");
+assert.deepEqual(causalBypassed.right, causalEmpty.right, "bypassed compressor right PCM is unshifted");
+
 // Red mutation: the package manifest still names the original digest, so one changed byte must be
 // rejected before WebAssembly.compile can see it.
 const wasmUrl = imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm;
