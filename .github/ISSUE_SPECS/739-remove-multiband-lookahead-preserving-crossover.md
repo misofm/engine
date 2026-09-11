@@ -365,3 +365,31 @@ in isolated branch `codex/causal-multiband-739`, one launch feature at a time.
 CPU qualification successor is #748, “Qualify causal multiband-compressor CPU
 cost on an active-input workload”; it is queued and authorizes no timing here.
 Luna XHIGH owns the first bounded core/reset tranche, Sol XHIGH verifies.
+
+
+## User-requested immediate usage handoff — 2026-09-11
+
+Implementation is paused mid-tranche at the owner's request to transfer instances.
+The preserved `src/lib.rs` WIP is deliberately **not compiling** and must not be
+merged or counted as completed. Root's `cargo check --locked -p multiband-compressor`
+returns101 with18 errors and1 warning: removed cursor/ring fields remain referenced
+in state adapter wrappers and one reset/render location; codec helper call arities
+still need adjustment. The raw diagnostic is `/tmp/issue739-gates/handoff-check.stderr`.
+This is a recovery checkpoint, not a failed final attempt verdict or qualified product.
+
+The inherited different-crossover restore/full-reset discriminator was added and
+failed before the fix at exact test
+`reset_tests::full_reset_restores_prepared_crossover_coefficients`. Raw baseline
+and RED logs are in `/tmp/issue739-luna-tranche1/`; Sol independently confirmed
+that the discriminator exercises the mismatch. No post-change test PASS exists.
+
+Resume the existing Luna XHIGH core/reset tranche, finish remaining lib.rs codec/
+reset callers and surgical split.rs changes, then run the build and focused library
+tests and stop for root's next exact-path checkpoint. Public tests/support, active
+f64 oracle, compatibility/admission/PDC descendants, SDK/artifacts and final
+Sol XHIGH verification/PR/main CI all remain. Preserve the existing frozen gates.
+The thin existing-pattern host-web atomic ID2 rejection test is scope-consistent;
+Sol accepted this clarification, alongside lattice63rows/189checks. No production
+control framework change is authorized. Tracked JSON inventory found only shipped
+SDK metadata plus the synthetic validator fixture, and no session JSON to update.
+CPU #748 remains queued with zero timing; listening #26 remains pending.
