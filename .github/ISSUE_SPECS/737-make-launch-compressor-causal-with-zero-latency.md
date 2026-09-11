@@ -351,3 +351,23 @@ ID 8. A systematic current-JSON inventory found exactly that remaining row in
 canonical writer with all other decoded fields identical. Session/source identities
 pass (`/tmp/issue737-qualification-fixture`). No binary change is needed. The failed
 browser run is preserved; a rerun on this corrected current fixture remains required.
+
+
+## Browser completion and final prose review
+
+The corrected existing browser matrix passes on Chromium 151.0.7922.34, Firefox
+153.0 and WebKit 26.5, including mutation self-tests. The generated deployment
+matrix passes its consistency check. Candidate 37f3e6c6 uses the current artifact
+identity recorded above; receipts are in `/tmp/issue737-artifact/browser-matrix-corrected*`.
+Workspace all-target/all-feature Clippy with warnings denied and workspace rustdoc
+with warnings denied both pass (`/tmp/issue737-local-gates/workspace-quality-results.json`).
+
+Sol XHIGH records behavioral PASS and requests one bounded prose-only correction
+tranche before final unconditional review: current shared effect-contract, runtime
+bank, rack, conformance, limiter and compiler helper comments, G5 corpus comments,
+compressor mutation gate summary and the obsolete compressor candidate in the
+effect-floor ruling still describe retired compressor delay storage/lookahead.
+Update those live explanations without changing code, gates, historical measurement
+records, or other effects. Preserve Rust source line counts where practical, then
+prove the rebuilt shipped artifact identity unchanged. Final source review and
+exact-head PR/main CI remain required before closure.
