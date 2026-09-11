@@ -44,3 +44,11 @@ The private codec tranche is committed and upstream. Synthetic PCM24 reconstruct
 ## Implementation checkpoint 2
 
 The private harness now exposes corpus freeze, all-variant preparation/qualification, and one warmup plus two measured rounds through isolated worker processes. Root independently reran the synthetic selftest and create-new persistence preflight successfully; both attest zero timed-workload invocations. The private checkpoint is upstream. Sol is reviewing attempt 1 before real-corpus qualification/timing. These passing controls are provisional evidence, not a claim that every issue gate has passed.
+
+## Attempt 1 adversarial verdict
+
+**Sol: FAIL; real-corpus qualification and timing remain gated.** A directed synthetic fixture reproduced an incorrect gap origin when an exact-zero run crossed an internal source-read boundary. Review also found incomplete adversarial controls, recomputed rather than universally frozen seek schedules, weak freeze admission, and a worker-failure path that returned apparent CLI success. These findings are preserved; the passing initial selftest does not satisfy the issue gates.
+
+Sol owns attempt 2, bounded to the gap correction, discriminating boundary/corruption controls, one shared frozen-window qualification path, strict freeze/record validation, truthful failure exits, and preflight/output/resource accounting. No corpus, format, compression parameter, or benchmark-protocol change is authorized by this revision.
+
+The private aligned-input census and original-prefix padding verification are upstream. They confirm the dataset preparation independently of the faulty prototype; they supply no codec or realtime performance evidence.
