@@ -16,7 +16,7 @@ use effect_contract::{
 use lane::Backend;
 
 /// Parameters in the descriptor table.
-pub const PARAMETER_COUNT: usize = 8;
+pub const PARAMETER_COUNT: usize = 7;
 
 /// Fixed scalar words before the rings, per channel section.
 pub const STATE_HEADER_WORDS: usize = compressor::STATE_HEADER_WORDS;

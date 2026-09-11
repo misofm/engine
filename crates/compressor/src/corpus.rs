@@ -34,25 +34,17 @@ use effect_contract::LinkMode;
 use lane::Lane;
 
 use crate::design::{MAX_WIDTH, PARAMETER_COUNT, SMOOTHING_SAMPLES};
-use crate::kernel::{Channel, Detector, Staged, process_block};
+use crate::kernel::{Channel, Detector, process_block};
 
 /// Independent single-track signals in a case. A multiple of the widest backend.
 pub const LANES: usize = 8;
 
-/// Frames rendered per track. The first [`RING_LENGTH`] − 1 are the latency's leading zeros.
+/// Frames rendered per track.
 pub const FRAMES: usize = 384;
 
 /// Block partition the corpus renders with. Not a multiple of [`FRAMES`], deliberately: the last
 /// block is short, so a kernel that behaved differently on a partial block would move the digest.
 pub const BLOCK: usize = 100;
-
-/// Ring length `B = N + 1` used by the corpus.
-///
-/// Not a launch quality's `N = Fs/50`: at 48 kHz that is 960 frames of pure latency before a
-/// single output sample is non-zero, which would make the corpus fifteen times longer for no extra
-/// coverage. The ring arithmetic under test — the wrap, the `w + 1` read and the per-lane
-/// `w - D` tap — is `B`-independent, and `tests/partition.rs` exercises the production `B`.
-pub const RING_LENGTH: usize = 65;
 
 /// Sample rate the ballistic coefficients are designed at.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -71,22 +63,20 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     "dual_mono_ramping",
 ];
 
-/// The eight tracks, in table order: threshold, ratio, knee, attack, release, makeup, mix,
-/// lookahead. Frozen; every value is inside its descriptor domain.
+/// The eight tracks, in table order: threshold, ratio, knee, attack, release, makeup, mix.
 ///
 /// Track 0 is a hard knee, track 1 a wide one; track 2 has ratio 1 (no compression) and non-zero
 /// makeup, so it exercises the `G == 0 && makeup != 0` path that is *not* an identity; track 3 has
-/// `mix == 0` and track 7 `mix == 1`, the two identity selects; tracks 4 to 6 sweep the lookahead
-/// tap from zero to the ring's limit.
+/// `mix == 0` and track 7 `mix == 1`, the two identity selects.
 const TRACKS: [[f32; PARAMETER_COUNT]; LANES] = [
-    [-18.0, 4.0, 0.0, 10.0, 100.0, 0.0, 1.0, 0.0],
-    [-24.0, 8.0, 24.0, 1.0, 50.0, 3.0, 0.75, 0.5],
-    [-6.0, 1.0, 6.0, 5.0, 200.0, -6.0, 0.5, 0.25],
-    [-40.0, 20.0, 12.0, 0.1, 5.0, 12.0, 0.0, 1.0],
-    [0.0, 2.0, 6.0, 50.0, 1000.0, -24.0, 0.25, 0.0],
-    [-80.0, 1.5, 3.0, 20.0, 5000.0, 24.0, 0.9, 0.75],
-    [-12.0, 12.0, 18.0, 0.5, 20.0, -3.0, 0.6, 1.0],
-    [-30.0, 6.0, 0.0, 2.0, 300.0, 6.0, 1.0, 0.125],
+    [-18.0, 4.0, 0.0, 10.0, 100.0, 0.0, 1.0],
+    [-24.0, 8.0, 24.0, 1.0, 50.0, 3.0, 0.75],
+    [-6.0, 1.0, 6.0, 5.0, 200.0, -6.0, 0.5],
+    [-40.0, 20.0, 12.0, 0.1, 5.0, 12.0, 0.0],
+    [0.0, 2.0, 6.0, 50.0, 1000.0, -24.0, 0.25],
+    [-80.0, 1.5, 3.0, 20.0, 5000.0, 24.0, 0.9],
+    [-12.0, 12.0, 18.0, 0.5, 20.0, -3.0, 0.6],
+    [-30.0, 6.0, 0.0, 2.0, 300.0, 6.0, 1.0],
 ];
 
 /// The automation applied by case 3, as `(parameter index, left value, right value)`.
@@ -177,9 +167,8 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         for (lane, slot) in defaults.iter_mut().take(width).enumerate() {
             *slot = TRACKS[base + lane];
         }
-        let mut left_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
-        let mut right_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
-        let mut staged = Staged::<L>::new();
+        let mut left_channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut right_channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
 
         let inputs: Vec<([f32; FRAMES], [f32; FRAMES])> = (0..width)
             .map(|lane| lane_input(base + lane, case))
@@ -217,7 +206,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 false,
                 SAMPLE_RATE,
                 (&mut left_channel, &mut right_channel),
-                &mut staged,
             );
             for step in 0..frames {
                 for lane in 0..width {
