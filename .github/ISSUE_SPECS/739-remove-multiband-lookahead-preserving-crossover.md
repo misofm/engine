@@ -574,3 +574,21 @@ check). Raw commands/failures/results: /tmp/issue739-luna-lint.md.
 Lane/realtime/workspace policy and step-vocabulary normal/self-testPASS.
 No production arithmetic, artifact, tolerance or DSP-reference change.
 Astra medium's singular final attempt1 verdict is the remaining review gate.
+
+
+## Final attempt1 verdict — 2026-09-11
+
+Astra medium PASS at231f218299c8bb244908d2dc79a097b87eb5c4e5,
+no blocking findings. Frozen causal DSP/control/state/reset/bank/compatibility
+contracts, independent oracle and target/artifact evidence are accepted.
+The existing shared admission contract requires positive scratch capacity1
+while the effect's actual prepared scratch usage remains0; no shared
+contract was weakened. Full verdict: /tmp/issue739-astra-final-verdict.md.
+
+Evidence limitation: Luna's intermediate final-lint identity assertion-offset
+failure (7PASS/1FAIL) was overwritten by its corrected8PASS log. The initial
+raw failure is unavailable; the failure description and final raw PASS remain.
+All earlier substantive inherited/partition/target failures listed above remain
+preserved. This limitation is candidly disclosed and does not replace a test
+gate. Required exact PR/main qualification and delivery synchronization remain
+root-owned. CPU748 and human listening26 remain pending without a claim.
