@@ -1,5 +1,11 @@
 # Release current causal dynamics in @misofm/engine 0.2.3
 
+## Attempt 1 recoverable implementation checkpoint
+
+Terra updated only the SDK package/lock version, existing trusted-publisher workflow identities and current worklet pin, and the packed public-consumer smoke. The new regression compares complete first quanta from empty-rack and bypassed-compressor sessions at48kHz/128 frames with asymmetric nonzero PCM; all four planes begin at sample zero and both outputs match without trimming or shifts. Packed compressor parameter IDs are exactly1 through7 with no removed lookahead parameter.
+
+Static identity checks pass. One fresh Linux worklet build produced the current accepted SHA256 `0c633b091457c4ab9ec17f08327802f423874124182bc794a7988ed1c536fa73`. Existing sdk-package.sh check passes for the resulting0.2.3 archive. Evidence is retained under `/data/sparse-pcm-launch/tooling/engine-753/`, including `worklet-build.log`, `worklet-artifact-dir.txt` and `sdk-package-check.log`. This checkpoint is not independent acceptance or publication: remaining generated/deletion/types/headless/browser qualification, Sol adversarial verdict, required remote qualification and exact qualified-archive registry/provenance verification remain mandatory. No Rust DSP changed.
+
 ## Root note
 
 App issue #187 proved that registry `@misofm/engine@0.2.2` delays a bypassed compressor by 20 ms (960 samples at 48 kHz; 882 at 44.1 kHz), even with lookahead set to zero. Engine issue #737 already fixed that defect and passed review; no new compressor Rust work belongs here. Publish one SDK built from a fresh synchronized current `main`, so the app can adopt the corrected public artifact in a separate bounded slice.
