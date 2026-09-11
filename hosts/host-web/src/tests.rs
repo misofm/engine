@@ -3203,6 +3203,63 @@ fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
     assert_eq!(observed.meter_poll_work(), before);
 }
 
+/// Feed a finite timing source, marking only the chunk that reaches its prepared boundary.
+fn feed_and_render_finite_source(
+    host: &mut AudioWorkletEngineHost,
+    block: u64,
+    source_blocks: u64,
+    value: f32,
+) {
+    assert!(block < source_blocks);
+    let quantum = host.status().quantum_frames;
+    let samples = vec![value; quantum as usize];
+    let planes: [&[f32]; 2] = [&samples, &samples];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            block * u64::from(quantum),
+            host.status().sample_rate_hz,
+            &planes,
+            quantum,
+            block + 1 == source_blocks,
+        ),
+        RESULT_OK,
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+}
+
+fn probe_timing_source_boundary() {
+    const QUANTUM: u32 = 128;
+    const SOURCE_BLOCKS: u64 = 2;
+    let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, 32, SOURCE_BLOCKS);
+    let samples = [0.25; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&samples, &samples];
+    for block in 0..SOURCE_BLOCKS {
+        // Reject an early marker first, then an unmarked final chunk on the same host.
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * u64::from(QUANTUM),
+                48_000,
+                &planes,
+                QUANTUM,
+                block == 0,
+            ),
+            RESULT_INVALID_ARGUMENT,
+            "wrong boundary marker at block {block}",
+        );
+        // Rendering each accepted chunk drains the one-quantum ring before the next admission.
+        feed_and_render_finite_source(&mut host, block, SOURCE_BLOCKS, 0.25);
+    }
+}
+
+#[test]
+fn timing_source_boundary_requires_only_the_actual_final_marker() {
+    probe_timing_source_boundary();
+}
+
 fn timed_accumulator_mode(metrics: Option<MeterMetricSet>) -> (u128, u64, u64) {
     const QUANTUM: usize = 128;
     const PERIOD_BLOCKS: u32 = 32;
@@ -3267,7 +3324,7 @@ fn timed_poll_mode(bypass_readiness: bool) -> (u128, u64, u64, (u64, u64)) {
     let mut emitted = 0_u64;
     for block in 0..blocks {
         let value = if block % 17 == 0 { 1.0 } else { 0.125 };
-        feed_and_render(&mut host, 1, block, value);
+        feed_and_render_finite_source(&mut host, block, blocks, value);
         let started = std::time::Instant::now();
         let windows = host.poll_meters();
         elapsed = elapsed.saturating_add(started.elapsed().as_nanos());
@@ -3359,6 +3416,7 @@ fn selective_meter_and_readiness_descriptive_timing() {
             .expect("output must not exist and must be writable")
     };
     if mode == "preflight" {
+        probe_timing_source_boundary();
         let mut file = open();
         let records = [
             timing_header(),

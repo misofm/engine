@@ -41,3 +41,18 @@ Keep the existing frozen 9-stream/128-frame/32-block-period/256-window compariso
 - Preserve each measured mode immediately; verify comparable peak hashes, poll hashes and emitted window counts before reporting results.
 - Report compiler/target, exact source revision, workload, raw records, units and limitations. Values describe isolated accumulator/Rust poll work, including clock/test-counter overhead; they do not establish end-to-end browser callback performance.
 - If the repaired runner fails, retain raw evidence and stop under the bounded tooling-attempt rule. Do not block already qualified engine capabilities or weaken their correctness gates.
+
+
+## Attempt 1 fixture correction checkpoint
+
+The timing poll feeder now uses a finite-source helper that derives the end marker
+from `block + 1 == source_blocks`. The two-block probe uses this same helper for
+accepted chunks on one host: it first rejects an early marker, accepts/renders the
+ordinary chunk to drain the one-quantum ring, rejects an unmarked final chunk, then
+accepts/renders the marked final chunk. A focused normal test and the existing
+preflight both call the probe before any timed helper is reached. General
+`feed_and_render` callers and the frozen timing constants, serialization,
+persistence, overwrite refusal and payload/window comparisons remain unchanged.
+
+No timed invocation belongs to this checkpoint. Non-timed evidence and independent
+source/validator freeze precede the sole new timing invocation.
