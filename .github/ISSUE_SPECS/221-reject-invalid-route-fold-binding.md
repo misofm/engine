@@ -77,3 +77,14 @@ argv/env/source/log/exits: /tmp/issue221-attempt1-rack. Graph is unchanged; borr
 preflight, public ownership controls and full old/new PCM controls remain pending.
 Root checkpoints this coherent tranche before further implementation; no PASS
 verdict or delivery is claimed.
+
+## Attempt 1 checkpoint: borrowed graph planning
+
+Borrowed preflight precedes ownership transfer and hands the same owned schedule,
+mappings and fold configurations into consuming construction. The old
+post-consumption apply_route_fold step is removed. Formatting, focused route
+controls, the seeded4000-graph corpus and RT1 direct-bank bit-exact/allocation
+control passed. An initial unused test-wrapper warning was corrected; final
+format/route rebuild passed without it. Receipts: /tmp/issue221-attempt1-graph-plan.
+Public ownership/fault matrix, rack PCM/pairing controls, console identity and
+strict Clippy remain before independent attempt review.

@@ -1377,6 +1377,11 @@ impl PreparedGraphPlan {
         let Some(program) = self.lowered() else {
             return Err((self, bindings, source_set, "graph.scheduler.layout"));
         };
+        let planning =
+            match runtime::preflight_sequential(&self, &program, &bindings, source_set.as_ref()) {
+                Ok(planning) => planning,
+                Err(code) => return Err((self, bindings, source_set, code)),
+            };
         let envelope = self.envelope;
         let plan_id = self.plan_id;
         let mut plan = self;
@@ -1385,8 +1390,14 @@ impl PreparedGraphPlan {
             observers.append(&mut bindings.observers);
             observers
         };
-        let executor =
-            GraphExecutor::new(plan, &program, bindings.nodes, observers, source_set.take());
+        let executor = GraphExecutor::new(
+            plan,
+            &program,
+            bindings.nodes,
+            observers,
+            source_set.take(),
+            planning,
+        );
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
@@ -1794,6 +1805,7 @@ impl GraphExecutor {
         bindings: Vec<GraphNodeBinding>,
         observers: Vec<GraphNodeObserverBinding>,
         source_set: Option<GraphPreparedSourceSet>,
+        planning: runtime::SequentialPlan,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
         let source_inputs: BTreeSet<_> = source_set
@@ -1838,7 +1850,7 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames);
+        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames, planning);
         Self {
             runtime,
             output,

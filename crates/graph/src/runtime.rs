@@ -1859,10 +1859,20 @@ pub(crate) fn trailing_active_mask(members: usize, width: BankWidth) -> Box<[boo
 /// slot only when *every* lane of the group runs it (`banks::bind_rack_banks`, #96 F7). The rack
 /// crate has supported multi-slot chains since it was written and unit-tests three of them; until
 /// issue #181 nothing in the graph layer ever handed it more than one.
+#[cfg(feature = "test-support")]
 fn bank_chain(
     scratch: AoSoaScratch,
     active: Box<[bool]>,
     slots: Vec<Box<dyn BankStage>>,
+) -> BankChain {
+    bank_chain_with_fold(scratch, active, slots, None)
+}
+
+fn bank_chain_with_fold(
+    scratch: AoSoaScratch,
+    active: Box<[bool]>,
+    slots: Vec<Box<dyn BankStage>>,
+    fold: Option<rack::PreparedFoldConfiguration>,
 ) -> BankChain {
     let slot_count = slots.len();
     let mut prepared_slots = Vec::with_capacity(slot_count);
@@ -1879,7 +1889,13 @@ fn bank_chain(
     );
     #[cfg(feature = "test-support")]
     BANK_CHAIN_CAPACITIES.with(|value| value.set([prepared_slots.capacity(), slot_count]));
-    BankChain::new(scratch, active, prepared_slots).expect("validated bank shape")
+    match fold {
+        Some(configuration) => {
+            BankChain::new_with_prepared_fold(scratch, configuration, prepared_slots)
+        }
+        None => BankChain::new(scratch, active, prepared_slots),
+    }
+    .expect("validated bank shape")
 }
 
 #[cfg(feature = "test-support")]
@@ -2215,7 +2231,17 @@ impl RuntimeParts {
     /// The scratch and the lane mask come from the run's first slot; every slot of a cohort
     /// covers the same lanes by construction, and `BankChain::new` re-checks it rather than
     /// trusting it.
+    #[cfg(test)]
     fn chain_for(&mut self, run: &[Membership], members: usize) -> BankChain {
+        self.chain_for_with_fold(run, members, None)
+    }
+
+    fn chain_for_with_fold(
+        &mut self,
+        run: &[Membership],
+        members: usize,
+        fold: Option<rack::PreparedFoldConfiguration>,
+    ) -> BankChain {
         // Every slot arrives with its own `AoSoaScratch`, because a bound bank is prepared
         // without knowing whether it will end up sharing a chain. One chain has one resident
         // block, so the run keeps the first slot's scratch and drops the rest here, on the
@@ -2318,10 +2344,11 @@ impl RuntimeParts {
             observed.maximum_runtime_slots = observed.maximum_runtime_slots.max(stages.len());
             facts.set(observed);
         });
-        bank_chain(
+        bank_chain_with_fold(
             scratch.expect("a unit has at least one slot"),
             active.expect("a unit has at least one slot"),
             stages,
+            fold,
         )
     }
 
@@ -2515,29 +2542,36 @@ pub(crate) fn units_of(
     units
 }
 
-/// Builds the sequential executor's runtime: one coloured arena, producers read in place.
-pub(crate) fn build_sequential(
+/// Prepared before caller-owned processors, observers, banks or sources move. Emission consumes
+/// this exact schedule and its owned fold configurations; it never replans route retirement.
+pub(crate) struct SequentialPlan {
+    run_units: Vec<(Vec<Membership>, Vec<usize>)>,
+    fold: Option<RouteFold>,
+    unit_of_run: Vec<Option<usize>>,
+    op_slot: Vec<Option<(usize, usize)>>,
+    installations: Vec<Option<FoldInstallation>>,
+}
+
+struct FoldInstallation {
+    configuration: rack::PreparedFoldConfiguration,
+    lanes: Box<[FoldLane]>,
+    master: u32,
+}
+
+pub(crate) fn preflight_sequential(
+    plan: &crate::PreparedGraphPlan,
     program: &ExecutionProgram,
-    spec: &GraphSpec,
-    parts: RuntimeParts,
-    frames: usize,
-) -> Runtime {
-    #[cfg(any(test, feature = "test-support"))]
-    test_only_reset_selected_split_fader();
-    let mut parts = parts;
-    // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
-    // arena buffer `b + ARENA_BASE`.
-    let arena = |buffer: u32| buffer + ARENA_BASE;
-    let taps = taps_by_op(program, spec);
-    let grouped = units_of(program, &parts.membership.clone());
-    let delays = program
-        .delays
-        .iter()
-        .map(|line| CompensationDelay::new(line.samples as usize))
-        .collect();
-    // Issue #181: consecutive slots of one cohort chain become one unit with one chain, so the
-    // pair pays one planar/AoSoA round-trip per block where it used to pay two.
-    let runs = cohort_runs(program, spec, &parts, &grouped);
+    bindings: &crate::GraphRuntimeBindings,
+    sources: Option<&crate::GraphPreparedSourceSet>,
+) -> Result<SequentialPlan, &'static str> {
+    let metadata = BorrowedPlanningMetadata {
+        plan,
+        bindings,
+        sources,
+        membership: bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks),
+    };
+    let grouped = units_of(program, metadata.membership());
+    let runs = cohort_runs(program, &plan.spec, &metadata, &grouped);
     let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
         .iter()
         .map(|run| {
@@ -2549,9 +2583,158 @@ pub(crate) fn build_sequential(
             )
         })
         .collect();
-    // Issue #218: decided here, before `build_op` consumes `parts.observers` and before any op is
-    // built, because it decides which ops are built at all.
-    let fold = route_fold(program, spec, &parts, &run_units);
+    let fold = route_fold(program, &plan.spec, &metadata, &run_units);
+    validate_fold_installation(plan, program, run_units, fold)
+}
+
+fn validate_fold_installation(
+    plan: &crate::PreparedGraphPlan,
+    program: &ExecutionProgram,
+    run_units: Vec<(Vec<Membership>, Vec<usize>)>,
+    fold: Option<RouteFold>,
+) -> Result<SequentialPlan, &'static str> {
+    let retired = fold.as_ref().map(|fold| &fold.retired);
+    let mut unit_of_run = vec![None; run_units.len()];
+    let mut op_slot = vec![None; program.ops.len()];
+    let mut emitted = 0;
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        if ops.is_empty() {
+            return Err("graph.route_fold.mapping");
+        }
+        if ops
+            .iter()
+            .any(|op| retired.is_some_and(|retired| retired.contains(op)))
+        {
+            if !membership.is_empty() || ops.len() != 1 {
+                return Err("graph.route_fold.bank");
+            }
+            continue;
+        }
+        unit_of_run[run] = Some(emitted);
+        for (member, op) in ops.iter().enumerate() {
+            let entry = op_slot.get_mut(*op).ok_or("graph.route_fold.mapping")?;
+            if entry.replace((emitted, member)).is_some() {
+                return Err("graph.route_fold.mapping");
+            }
+        }
+        emitted += 1;
+    }
+    let mut installations: Vec<Option<FoldInstallation>> =
+        (0..run_units.len()).map(|_| None).collect();
+    if let Some(fold) = &fold {
+        let master_slot = op_slot
+            .get(fold.master_op)
+            .copied()
+            .flatten()
+            .ok_or("graph.route_fold.master")?;
+        let master_run = unit_of_run
+            .iter()
+            .position(|unit| *unit == Some(master_slot.0))
+            .ok_or("graph.route_fold.master")?;
+        let (membership, ops) = &run_units[master_run];
+        if !membership.is_empty() || ops.as_slice() != [fold.master_op] || master_slot.1 != 0 {
+            return Err("graph.route_fold.master");
+        }
+        let mut owned = std::collections::BTreeSet::new();
+        for (run, lanes) in &fold.runs {
+            let (membership, ops) = run_units.get(*run).ok_or("graph.route_fold.mapping")?;
+            if unit_of_run.get(*run).copied().flatten().is_none() {
+                return Err("graph.route_fold.mapping");
+            }
+            if membership.is_empty()
+                || lanes.is_empty()
+                || ops.len() != membership.len() * lanes.len()
+            {
+                return Err("graph.route_fold.bank");
+            }
+            let mut first_shape = None;
+            for bank in membership {
+                let (key, width, active, members) = match bank {
+                    Membership::Effect(index) => {
+                        let bank = plan.banks.get(*index).ok_or("graph.route_fold.bank")?;
+                        (
+                            (false, *index),
+                            bank.scratch.width(),
+                            bank.active_mask.clone(),
+                            bank.members.len(),
+                        )
+                    }
+                    Membership::Builtin(index) => {
+                        let bank = plan
+                            .builtin_banks
+                            .get(*index)
+                            .ok_or("graph.route_fold.bank")?;
+                        (
+                            (true, *index),
+                            bank.scratch.width(),
+                            trailing_active_mask(bank.members.len(), bank.scratch.width()),
+                            bank.members.len(),
+                        )
+                    }
+                };
+                if !owned.insert(key) || members != lanes.len() {
+                    return Err("graph.route_fold.bank");
+                }
+                if first_shape.is_none() {
+                    first_shape = Some((width, active));
+                }
+            }
+            let (width, active) = first_shape.ok_or("graph.route_fold.bank")?;
+            if lanes.len() > width.lanes() as usize {
+                return Err("graph.route_fold.mask");
+            }
+            let mask = trailing_active_mask(lanes.len(), width);
+            let configuration = rack::PreparedFoldConfiguration::new(width, active, mask)
+                .map_err(|_| "graph.route_fold.mask")?;
+            let slot = installations
+                .get_mut(*run)
+                .ok_or("graph.route_fold.mapping")?;
+            if slot.is_some() {
+                return Err("graph.route_fold.mapping");
+            }
+            *slot = Some(FoldInstallation {
+                configuration,
+                lanes: lanes.clone().into_boxed_slice(),
+                master: fold.master.0 + ARENA_BASE,
+            });
+        }
+    }
+    Ok(SequentialPlan {
+        run_units,
+        fold,
+        unit_of_run,
+        op_slot,
+        installations,
+    })
+}
+
+/// Builds the sequential executor's runtime: one coloured arena, producers read in place.
+pub(crate) fn build_sequential(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: RuntimeParts,
+    frames: usize,
+    planning: SequentialPlan,
+) -> Runtime {
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_reset_selected_split_fader();
+    let mut parts = parts;
+    // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
+    // arena buffer `b + ARENA_BASE`.
+    let arena = |buffer: u32| buffer + ARENA_BASE;
+    let taps = taps_by_op(program, spec);
+    let delays = program
+        .delays
+        .iter()
+        .map(|line| CompensationDelay::new(line.samples as usize))
+        .collect();
+    let SequentialPlan {
+        run_units,
+        fold,
+        unit_of_run,
+        op_slot,
+        installations,
+    } = planning;
     let folded_runs: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
@@ -2765,24 +2948,19 @@ pub(crate) fn build_sequential(
             }
         }
     }
-    // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
-    let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
-    // Run unit -> the unit index it was emitted at, for the chains the fold arms.
-    let mut unit_of_run: Vec<Option<usize>> = vec![None; run_units.len()];
     let mut units = Vec::with_capacity(run_units.len());
     // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
     // rather than by a later walk because this is the only place the unit's ops and the spec's
     // node ids are both in hand: `RuntimeOp` deliberately carries no node id, and reconstructing
     // one from the arena buffers afterwards would be a second opinion about which lane is which.
     let mut identity: Vec<UnitIdentity> = Vec::with_capacity(run_units.len());
-    for (run, (membership, ops)) in run_units.iter().enumerate() {
+    for ((membership, ops), installation) in run_units.iter().zip(installations) {
         // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
         // reduction, no `mix2x2_block` pass of its own.
         if ops.iter().all(|index| retired.contains(index)) {
             continue;
         }
         let membership = membership.clone();
-        unit_of_run[run] = Some(units.len());
         {
             // `ops` is slot major with `lanes` ops per slot (`units_of` sorts by the member's
             // position within its bank), so slot `s`'s lane `l` is `ops[s * lanes + l]` and lane
@@ -2805,9 +2983,6 @@ pub(crate) fn build_sequential(
                     .collect(),
             });
         }
-        for (member, index) in ops.iter().enumerate() {
-            op_slot[*index] = Some((units.len(), member));
-        }
         let members: Vec<RuntimeOp> = ops
             .iter()
             .map(|index| {
@@ -2826,6 +3001,9 @@ pub(crate) fn build_sequential(
                             });
                         }
                     }
+                }
+                if fold.as_ref().is_some_and(|fold| fold.master_op == *index) {
+                    inputs = vec![arena(op.output.0)];
                 }
                 let sidechain = op.sidechain.map(|side| match side.delay {
                     None => arena(side.buffer.0),
@@ -2851,10 +3029,12 @@ pub(crate) fn build_sequential(
                 )
             })
             .collect();
-        units.push(finish_unit(&mut parts, &membership, members));
+        units.push(finish_unit(&mut parts, &membership, members, installation));
     }
     apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
-    let folds = apply_route_fold(fold.as_ref(), &unit_of_run, &op_slot, arena, &mut units);
+    let folds = fold.as_ref().map_or(0, |fold| {
+        fold.runs.iter().map(|(_, lanes)| lanes.len() as u64).sum()
+    });
     arm_resident_inputs(
         program,
         &first_producer,
@@ -2964,71 +3144,6 @@ fn resident_units_match(before: &RuntimeUnit, after: &RuntimeUnit) -> bool {
 
 /// Arm every admitted chain's epilogue and neutralise the reduction it performed.
 ///
-/// Three edits, and they are each other's counterparts. The chain is told which lanes to hand to
-/// `fold_plane` and given the master buffer and the per-lane constants; the retired route ops were
-/// never built into units at all; and the master op's inputs become its own output, which is the
-/// shape `reduce_plane` already treats as "nothing to copy", so the op still runs -- with whatever
-/// kind it has, a host binding included -- over the sum its cohorts' epilogues already wrote.
-///
-/// Returns the number of lanes armed, which is the only honest way to state that the fold fired:
-/// like the scatter redirect it optimises by *not doing* something, so there is no output
-/// difference to observe and no timing difference a gate may rest on.
-fn apply_route_fold(
-    fold: Option<&RouteFold>,
-    unit_of_run: &[Option<usize>],
-    op_slot: &[Option<(usize, usize)>],
-    arena: impl Fn(u32) -> u32,
-    units: &mut [RuntimeUnit],
-) -> u64 {
-    let Some(fold) = fold else {
-        return 0;
-    };
-    let master = arena(fold.master.0);
-    let mut armed = 0_u64;
-    for (run, lanes) in &fold.runs {
-        let Some(unit) = unit_of_run[*run] else {
-            continue;
-        };
-        let RuntimeUnit::Bank {
-            chain,
-            fold: slot,
-            master: destination,
-            ..
-        } = &mut units[unit]
-        else {
-            // Unreachable by construction: `route_fold` only ever names a banked run unit.
-            debug_assert!(false, "only a bank chain carries a folded epilogue");
-            continue;
-        };
-        let width = chain.width().lanes() as usize;
-        let mut mask = vec![false; width].into_boxed_slice();
-        for lane in 0..lanes.len().min(width) {
-            mask[lane] = true;
-        }
-        if chain.arm_fold(mask).is_err() {
-            // Unreachable by construction: the mask is the chain's own rendered lanes, which are
-            // exactly its active ones. Left inert rather than half-armed.
-            debug_assert!(false, "a chain's rendered lanes are its active lanes");
-            continue;
-        }
-        armed += lanes.len() as u64;
-        *destination = master;
-        *slot = lanes.clone().into_boxed_slice();
-    }
-    if armed == 0 {
-        return 0;
-    }
-    if let Some((unit, _)) = op_slot[fold.master_op] {
-        match &mut units[unit] {
-            RuntimeUnit::Op(op) => op.inputs = vec![master].into_boxed_slice(),
-            // Unreachable by construction: `route_fold` declines a banked master outright, because
-            // such a master's reduction is its chain's gather.
-            RuntimeUnit::Bank { .. } => debug_assert!(false, "a banked master never folds"),
-        }
-    }
-    armed
-}
-
 /// One chain's scatter redirect: `(run, lane, consumer op)` for every lane whose scatter may land
 /// in its consumer's buffer instead of the last slot's own (issue #202 rec 3).
 type ScatterRedirect = (usize, usize, usize);
@@ -3382,15 +3497,93 @@ const fn folded_route(transform: &RouteTransform) -> [f32; 4] {
 /// restates the same cascade as a query, in the same precedence order, and returns `None` for
 /// every arm that is not a plain route. Keep its exclusions coupled to new `node_kind` arms.
 /// Bindings, banks, sources and effects take precedence regardless of the node's session name.
-fn plain_route_gains(parts: &RuntimeParts, node: &GraphNodeId, index: u32) -> Option<[f32; 4]> {
-    if parts.source_inputs.contains(node)
-        || parts.membership.contains_key(&index)
-        || matches!(parts.bindings.get(node), Some(Some(_)))
-        || parts.effects.contains_key(node)
+trait PlanningMetadata {
+    fn membership(&self) -> &BankMembership;
+    fn has_source(&self, node: &GraphNodeId) -> bool;
+    fn has_binding(&self, node: &GraphNodeId) -> bool;
+    fn has_effect(&self, node: &GraphNodeId) -> bool;
+    fn has_observer(&self, node: &GraphNodeId) -> bool;
+    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform>;
+}
+
+impl PlanningMetadata for RuntimeParts {
+    fn membership(&self) -> &BankMembership {
+        &self.membership
+    }
+    fn has_source(&self, node: &GraphNodeId) -> bool {
+        self.source_inputs.contains(node)
+    }
+    fn has_binding(&self, node: &GraphNodeId) -> bool {
+        matches!(self.bindings.get(node), Some(Some(_)))
+    }
+    fn has_effect(&self, node: &GraphNodeId) -> bool {
+        self.effects.contains_key(node)
+    }
+    fn has_observer(&self, node: &GraphNodeId) -> bool {
+        self.observers.contains_key(node)
+    }
+    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
+        self.routes.get(node)
+    }
+}
+
+struct BorrowedPlanningMetadata<'a> {
+    plan: &'a crate::PreparedGraphPlan,
+    bindings: &'a crate::GraphRuntimeBindings,
+    sources: Option<&'a crate::GraphPreparedSourceSet>,
+    membership: BankMembership,
+}
+
+impl PlanningMetadata for BorrowedPlanningMetadata<'_> {
+    fn membership(&self) -> &BankMembership {
+        &self.membership
+    }
+    fn has_source(&self, node: &GraphNodeId) -> bool {
+        self.sources
+            .is_some_and(|set| set.claims().iter().any(|claim| &claim.node == node))
+    }
+    fn has_binding(&self, node: &GraphNodeId) -> bool {
+        self.bindings
+            .nodes
+            .iter()
+            .any(|binding| &binding.node == node && binding.processor.is_some())
+    }
+    fn has_effect(&self, node: &GraphNodeId) -> bool {
+        self.plan
+            .effects
+            .iter()
+            .any(|effect| matches!(node, GraphNodeId::Effect(id) if *id == effect.id))
+    }
+    fn has_observer(&self, node: &GraphNodeId) -> bool {
+        self.plan
+            .observers
+            .iter()
+            .chain(self.bindings.observers.iter())
+            .any(|observer| &observer.node == node)
+    }
+    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
+        self.plan
+            .routes
+            .iter()
+            .rev()
+            .find(|route| &route.node == node)
+            .map(|route| &route.transform)
+    }
+}
+
+fn plain_route_gains(
+    parts: &impl PlanningMetadata,
+    node: &GraphNodeId,
+    index: u32,
+) -> Option<[f32; 4]> {
+    if parts.has_source(node)
+        || parts.membership().contains_key(&index)
+        || parts.has_binding(node)
+        || parts.has_effect(node)
     {
         return None;
     }
-    parts.routes.get(node).map(folded_route)
+    parts.route(node).map(folded_route)
 }
 
 /// Whether anything can *see* the buffer op `index` writes other than by reading it as an input.
@@ -3402,22 +3595,18 @@ fn plain_route_gains(parts: &RuntimeParts, node: &GraphNodeId, index: u32) -> Op
 fn observed(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    parts: &impl PlanningMetadata,
     index: usize,
 ) -> bool {
     let node = &spec.nodes[program.ops[index].node as usize].id;
-    if parts.observers.contains_key(node) {
+    if parts.has_observer(node) {
         return true;
     }
     program
         .taps
         .iter()
         .filter(|tap| tap.after_op as usize == index)
-        .any(|tap| {
-            parts
-                .observers
-                .contains_key(&spec.nodes[tap.node as usize].id)
-        })
+        .any(|tap| parts.has_observer(&spec.nodes[tap.node as usize].id))
 }
 
 /// One chain's folded epilogue: which run unit it is, and one entry per rendered lane.
@@ -3468,7 +3657,7 @@ fn input_producers(program: &ExecutionProgram, target: usize) -> Vec<Option<usiz
 fn foldable_lane(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    parts: &impl PlanningMetadata,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
     producer: usize,
@@ -3573,7 +3762,7 @@ fn foldable_lane(
 fn route_fold(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    parts: &impl PlanningMetadata,
     run_units: &[(Vec<Membership>, Vec<usize>)],
 ) -> Option<RouteFold> {
     let (readers, first_producer) = op_dataflow(program);
@@ -3630,10 +3819,8 @@ fn route_fold(
             .inputs_of(master)
             .iter()
             .any(|input| input.delay.is_some())
-        || parts.membership.contains_key(&master.node)
-        || parts
-            .source_inputs
-            .contains(&spec.nodes[master.node as usize].id)
+        || parts.membership().contains_key(&master.node)
+        || parts.has_source(&spec.nodes[master.node as usize].id)
     {
         return None;
     }
@@ -3761,18 +3948,29 @@ fn finish_unit(
     parts: &mut RuntimeParts,
     run: &[Membership],
     mut members: Vec<RuntimeOp>,
+    installation: Option<FoldInstallation>,
 ) -> RuntimeUnit {
     if run.is_empty() {
         return RuntimeUnit::Op(members.pop().expect("one op per plain unit"));
     }
     let lanes = members.len() / run.len();
-    let chain = parts.chain_for(run, lanes);
+    let (configuration, fold, master) = installation.map_or_else(
+        || (None, Box::default(), 0),
+        |installation| {
+            (
+                Some(installation.configuration),
+                installation.lanes,
+                installation.master,
+            )
+        },
+    );
+    let chain = parts.chain_for_with_fold(run, lanes, configuration);
     RuntimeUnit::Bank {
         members: members.into_boxed_slice(),
         lanes,
         chain,
-        fold: Box::default(),
-        master: 0,
+        fold,
+        master,
     }
 }
 
@@ -3855,7 +4053,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 fn chains_into(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    parts: &impl PlanningMetadata,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
     earlier: &[usize],
@@ -3881,18 +4079,14 @@ fn chains_into(
             return false;
         }
         let node = &spec.nodes[producer.node as usize].id;
-        if parts.observers.contains_key(node) {
+        if parts.has_observer(node) {
             return false;
         }
         if program
             .taps
             .iter()
             .filter(|tap| tap.after_op as usize == *before)
-            .any(|tap| {
-                parts
-                    .observers
-                    .contains_key(&spec.nodes[tap.node as usize].id)
-            })
+            .any(|tap| parts.has_observer(&spec.nodes[tap.node as usize].id))
         {
             return false;
         }
@@ -3939,7 +4133,7 @@ fn chains_into(
 fn cohort_runs(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    parts: &impl PlanningMetadata,
     units: &[PlannedUnit],
 ) -> Vec<Vec<usize>> {
     let (readers, first_producer) = op_dataflow(program);
