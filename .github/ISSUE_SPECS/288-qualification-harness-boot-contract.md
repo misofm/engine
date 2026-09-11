@@ -117,3 +117,14 @@ Node and full shell wrapper exit0: callers5,real-ready5,real-disposed5,
 diagnose-ready1; existing and new mutationsPASS. Router check/test, JS/shell
 syntax and diff checkPASS. Raw outputs /tmp/issue288-a2-*.log.
 Astra medium attempt2 verdict is pending; attempt1FAIL remains recorded.
+
+
+## Attempt2 verdict — 2026-09-11
+
+Astra medium PASS against frozen c3cc077f. Independent Node and full shell
+execution PASS; five actual ready/dispose witnesses, one real diagnostic
+initializer, three count1 mutations rejected with typed contract errors.
+All four implementation paths select full qualification; clean worktree
+confirmed. No source/artifact/dependency/DSP boundary expansion.
+Verdict /tmp/issue288-astra-a2-verdict.md, independent raw logs alongside.
+Required exact PR/main qualification and remote closure remain root-owned.
