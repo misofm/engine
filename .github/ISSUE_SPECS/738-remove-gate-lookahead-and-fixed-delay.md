@@ -263,3 +263,15 @@ is accurate and changes no behavior. Raw receipt:
 qualification stays #746 and listening stays #26. This verdict is source approval,
 not merged delivery: required exact PR-head and resulting-main qualification
 and synchronized closure remain.
+
+
+## PR qualification policy correction
+
+PR#747 qualification34605481854 found a stale step-vocabulary allow-list entry
+for removed gate-test wording (`threshold is nudged`). The normal check passed;
+the self-test correctly rejected the unused exception. Luna removes that obsolete
+entry only; normal check, self-test and diff check pass. Raw failed CI log remains
+`/tmp/issue738-ci-lint.log`, repair receipt
+`/tmp/issue738-luna-ci-policy-repair.md`. This changes neither DSP nor artifact
+bytes and does not weaken the vocabulary rule. Review extension and fresh exact
+PR qualification are required before merge.
