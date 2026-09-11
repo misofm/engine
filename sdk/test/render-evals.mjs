@@ -77,6 +77,31 @@ function renderThroughSdk(engine, quanta, seed) {
   return blocks;
 }
 
+/** Feed one identical source plane to both stereo channels, or to the single mono channel. */
+function renderDuplicateSourceThroughSdk(engine, quanta, seed) {
+  const shape = engine.shape();
+  const blocks = [];
+  for (let block = 0; block < quanta; block += 1) {
+    shape.sources.forEach((source) => {
+      const plane = ramp(shape.quantumFrames, seed + block * 1024);
+      const planes = source.channels === 1 ? [plane] : [plane, plane];
+      const submitted = engine.submitSource({
+        sourceId: source.id,
+        generation: 1n,
+        startFrame: BigInt(block * shape.quantumFrames),
+        planes,
+        endOfRegion: block === quanta - 1,
+      });
+      assert.ok(
+        submitted.ok,
+        `source ${source.id} refused duplicate block ${block}: ${submitted.code}`,
+      );
+    });
+    blocks.push(engine.render());
+  }
+  return blocks;
+}
+
 let asset;
 
 before(async () => {
@@ -182,6 +207,29 @@ describe("eval 2 -- 96k/127 end to end from the boot's own answer", () => {
       assert.equal(digestBlocks(blocks), nativeDigest(document, 8, 3));
     } finally {
       engine.dispose();
+    }
+  });
+
+  test("duplicate stereo input and its mono preparation render identically", async () => {
+    const stereo = await createOfflineEngine(
+      sessionDocument({ channels: 2, frames: 1_024 }),
+      { asset },
+    );
+    const mono = await createOfflineEngine(
+      sessionDocument({ channels: 1, frames: 1_024 }),
+      { asset },
+    );
+    try {
+      const stereoBlocks = renderDuplicateSourceThroughSdk(stereo, 8, 11);
+      const monoBlocks = renderDuplicateSourceThroughSdk(mono, 8, 11);
+      assert.equal(digestBlocks(stereoBlocks), digestBlocks(monoBlocks));
+      assert.ok(
+        stereoBlocks.some(({ left, right }) =>
+          left.some((sample, index) => sample !== 0 || right[index] !== 0)),
+      );
+    } finally {
+      stereo.dispose();
+      mono.dispose();
     }
   });
 });
