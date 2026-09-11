@@ -66,3 +66,14 @@ Typecheck, 61 focused SDK tests and sdk-package check against the unchanged
 qualified80abeec2 artifact passed. Actual commands/env/exits/logs:
 `/tmp/issue376-attempt1`. No physical-browser opt-in run is claimed; required
 CI/browser delivery remains. Root checkpoints; independent XHIGH review pending.
+
+## Independent Astra XHIGH attempt 1 PASS
+
+Reviewed sourcec1385c26bb4409f100ba9d68d30e9180282b4462. Captured-policy and
+cached async refusal, zero session-map/command effects, positive attachment,
+caller mutation and packaged API behavior verified. Typecheck, 61 tests and
+package gate accepted. Isolated original-code negative control failed all
+three no-console cases while positive attachment passed. All six qualified
+artifact hashes unchanged; no source revision requested. Evidence:
+`/tmp/issue376-xhigh-_l8tc6wa/review.md`, review.json and negative.json.
+Required PR/main qualification and synchronized closure remain.
