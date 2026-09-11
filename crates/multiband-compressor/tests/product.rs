@@ -300,7 +300,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
 fn unity_gain_transition_has_no_step_at_crossover() {
     let mut initial = values();
     for lane in 0..2 {
-        initial[1 * 2 + lane].value = 0.0;
+        initial[2 + lane].value = 0.0;
         initial[6 * 2 + lane].value = 0.0;
     }
     let mut effect = MultibandCompressorFactory
@@ -361,7 +361,7 @@ fn unity_gain_transition_has_no_step_at_crossover() {
 fn unity_gain_output_is_the_causal_lr4_sum() {
     let mut initial = values();
     for lane in 0..2 {
-        initial[1 * 2 + lane].value = 0.0;
+        initial[2 + lane].value = 0.0;
         initial[6 * 2 + lane].value = 0.0;
     }
     let input = (0..8_192)
@@ -639,8 +639,8 @@ fn active_prefix_has_no_future_anticipation() {
         first[index] = sample;
         second[index] = sample;
     }
-    for index in PREFIX..second.len() {
-        second[index] = 0.8 * (core::f32::consts::TAU * 4_000.0 * index as f32 / 48_000.0).sin();
+    for (index, sample) in second.iter_mut().enumerate().skip(PREFIX) {
+        *sample = 0.8 * (core::f32::consts::TAU * 4_000.0 * index as f32 / 48_000.0).sin();
     }
     let mut first_right = first.clone();
     let mut second_right = second.clone();

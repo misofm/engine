@@ -849,21 +849,15 @@ fn ramp_words(state: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Vec<u32> {
         .1
         .chunks_exact(4)
         .enumerate()
-        .filter_map(|(word, bytes)| {
-            (3..43)
-                .contains(&word)
-                .then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        })
+        .filter(|(word, _)| (3..43).contains(word))
+        .map(|(_, bytes)| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         .chain(
             state
                 .2
                 .chunks_exact(4)
                 .enumerate()
-                .filter_map(|(word, bytes)| {
-                    (3..43)
-                        .contains(&word)
-                        .then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                }),
+                .filter(|(word, _)| (3..43).contains(word))
+                .map(|(_, bytes)| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
         )
         .collect()
 }
@@ -938,13 +932,60 @@ fn partition_control_trajectory_preserves_ramp_positions() {
         }
         assert_eq!(filter_words(&state), reference_filters.clone().unwrap());
         if partition == 1 {
+            let low_gain = f32::from_bits(u32::from_le_bytes([
+                state.1[4], state.1[5], state.1[6], state.1[7],
+            ]));
+            let high_gain = f32::from_bits(u32::from_le_bytes([
+                state.1[8],
+                state.1[9],
+                state.1[10],
+                state.1[11],
+            ]));
+            assert!(
+                low_gain < -0.001 || high_gain < -0.001,
+                "automation trajectory never engaged a gain reduction: low={low_gain} high={high_gain}"
+            );
             for (position, state) in checkpoints {
                 let ramps = ramp_words(&state);
-                assert!(ramps.iter().any(|word| *word != 0));
-                if position == 64 || position == 3_648 {
-                    assert!(ramps.chunks_exact(4).all(|ramp| ramp[3] == 0));
+                let ratio = &ramps[4..8];
+                let attack = &ramps[8..12];
+                match position {
+                    8 => {
+                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
+                        assert_eq!(ratio[3], 56);
+                        assert!(f32::from_bits(ratio[0]) > 8.0);
+                    }
+                    63 => {
+                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
+                        assert_eq!(ratio[3], 1);
+                        assert!(f32::from_bits(ratio[0]) > 8.0);
+                    }
+                    64 => {
+                        assert_eq!(f32::from_bits(ratio[0]), 8.0);
+                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
+                        assert_eq!(ratio[3], 0);
+                    }
+                    3_585 => {
+                        assert_eq!(f32::from_bits(attack[1]), 25.0);
+                        assert_eq!(attack[3], 63);
+                        assert!(f32::from_bits(attack[0]) > 0.2);
+                        assert!(f32::from_bits(attack[0]) < 25.0);
+                    }
+                    3_648 => {
+                        assert_eq!(f32::from_bits(attack[0]), 25.0);
+                        assert_eq!(f32::from_bits(attack[1]), 25.0);
+                        assert_eq!(attack[3], 0);
+                    }
+                    _ => {}
                 }
             }
+            let final_ramps = ramp_words(&state);
+            assert_eq!(f32::from_bits(final_ramps[4]), 8.0);
+            assert_eq!(f32::from_bits(final_ramps[5]), 8.0);
+            assert_eq!(final_ramps[7], 0);
+            assert_eq!(f32::from_bits(final_ramps[8]), 25.0);
+            assert_eq!(f32::from_bits(final_ramps[9]), 25.0);
+            assert_eq!(final_ramps[11], 0);
         }
     }
 }

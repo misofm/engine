@@ -4,6 +4,10 @@
 //! smoother. It is test local so production arithmetic remains the `f32` lane contract, while the
 //! causal sample order and recombination are independently readable here.
 
+// D6 gate exemption: this fixture intentionally keeps its host-f64 math independent from the
+// production approximation so the oracle cannot share the implementation's transcendental path.
+#![allow(clippy::disallowed_methods)]
+
 use dsp_reference::ReferenceLr4Crossover;
 
 fn frozen_retention(time_ms: f64, sample_rate: u32) -> f64 {

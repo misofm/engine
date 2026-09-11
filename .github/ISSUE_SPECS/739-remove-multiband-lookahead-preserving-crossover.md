@@ -561,3 +561,16 @@ Root full affected descendants287PASS/4ignored; multiband debug/release each
 47PASS/2ignored. Final source artifact probe remains byte-identical to the
 qualified pin. Astra medium found no descendant/artifact blockers; final
 strict checks and one complete-attempt verdict remain.
+
+
+## Final lint/assertion checkpoint — 2026-09-11
+
+Luna xhigh corrected test-only strict-Clippy findings: equivalent iterator/index
+style and a narrow documented independent-host-math oracle exemption. Added
+explicit ratio/attack ramp positions/endpoints and actual engaged-gain evidence
+required by the accepted partition ruling. Product10PASS, identity8PASS,
+fmtPASS; strict workspace ClippyPASS (broader than the requested affected-crate
+check). Raw commands/failures/results: /tmp/issue739-luna-lint.md.
+Lane/realtime/workspace policy and step-vocabulary normal/self-testPASS.
+No production arithmetic, artifact, tolerance or DSP-reference change.
+Astra medium's singular final attempt1 verdict is the remaining review gate.
