@@ -775,30 +775,72 @@ fn scalar_and_bank_state_interchange_continues() {
     }
 }
 
-/// Full reset restores prepared coefficients for lanes with different crossover frequencies.
+/// A restored different-crossover bank returns to the receiver's prepared defaults on full reset.
 #[test]
 fn bank_full_reset_restores_different_crossover_defaults() {
-    let mut sets = (0..4).map(|track| varied_values(track)).collect::<Vec<_>>();
-    for (track, values) in sets.iter_mut().enumerate() {
-        values[0].value = 700.0 + track as f32 * 300.0;
-        values[1].value = 900.0 + track as f32 * 300.0;
-    }
-    let requests = sets
-        .iter()
-        .map(|values| request_with(values, LinkMode::DualMono, FRAMES as u32, false))
-        .collect::<Vec<_>>();
-    let mut bank = support::bank(BankWidth::Four, &requests);
-    let sizes = bank.metadata().program_key.state_sizes;
-    let (mut left, mut right) = bank_signal(RESTORE_PREFIX, 4, 0xCAFE_0001);
-    process_bank_frames(bank.as_mut(), BankWidth::Four, &mut left, &mut right, 0);
-    bank.reset(ResetKind::FullToDefaults);
-    let fresh = support::bank(BankWidth::Four, &requests);
-    for track in 0..4 {
-        assert_eq!(
-            snapshot_track(bank.as_ref(), track, sizes),
-            snapshot_track(fresh.as_ref(), track, sizes),
-            "different-crossover full reset track={track}"
+    for width in [BankWidth::Four, BankWidth::Eight] {
+        let lanes = width.lanes() as usize;
+        let mut source_sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
+        for (track, values) in source_sets.iter_mut().enumerate() {
+            values[0].value = 700.0 + track as f32 * 300.0;
+            values[1].value = 900.0 + track as f32 * 300.0;
+        }
+        let destination_sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
+        let source_requests = source_sets
+            .iter()
+            .map(|values| request_with(values, LinkMode::DualMono, FRAMES as u32, false))
+            .collect::<Vec<_>>();
+        let destination_requests = destination_sets
+            .iter()
+            .map(|values| request_with(values, LinkMode::DualMono, FRAMES as u32, false))
+            .collect::<Vec<_>>();
+        let mut donor = support::bank(width, &source_requests);
+        let sizes = donor.metadata().program_key.state_sizes;
+        let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, lanes, 0xCAFE_0001);
+        process_bank_frames(donor.as_mut(), width, &mut donor_left, &mut donor_right, 0);
+        let saved = (0..lanes)
+            .map(|track| snapshot_track(donor.as_ref(), track as u32, sizes))
+            .collect::<Vec<_>>();
+        let mut receiver = support::bank(width, &destination_requests);
+        for (track, state) in saved.iter().enumerate() {
+            receiver
+                .restore_track_state_payload(
+                    track as u32,
+                    1,
+                    StatePayloadInput::new(&state.0, &state.1, &state.2, sizes)
+                        .expect("different-crossover payload"),
+                )
+                .expect("different-crossover restore");
+        }
+        receiver.reset(ResetKind::FullToDefaults);
+        let mut fresh = support::bank(width, &destination_requests);
+        for track in 0..lanes {
+            assert_eq!(
+                snapshot_track(receiver.as_ref(), track as u32, sizes),
+                snapshot_track(fresh.as_ref(), track as u32, sizes),
+                "different-crossover full reset width={width:?} track={track}"
+            );
+        }
+        let (mut reset_left, mut reset_right) = bank_signal(RESTORE_TAIL, lanes, 0xCAFE_1001);
+        let (mut fresh_left, mut fresh_right) = bank_signal(RESTORE_TAIL, lanes, 0xCAFE_1001);
+        process_bank_frames(
+            receiver.as_mut(),
+            width,
+            &mut reset_left,
+            &mut reset_right,
+            0,
         );
+        process_bank_frames(fresh.as_mut(), width, &mut fresh_left, &mut fresh_right, 0);
+        assert!(reset_left.iter().any(|sample| *sample != 0.0));
+        assert_eq!(reset_left, fresh_left, "reset PCM width={width:?}");
+        assert_eq!(reset_right, fresh_right, "reset PCM width={width:?}");
+        for track in 0..lanes {
+            assert_eq!(
+                snapshot_track(receiver.as_ref(), track as u32, sizes),
+                snapshot_track(fresh.as_ref(), track as u32, sizes),
+                "reset state width={width:?} track={track}"
+            );
+        }
     }
 }
 

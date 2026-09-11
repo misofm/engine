@@ -502,3 +502,30 @@ at1/7/64/128/512. Identity suite8PASS/0FAIL, captured in
 /tmp/issue739-luna-partition-ruling-identity.log. No production arithmetic or
 numerical tolerance changed. Active dynamics oracle and final product-resource
 cases remain the next bounded tranche before descendants/final qualification.
+
+
+## Active public and target evidence checkpoint — 2026-09-11
+
+Luna xhigh's remaining public tranche passes24tests: product10, identity8,
+nonfinite3, allocation3. The active oracle composes the independent LR4
+reference with the mathematical dynamics law and frozen f32 retention;
+worst PCM error2.30968e-7, restored unity reference3.5762787e-7.
+The bank reset discriminator now actually restores a different-crossover
+donor before FullToDefaults and compares fresh-receiver PCM/state atW4/W8.
+Workspace fmt check PASS. Raw focused results and initial failures, including
+a too-early release assertion corrected to the actual release interval, are
+preserved in /tmp/issue739-luna-public.md and its linked logs.
+
+Root current-artifact gates PASS: official pinned build/static/resource parity,
+three-browser matrix with mutation controls, SDK types/generated/package/
+headless, and G5 native/scalar-Wasm/simd128 unchanged primitive corpus replay.
+The external four-track full-product Wasm witness passes scalar/simd128 exact
+PCM equality; unity first0.41550278663635254, active first0.3513365387916565,
+bypass first0.5, with independent high-band first reduction-1.457039672590407dB.
+This complements, not relabels, the primitive corpus. Previous artifact fails
+the same actual first-sample discriminator. Receipts /tmp/issue739-gates;
+Astra medium found no artifact blocker in /tmp/issue739-artifact-review.md.
+Production sources are unchanged since7d57cff4; intermediate revisions changed
+tests/spec/generated metadata/pins only. Existing browser matrix/results are
+refreshed at candidate06eb5998. Thin descendants, proportional full native
+gates and final adversarial verdict/delivery remain; no CPU/listening claim.

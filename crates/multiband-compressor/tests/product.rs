@@ -7,8 +7,9 @@ mod support;
 
 use dsp_reference::ReferenceLr4Crossover;
 use effect_contract::{
-    BankWidth, EffectPrepareError, EffectQuality, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, ResetKind, StatePayloadInput,
+    BankWidth, EffectBankProcessBlock, EffectPrepareError, EffectQuality, LinkMode,
+    NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectBankRequest, ResetKind,
+    StatePayloadInput, StatePayloadSizes,
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 use support::{
@@ -25,6 +26,21 @@ fn rms(values: &[f32]) -> f64 {
         .sqrt()
 }
 
+fn active_values() -> [effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2] {
+    let mut values = values();
+    for channel in 0..2 {
+        values[2 + channel].value = -45.0;
+        values[4 + channel].value = 20.0;
+        values[6 + channel].value = 0.1;
+        values[8 + channel].value = 5.0;
+        values[12 + channel].value = -45.0;
+        values[14 + channel].value = 20.0;
+        values[16 + channel].value = 0.1;
+        values[18 + channel].value = 5.0;
+    }
+    values
+}
+
 /// The current byte rows, zero latency and exact-and-one-below resource caps.
 ///
 /// The compact causal payload has one crossover word, two gain words, ten four-word ramps and four
@@ -34,6 +50,14 @@ fn rms(values: &[f32]) -> f64 {
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR).expect("descriptor");
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters.len(), 11);
+    assert_eq!(
+        MULTIBAND_COMPRESSOR_DESCRIPTOR
+            .parameters
+            .iter()
+            .map(|parameter| parameter.id.0)
+            .collect::<Vec<_>>(),
+        [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
         (44_100u32, 188u32),
@@ -44,7 +68,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         let initial = values();
         let mut prepared = request(&initial);
         prepared.sample_rate = rate;
-        let effect = MultibandCompressorFactory
+        let mut effect = MultibandCompressorFactory
             .prepare(prepared)
             .expect("prepare");
         let metadata = effect.metadata();
@@ -68,6 +92,93 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             StatePayloadInput::new(&[], &old_left, &old_right, metadata.state_sizes).is_err(),
             "retired rate-dependent payload must not enter the compact codec at {rate} Hz"
         );
+        let saved = {
+            let mut left = support::signal(128, u64::from(rate));
+            let mut right = support::signal(128, u64::from(rate) + 1);
+            process(effect.as_mut(), &mut left, &mut right, 0, &[], 128);
+            snapshot(effect.as_ref())
+        };
+        let old_sizes = StatePayloadSizes {
+            common_bytes: 0,
+            left_bytes: old_bytes as u32,
+            right_bytes: old_bytes as u32,
+        };
+        let old_payload = StatePayloadInput::new(&[], &old_left, &old_right, old_sizes)
+            .expect("historical payload shape");
+        assert!(
+            effect.restore_state_payload(1, old_payload).is_err(),
+            "historical payload must be rejected by the scalar restore hook at {rate} Hz"
+        );
+        assert_eq!(snapshot(effect.as_ref()), saved);
+
+        let mut bypass_request = request_with(&initial, LinkMode::DualMono, 128, true);
+        bypass_request.sample_rate = rate;
+        let mut bypass = MultibandCompressorFactory
+            .prepare(bypass_request)
+            .expect("bypass prepare");
+        assert_eq!(
+            bypass.metadata().latency,
+            effect_contract::LatencySamples(0)
+        );
+        assert_eq!(bypass.metadata().state_sizes, metadata.state_sizes);
+        let mut bypass_left = support::signal(128, u64::from(rate) + 2);
+        let mut bypass_right = support::signal(128, u64::from(rate) + 3);
+        let input_left = bypass_left.clone();
+        let input_right = bypass_right.clone();
+        process(
+            bypass.as_mut(),
+            &mut bypass_left,
+            &mut bypass_right,
+            0,
+            &[],
+            128,
+        );
+        assert_eq!(bypass_left, input_left);
+        assert_eq!(bypass_right, input_right);
+
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let bank_values = vec![initial; lanes];
+            let mut bank_requests = bank_values
+                .iter()
+                .map(|values| request(values))
+                .collect::<Vec<_>>();
+            for request in &mut bank_requests {
+                request.sample_rate = rate;
+            }
+            let mut bank = MultibandCompressorFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: backend_for(width),
+                    width,
+                    requests: &bank_requests,
+                })
+                .expect("bank prepare")
+                .expect("bank");
+            assert_eq!(bank.metadata().width, width);
+            assert_eq!(
+                bank.metadata().program_key.state_sizes,
+                metadata.state_sizes
+            );
+            let mut bank_left = vec![0.25f32; 128 * lanes];
+            let mut bank_right = vec![-0.25f32; 128 * lanes];
+            let offsets = vec![0u32; lanes + 1];
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    128,
+                    width,
+                    0,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block"),
+            );
+            assert!(bank_left.iter().all(|sample| sample.is_finite()));
+            assert!(bank_right.iter().all(|sample| sample.is_finite()));
+        }
         let mut below = request(&initial);
         below.sample_rate = rate;
         below.limits.maximum_total_state_bytes = total - 1;
@@ -199,6 +310,165 @@ fn unity_gain_output_is_the_causal_lr4_sum() {
     eprintln!("E0b worst_error={worst:e}");
 }
 
+/// An independent LR4 plus mathematical dynamics oracle exercises both active envelopes at the
+/// current sample. Its resident negative-dB reading is checked at each block boundary.
+#[test]
+fn active_causal_oracle_engages_releases_and_starts_on_current_sample() {
+    const FRAMES: usize = 4_096;
+    let active = active_values();
+    let mut effect = MultibandCompressorFactory
+        .prepare(request_with(&active, LinkMode::DualMono, 128, false))
+        .expect("active effect");
+    let mut oracle = support::oracle::ActiveBands::new(
+        48_000.0, 1_000.0, -45.0, 20.0, 0.1, 5.0, -45.0, 20.0, 0.1, 5.0,
+    );
+    let input = (0..FRAMES)
+        .map(|index| {
+            let frequency = if index < 1_024 {
+                120.0
+            } else if (2_048..3_072).contains(&index) {
+                4_000.0
+            } else {
+                0.0
+            };
+            if frequency == 0.0 {
+                0.0
+            } else {
+                0.8 * (core::f32::consts::TAU * frequency * index as f32 / 48_000.0).sin()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut output = input.clone();
+    let mut right = input.clone();
+    let mut expected = Vec::with_capacity(FRAMES);
+    let mut low_envelope = Vec::with_capacity(FRAMES);
+    let mut high_envelope = Vec::with_capacity(FRAMES);
+    for start in (0..FRAMES).step_by(128) {
+        let end = start + 128;
+        for sample in &input[start..end] {
+            let (value, low, high) = oracle.process(*sample);
+            expected.push(value);
+            low_envelope.push(low);
+            high_envelope.push(high);
+        }
+        process(
+            effect.as_mut(),
+            &mut output[start..end],
+            &mut right[start..end],
+            start as u64,
+            &[],
+            128,
+        );
+        let mut observed = ObservationSample::default();
+        assert!(effect.observe_resident(0, &mut observed));
+        let oracle_reduction = low_envelope[end - 1].min(high_envelope[end - 1]);
+        assert!(
+            (f64::from(observed.left) - oracle_reduction).abs() <= 0.005,
+            "block ending {end}: observed={} oracle={oracle_reduction}",
+            observed.left
+        );
+    }
+    let mut worst = 0.0f32;
+    for (index, (actual, wanted)) in output.iter().zip(expected.iter()).enumerate() {
+        let error = (*actual - *wanted).abs();
+        worst = worst.max(error);
+        assert!(error <= 2.0e-5, "frame={index} error={error}");
+    }
+    let low_min = low_envelope[..1_024].iter().copied().fold(0.0, f64::min);
+    let high_min = high_envelope[2_048..3_072]
+        .iter()
+        .copied()
+        .fold(0.0, f64::min);
+    assert!(low_min < -5.0, "low envelope never engaged: {low_min}");
+    assert!(high_min < -5.0, "high envelope never engaged: {high_min}");
+    assert!(
+        low_envelope[2_047] > low_min + 1.0,
+        "low envelope did not release"
+    );
+    assert!(
+        high_envelope[4_095] > high_min + 1.0,
+        "high envelope did not release"
+    );
+    eprintln!("active oracle worst_error={worst:e}");
+
+    let mut first_values = values();
+    for channel in 0..2 {
+        first_values[4 + channel].value = 1.0;
+        first_values[12 + channel].value = -80.0;
+        first_values[14 + channel].value = 20.0;
+        first_values[16 + channel].value = 0.1;
+        first_values[18 + channel].value = 5.0;
+    }
+    let mut first_effect = MultibandCompressorFactory
+        .prepare(request_with(&first_values, LinkMode::DualMono, 1, false))
+        .expect("first-sample effect");
+    let mut first_oracle = support::oracle::ActiveBands::new(
+        48_000.0, 1_000.0, -18.0, 1.0, 10.0, 100.0, -80.0, 20.0, 0.1, 5.0,
+    );
+    let mut first = [1.0f32];
+    let mut first_right = [1.0f32];
+    let (wanted, _, high_state) = first_oracle.process(1.0);
+    process(
+        first_effect.as_mut(),
+        &mut first,
+        &mut first_right,
+        0,
+        &[],
+        1,
+    );
+    assert!(
+        high_state < -1.0,
+        "first sample high envelope did not engage"
+    );
+    assert!((first[0] - wanted).abs() <= 2.0e-5);
+    assert!(first[0].abs() < 0.99, "first sample was not reduced");
+}
+
+/// Equal current prefixes stay bit-identical when a future suffix changes, proving causality.
+#[test]
+fn active_prefix_has_no_future_anticipation() {
+    const PREFIX: usize = 128;
+    let active = active_values();
+    let mut first = vec![0.0f32; 512];
+    let mut second = first.clone();
+    for index in 0..PREFIX {
+        let sample = 0.8 * (core::f32::consts::TAU * 120.0 * index as f32 / 48_000.0).sin();
+        first[index] = sample;
+        second[index] = sample;
+    }
+    for index in PREFIX..second.len() {
+        second[index] = 0.8 * (core::f32::consts::TAU * 4_000.0 * index as f32 / 48_000.0).sin();
+    }
+    let mut first_right = first.clone();
+    let mut second_right = second.clone();
+    let mut first_effect = MultibandCompressorFactory
+        .prepare(request(&active))
+        .expect("first prefix effect");
+    let mut second_effect = MultibandCompressorFactory
+        .prepare(request(&active))
+        .expect("second prefix effect");
+    for start in (0..first.len()).step_by(128) {
+        process(
+            first_effect.as_mut(),
+            &mut first[start..start + 128],
+            &mut first_right[start..start + 128],
+            start as u64,
+            &[],
+            128,
+        );
+        process(
+            second_effect.as_mut(),
+            &mut second[start..start + 128],
+            &mut second_right[start..start + 128],
+            start as u64,
+            &[],
+            128,
+        );
+    }
+    assert_eq!(&first[..PREFIX], &second[..PREFIX]);
+    assert_eq!(&first_right[..PREFIX], &second_right[..PREFIX]);
+}
+
 /// E0c. A bypassed instance is a causal dry path, and signed zero survives it.
 ///
 /// Signed zero lives on the bypass path and nowhere else: on the enabled path
@@ -316,6 +586,72 @@ fn a_rejected_restore_changes_nothing() {
     );
 }
 
+/// A bank stages both channels before commit: malformed right state and retired payload lengths
+/// leave the target lane and every untouched lane byte-identical.
+#[test]
+fn bank_rejected_restore_changes_nothing_at_each_launch_rate() {
+    for (rate, old_bytes) in [
+        (44_100u32, 7_256usize),
+        (48_000, 7_880),
+        (88_200, 14_312),
+        (96_000, 15_560),
+    ] {
+        let initial = values();
+        let mut requests = (0..4).map(|_| request(&initial)).collect::<Vec<_>>();
+        for request in &mut requests {
+            request.sample_rate = rate;
+        }
+        let mut bank = support::bank(BankWidth::Four, &requests);
+        let sizes = bank.metadata().program_key.state_sizes;
+        let mut left = vec![0.3f32; 128 * 4];
+        let mut right = vec![-0.2f32; 128 * 4];
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                128,
+                BankWidth::Four,
+                0,
+                &[],
+                &[0u32; 5],
+                128,
+            )
+            .expect("bank block"),
+        );
+        let saved = (0..4)
+            .map(|track| support::snapshot_track(bank.as_ref(), track, sizes))
+            .collect::<Vec<_>>();
+        let mut malformed = saved[0].clone();
+        malformed.2[..4].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        let payload = StatePayloadInput::new(&malformed.0, &malformed.1, &malformed.2, sizes)
+            .expect("compact malformed payload");
+        assert!(bank.restore_track_state_payload(0, 1, payload).is_err());
+        for (track, state) in saved.iter().enumerate() {
+            assert_eq!(
+                support::snapshot_track(bank.as_ref(), track as u32, sizes),
+                *state,
+                "right-channel rollback rate={rate} track={track}"
+            );
+        }
+        let old_left = vec![0u8; old_bytes];
+        let old_right = vec![0u8; old_bytes];
+        let old_sizes = StatePayloadSizes {
+            common_bytes: 0,
+            left_bytes: old_bytes as u32,
+            right_bytes: old_bytes as u32,
+        };
+        let old_payload = StatePayloadInput::new(&[], &old_left, &old_right, old_sizes)
+            .expect("historical payload shape");
+        assert!(bank.restore_track_state_payload(0, 1, old_payload).is_err());
+        assert_eq!(
+            support::snapshot_track(bank.as_ref(), 0, sizes),
+            saved[0],
+            "historical bank payload rollback rate={rate}"
+        );
+    }
+}
+
 /// Compressing one band leaves the other alone.
 #[test]
 fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
@@ -373,6 +709,19 @@ fn bank_requests_are_validated_before_any_fallback() {
     let factory = MultibandCompressorFactory;
     let sets = vec![values(); 4];
     let requests = sets.iter().map(|set| request(set)).collect::<Vec<_>>();
+    let wrong_count = sets[..3].iter().map(|set| request(set)).collect::<Vec<_>>();
+    assert_eq!(
+        factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: backend_for(BankWidth::Four),
+                width: BankWidth::Four,
+                requests: &wrong_count,
+            })
+            .err(),
+        Some(EffectPrepareError {
+            code: "effect.bank.requests"
+        })
+    );
     assert_eq!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -404,6 +753,27 @@ fn bank_requests_are_validated_before_any_fallback() {
             code: "effect.parameter.initial"
         }),
         "every request is validated before an unavailable-backend fallback"
+    );
+
+    let mut mixed_malformed_sets = sets.clone();
+    mixed_malformed_sets[3][0].value = f32::NAN;
+    let mut mixed_malformed = mixed_malformed_sets
+        .iter()
+        .map(|set| request(set))
+        .collect::<Vec<_>>();
+    mixed_malformed[2] = request_with(&mixed_malformed_sets[2], LinkMode::Maximum, 128, false);
+    assert_eq!(
+        factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: backend_for(BankWidth::Four),
+                width: BankWidth::Four,
+                requests: &mixed_malformed,
+            })
+            .err(),
+        Some(EffectPrepareError {
+            code: "effect.parameter.initial"
+        }),
+        "malformed members are rejected before mixed-program fallback"
     );
 
     // A track whose program key differs falls back to scalar rather than silently binding.
