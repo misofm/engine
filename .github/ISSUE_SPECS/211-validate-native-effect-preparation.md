@@ -52,3 +52,13 @@ that singleton loop. Astra LOW applied the correction; locked validator tests,
 strict all-target/all-feature Clippy and formatting all passed. Evidence:
 `/tmp/issue211-attempt2`. Incidental unrelated lock ordering was restored; only
 the test correction and this record change. Independent attempt2 verdict pending.
+
+## Independent Astra XHIGH attempt 2 PASS
+
+Source7463c0d3c7c883f1e949975eaeb06cd03710c4c1 approved. Reviewer accepted
+formatting, locked strict Clippy and 10 integration tests, and independently
+passed nine CLI controls covering ports, quality, link modes, third-party
+refusal, diagnostic ordering, exit status and canonical suppression. Shared
+registry/preparer, caps, earlier-stage skips and sealed fixture bytes verified.
+Evidence: `/tmp/issue211-verification-attempt2/verdict.md` and control receipts.
+Required PR/main qualification and upstream synchronized closure remain.
