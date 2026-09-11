@@ -706,6 +706,18 @@ export const qualificationConstants = Object.freeze({
   sourceBitDepth: "32f",
 });
 
+// Issue #288: these are the existing qualification call sites, exposed only to the hermetic
+// contract test. The browser runner continues to enter through runQualification below; keeping
+// the references here direct means the test executes the same boot objects that production uses.
+export const qualificationBootContract = Object.freeze({
+  renderCorpusSegment,
+  typedUnsupportedAttestation,
+  runConsoleQualification,
+  runObservationRun,
+  runStallQualification,
+  diagnoseReady,
+});
+
 // Issue #272: the fed-PCM generator behind each qualification session document, exported so the
 // harness runner can re-derive that document's declared `content` identity from the exact same
 // code the browser feeds. Every row states the generator, the block count fed, and the source row
