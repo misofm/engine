@@ -26,6 +26,18 @@ from typing import Any, Iterable
 
 
 ISSUE = 746
+SUBJECTS = {
+    "gate-active": {
+        "issue": 746,
+        "record": "gate_active",
+        "effect_id": None,
+    },
+    "multiband-active": {
+        "issue": 748,
+        "record": "multiband_active",
+        "effect_id": "miso.multiband-compressor",
+    },
+}
 SAMPLE_RATE = 48_000
 FRAMES = 128
 CHANNELS = 2
@@ -37,6 +49,10 @@ MEASURED_BLOCKS = 32_768
 DRIFT_CEILING = 0.03
 HIGH_RATIO_LIMIT = 0.9
 LOW_RATIO_LIMIT = 0.01
+MULTIBAND_BANDS = ("low", "high")
+MULTIBAND_HIGH_GAIN_LIMIT_DB = -3.0
+MULTIBAND_QUIET_GAIN_FLOOR_DB = -0.1
+MULTIBAND_QUIET_GAIN_CEILING_DB = 0.0
 METADATA_NAMES = (
     "MISO_ENGINE_BENCH_CPU_MODEL",
     "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
@@ -54,6 +70,13 @@ METADATA_NAMES = (
 
 class RunnerError(RuntimeError):
     """A refusal or a preserved run failure."""
+
+
+def subject_spec(name: str) -> dict[str, Any]:
+    try:
+        return SUBJECTS[name]
+    except KeyError as error:
+        raise RunnerError(f"unknown subject: {name}") from error
 
 
 def sha256(path: Path) -> str:
@@ -199,9 +222,9 @@ def loadavg() -> str:
     return value or "unknown"
 
 
-def probe_parent(parent: Path) -> None:
+def probe_parent(parent: Path, issue: int = ISSUE, subject: str = "gate-active") -> None:
     try:
-        probe = Path(tempfile.mkdtemp(prefix=f".issue{ISSUE}-parent-probe-", dir=parent))
+        probe = Path(tempfile.mkdtemp(prefix=f".issue{issue}-{subject}-parent-probe-", dir=parent))
         try:
             marker = probe / "write-test"
             marker.write_bytes(b"probe")
@@ -291,7 +314,7 @@ def exact_int(value: Any, label: str, *, nonnegative: bool = True) -> int:
     return value
 
 
-def activity_valid(row: dict[str, Any], width: int) -> bool:
+def gate_activity_valid(row: dict[str, Any], width: int) -> bool:
     activity = row.get("activity")
     if not isinstance(activity, list) or len(activity) != width * CHANNELS:
         return False
@@ -339,7 +362,75 @@ def activity_valid(row: dict[str, Any], width: int) -> bool:
     return len(seen) == width * CHANNELS
 
 
-def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
+def multiband_activity_valid(row: dict[str, Any], width: int) -> bool:
+    activity = row.get("activity")
+    if not isinstance(activity, list) or len(activity) != width * CHANNELS * 2:
+        return False
+    try:
+        blocks = exact_int(row["blocks"], "blocks")
+    except (KeyError, RunnerError):
+        return False
+    expected_samples = blocks * FRAMES
+    expected_witnesses = blocks // 64
+    seen: set[tuple[int, str, str]] = set()
+    for item in activity:
+        if not isinstance(item, dict):
+            return False
+        try:
+            lane = exact_int(item["lane"], "activity lane")
+            channel = item["channel"]
+            band = item["band"]
+            high_witnesses = exact_int(item["high_witnesses"], "high witness count")
+            quiet_witnesses = exact_int(item["quiet_witnesses"], "quiet witness count")
+            high_min = float(item["high_gain_min_db"])
+            high_max = float(item["high_gain_max_db"])
+            quiet_min = float(item["quiet_gain_min_db"])
+            quiet_max = float(item["quiet_gain_max_db"])
+            finite = exact_int(item["finite_output_samples"], "finite output sample count")
+            nonzero_input = exact_int(item["nonzero_input_samples"], "nonzero input sample count")
+            nonzero_output = exact_int(item["nonzero_output_samples"], "nonzero output sample count")
+            input_energy = float(item["input_energy"])
+            output_energy = float(item["output_energy"])
+        except (KeyError, TypeError, ValueError, RunnerError):
+            return False
+        key = (lane, channel, band)
+        if key in seen or lane < 0 or lane >= width or channel not in ("left", "right") or band not in MULTIBAND_BANDS:
+            return False
+        seen.add(key)
+        if (
+            high_witnesses != expected_witnesses
+            or quiet_witnesses != expected_witnesses
+            or not math.isfinite(high_min)
+            or not math.isfinite(high_max)
+            or not math.isfinite(quiet_min)
+            or not math.isfinite(quiet_max)
+            or high_max >= MULTIBAND_HIGH_GAIN_LIMIT_DB
+            or quiet_min <= MULTIBAND_QUIET_GAIN_FLOOR_DB
+            or quiet_max > MULTIBAND_QUIET_GAIN_CEILING_DB
+            or finite != expected_samples
+            or nonzero_input <= 0
+            or nonzero_output <= 0
+            or not math.isfinite(input_energy)
+            or input_energy <= 0.0
+            or not math.isfinite(output_energy)
+            or output_energy <= 0.0
+        ):
+            return False
+    return len(seen) == width * CHANNELS * 2
+
+
+def activity_valid(row: dict[str, Any], width: int, subject: str = "gate-active") -> bool:
+    return (
+        multiband_activity_valid(row, width)
+        if subject == "multiband-active"
+        else gate_activity_valid(row, width)
+    )
+
+
+def validate_subject_rows(
+    rows: list[dict[str, Any]], phase: str, subject: str = "gate-active"
+) -> None:
+    spec = subject_spec(subject)
     expected_blocks = {
         "preflight": PREFLIGHT_BLOCKS,
         "warmup": WARMUP_BLOCKS,
@@ -354,8 +445,8 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
             type(row.get("schema_version")) is not int
             or row.get("schema_version") != 1
             or type(row.get("issue")) is not int
-            or row.get("issue") != ISSUE
-            or row.get("record") != "gate_active"
+            or row.get("issue") != spec["issue"]
+            or row.get("record") != spec["record"]
         ):
             raise RunnerError(f"{phase} has the wrong issue/schema record")
         if row.get("phase") != phase:
@@ -397,8 +488,34 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
             or timed_calls != (blocks if phase in ("1", "2") else 0)
         ):
             raise RunnerError(f"{phase} width {width} has incorrect frozen normalization")
-        if not activity_valid(row, width):
-            raise RunnerError(f"{phase} width {width} failed active high/low validation")
+        if spec["effect_id"] is not None:
+            if row.get("effect_id") != spec["effect_id"]:
+                raise RunnerError(f"{phase} width {width} has the wrong effect identity")
+            digest = row.get("input_digest")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise RunnerError(f"{phase} width {width} lacks a valid input digest")
+            frozen = {
+                "stimulus": "square_components_v1",
+                "low_component_hz": 125,
+                "high_component_hz": 4_000,
+                "high_amplitude": 0.25,
+                "quiet_amplitude": 1.0 / 4_096.0,
+                "crossover_hz": 1_000,
+                "threshold_db": -30,
+                "ratio": 4,
+                "attack_ms": 1,
+                "release_ms": 5,
+                "makeup_db": 0,
+                "state_layout_version": 1,
+                "state_common_bytes": 0,
+                "state_channel_bytes": 188,
+                "scratch_admission_bytes": 1,
+                "scratch_bytes": 0,
+            }
+            if any(row.get(key) != value for key, value in frozen.items()):
+                raise RunnerError(f"{phase} width {width} has the wrong frozen multiband identity")
+        if not activity_valid(row, width, subject):
+            raise RunnerError(f"{phase} width {width} failed active envelope validation")
         reports = row.get("actual_report_counts")
         if not isinstance(reports, list) or len(reports) != width:
             raise RunnerError(f"{phase} width {width} lacks one report per lane")
@@ -585,22 +702,41 @@ def enrich_rows(rows: list[dict[str, Any]], context: dict[str, Any], perf: Path,
     return output
 
 
-def preflight(args: argparse.Namespace, root: Path, binary: Path, perf: Path, output: Path, cpu: int) -> dict[str, Any]:
+def preflight(
+    args: argparse.Namespace,
+    root: Path,
+    binary: Path,
+    perf: Path,
+    output: Path,
+    cpu: int,
+    subject: str = "gate-active",
+) -> dict[str, Any]:
+    spec = subject_spec(subject)
     context = host_context(root, binary, perf, cpu)
     perf_text = perf_version(perf)
-    probe_directory = Path(tempfile.mkdtemp(prefix=f".issue{ISSUE}-preflight-", dir=output.parent))
+    probe_directory = Path(
+        tempfile.mkdtemp(prefix=f".issue{spec['issue']}-{subject}-preflight-", dir=output.parent)
+    )
     probe_hz, probe_csv, probe_stdout, probe_stderr = perf_probe(perf, probe_directory, "no-workload", ["true"])
     _ = (probe_stdout, probe_stderr)
     env_values = metadata_env(context)
     rows, subject_hz, counters, argv, stdout, stderr, csv = launch_subject(
-        perf, binary, cpu, env_values, ["gate-active", "--preflight"], probe_directory, "subject-preflight"
+        perf,
+        binary,
+        cpu,
+        env_values,
+        [subject, "--preflight"],
+        probe_directory,
+        "subject-preflight",
     )
-    validate_subject_rows(rows, "preflight")
+    validate_subject_rows(rows, "preflight", subject)
     if not math.isfinite(subject_hz) or subject_hz <= 0.0:
         raise RunnerError("subject preflight did not produce a positive effective clock")
     write_json(probe_directory / "preflight-summary.json", {
         "schema_version": 1,
-        "issue": ISSUE,
+        "issue": spec["issue"],
+        "subject": subject,
+        "record": spec["record"],
         "mode": "preflight",
         "binary": str(binary),
         "binary_sha256": context["binary_sha256"],
@@ -623,12 +759,37 @@ def preflight(args: argparse.Namespace, root: Path, binary: Path, perf: Path, ou
         "timed_subject_invocations": 0,
         "source": context,
     })
-    print(json.dumps({"issue": ISSUE, "status": "PREFLIGHT_PASS", "preflight_directory": str(probe_directory), "no_workload_effective_hz": probe_hz}, sort_keys=True))
-    return {"context": context, "perf_version": perf_text, "preflight_directory": str(probe_directory)}
+    print(
+        json.dumps(
+            {
+                "issue": spec["issue"],
+                "subject": subject,
+                "status": "PREFLIGHT_PASS",
+                "preflight_directory": str(probe_directory),
+                "no_workload_effective_hz": probe_hz,
+            },
+            sort_keys=True,
+        )
+    )
+    return {
+        "context": context,
+        "perf_version": perf_text,
+        "preflight_directory": str(probe_directory),
+        "subject": subject,
+    }
 
 
-def run_once(args: argparse.Namespace, root: Path, binary: Path, perf: Path, output: Path, cpu: int) -> int:
-    first = preflight(args, root, binary, perf, output, cpu)
+def run_once(
+    args: argparse.Namespace,
+    root: Path,
+    binary: Path,
+    perf: Path,
+    output: Path,
+    cpu: int,
+    subject: str = "gate-active",
+) -> int:
+    spec = subject_spec(subject)
+    first = preflight(args, root, binary, perf, output, cpu, subject)
     context = first["context"]
     if context["source_dirty"]:
         raise RunnerError("run requires a clean committed source candidate")
@@ -648,7 +809,9 @@ def run_once(args: argparse.Namespace, root: Path, binary: Path, perf: Path, out
         raise RunnerError(f"failed to create output exclusively: {output}: {error}") from error
     manifest = {
         "schema_version": 1,
-        "issue": ISSUE,
+        "issue": spec["issue"],
+        "subject": subject,
+        "record": spec["record"],
         "mode": "run",
         "source": context,
         "perf_version": first["perf_version"],
@@ -659,12 +822,26 @@ def run_once(args: argparse.Namespace, root: Path, binary: Path, perf: Path, out
     write_json(output / "launch-manifest.json", manifest)
     raw = output / "raw.jsonl"
     write_bytes(raw, b"")
-    status = {"schema_version": 1, "issue": ISSUE, "status": "FAIL", "completed_phases": [], "source": context}
+    status = {
+        "schema_version": 1,
+        "issue": spec["issue"],
+        "subject": subject,
+        "record": spec["record"],
+        "status": "FAIL",
+        "completed_phases": [],
+        "source": context,
+    }
     try:
         warmup_rows, warmup_hz, warmup_counters, warmup_argv, warmup_stdout, _, _ = launch_subject(
-            perf, binary, cpu, metadata_env(context), ["gate-active", "--phase", "warmup"], output, "warmup"
+            perf,
+            binary,
+            cpu,
+            metadata_env(context),
+            [subject, "--phase", "warmup"],
+            output,
+            "warmup",
         )
-        validate_subject_rows(warmup_rows, "warmup")
+        validate_subject_rows(warmup_rows, "warmup", subject)
         with raw.open("ab") as stream:
             stream.write(warmup_stdout)
         manifest["phases"].append({"phase": "warmup", "argv": warmup_argv, "effective_hz": warmup_hz, "counters": warmup_counters})
@@ -674,9 +851,15 @@ def run_once(args: argparse.Namespace, root: Path, binary: Path, perf: Path, out
         accepted: list[dict[str, Any]] = []
         for phase in ("1", "2"):
             rows, hz, counters, phase_argv, phase_stdout, _, _ = launch_subject(
-                perf, binary, cpu, metadata_env(context), ["gate-active", "--phase", phase], output, phase
+                perf,
+                binary,
+                cpu,
+                metadata_env(context),
+                [subject, "--phase", phase],
+                output,
+                phase,
             )
-            validate_subject_rows(rows, phase)
+            validate_subject_rows(rows, phase, subject)
             drift = abs(hz - warmup_hz) / warmup_hz
             if not math.isfinite(drift) or drift > DRIFT_CEILING:
                 raise RunnerError(f"{phase} effective clock drift {drift:.6f} exceeds {DRIFT_CEILING:.3f}")
@@ -701,7 +884,7 @@ def run_once(args: argparse.Namespace, root: Path, binary: Path, perf: Path, out
 
 
 def parser() -> argparse.ArgumentParser:
-    command = argparse.ArgumentParser(description="Issue #746 gate-active preflight/runner")
+    command = argparse.ArgumentParser(description="Issue #746/#748 active subject preflight/runner")
     mode = command.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--run", action="store_true")
@@ -709,27 +892,30 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--output", required=True)
     command.add_argument("--cpu", required=True)
     command.add_argument("--perf-executable")
+    command.add_argument("--subject", choices=tuple(SUBJECTS), default="gate-active")
     return command
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    subject = args.subject
+    spec = subject_spec(subject)
     try:
         script_root = Path(__file__).resolve().parent.parent
         binary = regular_executable(args.binary, "binary")
         output = output_path(args.output)
         cpu = parse_cpu(args.cpu)
-        probe_parent(output.parent)
+        probe_parent(output.parent, spec["issue"], subject)
         perf_raw = args.perf_executable or shutil.which("perf")
         if not perf_raw:
             raise RunnerError("perf executable is unavailable")
         perf = regular_executable(perf_raw, "perf executable")
         if args.run:
-            return run_once(args, script_root, binary, perf, output, cpu)
-        preflight(args, script_root, binary, perf, output, cpu)
+            return run_once(args, script_root, binary, perf, output, cpu, subject)
+        preflight(args, script_root, binary, perf, output, cpu, subject)
         return 0
     except RunnerError as error:
-        print(f"issue #746 runner: {error}", file=sys.stderr)
+        print(f"issue #{spec['issue']} runner ({subject}): {error}", file=sys.stderr)
         return 1
 
 

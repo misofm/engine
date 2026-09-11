@@ -90,3 +90,18 @@ Issue-boundary audit found no missing numbered GitHub issue. Root installs and
 synchronizes this full existing748scope before Luna xhigh starts on dedicated
 codex/multiband-active-cpu-748. No multiband timing has run; gate's sole run is
 consumed and must not be repeated. Root retains checkpoint-push delivery mode.
+
+## Attempt 1 — implementation checkpoint
+
+Luna xhigh explicitly completed and paused after the five approved source paths.
+Reported PASS: locked bench check, strict Clippy, focused multiband tests6 and
+gate tests5, fmt/diff, bench policy check/self-test, hermetic Python runner tests
+and release build. Actual untimed multiband preflight passed at
+`/tmp/.issue748-multiband-active-preflight-6sainjir`; no warmup or measured phase
+ran. Root independently generated128-block inputs with Python hashlib/struct:
+W1SHA2568a66373ff9c3d0a70159fcfe45eb7e60ee7b2202e24f679f582077c92c88f353;
+W8SHA256a4e3e6fe18147c2624d35d0c6c298a974b6f318ce8bcea17c50cdc33832d561a.
+Both exactly match actual emitted input_digest values. Independent oracle and
+per-channel nonzero counts are `/tmp/issue748-independent-input-preflight.json`.
+Root audits and checkpoints this completed tranche before clean-source release
+preflight and Astra clearance. This is not final verification or measurement.

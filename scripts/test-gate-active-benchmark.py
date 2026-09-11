@@ -33,13 +33,16 @@ def executable(path: Path, source: str) -> Path:
 SUBJECT = r'''#!/usr/bin/env python3
 import json, os, sys
 mode = sys.argv[1:]
-if mode == ["gate-active", "--preflight"]:
+subject = mode[0] if mode else ""
+if subject not in ("gate-active", "multiband-active"):
+    sys.exit(41)
+if mode[1:] == ["--preflight"]:
     phase, blocks, timed = "preflight", 128, 0
-elif mode == ["gate-active", "--phase", "warmup"]:
+elif mode[1:] == ["--phase", "warmup"]:
     phase, blocks, timed = "warmup", 8192, 0
-elif mode == ["gate-active", "--phase", "1"]:
+elif mode[1:] == ["--phase", "1"]:
     phase, blocks, timed = "1", 32768, 32768
-elif mode == ["gate-active", "--phase", "2"]:
+elif mode[1:] == ["--phase", "2"]:
     phase, blocks, timed = "2", 32768, 32768
 else:
     sys.exit(41)
@@ -50,18 +53,33 @@ for width, backend in ((1, "scalar"), (8, "Simd8")):
     activity = []
     for lane in range(width):
         for channel in ("left", "right"):
-            activity.append({
-                "lane": lane, "channel": channel, "high_plateaus": 1,
-                "low_plateaus": 1, "high_ratio_witness": 1.0,
-                "low_ratio_witness": 0.001, "finite_output_samples": blocks * 128,
-                "nonzero_input_samples": blocks * 128,
-                "nonzero_output_samples": blocks * 128,
-            })
+            if subject == "gate-active":
+                activity.append({
+                    "lane": lane, "channel": channel, "high_plateaus": 1,
+                    "low_plateaus": 1, "high_ratio_witness": 1.0,
+                    "low_ratio_witness": 0.001, "finite_output_samples": blocks * 128,
+                    "nonzero_input_samples": blocks * 128,
+                    "nonzero_output_samples": blocks * 128,
+                })
+            else:
+                for band in ("low", "high"):
+                    activity.append({
+                        "lane": lane, "channel": channel, "band": band,
+                        "high_witnesses": blocks // 64, "quiet_witnesses": blocks // 64,
+                        "high_gain_min_db": -10.0, "high_gain_max_db": -4.0,
+                        "quiet_gain_min_db": -0.05, "quiet_gain_max_db": 0.0,
+                        "finite_output_samples": blocks * 128,
+                        "nonzero_input_samples": blocks * 128 - 1,
+                        "nonzero_output_samples": blocks * 128 - 1,
+                        "input_energy": 1.0, "output_energy": 1.0,
+                    })
     reports = [{"sanitized_main_samples": 0, "sanitized_sidechain_samples": 0,
                 "invalid_spans": 0, "nonfinite_left_blocks": 0,
                 "nonfinite_right_blocks": 0} for _ in range(width)]
     row = {
-        "schema_version": 1, "issue": 746, "record": "gate_active",
+        "schema_version": 1,
+        "issue": 746 if subject == "gate-active" else 748,
+        "record": "gate_active" if subject == "gate-active" else "multiband_active",
         "phase": phase, "round": None if phase in ("preflight", "warmup") else int(phase),
         "width": width, "backend": backend, "sample_rate_hz": 48000,
         "frames": 128, "channels": 2, "blocks": blocks,
@@ -73,6 +91,27 @@ for width, backend in ((1, "scalar"), (8, "Simd8")):
         }, "activity": activity, "actual_report_counts": reports,
         "descriptive_only": True, "statistical_method": "stub",
     }
+    if subject == "multiband-active":
+        row.update({
+            "effect_id": "miso.multiband-compressor",
+            "input_digest": "0" * 64,
+            "stimulus": "square_components_v1",
+            "low_component_hz": 125,
+            "high_component_hz": 4000,
+            "high_amplitude": 0.25,
+            "quiet_amplitude": 1.0 / 4096.0,
+            "crossover_hz": 1000,
+            "threshold_db": -30,
+            "ratio": 4,
+            "attack_ms": 1,
+            "release_ms": 5,
+            "makeup_db": 0,
+            "state_layout_version": 1,
+            "state_common_bytes": 0,
+            "state_channel_bytes": 188,
+            "scratch_admission_bytes": 1,
+            "scratch_bytes": 0,
+        })
     for name in (
         "CPU_MODEL", "GOVERNOR_OR_POWER_MODE", "RUST_VERSION", "LLVM_VERSION",
         "TARGET_TRIPLE", "TARGET_FEATURES", "PROFILE", "BACKGROUND_LOAD_NOTE",
@@ -81,12 +120,26 @@ for width, backend in ((1, "scalar"), (8, "Simd8")):
         row[name.lower()] = os.environ.get("MISO_ENGINE_BENCH_" + name, "missing")
     row["missing_metadata"] = []
     bad = os.environ.get("STUB_BAD")
-    if bad == "all-high" or bad == "identity":
-        for item in activity:
-            item["low_ratio_witness"] = 1.0
-    elif bad == "all-low":
-        for item in activity:
-            item["high_ratio_witness"] = 0.001
+    if subject == "gate-active":
+        if bad == "all-high" or bad == "identity":
+            for item in activity:
+                item["low_ratio_witness"] = 1.0
+        elif bad == "all-low":
+            for item in activity:
+                item["high_ratio_witness"] = 0.001
+    else:
+        if bad in ("all-high", "identity"):
+            for item in activity:
+                item["quiet_gain_min_db"] = -1.0
+        elif bad == "all-low":
+            for item in activity:
+                item["high_gain_max_db"] = -1.0
+        elif bad == "missing-band":
+            activity.pop()
+        elif bad == "wrong-effect":
+            row["issue"] = 746
+            row["record"] = "gate_active"
+            row.pop("effect_id")
     if bad == "missing-metadata":
         row.pop("cpu_model")
         row["missing_metadata"] = ["cpu_model"]
@@ -231,6 +284,50 @@ def assert_executable_controls(directory: Path, perf: Path) -> None:
         raise AssertionError("symlink perf executable was accepted")
 
 
+def assert_multiband_controls(directory: Path, subject: Path, perf: Path, log: Path, cpu: int) -> None:
+    before = log.read_text(encoding="utf-8")
+    output = directory / "multiband-preflight-output"
+    assert call(subject, perf, output, cpu, "--preflight", "--subject", "multiband-active") == 0
+    assert not output.exists()
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    subject_calls = [call for call in calls if "multiband-active" in call]
+    assert len(subject_calls) == 1
+    assert subject_calls[0][-1] == "--preflight"
+    preflight = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert len(preflight) > len([json.loads(line) for line in before.splitlines() if line])
+    for bad in ("all-high", "all-low", "identity", "missing-band", "wrong-effect"):
+        os.environ["STUB_BAD"] = bad
+        bad_output = directory / f"multiband-bad-{bad}"
+        assert call(subject, perf, bad_output, cpu, "--preflight", "--subject", "multiband-active") == 1
+        assert not bad_output.exists()
+    os.environ.pop("STUB_BAD", None)
+
+    context = runner.host_context(ROOT, subject, perf, cpu)
+    context["source_dirty"] = False
+    original = runner.host_context
+    runner.host_context = lambda *_args: dict(context)
+    try:
+        run_output = directory / "multiband-run-output"
+        assert call(subject, perf, run_output, cpu, "--run", "--subject", "multiband-active") == 0
+        accepted = [
+            json.loads(line)
+            for line in (run_output / "accepted.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(accepted) == 4
+        assert all(row["issue"] == 748 and row["record"] == "multiband_active" for row in accepted)
+        assert all(row["effect_id"] == "miso.multiband-compressor" for row in accepted)
+        manifest = json.loads((run_output / "launch-manifest.final.json").read_text(encoding="utf-8"))
+        status = json.loads((run_output / "status.json").read_text(encoding="utf-8"))
+        assert manifest["issue"] == status["issue"] == 748
+        assert manifest["subject"] == status["subject"] == "multiband-active"
+    finally:
+        runner.host_context = original
+
+
 def assert_counter_controls(directory: Path) -> None:
     valid = "100,,cycles,1,100.0,1.0,GHz\n1,msec,task-clock,1,100.0,1.0,CPUs utilized\n"
     path = directory / "counter.csv"
@@ -282,11 +379,12 @@ def assert_exactly_once_and_failure(directory: Path, subject: Path, perf: Path, 
     runner.host_context = lambda *_args: dict(context)
     try:
         output = directory / "run-output"
+        before_run = len(log.read_text(encoding="utf-8").splitlines())
         assert call(subject, perf, output, cpu, "--run") == 0
         accepted = [json.loads(line) for line in (output / "accepted.jsonl").read_text(encoding="utf-8").splitlines()]
         assert len(accepted) == 4
         calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-        phases = [call[call.index("--phase") + 1] for call in calls if "--phase" in call]
+        phases = [call[call.index("--phase") + 1] for call in calls[before_run:] if "--phase" in call]
         assert phases == ["warmup", "1", "2"]
         os.environ["STUB_FAIL_PHASE"] = "1"
         failed = directory / "failed-output"
@@ -321,6 +419,7 @@ def main() -> int:
         assert_known_conversion()
         assert_executable_controls(directory, perf)
         assert_preflight_controls(directory, subject, perf, log, cpu)
+        assert_multiband_controls(directory, subject, perf, log, cpu)
         assert_exactly_once_and_failure(directory, subject, perf, log, cpu)
     print("issue #746 runner tests: PASS")
     return 0

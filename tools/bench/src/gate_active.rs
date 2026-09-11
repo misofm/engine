@@ -47,14 +47,14 @@ const ACTIVE_PARAMETERS: [(u32, f32); 7] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
+pub(crate) enum Phase {
     Preflight,
     Warmup,
     Measured(u8),
 }
 
 impl Phase {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    pub(crate) fn parse(args: &[String]) -> Result<Self, String> {
         match args {
             [flag] if flag == "--preflight" => Ok(Self::Preflight),
             [flag, value] if flag == "--phase" && value == "warmup" => Ok(Self::Warmup),
@@ -65,7 +65,7 @@ impl Phase {
         }
     }
 
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Preflight => "preflight",
             Self::Warmup => "warmup",
@@ -75,7 +75,7 @@ impl Phase {
         }
     }
 
-    const fn blocks(self) -> u64 {
+    pub(crate) const fn blocks(self) -> u64 {
         match self {
             Self::Preflight => PREFLIGHT_BLOCKS,
             Self::Warmup => WARMUP_BLOCKS,
@@ -83,11 +83,11 @@ impl Phase {
         }
     }
 
-    const fn timed(self) -> bool {
+    pub(crate) const fn timed(self) -> bool {
         matches!(self, Self::Measured(_))
     }
 
-    const fn round(self) -> Option<u8> {
+    pub(crate) const fn round(self) -> Option<u8> {
         match self {
             Self::Measured(round) => Some(round),
             Self::Preflight | Self::Warmup => None,
@@ -96,16 +96,16 @@ impl Phase {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct ReportCounts {
-    sanitized_main_samples: u64,
-    sanitized_sidechain_samples: u64,
-    invalid_spans: u64,
-    nonfinite_left_blocks: u64,
-    nonfinite_right_blocks: u64,
+pub(crate) struct ReportCounts {
+    pub(crate) sanitized_main_samples: u64,
+    pub(crate) sanitized_sidechain_samples: u64,
+    pub(crate) invalid_spans: u64,
+    pub(crate) nonfinite_left_blocks: u64,
+    pub(crate) nonfinite_right_blocks: u64,
 }
 
 impl ReportCounts {
-    fn add(&mut self, report: ProcessReport) {
+    pub(crate) fn add(&mut self, report: ProcessReport) {
         self.sanitized_main_samples = self
             .sanitized_main_samples
             .saturating_add(report.sanitized_main_samples);
@@ -121,7 +121,7 @@ impl ReportCounts {
             .saturating_add(report.nonfinite_right_blocks);
     }
 
-    fn is_clear(self) -> bool {
+    pub(crate) fn is_clear(self) -> bool {
         self.sanitized_main_samples == 0
             && self.sanitized_sidechain_samples == 0
             && self.invalid_spans == 0
