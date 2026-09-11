@@ -427,3 +427,20 @@ Raw results: /tmp/issue739-luna-resume-core.{check,test,fmt}.log.
 This compiling checkpoint is not final product PASS: public suites/oracle, thin
 descendants, SDK/target/artifact evidence and Astra medium final review remain.
 No timing, corpus digest, tolerance or generated-artifact change occurred.
+
+
+## Public-test adaptation checkpoint — 2026-09-11
+
+Luna xhigh adapted existing product/identity/nonfinite/allocation/support suites to
+the causal control/state layout. Focused tests PASS: product7, identity5,
+no_alloc_render3 including positive control, nonfinite3. Current unity comparison
+reported worst absolute error2.3841858e-7 against its test-local f64 restatement.
+Initial failed compile/test logs and corrected logs are retained under
+/tmp/issue739-luna-public-*.log. Root paused implementation at this compiling
+checkpoint before further oracle work.
+
+The new support/oracle.rs is compiled, but its active-band composition is not yet
+exercised; it is not active-oracle evidence. Independent reference preservation
+and the additional frozen causal/resource/reset cases still require review and
+completion. This is a recovery/throughput checkpoint, not a product verdict.
+No benchmark, target/artifact, SDK or descendant gate PASS is claimed here.

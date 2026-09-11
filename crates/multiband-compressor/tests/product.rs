@@ -5,10 +5,9 @@
 
 mod support;
 
-use dsp_reference::ReferenceLr4Crossover;
 use effect_contract::{
-    BankWidth, EffectPrepareError, EffectQuality, LatencySamples, LinkMode, NativeEffectFactory,
-    ParameterChannel, PrepareEffectBankRequest, ResetKind,
+    BankWidth, EffectPrepareError, EffectQuality, LinkMode, NativeEffectFactory, ParameterChannel,
+    PrepareEffectBankRequest, ResetKind,
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 use support::{
@@ -25,22 +24,21 @@ fn rms(values: &[f32]) -> f64 {
         .sqrt()
 }
 
-/// The current byte rows, latency and exact-and-one-below resource caps.
+/// The current byte rows, zero latency and exact-and-one-below resource caps.
 ///
-/// The rows changed **by decision**, not by drift: F1 removed the dry ring, F4 halved the filter
-/// state and D11 added a step word to every ramp. The earlier prelaunch implementation used
-/// `lane 4 * (43 + 3 * ring)`; the current shape is `lane 4 * (48 + 2 * ring)`. The common section stays empty: wave-2 decision W2-D2
-/// on #83 defers the shared codec's versioned header to #95.
+/// The compact causal payload has one crossover word, two gain words, ten four-word ramps and four
+/// filter words per channel. The common section stays empty: wave-2 decision W2-D2 on #83 defers
+/// the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR).expect("descriptor");
-    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters.len(), 12);
+    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters.len(), 11);
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 7_256u32),
-        (48_000, 7_880),
-        (88_200, 14_312),
-        (96_000, 15_560),
+        (44_100u32, 188u32),
+        (48_000, 188),
+        (88_200, 188),
+        (96_000, 188),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
@@ -49,7 +47,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             .prepare(prepared)
             .expect("prepare");
         let metadata = effect.metadata();
-        assert_eq!(metadata.latency, LatencySamples(u64::from(rate / 50)));
+        assert_eq!(metadata.latency, effect_contract::LatencySamples(0));
         assert_eq!(metadata.state_sizes.common_bytes, 0);
         assert_eq!(metadata.state_sizes.left_bytes, bytes);
         assert_eq!(metadata.state_sizes.right_bytes, bytes);
@@ -78,8 +76,8 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
 fn unity_gain_transition_has_no_step_at_crossover() {
     let mut initial = values();
     for lane in 0..2 {
-        initial[2 * 2 + lane].value = 0.0;
-        initial[7 * 2 + lane].value = 0.0;
+        initial[1 * 2 + lane].value = 0.0;
+        initial[6 * 2 + lane].value = 0.0;
     }
     let mut effect = MultibandCompressorFactory
         .prepare(request(&initial))
@@ -89,16 +87,16 @@ fn unity_gain_transition_has_no_step_at_crossover() {
         .collect::<Vec<_>>();
     let mut right = left.clone();
     let up = [
-        point(6, ParameterChannel::Left, 5_120, 0.01),
-        point(6, ParameterChannel::Right, 5_120, 0.01),
-        point(11, ParameterChannel::Left, 5_120, 0.01),
-        point(11, ParameterChannel::Right, 5_120, 0.01),
+        point(5, ParameterChannel::Left, 5_120, 0.01),
+        point(5, ParameterChannel::Right, 5_120, 0.01),
+        point(10, ParameterChannel::Left, 5_120, 0.01),
+        point(10, ParameterChannel::Right, 5_120, 0.01),
     ];
     let down = [
-        point(6, ParameterChannel::Left, 7_680, 0.0),
-        point(6, ParameterChannel::Right, 7_680, 0.0),
-        point(11, ParameterChannel::Left, 7_680, 0.0),
-        point(11, ParameterChannel::Right, 7_680, 0.0),
+        point(5, ParameterChannel::Left, 7_680, 0.0),
+        point(5, ParameterChannel::Right, 7_680, 0.0),
+        point(10, ParameterChannel::Left, 7_680, 0.0),
+        point(10, ParameterChannel::Right, 7_680, 0.0),
     ];
     for block in 0..96 {
         let start = block * 128;
@@ -134,13 +132,13 @@ fn unity_gain_transition_has_no_step_at_crossover() {
     eprintln!("E0 worst_consecutive_delta={worst:e}");
 }
 
-/// E0b. At unity gain the output is the delayed LR4 sum, against the independent `f64` oracle.
+/// E0b. At unity gain the causal output is the LR4 sum, against the independent `f64` oracle.
 #[test]
-fn unity_gain_output_is_the_delayed_lr4_sum() {
+fn unity_gain_output_is_the_causal_lr4_sum() {
     let mut initial = values();
     for lane in 0..2 {
-        initial[2 * 2 + lane].value = 0.0;
-        initial[7 * 2 + lane].value = 0.0;
+        initial[1 * 2 + lane].value = 0.0;
+        initial[6 * 2 + lane].value = 0.0;
     }
     let input = (0..8_192)
         .map(|index| 0.5 * (core::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin())
@@ -165,29 +163,26 @@ fn unity_gain_output_is_the_delayed_lr4_sum() {
             128,
         );
     }
-    let mut reference = ReferenceLr4Crossover::new(48_000.0, 1_000.0).expect("reference");
+    let mut reference = support::oracle::ActiveLr4::new(48_000.0, 1_000.0);
     let expected = input
         .iter()
-        .map(|sample| {
-            let (low, high) = reference.process_sample(f64::from(*sample));
-            (low + high) as f32
-        })
+        .map(|sample| reference.process(*sample))
         .collect::<Vec<_>>();
     let mut worst = 0.0f32;
-    for index in 4_096..8_192 {
-        let error = (left[index] - expected[index - 960]).abs();
+    for index in 0..8_192 {
+        let error = (left[index] - expected[index]).abs();
         worst = worst.max(error);
         assert!(
             error <= 2.0e-5,
             "index={index} error={error} actual={} expected={}",
             left[index],
-            expected[index - 960]
+            expected[index]
         );
     }
     eprintln!("E0b worst_error={worst:e}");
 }
 
-/// E0c. A bypassed instance is a pure `Fs/50` delay, and signed zero survives it.
+/// E0c. A bypassed instance is a causal dry path, and signed zero survives it.
 ///
 /// Signed zero lives on the bypass path and nowhere else: on the enabled path
 /// `(+0.0) + (-0.0)` is `+0.0`, so the sum cannot preserve it, which is a property of addition and
@@ -204,7 +199,7 @@ fn bypass_latency_automation_and_restore_are_transactional() {
     left[0] = -0.5;
     left[1] = -0.0;
     right[0] = 0.25;
-    let span = [point(2, ParameterChannel::Left, 0, -80.0)];
+    let span = [point(1, ParameterChannel::Left, 0, -80.0)];
     let mut output = Vec::new();
     for block in 0..8u64 {
         let spans: &[_] = if block == 0 { &span } else { &[] };
@@ -220,9 +215,8 @@ fn bypass_latency_automation_and_restore_are_transactional() {
         left.fill(0.0);
         right.fill(0.0);
     }
-    assert!(output[..960].iter().all(|sample| *sample == 0.0));
-    assert_eq!(output[960].to_bits(), (-0.5f32).to_bits());
-    assert_eq!(output[961].to_bits(), (-0.0f32).to_bits());
+    assert_eq!(output[0].to_bits(), (-0.5f32).to_bits());
+    assert_eq!(output[1].to_bits(), (-0.0f32).to_bits());
 
     let saved = snapshot(effect.as_ref());
     let mut malformed = saved.clone();
@@ -256,10 +250,9 @@ fn a_rejected_restore_changes_nothing() {
 
     for (word, code) in [
         (0usize, "effect.state.parameter"), // crossover frequency
-        (2, "effect.state.gain"),           // low-band smoother
-        (4, "effect.state.parameter"),      // low threshold, current
-        (44, "effect.state.filter"),        // first stage ic1
-        (48, "effect.state.ring"),          // oldest low-ring sample
+        (1, "effect.state.gain"),           // low-band smoother
+        (3, "effect.state.parameter"),      // low threshold, current
+        (43, "effect.state.filter"),        // first stage ic1
     ] {
         let mut corrupted = saved.clone();
         corrupted.1[word * 4..word * 4 + 4].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
@@ -276,7 +269,7 @@ fn a_rejected_restore_changes_nothing() {
     // A resting ramp with a live step would have the segment driver add it for ever. The
     // invariant is `LinearRamp`'s; the restore enforces it rather than assuming it.
     let mut live_step = saved.clone();
-    live_step.1[6 * 4..6 * 4 + 4].copy_from_slice(&0.5f32.to_bits().to_le_bytes());
+    live_step.1[5 * 4..5 * 4 + 4].copy_from_slice(&0.5f32.to_bits().to_le_bytes());
     assert_eq!(
         restore(effect.as_mut(), 1, &live_step, sizes)
             .expect_err("a resting ramp cannot carry a step")
@@ -313,11 +306,11 @@ fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
         let mut active_values = values();
         let mut identity_values = values();
         for lane in 0..2 {
-            active_values[(base + 2) * 2 + lane].value = -45.0;
-            active_values[(base + 3) * 2 + lane].value = 20.0;
-            active_values[(base + 4) * 2 + lane].value = 0.1;
-            active_values[(base + 5) * 2 + lane].value = 5.0;
-            identity_values[(base + 3) * 2 + lane].value = 1.0;
+            active_values[(base + 1) * 2 + lane].value = -45.0;
+            active_values[(base + 2) * 2 + lane].value = 20.0;
+            active_values[(base + 3) * 2 + lane].value = 0.1;
+            active_values[(base + 4) * 2 + lane].value = 5.0;
+            identity_values[(base + 2) * 2 + lane].value = 1.0;
         }
         let mut active = MultibandCompressorFactory
             .prepare(request(&active_values))
@@ -434,7 +427,7 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 15_760);
-    assert_eq!(per_track * 4, 63_040);
-    assert_eq!(per_track * 8, 126_080);
+    assert_eq!(per_track, 376);
+    assert_eq!(per_track * 4, 1_504);
+    assert_eq!(per_track * 8, 3_008);
 }

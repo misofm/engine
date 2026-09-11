@@ -71,7 +71,7 @@ use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_le
 /// Parameters in the frozen V1 order.
 const PARAMETER_COUNT: usize = 11;
 
-/// Ramped parameters: everything but the two preparation-time ones.
+/// Ramped parameters: every parameter except the preparation-time crossover.
 const RAMP_COUNT: usize = 10;
 
 /// State-payload words each ramp occupies: current, target, step, remaining.
