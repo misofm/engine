@@ -47,6 +47,23 @@ fn native_effect_session() -> session::SessionModel {
     model.tracks[0].builtins.right.trim_db = -3.0;
     model.tracks[0].builtins.left.delay_samples = 1;
     model.tracks[0].builtins.right.delay_samples = 2;
+    model.tracks[0].builtins.left.hpf_hz = 80.0;
+    model.tracks[0].builtins.left.lpf_hz = 18_000.0;
+    model.tracks[0].builtins.right.hpf_hz = 140.0;
+    model.tracks[0].builtins.right.lpf_hz = 12_000.0;
+    model.tracks[0].fader.left_db = -3.0;
+    model.tracks[0].fader.right_db = 2.0;
+    model
+}
+
+fn asymmetric_session() -> session::SessionModel {
+    let mut model = identity_session();
+    model.tracks[0].builtins.left.hpf_hz = 80.0;
+    model.tracks[0].builtins.left.lpf_hz = 18_000.0;
+    model.tracks[0].builtins.right.hpf_hz = 140.0;
+    model.tracks[0].builtins.right.lpf_hz = 12_000.0;
+    model.tracks[0].fader.left_db = -3.0;
+    model.tracks[0].fader.right_db = 2.0;
     model
 }
 
@@ -269,7 +286,7 @@ fn render_two_blocks(document: &str, mono: bool) -> Vec<f32> {
 
 #[test]
 fn native_render_is_bit_identical_for_duplicate_stereo_and_prepared_mono() {
-    let input = canonical_model(&identity_session());
+    let input = canonical_model(&asymmetric_session());
     let transformed = fold_mono_session_document(&input, &pairs()).unwrap();
     let stereo = render_two_blocks(&input, false);
     let mono = render_two_blocks(&transformed, true);

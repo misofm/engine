@@ -109,3 +109,28 @@ not a fresh context. The user paused implementation to settle delivery packaging
 resumption with one indexed blob per stem and a 16-byte header. That transport decision does
 not alter this tool's mono/session contract. Root authorizes the bounded attempt-2 revision
 after this evidence checkpoint is upstream; no new transport code belongs to this issue.
+
+## Attempt 2 implementation evidence (Luna)
+
+The existing native A/B fixtures now exercise unequal valid lane filters (`80/18,000 Hz` versus
+`140/12,000 Hz`) and unequal fader gains (`-3 dB` versus `+2 dB`) while retaining the separate
+`-0.0` preservation witness in the semantic restoration test. Complete rendered PCM bit equality,
+nonzero output, and unequal L/R output assertions remain in place for the duplicate-stereo versus
+prepared-mono case; the native parametric-EQ fixture uses the same asymmetric controls.
+
+Evidence from this clean worktree:
+
+- `cargo test --locked -p session-validator --test fold_mono`: 8 tests passed.
+- `cargo test --locked -p session-validator`: all 8 focused tests, 1 skill test, 9 existing validator tests, and doc-tests passed.
+- `cargo test --locked -p host-core --test symmetry_witness`: 11 tests passed.
+- `cargo test --locked -p host-core --test input_liveness_console`: 10 mono-collapse/state-divergence tests passed, including the first affected block and re-equalisation gates.
+- `cargo test --locked -p host-core --test track_delay`: 8 tests passed.
+- `cargo test --locked -p builtins --test mono_collapse`: 2 tests passed.
+- `cargo test --locked -p compressor --test mono_collapse`: 5 tests passed.
+- `cargo clippy --locked -p session-validator --all-targets -- -D warnings`: passed.
+- `cargo fmt --all -- --check`: passed.
+
+The prior 193-test SDK headless evidence remains valid; no SDK/runtime/ABI files changed in this
+revision, so the approved scope does not rerun that harness. No production code, DSP, transport,
+store, codec, package, release, or dependency behavior changed. Attempt 2 is paused for the
+independent Astra medium verdict and root checkpoint; no commit or push was made by Luna.
