@@ -57,6 +57,12 @@ pairing/fallback. All fold-mask errors precede ownership consumption. The existi
 bank-shape constructor Result/expect is unchanged; no new post-consumption fold
 error or panic is permitted. Gates include width mismatch, inactive armed lane,
 all-false disarm, valid partial/full masks, and proof/configuration misuse prevention.
+Compare old/new constructor paths at widths 4/8 for identical masks and bitwise
+PCM, including prefix subsets with additional active lanes left unfolded, active
+mask holes, all-false/disarm, and partial-bank staging allocation before render.
+Proof supplies the actual active mask, not a comparison copy. Cover pairing
+success/fallback. No unsafe or unchecked public setter, mask truncation/intersection
+fallback, or render-path change.
 This is a scope correction before source edits, not a failed implementation attempt.
 
 ## Historical issue body
