@@ -3184,18 +3184,15 @@ mod tests {
             .expect("builtins");
             (effects, builtins)
         };
-        let compile = |effects, builtins, caps| {
-            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-                plan_id: 162,
-                effects,
-                builtins,
-                caps,
-                dispatch: Backend::Scalar,
-            })
-        };
         let (baseline_effects, baseline_builtins) = prepare();
-        let baseline = compile(baseline_effects, baseline_builtins, integration_caps())
-            .unwrap_or_else(|failure| panic!("baseline: {:?}", failure.diagnostics));
+        let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 162,
+            effects: baseline_effects,
+            builtins: baseline_builtins,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| panic!("baseline: {:?}", failure.diagnostics));
         let (mut effects, mut builtins) = prepare();
         let session_tracks = effects.session.normalized_model().tracks.as_ptr();
         let processors = effects
@@ -3210,7 +3207,13 @@ mod tests {
         for maximum_nodes in [0, 1] {
             let mut constrained = integration_caps();
             constrained.maximum_nodes = maximum_nodes;
-            let failure = match compile(effects, builtins, constrained) {
+            let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                plan_id: 162,
+                effects,
+                builtins,
+                caps: constrained,
+                dispatch: Backend::Scalar,
+            }) {
                 Ok(_) => panic!("zero cap rejects early; nonzero node cap rejects after planning"),
                 Err(failure) => failure,
             };
@@ -3254,8 +3257,14 @@ mod tests {
             effects = failure.effects;
             builtins = failure.builtins;
         }
-        let recovered = compile(effects, builtins, integration_caps())
-            .unwrap_or_else(|failure| panic!("retry: {:?}", failure.diagnostics));
+        let recovered = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 162,
+            effects,
+            builtins,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| panic!("retry: {:?}", failure.diagnostics));
         assert_eq!(
             GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes,
             GraphCompiler::evidence(recovered.graph(), recovered.report()).canonical_bytes

@@ -68,3 +68,15 @@ argv/env/source/exits/logs: `/tmp/engine-162-attempt1`. Incidental Cargo lock
 ordering was preserved externally and restored; no dependency change.
 Root checkpoints now; full compiler tests, strict Clippy and independent review
 remain. No allocation-count or performance claim beyond removing this clone.
+
+## Attempt 1 review and bounded attempt 2
+
+Independent debug and release-unwind suites each passed86 tests. Strict Clippy
+then rejected the new test closure's large Result error type; the frozen
+ownership-returning API itself is unchanged. Receipt:
+`/tmp/issue162-xhigh-qemy_v30/clippy.json`. Root authorized only replacing that
+forwarding closure with direct compiler calls. Astra LOW did so; formatting,
+locked strict all-target/all-feature Clippy and focused ownership test passed.
+Evidence: `/tmp/engine-162-attempt2/manifest.json`. No production/API/dependency
+change beyond original borrowing patch. Independent follow-up verdict pending;
+prepared external final-plan-cap ownership control remains unrun.
