@@ -46,30 +46,90 @@ trap cleanup EXIT
 
 # Issue #288: mutate the real qualification caller module and run the same hermetic boot check.
 # Keep the helper import's relative layout under the temporary directory so a missing module or
-# an import-path mistake cannot masquerade as a contract failure.
+# an import-path mistake cannot masquerade as a contract failure. Each transform is scoped to its
+# intended source site and must replace exactly one matching line.
 qualification_source="$repo_root/hosts/host-web/qualification/qualification.js"
 qualification_module_dir="$mutation_dir/qualification-module"
 mkdir -p "$qualification_module_dir/hosts/host-web/qualification" \
   "$qualification_module_dir/hosts/host-web/web"
 qualification_helper="$repo_root/hosts/host-web/web/hex-lower.js"
+cp "$qualification_helper" "$qualification_module_dir/hosts/host-web/web/hex-lower.js"
+
 qualification_mutations=(
-  'outer document|s/^    document: sessionDocument,$/    sessionDocument: sessionDocument,/|renderCorpusSegment real host guard rejected'
-  'shared boot key|s/^    options: bootOptions(frames),$/    boot: bootOptions(frames),/|renderCorpusSegment real host guard rejected'
-  'diagnostic options|s/^        options: bootOptions(QUANTUM_FRAMES),$/        limits: bootOptions(QUANTUM_FRAMES),/|diagnoseReady initializer was refused'
+  'outer document|renderCorpusSegment real host guard rejected (miso.error.v1 result=1)'
+  'shared boot key|renderCorpusSegment real host guard rejected (miso.error.v1 result=1)'
+  'diagnostic options|diagnoseReady initializer was refused (tag=miso.error.v1 result=1)'
 )
 for entry in "${qualification_mutations[@]}"; do
   name=${entry%%|*}
-  remainder=${entry#*|}
-  expression=${remainder%%|*}
-  expected=${remainder#*|}
+  expected=${entry#*|}
   mutated_qualification="$qualification_module_dir/hosts/host-web/qualification/qualification.js"
   qualification_log="$mutation_dir/qualification-${name// /-}.log"
-  sed "$expression" "$qualification_source" >"$mutated_qualification"
+  case "$name" in
+    "outer document")
+      match_count=$(awk '
+        /^async function renderCorpusSegment\(/ { in_render = 1 }
+        /^async function runCorpusQualification\(/ { in_render = 0 }
+        in_render && $0 == "    document: sessionDocument," { count += 1 }
+        END { print count + 0 }
+      ' "$qualification_source")
+      if [[ "$match_count" -ne 1 ]]; then
+        echo "qualification mutation match count $match_count, wanted 1: $name" >&2
+        exit 1
+      fi
+      awk '
+        /^async function renderCorpusSegment\(/ { in_render = 1 }
+        /^async function runCorpusQualification\(/ { in_render = 0 }
+        in_render && $0 == "    document: sessionDocument," {
+          $0 = "    sessionDocument: sessionDocument,"
+          count += 1
+        }
+        { print }
+        END { if (count != 1) exit 1 }
+      ' "$qualification_source" >"$mutated_qualification"
+      ;;
+    "shared boot key")
+      match_count=$(awk '$0 == "    sourceRingFrames," { count += 1 } END { print count + 0 }' \
+        "$qualification_source")
+      if [[ "$match_count" -ne 1 ]]; then
+        echo "qualification mutation match count $match_count, wanted 1: $name" >&2
+        exit 1
+      fi
+      awk '
+        $0 == "    sourceRingFrames," {
+          $0 = "    sourceRingFramez: sourceRingFrames,"
+          count += 1
+        }
+        { print }
+        END { if (count != 1) exit 1 }
+      ' "$qualification_source" >"$mutated_qualification"
+      ;;
+    "diagnostic options")
+      match_count=$(awk '$0 == "        options: bootOptions(QUANTUM_FRAMES)," { count += 1 } END { print count + 0 }' \
+        "$qualification_source")
+      if [[ "$match_count" -ne 1 ]]; then
+        echo "qualification mutation match count $match_count, wanted 1: $name" >&2
+        exit 1
+      fi
+      awk '
+        $0 == "        options: bootOptions(QUANTUM_FRAMES)," {
+          $0 = "        limits: bootOptions(QUANTUM_FRAMES),"
+          count += 1
+        }
+        { print }
+        END { if (count != 1) exit 1 }
+      ' "$qualification_source" >"$mutated_qualification"
+      ;;
+    *)
+      echo "unknown qualification mutation: $name" >&2
+      exit 1
+      ;;
+  esac
+  printf 'qualification mutation match count: %s=%s\n' "$name" "$match_count"
   if diff -q "$qualification_source" "$mutated_qualification" >/dev/null; then
     echo "qualification mutation matched nothing: $name" >&2
     exit 1
   fi
-  cp "$qualification_helper" "$qualification_module_dir/hosts/host-web/web/hex-lower.js"
   if node "$repo_root/scripts/test-web-audioworklet.mjs" \
     --qualification-module "$mutated_qualification" >"$qualification_log" 2>&1; then
     echo "qualification mutation escaped the hermetic check: $name" >&2

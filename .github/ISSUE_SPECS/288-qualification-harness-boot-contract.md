@@ -102,3 +102,18 @@ after counted realready/dispose, never run source/render/stall loops. Require
 unique mutation-site count and specific intended contract failure. No new
 framework/production/artifact changes. Maximum5attempts remains binding.
 Root will wait for explicit finished/paused notification before checkpointing.
+
+
+## Attempt2 checkpoint — 2026-09-11
+
+A fresh Luna xhigh agent corrected only the two test scripts, then explicitly
+finished and paused before root checkpoint. Labeled sentinels now stop after
+realready/dispose and are caught per caller; the expanded fake-host continuation
+and performance mock are removed. Typed unsupported validation remains.
+The three real-caller mutants each require exactly one source match and
+the intended miso.error.v1/result1 contract rejection; shared mutation now
+changes an inner bootOptions key.
+Node and full shell wrapper exit0: callers5,real-ready5,real-disposed5,
+diagnose-ready1; existing and new mutationsPASS. Router check/test, JS/shell
+syntax and diff checkPASS. Raw outputs /tmp/issue288-a2-*.log.
+Astra medium attempt2 verdict is pending; attempt1FAIL remains recorded.
