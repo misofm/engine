@@ -88,3 +88,13 @@ control passed. An initial unused test-wrapper warning was corrected; final
 format/route rebuild passed without it. Receipts: /tmp/issue221-attempt1-graph-plan.
 Public ownership/fault matrix, rack PCM/pairing controls, console identity and
 strict Clippy remain before independent attempt review.
+
+## Attempt 1 checkpoint: public recovery matrix
+
+Eleven one-shot raw installation faults run through both public bind families
+(22 rejection/retry paths). The focused test checks exact returned graph/bank/
+bound/observer owner addresses, source driver identity, no source work/drop
+before rejection, then successful same-owner retry with four folded lanes and
+known three-block PCM. Added folded-op mapping consistency rejection. Formatting
+and focused recovery test passed; receipts /tmp/issue221-attempt1-recovery.
+Rack PCM/pairing, console identity and strict gates remain before final review.

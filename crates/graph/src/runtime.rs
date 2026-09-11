@@ -2542,6 +2542,34 @@ pub(crate) fn units_of(
     units
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FoldFault {
+    MissingRun,
+    MissingUnit,
+    WrongUnit,
+    UnbankedRun,
+    MissingBank,
+    OversizedMask,
+    InactiveLane,
+    ActiveWidth,
+    MissingMaster,
+    BankedMaster,
+    WrongMaster,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FOLD_FAULT: std::cell::Cell<Option<FoldFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_fold_fault(fault: FoldFault) {
+    FOLD_FAULT.with(|slot| {
+        assert!(slot.replace(Some(fault)).is_none());
+    });
+}
+
 /// Prepared before caller-owned processors, observers, banks or sources move. Emission consumes
 /// this exact schedule and its owned fold configurations; it never replans route retirement.
 pub(crate) struct SequentialPlan {
@@ -2619,6 +2647,37 @@ fn validate_fold_installation(
         }
         emitted += 1;
     }
+    #[cfg(test)]
+    let fault = FOLD_FAULT.with(std::cell::Cell::take);
+    #[cfg(test)]
+    let (run_units, fold) = {
+        let mut run_units = run_units;
+        let mut fold = fold;
+        if let Some(fault) = fault {
+            let fold = fold
+                .as_mut()
+                .expect("fault fixture must reach an admitted fold");
+            let run = fold.runs[0].0;
+            match fault {
+                FoldFault::MissingRun => fold.runs[0].0 = run_units.len(),
+                FoldFault::MissingUnit => unit_of_run[run] = None,
+                FoldFault::WrongUnit => unit_of_run[run] = Some(usize::MAX),
+                FoldFault::UnbankedRun => run_units[run].0.clear(),
+                FoldFault::MissingBank => run_units[run].0[0] = Membership::Builtin(usize::MAX),
+                FoldFault::MissingMaster => op_slot[fold.master_op] = None,
+                FoldFault::BankedMaster => {
+                    let master = unit_of_run
+                        .iter()
+                        .position(|unit| *unit == op_slot[fold.master_op].map(|slot| slot.0))
+                        .expect("master run");
+                    run_units[master].0.push(Membership::Builtin(0));
+                }
+                FoldFault::WrongMaster => op_slot[fold.master_op] = op_slot[run_units[run].1[0]],
+                FoldFault::OversizedMask | FoldFault::InactiveLane | FoldFault::ActiveWidth => {}
+            }
+        }
+        (run_units, fold)
+    };
     let mut installations: Vec<Option<FoldInstallation>> =
         (0..run_units.len()).map(|_| None).collect();
     if let Some(fold) = &fold {
@@ -2639,6 +2698,11 @@ fn validate_fold_installation(
         for (run, lanes) in &fold.runs {
             let (membership, ops) = run_units.get(*run).ok_or("graph.route_fold.mapping")?;
             if unit_of_run.get(*run).copied().flatten().is_none() {
+                return Err("graph.route_fold.mapping");
+            }
+            if ops.iter().enumerate().any(|(member, op)| {
+                op_slot.get(*op).copied().flatten() != unit_of_run[*run].map(|unit| (unit, member))
+            }) {
                 return Err("graph.route_fold.mapping");
             }
             if membership.is_empty()
@@ -2684,6 +2748,20 @@ fn validate_fold_installation(
                 return Err("graph.route_fold.mask");
             }
             let mask = trailing_active_mask(lanes.len(), width);
+            #[cfg(test)]
+            let (active, mask) = {
+                let mut active = active.into_vec();
+                let mut mask = mask.into_vec();
+                match fault {
+                    Some(FoldFault::OversizedMask) => mask.push(true),
+                    Some(FoldFault::InactiveLane) => active[0] = false,
+                    Some(FoldFault::ActiveWidth) => {
+                        active.pop();
+                    }
+                    _ => {}
+                }
+                (active.into_boxed_slice(), mask.into_boxed_slice())
+            };
             let configuration = rack::PreparedFoldConfiguration::new(width, active, mask)
                 .map_err(|_| "graph.route_fold.mask")?;
             let slot = installations
