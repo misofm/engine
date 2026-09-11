@@ -67,7 +67,7 @@ canonical writer; failures emit no document. A bounded SDK render-eval covers du
 planes versus the prepared mono source, and native tests cover asymmetric builtins/matrix and a
 valid native EQ fixture with exact PCM bit equality and nonzero output.
 
-Evidence from the clean worktree:
+Evidence from the implementation worktree before root checkpoint `e6ccbd3f`:
 
 - `cargo test --locked -p session-validator`: 8 focused fold-mono tests, 1 skill test, 9 existing validator tests, and doc-tests passed.
 - `cargo clippy --locked -p session-validator --all-targets -- -D warnings`: passed.
@@ -76,8 +76,36 @@ Evidence from the clean worktree:
 - `git diff --check`: passed.
 
 No session runtime, SDK runtime/ABI, DSP, codec, package, release, or dependency behavior was
-changed. No generated Wasm artifact or executable is committed. Source-attested executable
-metadata for the uncommitted baseline build is `source_revision=4651563a949cf81165890b99ea9fd99754061825`,
+changed. No generated Wasm artifact or executable is committed. The first executable was a
+dirty-worktree build based on parent `4651563a949cf81165890b99ea9fd99754061825`, not an executable
+attested to that parent alone. Its metadata was
 `target=x86_64-unknown-linux-gnu`, `sha256=f3f34b73f3904dd70c4fd2807caf882a05e60f6b4e8114a23e0bb0ae1feb1f42`,
-from `cargo build --locked -p session-validator --release`. Independent Astra medium verdict and
-root checkpoint are pending.
+from `cargo build --locked -p session-validator --release`.
+
+Root checkpointed and pushed attempt 1 as `e6ccbd3f`, then merged independently delivered main
+`8b1f0cb3` in clean pushed `f4ff06cfed68fd17db20bcc7bf1a232211b43d3d`. After that merge, the
+tool's 18 tests, clippy, formatting, 193 SDK headless tests and release build all passed again.
+The retained committed-source executable has target `x86_64-unknown-linux-gnu`, SHA-256
+`a916ce9c080256bc72f0de460d5e8d1c8850e32ecea3136a4e20c531fb481103`, and build command
+`cargo build --locked -p session-validator --release`. Its provenance identifies `f4ff06cf`
+and Rust 1.97.1; it remains an unaccepted attempt-1 artifact pending the review correction.
+
+## Attempt 1 adversarial verdict and bounded revision
+
+Astra medium independently reviewed clean pushed `f4ff06cf` and recorded **FAIL** for one
+test/evidence finding, with no production-code defect identified. The existing A/B fixture
+exercises unequal trim/delay and a nonidentity matrix, but both filters are disabled and its
+fader values -0.0/+0.0 have equal gain. The native EQ fixture also has equal filters and faders.
+Attempt 2 must exercise valid unequal lane filters and unequal fader gains in an existing
+bounded A/B fixture, preserving the separate negative-zero canonical witness, full bit equality
+and nonzero/unequal-output assertions. Run and record the existing focused symmetry-witness
+and applicable mono-collapse state-divergence/first-left-control-block gates. This is a small
+test/evidence revision, not permission to change DSP or introduce another harness.
+
+The reviewer independently passed 8 focused tests and boundary probes for malformed/oversized
+maps and source-shape conflicts, all failures producing empty stdout. The reviewer is the
+non-implementing Astra medium planning thread; it is independent of Luna implementation but
+not a fresh context. The user paused implementation to settle delivery packaging, then approved
+resumption with one indexed blob per stem and a 16-byte header. That transport decision does
+not alter this tool's mono/session contract. Root authorizes the bounded attempt-2 revision
+after this evidence checkpoint is upstream; no new transport code belongs to this issue.
