@@ -34,9 +34,9 @@ use effect_runtime::params::{ParameterKind, ParameterMapping, ParameterSpec};
 use crate::COMPRESSOR_PARAMETERS;
 
 /// Parameters in the descriptor table.
-pub(crate) const PARAMETER_COUNT: usize = 8;
+pub(crate) const PARAMETER_COUNT: usize = 7;
 
-/// Parameters that are smoothed (`Linear 64`); `lookahead` is the eighth and is not automatable.
+/// Parameters that are smoothed (`Linear 64`).
 pub(crate) const RAMP_COUNT: usize = 7;
 
 /// Lane coefficient words produced by [`design_lane`].
@@ -114,7 +114,6 @@ pub(crate) const PARAMETER_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
     spec(4),
     spec(5),
     spec(6),
-    spec(7),
 ];
 
 /// One-pole *rate* coefficient `c = 1 - exp(-1 / (0.001 * time_ms * sample_rate))`.
@@ -178,23 +177,4 @@ pub(crate) fn design_lane(
     if changed & (1 << 6) != 0 {
         words[COEF_MIX][lane] = values[6];
     }
-}
-
-/// Detector read-back distance `D = N - L` in samples, derived only at prepare, restore and a
-/// full reset (BRIEFS/013).
-///
-/// `L = floor(f64(lookahead_ms) * Fs / 1000 + 0.5)` clamped to the latency `N = ring_length - 1`,
-/// and `D = N - L`, so `D == 0` reads the entry written this frame and `D == N` reads the oldest.
-/// Kept in `f64` and unchanged from the pre-audit code: it is a frozen product rule, not an
-/// implementation detail.
-pub(crate) fn detector_delay(lookahead_ms: f32, sample_rate: u32, ring_length: usize) -> u32 {
-    let latency = ring_length - 1;
-    let lookahead =
-        ((f64::from(lookahead_ms) * f64::from(sample_rate) / 1000.0) + 0.5).floor() as usize;
-    let clamped = if lookahead < latency {
-        lookahead
-    } else {
-        latency
-    };
-    (latency - clamped) as u32
 }

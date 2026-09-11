@@ -1,19 +1,23 @@
 #![allow(missing_docs)]
 
 use effect_contract::{
-    AutomationRate, EffectDescriptor, EffectId, EffectQuality, EnumChoice, LatencySamples,
-    LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
-    ObservationFold, ObservationKind, ObservationTapId, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor, SmoothingRule,
-    StatePayloadSizes, TailSamples, default_parameter_lattice, validate_descriptor,
+    AutomationRate, EffectDescriptor, EffectId, EffectQuality, EnumChoice, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
+    QualityDescriptor, SmoothingRule, StatePayloadSizes, TailSamples, default_parameter_lattice,
+    validate_descriptor,
 };
 use effect_package::{
     EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectArtifactAuthoring, EffectArtifactKind,
     EffectDescriptorWireDiagnosticCode as Code, EffectPackageAuthoring, EffectPackageLimits,
+    EffectStateLimits, EffectStateReplayView, bind_effect_descriptor_wire,
     effect_descriptor_identity, effect_descriptor_wire_required_size, effect_package_cid,
-    effect_package_required_size, encode_effect_descriptor_wire, encode_effect_package,
-    verify_effect_descriptor_wire, verify_effect_package,
+    effect_package_required_size, effect_state_requirements, encode_effect_descriptor_wire,
+    encode_effect_package, encode_effect_state, verify_effect_descriptor_wire,
+    verify_effect_package, verify_effect_state,
 };
 use std::{fs, path::PathBuf};
 
@@ -208,6 +212,87 @@ const SIDECHAIN: PortDescriptor = PortDescriptor {
 static PORTS_UNSORTED: [PortDescriptor; 3] = [SIDECHAIN, MAIN_OUT, MAIN_IN];
 static PORTS_PERMUTED: [PortDescriptor; 3] = [MAIN_IN, SIDECHAIN, MAIN_OUT];
 static PORTS_MAIN: [PortDescriptor; 2] = [MAIN_OUT, MAIN_IN];
+
+const COMPRESSOR_SIDECHAIN: PortDescriptor = PortDescriptor {
+    id: port_id("sidechain-in"),
+    role: PortRole::SidechainInput,
+    required: false,
+    layout: PortLayout::DualMonoPlanar,
+};
+static OLD_COMPRESSOR_PORTS: [PortDescriptor; 3] = [MAIN_IN, MAIN_OUT, COMPRESSOR_SIDECHAIN];
+
+const OLD_COMPRESSOR_LOOKAHEAD: ParameterDescriptor = ParameterDescriptor {
+    id: ParameterId(8),
+    display_name: "lookahead",
+    display_unit: "ms",
+    unit: ParameterUnit::Milliseconds,
+    domain: ParameterDomain::Continuous,
+    minimum: Some(0.0),
+    maximum: Some(20.0),
+    default_value: 5.0,
+    mapping: ParameterMapping::Linear,
+    automation_rate: AutomationRate::None,
+    channel_policy: ParameterChannelPolicy::PerLane,
+    smoothing: SmoothingRule::None,
+    smoothing_samples: 0,
+    readable: true,
+    automatable: false,
+    enum_choices: &[],
+    lattice: default_parameter_lattice(
+        ParameterUnit::Milliseconds,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+    ),
+};
+
+static OLD_COMPRESSOR_PARAMETERS: [ParameterDescriptor; 8] = [
+    compressor::COMPRESSOR_PARAMETERS[0],
+    compressor::COMPRESSOR_PARAMETERS[1],
+    compressor::COMPRESSOR_PARAMETERS[2],
+    compressor::COMPRESSOR_PARAMETERS[3],
+    compressor::COMPRESSOR_PARAMETERS[4],
+    compressor::COMPRESSOR_PARAMETERS[5],
+    compressor::COMPRESSOR_PARAMETERS[6],
+    OLD_COMPRESSOR_LOOKAHEAD,
+];
+
+const fn old_compressor_quality(sample_rate: u32, latency: u64) -> QualityDescriptor {
+    let ring_length = latency as u32 + 1;
+    let per_lane = (24 + 2 * ring_length) * 4;
+    QualityDescriptor {
+        quality: EffectQuality::Normal,
+        sample_rate,
+        latency: LatencySamples(latency),
+        tail: TailSamples::Infinite,
+        maximum_state: StatePayloadSizes {
+            common_bytes: 0,
+            left_bytes: per_lane,
+            right_bytes: per_lane,
+        },
+        scratch_fixed_bytes: 64,
+        scratch_bytes_per_frame: 0,
+    }
+}
+
+static OLD_COMPRESSOR_QUALITIES: [QualityDescriptor; 4] = [
+    old_compressor_quality(44_100, 882),
+    old_compressor_quality(48_000, 960),
+    old_compressor_quality(88_200, 1764),
+    old_compressor_quality(96_000, 1920),
+];
+
+static OLD_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+    id: effect_id("miso.compressor"),
+    display_name: "Compressor",
+    contract_major: 1,
+    contract_minor: 1,
+    state_layout_version: 1,
+    supported_link_modes: LinkModeSet::ALL,
+    parameters: &OLD_COMPRESSOR_PARAMETERS,
+    ports: &OLD_COMPRESSOR_PORTS,
+    qualities: &OLD_COMPRESSOR_QUALITIES,
+    observations: &compressor::COMPRESSOR_OBSERVATIONS,
+};
 
 #[allow(clippy::too_many_arguments)]
 const fn quality(
@@ -636,6 +721,82 @@ fn every_current_production_descriptor_encodes_and_verifies() {
         verify_effect_package(&package, EffectPackageLimits::default()).unwrap();
         effect_package_cid(&package, EffectPackageLimits::default()).unwrap();
     }
+}
+
+#[test]
+fn old_compressor_descriptor_bound_state_is_rejected_by_the_causal_descriptor() {
+    let old_wire = encoded(&OLD_COMPRESSOR_DESCRIPTOR);
+    verify_effect_descriptor_wire(&old_wire, 1 << 20).unwrap();
+    let old_bound =
+        bind_effect_descriptor_wire(&OLD_COMPRESSOR_DESCRIPTOR, &old_wire, 1 << 20).unwrap();
+
+    let mut initial_values = Vec::with_capacity(16);
+    for (index, parameter) in OLD_COMPRESSOR_PARAMETERS.iter().enumerate() {
+        let value = if index == 7 {
+            5.0
+        } else {
+            parameter.default_value
+        };
+        initial_values.push(InitialParameterValue {
+            parameter_index: index as u32,
+            channel: ParameterChannel::Left,
+            value,
+        });
+        initial_values.push(InitialParameterValue {
+            parameter_index: index as u32,
+            channel: ParameterChannel::Right,
+            value,
+        });
+    }
+    let replay = EffectStateReplayView {
+        effect_id: OLD_COMPRESSOR_DESCRIPTOR.id,
+        request: PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: port_id("sidechain-in"),
+                    required: false,
+                },
+            },
+            initial_values: &initial_values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        },
+    };
+    let requirements =
+        effect_state_requirements(old_bound, replay, EffectStateLimits::default()).unwrap();
+    let old_sizes = OLD_COMPRESSOR_QUALITIES[1].maximum_state;
+    let mut old_envelope = vec![0_u8; requirements.envelope_bytes as usize];
+    encode_effect_state(
+        old_bound,
+        replay,
+        &vec![0_u8; old_sizes.common_bytes as usize],
+        &vec![0_u8; old_sizes.left_bytes as usize],
+        &vec![0_u8; old_sizes.right_bytes as usize],
+        EffectStateLimits::default(),
+        &mut old_envelope,
+    )
+    .unwrap();
+    verify_effect_state(old_bound, &old_envelope, EffectStateLimits::default()).unwrap();
+
+    let current_wire = encoded(&compressor::COMPRESSOR_DESCRIPTOR);
+    let current_bound =
+        bind_effect_descriptor_wire(&compressor::COMPRESSOR_DESCRIPTOR, &current_wire, 1 << 20)
+            .unwrap();
+    assert_ne!(old_bound.identity(), current_bound.identity());
+    let rejection = verify_effect_state(current_bound, &old_envelope, EffectStateLimits::default())
+        .unwrap_err();
+    assert_eq!(
+        rejection.code,
+        effect_package::EffectStateDiagnosticCode::Descriptor
+    );
 }
 
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {

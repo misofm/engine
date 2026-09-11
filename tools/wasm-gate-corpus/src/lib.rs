@@ -162,14 +162,14 @@ pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 /// Cases delegated to [`compressor::corpus`] (issue #88 E4), replayed under wasm.
 ///
 /// A whole prepared compressor per case, over 384 frames of eight independent stereo tracks with
-/// different thresholds, ratios, knees, ballistics, makeup, mixes and lookahead taps, rendered
-/// through the production `process_block` in a frozen block partition and read back lane major:
-/// the per-lane detector gather with its compare-select ring wrap, the branchless Giannoulis,
-/// Massberg and Reiss equation 4, the `log2`/`exp2` dB chain, the single-rounding switched one-pole
-/// on the gain-reduction word with its D7 `flush`, and the three identity selects. One case per
-/// link mode plus one that drives the D11 ramping body through a mid-block automation point. The
-/// recurrence is per lane and never crosses lanes, which is why the digests stay width
-/// independent. Lane generic, and their pins live in that crate.
+/// different thresholds, ratios, knees, ballistics, makeup and mixes, rendered through the
+/// production `process_block` in a frozen block partition and read back lane major: the per-lane
+/// current-sample detector, the branchless Giannoulis, Massberg and Reiss equation 4, the
+/// `log2`/`exp2` dB chain, the single-rounding switched one-pole on the gain-reduction word with
+/// its D7 `flush`, and the three identity selects. One case per link mode plus one that drives the
+/// D11 ramping body through a mid-block automation point. The recurrence is per lane and never
+/// crosses lanes, which is why the digests stay width independent. Lane generic, and their pins
+/// live in that crate.
 pub const COMPRESSOR_CASE_COUNT: usize = compressor_corpus::CASE_COUNT;
 
 /// Total cases the guest exports.

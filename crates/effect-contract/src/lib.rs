@@ -1865,14 +1865,14 @@ pub trait PreparedNativeEffectBank: Send {
     /// *recovery window* -- the chain is otherwise ready to collapse and this is the only thing
     /// declining -- so a session that never disagrees never calls it at all.
     ///
-    /// That still forbids a naive answer. A launch effect's per-channel state is dominated by
-    /// delay lines: the compressor's two rings and the limiter's four run to tens of kilobytes per
-    /// lane, and a byte-compare of them every block would cost more than the collapse saves and
+    /// That still forbids a naive answer. A launch effect's per-channel state can be large, and a
+    /// byte-compare of every saved word every block would cost more than the collapse saves and
     /// would be paid by exactly the sessions that are already not collapsing. So an implementation
-    /// is expected to **discharge the buffers rather than compare them**: the silence fixed point
-    /// each of these kernels already earns (`#163` phase 4 item 1) pins every ring to a known
-    /// uniform value, at which point equality of the rings is a property of the claim and the only
-    /// words left to compare are the coefficients, the ramps and the handful of recursive words --
+    /// is expected to **discharge uniform storage rather than compare it**: the silence fixed point
+    /// each kernel earns (`#163` phase 4 item 1) pins its resting storage to a known uniform value,
+    /// at which point equality of that storage is a property of the claim and the only words
+    /// left to compare are coefficients, ramps and recursive
+    /// words --
     /// a kilobyte or so, not a hundred. An effect whose whole state is small enough compares it
     /// all and needs no fixed point at all. An effect that can do neither returns `false`, and its
     /// chain simply does not recover; declining is always safe.
@@ -1912,16 +1912,16 @@ pub trait PreparedNativeEffectBank: Send {
     ///   `ChannelState::is_at_silent_rest` reads back `clear_runtime`'s own list and pins every
     ///   running word to a constant (`+0.0`, `1.0`, or the lane's window), so a channel at rest is
     ///   at *the* rest state rather than at *a* fixed point, and two channels at it agree.
-    /// * **`compressor`** is the one that needs care. Its `silent_fixed_point` proves
-    ///   both delay rings are entirely `+0.0` -- which is what would discharge the expensive part
-    ///   of the comparison -- but it proves the recursive gain-reduction word only *unchanged*,
-    ///   not equal between the channels. A release that has stalled at two different values is
-    ///   still a fixed point at both, so an implementation must compare that word explicitly and
-    ///   must not read the flag as a claim about agreement.
+    /// * **`compressor`** is the one that needs care. Its causal detector and recursive
+    ///   gain-reduction state can be unchanged at rest, but that does not prove equality between
+    ///   the channels. A release that stalled at two different values is still a fixed point at
+    ///   both, so an implementation must compare that state explicitly and must not read the flag
+    ///   as a claim about agreement. The fixed-point flag proves
+    ///   unchanged state, not agreement.
     ///
-    /// A full byte-compare including the rings is the third way and is deliberately not the design:
-    /// at tens of kilobytes per lane it is paid every block by exactly the sessions that are
-    /// already not collapsing, which inverts the trade the collapse exists to make.
+    /// A full byte-compare of every state word is the third way and is deliberately not the design:
+    /// its cost is paid every block by exactly the sessions that are already not collapsing, which
+    /// inverts the trade the collapse exists to make.
     fn channels_agree(&self) -> bool {
         false
     }

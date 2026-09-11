@@ -5,31 +5,27 @@
 //! sample; the counters counted *samples*. There is now one vector scan of the finished block per
 //! channel, `bank::check_block`, and the counters count *blocks*.
 //!
-//! The channels are checked independently, because this effect keeps a separate ring, cursor and
-//! recursive word per channel: a `DualMono` instance whose right channel diverged has a left
-//! channel that is still exactly correct.
+//! The channels are checked independently: a `DualMono` instance whose right channel diverged has
+//! a left channel that is still exactly correct.
 
 mod support;
 
 use effect_contract::{EffectProcessBlock, PreparedSidechainPort};
 use effect_runtime::state_payload::read_f32;
 
-use support::{
-    STATE_HEADER_WORDS, noise, prepare, render_scalar, request, sidechain_port, snapshot,
-    values_with,
-};
+use support::{noise, prepare, render_scalar, request, sidechain_port, snapshot, values_with};
 
 /// A NaN in the right input leaves the left channel bit-identical to a clean run, and trips the
 /// boundary counter exactly once — in the block where the NaN reaches the output, not in the block
 /// where it entered.
 ///
-/// The latency is 960 samples and the quantum is 128, so a NaN at sample 0 emerges in block 7.
-/// That gap is the whole difference between a per-sample sanitiser and a boundary check.
+/// A NaN at sample 0 reaches the causal output in block 0; the boundary policy still counts one
+/// rejected block and resets only the failing channel.
 ///
 /// Red mutation (MUTATIONS.md row 17): stop zeroing and resetting the failing channel.
 #[test]
 fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
-    let values = values_with(&[(0, -30.0), (7, 0.0)]);
+    let values = values_with(&[(0, -30.0)]);
     let clean_left = noise(2_048, 0x7A_70_00_01, 0.6);
     let clean_right = noise(2_048, 0x7A_70_00_02, 0.6);
 
@@ -66,21 +62,21 @@ fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
         );
         blocks.push(report);
         offset += 128;
-        if blocks.len() == 8 {
+        if blocks.len() == 1 {
             state_after_the_rejected_block = Some(snapshot(effect.as_ref()));
         }
     }
 
-    // Exactly one block was rejected, and it is block 7 — where sample 960 leaves the latency.
+    // Exactly one block was rejected, and it is block 0 where the NaN was consumed.
     let tripped: Vec<usize> = blocks
         .iter()
         .enumerate()
         .filter(|(_, report)| report.nonfinite_right_blocks != 0)
         .map(|(index, _)| index)
         .collect();
-    assert_eq!(tripped, vec![7], "one rejected block, at the latency");
+    assert_eq!(tripped, vec![0], "one rejected block at the causal sample");
     assert_eq!(
-        blocks[7].nonfinite_right_blocks, 1,
+        blocks[0].nonfinite_right_blocks, 1,
         "the counter counts blocks"
     );
     assert!(
@@ -109,17 +105,71 @@ fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
 
     // The rejected block is zeroed, and the right channel's state is back to default.
     assert!(
-        right[7 * 128..8 * 128].iter().all(|s| s.to_bits() == 0),
+        right[0..128].iter().all(|s| s.to_bits() == 0),
         "a rejected block is zeroed"
     );
-    let (_, right_state) = state_after_the_rejected_block.expect("snapshot after block 7");
-    assert_eq!(read_f32(&right_state, 2).to_bits(), 0.0_f32.to_bits(), "G");
-    assert!(
-        right_state[STATE_HEADER_WORDS * 4..]
-            .chunks_exact(4)
-            .take(128)
-            .all(|word| word == 0.0_f32.to_le_bytes()),
-        "the rings of the failing channel were cleared"
+    let (_, right_state) = state_after_the_rejected_block.expect("snapshot after block 0");
+    assert_eq!(read_f32(&right_state, 0).to_bits(), 0.0_f32.to_bits(), "G");
+}
+
+/// A left-only boundary rejection leaves the right channel's causal output and state unchanged
+/// across every following partition.
+#[test]
+fn a_left_only_rejection_preserves_right_partition_output() {
+    let values = values_with(&[(0, -30.0)]);
+    let clean_left = noise(1_024, 0x7A_70_01_01, 0.6);
+    let clean_right = noise(1_024, 0x7A_70_01_02, 0.6);
+    let mut clean = prepare(request(&values));
+    let mut expected_left = clean_left.clone();
+    let mut expected_right = clean_right.clone();
+    render_scalar(
+        clean.as_mut(),
+        &mut expected_left,
+        &mut expected_right,
+        128,
+        128,
+        &[],
+    );
+
+    let mut effect = prepare(request(&values));
+    let mut actual_left = clean_left;
+    let mut actual_right = clean_right;
+    actual_left[0] = f32::NAN;
+    let mut offset = 0;
+    let mut reports = Vec::new();
+    while offset < actual_left.len() {
+        reports.push(
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut actual_left[offset..offset + 128],
+                    &mut actual_right[offset..offset + 128],
+                    None,
+                    offset as u64,
+                    &[],
+                    128,
+                )
+                .expect("block"),
+            ),
+        );
+        offset += 128;
+    }
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|report| report.nonfinite_left_blocks != 0)
+            .count(),
+        1
+    );
+    assert_eq!(
+        actual_right
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>(),
+        expected_right
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>(),
+        "a left-only rejection must preserve the right causal partition output"
     );
 }
 
@@ -136,7 +186,7 @@ fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
 /// this test pins is the resulting behaviour, which is what a caller can observe.
 #[test]
 fn a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor() {
-    let values = values_with(&[(0, -30.0), (6, 1.0), (7, 0.0)]);
+    let values = values_with(&[(0, -30.0), (6, 1.0)]);
     let mut preparation = request(&values);
     preparation.ports.sidechain = PreparedSidechainPort::Connected {
         id: sidechain_port(),
@@ -170,16 +220,15 @@ fn a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor() {
         offset += 128;
     }
     assert_eq!(trips, 0, "a NaN detector level is clamped, not propagated");
-    // Sample 960 is the frame whose detector read the NaN. A silent detector means no gain
-    // reduction at all, so the dry signal comes through exactly.
-    assert_eq!(left[960].to_bits(), 0.5_f32.to_bits());
+    // The current detector sample is clamped, so the dry signal comes through exactly.
+    assert_eq!(left[0].to_bits(), 0.5_f32.to_bits());
     assert_eq!(left[1_500].to_bits(), 0.5_f32.to_bits());
 }
 
 /// A value at or above the section 4.4 magnitude limit is rejected even though it is finite.
 #[test]
 fn the_boundary_limit_rejects_a_finite_but_absurd_value() {
-    let values = values_with(&[(0, 0.0), (1, 1.0), (5, 0.0), (6, 0.5), (7, 0.0)]);
+    let values = values_with(&[(0, 0.0), (1, 1.0), (5, 0.0), (6, 0.5)]);
     let mut effect = prepare(request(&values));
     let mut left = vec![0.0_f32; 2_048];
     let mut right = vec![0.0_f32; 2_048];
@@ -254,7 +303,6 @@ fn the_recursive_word_flushes_to_exactly_zero() {
         (4, 5.0),
         (5, 0.0),
         (6, 0.5),
-        (7, 0.0),
     ]);
     let mut effect = prepare(request(&values));
 
@@ -262,7 +310,7 @@ fn the_recursive_word_flushes_to_exactly_zero() {
     let mut loud = vec![0.9_f32; 4_096];
     let mut loud_right = vec![0.9_f32; 4_096];
     render_scalar(effect.as_mut(), &mut loud, &mut loud_right, 128, 128, &[]);
-    let after_burst = read_f32(&snapshot(effect.as_ref()).0, 2);
+    let after_burst = read_f32(&snapshot(effect.as_ref()).0, 0);
     assert!(
         after_burst < -5.0,
         "the burst must reduce gain: {after_burst}"
@@ -272,7 +320,7 @@ fn the_recursive_word_flushes_to_exactly_zero() {
     let mut quiet = vec![0.0_f32; 16_384];
     let mut quiet_right = vec![0.0_f32; 16_384];
     render_scalar(effect.as_mut(), &mut quiet, &mut quiet_right, 128, 128, &[]);
-    let settled = read_f32(&snapshot(effect.as_ref()).0, 2);
+    let settled = read_f32(&snapshot(effect.as_ref()).0, 0);
     assert_eq!(
         settled.to_bits(),
         0.0_f32.to_bits(),
@@ -284,7 +332,7 @@ fn the_recursive_word_flushes_to_exactly_zero() {
     let mut left = signal.clone();
     let mut right = signal.clone();
     render_scalar(effect.as_mut(), &mut left, &mut right, 128, 128, &[]);
-    for index in 960..2_048 {
-        assert_eq!(left[index].to_bits(), signal[index - 960].to_bits());
+    for index in 0..2_048 {
+        assert_eq!(left[index].to_bits(), signal[index].to_bits());
     }
 }

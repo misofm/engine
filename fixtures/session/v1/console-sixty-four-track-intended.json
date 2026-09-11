@@ -160,12 +160,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 1.0
               }
             ],
             "sidechain": {
@@ -363,12 +357,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -566,12 +554,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -769,12 +751,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -971,12 +947,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -1175,12 +1145,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -1378,12 +1342,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -1581,12 +1539,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -1783,12 +1735,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -1987,12 +1933,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -2190,12 +2130,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -2393,12 +2327,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -2595,12 +2523,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -2799,12 +2721,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -3002,12 +2918,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -3205,12 +3115,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -3407,12 +3311,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -3611,12 +3509,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -3814,12 +3706,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -4017,12 +3903,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -4219,12 +4099,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -4423,12 +4297,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -4626,12 +4494,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -4829,12 +4691,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -5031,12 +4887,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -5235,12 +5085,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -5438,12 +5282,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -5641,12 +5479,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -5843,12 +5675,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -6047,12 +5873,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -6250,12 +6070,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -6453,12 +6267,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -6655,12 +6463,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -6859,12 +6661,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -7062,12 +6858,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -7265,12 +7055,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -7467,12 +7251,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -7671,12 +7449,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -7874,12 +7646,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -8077,12 +7843,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -8279,12 +8039,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -8483,12 +8237,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -8686,12 +8434,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -8889,12 +8631,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -9091,12 +8827,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -9295,12 +9025,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -9498,12 +9222,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -9701,12 +9419,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -9903,12 +9615,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -10107,12 +9813,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -10310,12 +10010,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -10513,12 +10207,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -10715,12 +10403,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -10919,12 +10601,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -11122,12 +10798,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -11325,12 +10995,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -11527,12 +11191,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -11731,12 +11389,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -11934,12 +11586,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -12137,12 +11783,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {
@@ -12339,12 +11979,6 @@
                 "parameter_id": 7,
                 "channel": "both",
                 "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
                 "value": 1.0
               }
             ],
@@ -12543,12 +12177,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {
@@ -12746,12 +12374,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 3.0
               }
             ],
             "sidechain": {
@@ -12949,12 +12571,6 @@
                 "channel": "both",
                 "unit": "linear",
                 "value": 1.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 4.0
               }
             ],
             "sidechain": {

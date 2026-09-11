@@ -24,12 +24,10 @@
 //!
 //! # What is frozen
 //!
-//! The parameter table, the port list, the quality rows (latency `N = Fs/50`, `maximum_state`,
-//! `scratch_fixed_bytes: 64`), the program key, the state payload layout and `state_layout_version
-//! = 1`, the `L`/`D` derivation and the ring semantics, the link laws, and the four identities
-//! (bypass, `mix == 0`, `G == 0 && makeup == +0`, `mix == 1`). Master plan §8.2: a contract fixture
-//! does not move in a re-landing job. `scratch_fixed_bytes` is unused and stays anyway; #95 owns
-//! the program key.
+//! The parameter table, the port list, the quality rows (zero processing latency and the
+//! conservative state reservation), the program key, the state payload layout and
+//! `state_layout_version = 1`, the link laws, and the four identities (bypass, `mix == 0`,
+//! `G == 0 && makeup == +0`, `mix == 1`).
 #![allow(missing_docs)]
 
 mod design;
@@ -60,10 +58,7 @@ use crate::design::{
 };
 use crate::kernel::{Channel, Detector};
 
-/// Fixed scalar words each channel section carries before its two ring arrays.
-///
-/// Public because it is part of the documented V1 payload layout (BRIEFS/013), not an internal
-/// detail: a host that inspects a snapshot needs it to find the rings.
+/// Fixed scalar words each channel section carries in the current causal payload.
 pub use crate::state::STATE_HEADER_WORDS;
 
 const fn effect_id(value: &'static str) -> effect_contract::EffectId {
@@ -127,7 +122,7 @@ const fn parameter(
 }
 
 /// Frozen V1 parameter descriptors. Parameter positions and stable IDs are identical.
-pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 8] = [
+pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     parameter(
         1,
         "threshold",
@@ -219,19 +214,6 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 8] = [
         SmoothingRule::Linear,
         64,
     ),
-    parameter(
-        8,
-        "lookahead",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        20.0,
-        5.0,
-        ParameterMapping::Linear,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
 ];
 
 const PORTS: [PortDescriptor; 3] = [
@@ -255,18 +237,16 @@ const PORTS: [PortDescriptor; 3] = [
     },
 ];
 
-const fn quality(sample_rate: u32, latency: u64) -> effect_contract::QualityDescriptor {
-    let ring_length = latency as u32 + 1;
-    let per_lane = (24 + 2 * ring_length) * 4;
+const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
-        latency: LatencySamples(latency),
+        latency: LatencySamples(0),
         tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
-            left_bytes: per_lane,
-            right_bytes: per_lane,
+            left_bytes: 22 * 4,
+            right_bytes: 22 * 4,
         },
         scratch_fixed_bytes: 64,
         scratch_bytes_per_frame: 0,
@@ -274,10 +254,10 @@ const fn quality(sample_rate: u32, latency: u64) -> effect_contract::QualityDesc
 }
 
 const QUALITIES: [effect_contract::QualityDescriptor; 4] = [
-    quality(44_100, 882),
-    quality(48_000, 960),
-    quality(88_200, 1764),
-    quality(96_000, 1920),
+    quality(44_100),
+    quality(48_000),
+    quality(88_200),
+    quality(96_000),
 ];
 
 /// The one declared observation tap: the smoothed reduction the kernel already holds.
@@ -321,16 +301,6 @@ pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// Factory entry point for the V1 compressor implementation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CompressorFactory;
-
-/// Ring length `B = N + 1` for a prepared latency, or the resource-limit diagnostic.
-fn ring_length(metadata: PreparedEffectMetadata) -> Result<usize, EffectPrepareError> {
-    usize::try_from(metadata.latency.0)
-        .ok()
-        .and_then(|latency| latency.checked_add(1))
-        .ok_or(EffectPrepareError {
-            code: "effect.resource.limit",
-        })
-}
 
 /// The preparation-time values of both channels of one request.
 ///
@@ -477,11 +447,6 @@ struct Instance<L: Lane> {
     metadata: PreparedEffectMetadata,
     left: Channel<L>,
     right: Channel<L>,
-    /// The staged idle body's scratch, allocated once here rather than zeroed on the stack once
-    /// per block. Scratch, not state: it is written before it is read within every call that
-    /// touches it, so no snapshot, restore or reset has anything to say about it. See
-    /// [`kernel::Staged`].
-    staged: kernel::Staged<L>,
     /// Issue #163 phase 4 item 1: the previous block proved this instance is at a silent fixed
     /// point. Earned only by observation in [`render`](Self::render), never assumed. See the
     /// matching field on `parametric-eq` for the induction it licenses.
@@ -497,20 +462,18 @@ impl<L: Lane> Instance<L> {
         metadata: PreparedEffectMetadata,
         left_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
         right_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
-        length: usize,
     ) -> Self {
         Self {
             metadata,
-            left: Channel::new(left_defaults, length, metadata.sample_rate),
-            right: Channel::new(right_defaults, length, metadata.sample_rate),
-            staged: kernel::Staged::new(),
+            left: Channel::new(left_defaults, metadata.sample_rate),
+            right: Channel::new(right_defaults, metadata.sample_rate),
             silent_fixed_point: false,
             silent_bypass: metadata.bypass,
         }
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        // #163 phase 4 item 1: a reset moves the rings and the recursive word, so the claim goes.
+        // A reset changes the recursive word and ramps, so any silent fixed-point claim goes.
         self.silent_fixed_point = false;
         let rate = self.metadata.sample_rate;
         match kind {
@@ -546,8 +509,8 @@ impl<L: Lane> Instance<L> {
         //   second buffer whose contents could differ from the block that was observed;
         // * the bypass flag is the one that was in force when the claim was earned, since it
         //   selects a different path through the kernel;
-        // * both input planes are exactly `+0.0`, which short-circuits on the first chunk for a
-        //   block carrying signal.
+        // * both input planes are exactly `+0.0`, which is the only input for which a settled
+        //   causal compressor can skip the kernel while preserving output and state bits.
         let quiet = self.left.max_remaining() == 0
             && self.right.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
@@ -555,14 +518,9 @@ impl<L: Lane> Instance<L> {
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
-            // Both rings are known all-`+0.0` (that is one of the legs the claim was earned on),
-            // the one recursive word is at its fixed point, and the buffers already hold the
-            // `+0.0` the kernel would have written. The cursor is the only state that must still
-            // move: advancing it by `frames` is exactly what `frames` per-sample increments do,
-            // and it keeps the state bit-identical to the slow path rather than merely
-            // equivalent.
-            self.left.advance_cursor(frames as u32);
-            self.right.advance_cursor(frames as u32);
+            // The recursive words are at their fixed point and the buffers already hold the
+            // `+0.0` the current-sample kernel would write, so the whole block is bit-identical
+            // to the slow path. There is no history cursor to advance.
             return;
         }
         let before = quiet.then(|| (self.left.recursive_bits(), self.right.recursive_bits()));
@@ -575,17 +533,13 @@ impl<L: Lane> Instance<L> {
             self.metadata.bypass,
             self.metadata.sample_rate,
             (&mut self.left, &mut self.right),
-            &mut self.staged,
         );
         // Earn or lose the claim from what this block actually did: the recursive gain-reduction
-        // word came out as it went in, both delay rings are entirely `+0.0` (so a later cursor
-        // position reads the same silence a slow path would), and the output is `+0.0` to the bit.
+        // word came out as it went in and the output is `+0.0` to the bit.
         self.silent_fixed_point = match before {
             Some((left_before, right_before)) => {
                 left_before == self.left.recursive_bits()
                     && right_before == self.right.recursive_bits()
-                    && self.left.rings_are_positive_zero()
-                    && self.right.rings_are_positive_zero()
                     && block_is_positive_zero(&left[..words])
                     && block_is_positive_zero(&right[..words])
             }
@@ -606,11 +560,10 @@ impl<L: Lane> Instance<L> {
     /// Renders one block of the **collapsed** track: the left plane only.
     ///
     /// Every leg reads the left channel, which is the dual body's predicate with the right
-    /// channel's conjunct deleted -- and it is the same predicate, not a weaker one: a collapsed
-    /// bank's two channels hold the same ramps, the same rings and the same recursive word by the
-    /// induction the witness states, so `right.max_remaining() == 0` and
-    /// `block_is_positive_zero(right)` are the left conjuncts restated. Reading them off a right
-    /// plane the chain did not gather is what would be wrong.
+    /// channel's conjunct deleted. A collapsed bank's two channels hold the same ramps and
+    /// recursive word by the induction the witness states, so the right-channel checks are the
+    /// left checks restated. Reading them off a right plane the chain did not gather is what would
+    /// be wrong.
     ///
     /// `record` is called with the **same** verdict for both channels, because the right plane the
     /// seam is about to write is this left plane.
@@ -627,7 +580,6 @@ impl<L: Lane> Instance<L> {
             && self.silent_bypass == self.metadata.bypass
             && block_is_positive_zero(&left[..words]);
         if quiet && self.silent_fixed_point {
-            self.left.advance_cursor(frames as u32);
             return;
         }
         let before = quiet.then(|| self.left.recursive_bits());
@@ -639,13 +591,10 @@ impl<L: Lane> Instance<L> {
             self.metadata.bypass,
             self.metadata.sample_rate,
             &mut self.left,
-            &mut self.staged,
         );
         self.silent_fixed_point = match before {
             Some(left_before) => {
-                left_before == self.left.recursive_bits()
-                    && self.left.rings_are_positive_zero()
-                    && block_is_positive_zero(&left[..words])
+                left_before == self.left.recursive_bits() && block_is_positive_zero(&left[..words])
             }
             None => false,
         };
@@ -690,9 +639,9 @@ impl<L: Lane> Instance<L> {
         input: StatePayloadInput<'_>,
         lane: usize,
     ) -> Result<(), StatePayloadError> {
-        // #163 phase 4 item 1: a restore writes rings, the recursive word and the coefficients
-        // from a payload this instance never rendered, so any standing claim is void. Withdrawn
-        // before the version check so a rejected restore cannot leave a half-trusted claim either.
+        // A restore writes the recursive word and coefficients from a payload this instance never
+        // rendered, so any standing claim is void. Withdraw it before the version check so a
+        // rejected restore cannot leave a half-trusted claim either.
         self.silent_fixed_point = false;
         if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
@@ -705,9 +654,8 @@ impl<L: Lane> Instance<L> {
             input.right.len(),
             self.metadata.state_sizes,
         )?;
-        let length = self.left.ring_length as usize;
-        state::validate_channel(input.left, length)?;
-        state::validate_channel(input.right, length)?;
+        state::validate_channel(input.left)?;
+        state::validate_channel(input.right)?;
         let rate = self.metadata.sample_rate;
         state::commit_channel(input.left, &mut self.left, lane, rate);
         state::commit_channel(input.right, &mut self.right, lane, rate);
@@ -720,9 +668,9 @@ impl<L: Lane> Instance<L> {
 ///
 /// # The word list, and why it is exactly this
 ///
-/// Every per-lane word the compressor's kernel loads is a `Channel` field
-/// (`compressor::kernel::Channel`), and the render path reads exactly four of them
-/// per lane:
+/// Every designed per-lane word the compressor's kernel loads is a `Channel` field
+/// (`compressor::kernel::Channel`), and the render path reads the coefficient words and ramps
+/// listed below:
 ///
 /// * `words[c][l]` -- the eight designed coefficients (`COEF_COUNT`), the documented "source of
 ///   truth; `Coef` is a load of these". `Coef::load` reads them and derives `wet_identity`,
@@ -732,24 +680,18 @@ impl<L: Lane> Instance<L> {
 ///   `max_remaining` reads `remaining` to size the ramping prefix, and `advance_ramps` reads
 ///   `current`, `target` and `step` to move it. A ramp mid-flight is symmetric exactly when both
 ///   channels are the same distance from the same target by the same step.
-/// * `delay[l]` -- the detector read-back distance, read every frame by `gather_detector` and
-///   `fill_taps`, and by `min_delay`, which gates the staged idle body.
-/// * `lookahead_ms[l]` -- what `delay` was derived from. The kernel never reads it, but `redesign`
-///   does, so two channels that agree on `delay` and disagree here would diverge at the next
-///   restore or reset. Cheap, and it closes that hole.
 ///
 /// Deliberately excluded, each for its own reason:
 ///
-/// * `gain_reduction_db`, `main`, `detector`, `cursor` -- running state, not designed words.
+/// * `gain_reduction_db` -- running state, not designed words.
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
 /// * `metadata.link_mode`, `metadata.bypass`, `metadata.sample_rate`, `silent_fixed_point`,
-///   `silent_bypass`, `ring_length` -- whole-instance or per-channel-shared, so they cannot be
+///   `silent_bypass` -- whole-instance or per-channel-shared, so they cannot be
 ///   asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
 ///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
 ///   the original operation order.
-/// * `staged` -- scratch, written before it is read on every call that touches it.
 impl<L: Lane> Instance<L> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= L::WIDTH {
@@ -771,8 +713,7 @@ impl<L: Lane> Instance<L> {
                 return false;
             }
         }
-        left.delay[lane] == right.delay[lane]
-            && left.lookahead_ms[lane].to_bits() == right.lookahead_ms[lane].to_bits()
+        true
     }
 }
 
@@ -798,13 +739,11 @@ impl NativeEffectFactory for CompressorFactory {
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
-        let length = ring_length(metadata)?;
         Ok(Box::new(PreparedCompressor {
             instance: Instance::new(
                 metadata,
                 &[left_defaults; MAX_WIDTH],
                 &[right_defaults; MAX_WIDTH],
-                length,
             ),
         }))
     }
@@ -856,7 +795,6 @@ impl NativeEffectFactory for CompressorFactory {
         if Backend::current().width() != lanes {
             return Ok(None);
         }
-        let length = ring_length(metadata)?;
         let bank_metadata = PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
@@ -864,11 +802,11 @@ impl NativeEffectFactory for CompressorFactory {
         Ok(Some(match Backend::current() {
             Backend::Simd4 => Box::new(PreparedCompressorBank::<Simd4> {
                 metadata: bank_metadata,
-                instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
+                instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
             Backend::Simd8 => Box::new(PreparedCompressorBank::<Simd8> {
                 metadata: bank_metadata,
-                instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
+                instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
             Backend::Scalar => return Ok(None),
         }))
@@ -887,8 +825,7 @@ impl PreparedNativeEffect for PreparedCompressor {
     /// Applies a compressor target by zero-based descriptor index.
     ///
     /// Indices 0 through 6 are the threshold dB, ratio, knee dB, attack milliseconds, release
-    /// milliseconds, makeup dB, and unitless wet mix. Index 7 (lookahead milliseconds) is readable
-    /// but fixed after preparation. Left and Right are independent; Both is rejected. Validation
+    /// milliseconds, makeup dB, and unitless wet mix. Left and Right are independent; Both is rejected. Validation
     /// precedence is index, channel, automatable, then finite in-domain value, and every rejection
     /// leaves the complete prepared state unchanged.
     ///
@@ -930,8 +867,8 @@ impl PreparedNativeEffect for PreparedCompressor {
 
     /// Reads the resident current and target values in the units listed above.
     ///
-    /// The same index and channel validation applies. Lookahead reports its fixed prepared value
-    /// as both current and target. Reading never changes smoother, detector, or delay state. Direct
+    /// The same index and channel validation applies. Reading never changes smoother or envelope
+    /// state. Direct
     /// native scheduling shares the [`lane::CanonicalFpEnv`] precondition documented on
     /// [`Self::apply_parameter_point`].
     fn parameter_state(
@@ -953,13 +890,6 @@ impl PreparedNativeEffect for PreparedCompressor {
         } else {
             &self.instance.right
         };
-        if index == RAMP_COUNT {
-            let value = channel.lookahead_ms[0];
-            return Ok(PreparedParameterState {
-                current_value: value,
-                target_value: value,
-            });
-        }
         let ramp = channel.ramps[index][0];
         Ok(PreparedParameterState {
             current_value: ramp.current,
@@ -1214,4 +1144,92 @@ fn offsets_are_ordered(offsets: &[u32], spans: usize) -> bool {
         previous = *offset;
     }
     true
+}
+
+#[cfg(test)]
+mod width_state_tests {
+    use super::{Channel, Detector, Lane, Simd4, Simd8, kernel, state};
+    use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
+    use effect_contract::LinkMode;
+
+    const FRAMES: usize = 128;
+    const SAMPLE_RATE: u32 = 48_000;
+
+    fn defaults() -> [[f32; PARAMETER_COUNT]; MAX_WIDTH] {
+        let values = core::array::from_fn(|index| PARAMETER_SPECS[index].default);
+        [values; MAX_WIDTH]
+    }
+
+    fn serialized<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; state::STATE_HEADER_WORDS * 4];
+        state::write_channel(&mut bytes, channel, lane);
+        bytes
+    }
+
+    fn state_matches_scalar<L: Lane>() {
+        let defaults = defaults();
+        let mut wide_left = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut wide_right = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut input_left = vec![0.0_f32; FRAMES * L::WIDTH];
+        let mut input_right = vec![0.0_f32; FRAMES * L::WIDTH];
+        for frame in 0..FRAMES {
+            for lane in 0..L::WIDTH {
+                let slot = frame * L::WIDTH + lane;
+                input_left[slot] = ((frame * 3 + lane * 5) % 23) as f32 / 23.0;
+                input_right[slot] = -(((frame * 7 + lane * 2) % 19) as f32) / 19.0;
+            }
+        }
+        let mut left = input_left.clone();
+        let mut right = input_right.clone();
+        kernel::process_block::<L>(
+            &mut left,
+            &mut right,
+            Detector::Main,
+            FRAMES,
+            LinkMode::DualMono,
+            false,
+            SAMPLE_RATE,
+            (&mut wide_left, &mut wide_right),
+        );
+
+        for lane in 0..L::WIDTH {
+            let mut scalar_left = Channel::<f32>::new(&defaults, SAMPLE_RATE);
+            let mut scalar_right = Channel::<f32>::new(&defaults, SAMPLE_RATE);
+            let mut scalar_input_left = vec![0.0_f32; FRAMES];
+            let mut scalar_input_right = vec![0.0_f32; FRAMES];
+            for frame in 0..FRAMES {
+                scalar_input_left[frame] = input_left[frame * L::WIDTH + lane];
+                scalar_input_right[frame] = input_right[frame * L::WIDTH + lane];
+            }
+            kernel::process_block::<f32>(
+                &mut scalar_input_left,
+                &mut scalar_input_right,
+                Detector::Main,
+                FRAMES,
+                LinkMode::DualMono,
+                false,
+                SAMPLE_RATE,
+                (&mut scalar_left, &mut scalar_right),
+            );
+            assert_eq!(
+                serialized(&wide_left, lane),
+                serialized(&scalar_left, 0),
+                "left serialized state differs at lane {lane} for width {}",
+                L::WIDTH
+            );
+            assert_eq!(
+                serialized(&wide_right, lane),
+                serialized(&scalar_right, 0),
+                "right serialized state differs at lane {lane} for width {}",
+                L::WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn serialized_state_is_width_invariant_at_w1_w4_w8() {
+        state_matches_scalar::<f32>();
+        state_matches_scalar::<Simd4>();
+        state_matches_scalar::<Simd8>();
+    }
 }

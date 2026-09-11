@@ -5247,7 +5247,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change() {
+    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_with_zero_pdc() {
         let model = accepted_compressor_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
         let session = compile_session(
@@ -5283,7 +5283,7 @@ mod tests {
             effects
                 .entries
                 .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(960))
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
@@ -5403,6 +5403,7 @@ mod tests {
             .unwrap_or_else(|failure| panic!("compressor scalar bind: {}", failure.code));
         let frames = envelope.quantum.0 as usize;
         let mut rendered_nonzero = false;
+        let mut first_block_nonzero = false;
         for block in 0..16_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
             let mut scalar_pcm = vec![0.0_f32; frames * 2];
@@ -5442,10 +5443,17 @@ mod tests {
                 "retained compressor bank and scalar fallback render the same PCM"
             );
             rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
+            if block == 0 {
+                first_block_nonzero = bank_pcm.iter().any(|sample| *sample != 0.0);
+            }
         }
         assert!(
             rendered_nonzero,
-            "the fixed-delay compressor path rendered after its latency"
+            "the causal compressor path rendered audio"
+        );
+        assert!(
+            first_block_nonzero,
+            "the zero-latency compressor renders the current first block"
         );
 
         let mut bypass_model = model.clone();
@@ -5471,7 +5479,7 @@ mod tests {
             bypass_effects
                 .entries
                 .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(960))
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
             dispatch: host_dispatch(),
@@ -5484,6 +5492,128 @@ mod tests {
         assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
     }
 
+    #[test]
+    fn mixed_causal_compressor_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
+        let mut model = accepted_compressor_graph_fixture();
+        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
+        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed compressor/limiter fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, caps)
+            .expect("prepared mixed effects");
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "compressor")
+                .count(),
+            9
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .count(),
+            1
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "compressor")
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .all(|entry| entry.metadata.latency == LatencySamples(486))
+        );
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_017,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| {
+            panic!("mixed compressor/limiter graph: {:?}", failure.diagnostics)
+        });
+        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert!(
+            artifact
+                .graph
+                .inserted_delays
+                .iter()
+                .any(|delay| { delay.samples == LatencySamples(486) })
+        );
+        for route in &artifact.graph.route_timings {
+            let route_id = route.route_id.as_str();
+            if route_id == "eq9-main" {
+                assert_eq!(route.source_arrival, LatencySamples(486));
+                assert_eq!(route.compensation_delay, LatencySamples(0));
+                assert_eq!(route.destination_arrival, LatencySamples(486));
+            } else if route_id.ends_with("-main") {
+                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
+                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
+                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+            }
+        }
+
+        // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency compressor
+        // paths remain aligned with the real delayed processor and the output latency is stable.
+        let mut bypass_model = model;
+        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed bypass fixture");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+            .expect("prepared mixed bypass effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_018,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(
+            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            "bypassing the delayed limiter preserves PDC route timing"
+        );
+        assert_eq!(
+            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            "bypassing the delayed limiter preserves its compensation"
+        );
+    }
+
     /// Phase 1b: a native effect carrying the homogeneous-bank kernel contract banks in the
     /// **dynamic** rack, and every rendered sample is bit-identical to the per-node path.
     ///
@@ -5494,9 +5624,9 @@ mod tests {
     /// The bar is class A. Banking changes lane *grouping*, not per-lane arithmetic:
     /// `PreparedCompressorBank<L>` runs the same coefficient and detector update per lane that the
     /// scalar instance runs, so a single differing bit would be a defect in the bank kernel or in
-    /// the gather/scatter, never something to re-pin around. This renders sixteen blocks -- well
-    /// past the compressor's 960-sample lookahead latency, so the comparison is over live
-    /// compressed audio with retained detector state, not over a latency pad of zeros.
+    /// the gather/scatter, never something to re-pin around. This renders sixteen blocks so the
+    /// comparison covers live compressed audio with retained detector state, including the first
+    /// causal block rather than a latency pad of zeros.
     #[test]
     fn dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path() {
         let model = accepted_dynamic_rack_compressor_fixture();
@@ -5555,7 +5685,7 @@ mod tests {
         assert_pcm_bits_equal(&banked, &scalar, "dynamic-rack compressor bank vs per node");
         assert!(
             banked.iter().flatten().any(|sample| *sample != 0.0),
-            "sixteen blocks must clear the compressor's lookahead latency"
+            "sixteen blocks must retain non-silent causal compressor output"
         );
         assert!(
             banked[15]
@@ -5968,8 +6098,7 @@ mod tests {
     ///    literal, so the extra dynamic banks scale both sides of it -- there is no re-pin here.
     #[test]
     fn console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically() {
-        // Past the compressor's 960-sample lookahead (8 blocks of 128), so the comparison is over
-        // live compressed audio rather than over a latency pad of zeros.
+        // The causal compressor has no latency pad; the first block is already live audio.
         const BLOCKS: u64 = 12;
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         assert_eq!(model.tracks.len(), 64);

@@ -1,20 +1,18 @@
-//! E13 — the contract fixtures, unchanged from V1.
+//! E13 — the current causal compressor contract.
 //!
-//! Every assertion here was already true before #88 and must still be true after it (master plan
-//! section 8.2: a re-landing job does not move a contract fixture). The bank-fallback test is the
-//! one that changed shape: it named `Backend::Simd8` / `Aarch64Neon` as "the backend
-//! that is not available here", and D4 revision 4 removed runtime dispatch, so the unavailable
-//! backend is now simply "a bank width this build was not compiled for".
+//! Descriptor, resource, zero-latency, causal sample-zero, bank-fallback, link, sidechain and
+//! malformed-block behavior are asserted here. The contract intentionally changes the former
+//! lookahead payload and parameter menu under issue #737; root-owned current fixture pins move with
+//! that amended descriptor.
 
 mod support;
 
 use compressor::{COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory};
 use effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProcessBlock, LatencySamples,
-    LinkMode, NativeEffectFactory, PrepareEffectBankRequest, PreparedSidechainPort, ResetKind,
-    StatePayloadOutput, expected_prepared_metadata, validate_descriptor,
+    LinkMode, NativeEffectFactory, PrepareEffectBankRequest, PreparedSidechainPort,
+    expected_prepared_metadata, validate_descriptor,
 };
-use effect_runtime::state_payload::read_f32;
 use lane::Backend;
 
 use support::{
@@ -24,8 +22,8 @@ use support::{
 
 /// Descriptor rows, latency, payload sizes, scratch and the resource envelope are frozen.
 ///
-/// Red mutation: `scratch_fixed_bytes: 0` (the F10 change #95 owns) or `STATE_HEADER_WORDS = 26`
-/// (83c's two-word header) — RED here, which is the point: neither may be smuggled in by #88.
+/// Red mutation: `scratch_fixed_bytes: 0` or `STATE_HEADER_WORDS = 26` — RED here, which is the
+/// point: the causal resource envelope and exact 22-word channel payload are both contract data.
 #[test]
 fn descriptor_rows_and_resource_envelope_are_frozen() {
     validate_descriptor(&COMPRESSOR_DESCRIPTOR).expect("descriptor");
@@ -34,13 +32,12 @@ fn descriptor_rows_and_resource_envelope_are_frozen() {
     assert_eq!(COMPRESSOR_PARAMETERS.len(), PARAMETER_COUNT);
     for (quality, (rate, latency, lane_bytes, total_bytes)) in
         COMPRESSOR_DESCRIPTOR.qualities.iter().zip([
-            (44_100_u32, 882_u64, 7_160_u32, 14_320_u64),
-            (48_000, 960, 7_784, 15_568),
-            (88_200, 1_764, 14_216, 28_432),
-            (96_000, 1_920, 15_464, 30_928),
+            (44_100_u32, 0_u64, 88_u32, 176_u64),
+            (48_000, 0, 88, 176),
+            (88_200, 0, 88, 176),
+            (96_000, 0, 88, 176),
         ])
     {
-        let ring_length = latency as usize + 1;
         assert_eq!(quality.sample_rate, rate);
         assert_eq!(quality.latency, LatencySamples(latency));
         assert_eq!(quality.maximum_state.common_bytes, 0);
@@ -49,9 +46,167 @@ fn descriptor_rows_and_resource_envelope_are_frozen() {
         assert_eq!(quality.maximum_state.total(), Some(total_bytes));
         assert_eq!(quality.scratch_fixed_bytes, 64);
         assert_eq!(quality.scratch_bytes_per_frame, 0);
-        assert_eq!(
-            lane_bytes as usize,
-            (STATE_HEADER_WORDS + 2 * ring_length) * 4
+        assert_eq!(lane_bytes as usize, STATE_HEADER_WORDS * 4);
+    }
+}
+
+/// Every launch rate takes the same direct current-sample path in scalar and the supported native
+/// bank. The identity configurations use a sample-zero impulse so a delayed implementation cannot
+/// satisfy the bypass, ratio-one, or mix-zero assertions by returning a later sample.
+#[test]
+fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
+    const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+    let factory = CompressorFactory;
+    let active_values = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0), (3, 0.1), (6, 1.0)]);
+    let identity_values = values_with(&[(0, -40.0), (1, 1.0), (2, 0.0), (5, 0.0), (6, 1.0)]);
+    let mix_zero_values = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0), (6, 0.0)]);
+
+    for rate in RATES {
+        let mut active_request = request(&active_values);
+        active_request.sample_rate = rate;
+        let mut active = prepare(active_request);
+        assert_eq!(active.metadata().latency, LatencySamples(0));
+        let mut left = vec![0.0_f32; 128];
+        let mut right = vec![0.0_f32; 128];
+        left[0] = 0.75;
+        right[0] = -0.5;
+        render_scalar(active.as_mut(), &mut left, &mut right, 128, 128, &[]);
+        assert!(left[0].is_finite() && left[0].to_bits() != 0.75_f32.to_bits());
+        assert!(right[0].is_finite() && right[0].to_bits() != (-0.5_f32).to_bits());
+
+        let mut bypass_request = request(&active_values);
+        bypass_request.sample_rate = rate;
+        bypass_request.bypass = true;
+        let mut bypass = prepare(bypass_request);
+        let mut bypass_left = vec![0.0_f32; 128];
+        let mut bypass_right = vec![0.0_f32; 128];
+        bypass_left[0] = 0.75;
+        bypass_right[0] = -0.5;
+        render_scalar(
+            bypass.as_mut(),
+            &mut bypass_left,
+            &mut bypass_right,
+            128,
+            128,
+            &[],
+        );
+        assert_eq!(bypass_left[0].to_bits(), 0.75_f32.to_bits());
+        assert_eq!(bypass_right[0].to_bits(), (-0.5_f32).to_bits());
+
+        for (name, values) in [
+            ("ratio-one", &identity_values),
+            ("mix-zero", &mix_zero_values),
+        ] {
+            let mut identity_request = request(values);
+            identity_request.sample_rate = rate;
+            let mut identity = prepare(identity_request);
+            let mut identity_left = vec![0.0_f32; 128];
+            let mut identity_right = vec![0.0_f32; 128];
+            identity_left[0] = 0.75;
+            identity_right[0] = -0.5;
+            render_scalar(
+                identity.as_mut(),
+                &mut identity_left,
+                &mut identity_right,
+                128,
+                128,
+                &[],
+            );
+            assert_eq!(
+                identity_left[0].to_bits(),
+                0.75_f32.to_bits(),
+                "{name} left rate {rate}"
+            );
+            assert_eq!(
+                identity_right[0].to_bits(),
+                (-0.5_f32).to_bits(),
+                "{name} right rate {rate}"
+            );
+        }
+
+        let Some((backend, width)) = support::native_bank_width() else {
+            continue;
+        };
+        let lanes = width.lanes() as usize;
+        let requests: Vec<_> = (0..lanes)
+            .map(|_| {
+                let mut request = request(&active_values);
+                request.sample_rate = rate;
+                request
+            })
+            .collect();
+        let mut bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &requests,
+            })
+            .expect("supported bank bind")
+            .expect("supported bank");
+        let mut bank_left = vec![0.75_f32; lanes];
+        let mut bank_right = vec![-0.5_f32; lanes];
+        let offsets = vec![0_u32; lanes + 1];
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                1,
+                width,
+                0,
+                &[],
+                &offsets,
+                128,
+            )
+            .expect("bank impulse"),
+        );
+        assert!(
+            bank_left
+                .iter()
+                .any(|sample| sample.to_bits() != 0.75_f32.to_bits())
+        );
+
+        let bypass_requests: Vec<_> = (0..lanes)
+            .map(|_| {
+                let mut request = request(&active_values);
+                request.sample_rate = rate;
+                request.bypass = true;
+                request
+            })
+            .collect();
+        let mut bypass_bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &bypass_requests,
+            })
+            .expect("supported bypass bank bind")
+            .expect("supported bypass bank");
+        let mut bypass_bank_left = vec![0.75_f32; lanes];
+        let mut bypass_bank_right = vec![-0.5_f32; lanes];
+        bypass_bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bypass_bank_left,
+                &mut bypass_bank_right,
+                None,
+                1,
+                width,
+                0,
+                &[],
+                &offsets,
+                128,
+            )
+            .expect("bank bypass impulse"),
+        );
+        assert!(
+            bypass_bank_left
+                .iter()
+                .all(|sample| sample.to_bits() == 0.75_f32.to_bits())
+        );
+        assert!(
+            bypass_bank_right
+                .iter()
+                .all(|sample| sample.to_bits() == (-0.5_f32).to_bits())
         );
     }
 }
@@ -88,7 +243,7 @@ fn every_descriptor_row_admits_exactly_its_own_domain() {
         }
     }
     // `-0.0` is a preparation-time rejection for every parameter whose domain contains zero.
-    for index in [2_usize, 5, 6, 7] {
+    for index in [2_usize, 5, 6] {
         let values = values_with(&[(index, -0.0)]);
         assert!(
             factory.prepare(request(&values)).is_err(),
@@ -130,58 +285,21 @@ fn preparation_has_expected_metadata_and_one_byte_below_rejects() {
     );
 }
 
-/// `D = N - L` is derived at prepare and at a full reset, and only there.
-///
-/// `L = floor(ms * Fs / 1000 + 0.5)` clamped to `N`, `D = N - L`. At 48 kHz `N = 960`, so
-/// `lookahead = 20 ms` gives `L = 960` and `D = 0`: the detector reads the entry written **this**
-/// frame, 960 frames ahead of the output it gains, and the envelope is fully settled by the time
-/// the first sample leaves the latency. `lookahead = 0` gives `D = N`: the detector is aligned
-/// with the output, so at sample 960 the envelope has had exactly one sample of attack. The gap
-/// between the two is the whole content of the lookahead tap.
-///
-/// Red mutation: `gather_detector` uses `D[0]` for every lane, or `D = L` instead of `N - L` —
-/// RED, the two configurations become indistinguishable.
+/// The causal contract reports zero latency and consumes the current sample at sample zero.
 #[test]
-fn lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset() {
-    let mut first_audible = Vec::new();
-    for lookahead_ms in [20.0_f32, 0.0] {
-        let values = values_with(&[
-            (0, -40.0),
-            (1, 20.0),
-            (2, 0.0),
-            (3, 0.1),
-            (6, 1.0),
-            (7, lookahead_ms),
-        ]);
-        let mut effect = prepare(request(&values));
-        let mut left = vec![0.5_f32; 1_152];
-        let mut right = vec![0.5_f32; 1_152];
-        render_scalar(effect.as_mut(), &mut left, &mut right, 128, 128, &[]);
-        // Sample 960 is the first sample the latency lets through.
-        first_audible.push((left[960], left[1_100]));
-    }
-    let (settled, late) = (first_audible[0], first_audible[1]);
-    assert!(
-        settled.0 < late.0,
-        "a 20 ms lookahead must have settled by sample 960: {settled:?} vs {late:?}"
-    );
-    // By sample 1,100 both have settled to the same gain.
-    assert!((settled.1 - late.1).abs() < 1.0e-6, "{settled:?} {late:?}");
-    assert!(settled.0 < 0.5 && late.0 < 0.5);
-
-    // The payload carries the lookahead value itself, and a full reset re-derives from it.
-    let values = values_with(&[(7, 12.5)]);
+fn causal_processing_starts_at_sample_zero() {
+    let values = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0), (3, 0.1), (6, 1.0)]);
     let mut effect = prepare(request(&values));
-    effect.reset(ResetKind::FullToDefaults);
-    let sizes = effect.metadata().state_sizes;
-    let mut left = vec![0_u8; sizes.left_bytes as usize];
-    let mut right = vec![0_u8; sizes.right_bytes as usize];
-    effect
-        .snapshot_state_payload(
-            StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("payload"),
-        )
-        .expect("snapshot");
-    assert_eq!(read_f32(&left, 1).to_bits(), 12.5_f32.to_bits());
+    assert_eq!(effect.metadata().latency, LatencySamples(0));
+    let mut left = vec![0.5_f32; 128];
+    let mut right = vec![0.5_f32; 128];
+    render_scalar(effect.as_mut(), &mut left, &mut right, 128, 128, &[]);
+    assert!(
+        left[0].is_finite() && left[0] > 0.0 && left[0] < 0.5,
+        "active compression must produce a finite positive compressed sample at zero: {}",
+        left[0]
+    );
+    assert!(left.iter().all(|sample| sample.is_finite()));
 }
 
 /// A bank fallback never hides a malformed or incompatible request.
@@ -292,14 +410,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
 fn links_are_exact_and_connected_sidechain_is_distinct_from_main_detection() {
     // 0.5 * |l| + 0.5 * |r| in the frozen product order, checked through the rendered output of a
     // configuration whose gain is a pure function of the detector level.
-    let values = values_with(&[
-        (0, -40.0),
-        (1, 20.0),
-        (2, 0.0),
-        (3, 0.1),
-        (6, 1.0),
-        (7, 20.0),
-    ]);
+    let values = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0), (3, 0.1), (6, 1.0)]);
 
     let mut outputs = Vec::new();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
@@ -462,6 +573,7 @@ fn a_malformed_bank_block_is_rejected_before_it_is_indexed() {
     assert_eq!(report, BankProcessReport::empty(width));
     assert!(
         left.iter()
-            .all(|sample| sample.to_bits() == 0.0_f32.to_bits())
+            .any(|sample| sample.to_bits() != 0.5_f32.to_bits()),
+        "a well-formed bank block must render rather than leave the input untouched"
     );
 }

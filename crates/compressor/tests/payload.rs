@@ -13,8 +13,8 @@ use effect_contract::{
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 
 use support::{
-    STATE_HEADER_WORDS, initial_values, noise, prepare, render_scalar, request, restore, snapshot,
-    values_with,
+    bind_bank, initial_values, native_bank_width, noise, prepare, render_scalar, request, restore,
+    restore_track, snapshot, snapshot_track, values_with,
 };
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
@@ -38,7 +38,7 @@ fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutom
 /// on the transactional test below.
 #[test]
 fn an_idle_restore_is_bit_exact() {
-    let values = values_with(&[(0, -30.0), (1, 6.0), (2, 6.0), (7, 5.0)]);
+    let values = values_with(&[(0, -30.0), (1, 6.0), (2, 6.0)]);
     let input_left = noise(4_096, 0x9A_10_00_01, 0.8);
     let input_right = noise(4_096, 0x9A_10_00_02, 0.8);
 
@@ -107,19 +107,14 @@ fn a_restore_is_transactional_across_both_channels() {
     // The left section handed to `restore` must differ from the live state, or a commit that
     // happened before the right section was validated would be invisible.
     let mut modified_left = saved_left.clone();
-    write_f32(&mut modified_left, STATE_HEADER_WORDS + 3, 0.125);
+    write_f32(&mut modified_left, 1, -17.5);
     assert_ne!(modified_left, saved_left);
 
     for (word, value, code) in [
-        (0_usize, u32::MAX, "effect.state.cursor"),
+        (0_usize, 1.0_f32.to_bits(), "effect.state.gain"),
         (1, f32::NAN.to_bits(), "effect.state.parameter"),
-        (2, 1.0_f32.to_bits(), "effect.state.gain"),
-        (5, 65_u32, "effect.state.parameter"),
-        (
-            STATE_HEADER_WORDS,
-            f32::from_bits(1).to_bits(),
-            "effect.state.ring",
-        ),
+        (2, 1.0_f32.to_bits(), "effect.state.parameter"),
+        (3, 65_u32, "effect.state.parameter"),
     ] {
         let mut corrupt = saved_right.clone();
         write_u32(&mut corrupt, word, value);
@@ -153,6 +148,103 @@ fn a_restore_is_transactional_across_both_channels() {
     );
 }
 
+/// Raw payload hooks validate their public input sections themselves. A caller that bypasses the
+/// convenience constructor still gets exact-length rejection, and the scalar and bank hooks both
+/// validate the final right-channel word before committing a changed left section.
+#[test]
+fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
+    const OLD_CHANNEL_BYTES: usize = 7_784;
+    let values = initial_values();
+
+    let mut scalar = prepare(request(&values));
+    let scalar_saved = snapshot(scalar.as_ref());
+    let mut scalar_left = scalar_saved.0.clone();
+    write_f32(&mut scalar_left, 1, -17.5);
+    let mut scalar_short = scalar_saved.1.clone();
+    scalar_short.pop();
+    assert_eq!(
+        restore(scalar.as_mut(), 1, &scalar_left, &scalar_short)
+            .expect_err("short raw scalar payload must reach validation")
+            .code,
+        "effect.state.length"
+    );
+    assert_eq!(snapshot(scalar.as_ref()), scalar_saved);
+
+    let old_raw = vec![0_u8; OLD_CHANNEL_BYTES];
+    assert_eq!(
+        restore(scalar.as_mut(), 1, &old_raw, &old_raw)
+            .expect_err("old raw scalar payload must be rejected")
+            .code,
+        "effect.state.length"
+    );
+    assert_eq!(snapshot(scalar.as_ref()), scalar_saved);
+
+    let Some((_, width)) = native_bank_width() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let requests: Vec<_> = (0..lanes).map(|_| request(&values)).collect();
+    let mut bank = bind_bank(&requests).expect("bank");
+    let bank_scalar = prepare(request(&values));
+    let bank_saved = snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref());
+
+    let mut bank_left = bank_saved.0.clone();
+    write_f32(&mut bank_left, 1, -17.5);
+    let mut corrupt_right = bank_saved.1.clone();
+    write_u32(&mut corrupt_right, 21, 65);
+    assert_eq!(
+        restore_track(
+            bank.as_mut(),
+            0,
+            1,
+            &bank_left,
+            &corrupt_right,
+            bank_scalar.as_ref(),
+        )
+        .expect_err("final right-channel word must be validated")
+        .code,
+        "effect.state.parameter"
+    );
+    assert_eq!(
+        snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref()),
+        bank_saved,
+        "bank restore must be transactional across both channels"
+    );
+
+    let mut bank_short = bank_saved.1.clone();
+    bank_short.pop();
+    assert_eq!(
+        restore_track(
+            bank.as_mut(),
+            0,
+            1,
+            &bank_saved.0,
+            &bank_short,
+            bank_scalar.as_ref(),
+        )
+        .expect_err("short raw bank payload must reach validation")
+        .code,
+        "effect.state.length"
+    );
+    assert_eq!(
+        restore_track(
+            bank.as_mut(),
+            0,
+            1,
+            &old_raw,
+            &old_raw,
+            bank_scalar.as_ref(),
+        )
+        .expect_err("old raw bank payload must be rejected")
+        .code,
+        "effect.state.length"
+    );
+    assert_eq!(
+        snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref()),
+        bank_saved
+    );
+}
+
 /// A mid-ramp restore lands on the target on the same sample, and tracks within 8 ulp afterwards.
 ///
 /// `step` is not serialised — the payload layout is a frozen contract fixture — so a restore
@@ -179,13 +271,13 @@ fn a_mid_ramp_restore_arrives_on_the_same_sample() {
         &[(0, point(0, ParameterChannel::Left, -80.0))],
     );
     let (saved_left, saved_right) = snapshot(effect.as_ref());
-    assert_eq!(read_u32(&saved_left, 5), 37, "37 samples still to produce");
+    assert_eq!(read_u32(&saved_left, 3), 37, "37 samples still to produce");
 
     let mut restored = prepare(request(&values));
     restore(restored.as_mut(), 1, &saved_left, &saved_right).expect("restore");
 
     // 36 more samples: still short of the target, and on the re-derived step exactly.
-    let resumed_from = read_f32(&saved_left, 3);
+    let resumed_from = read_f32(&saved_left, 1);
     let resumed_step = ((-80.0_f32) - resumed_from) / 37.0;
     let mut expected = resumed_from;
     for _ in 0..36 {
@@ -195,10 +287,10 @@ fn a_mid_ramp_restore_arrives_on_the_same_sample() {
     let mut right = vec![0.0_f32; 36];
     render_scalar(restored.as_mut(), &mut left, &mut right, 36, 128, &[]);
     let (state, _) = snapshot(restored.as_ref());
-    assert_eq!(read_u32(&state, 5), 1);
-    assert_ne!(read_f32(&state, 3).to_bits(), (-80.0_f32).to_bits());
+    assert_eq!(read_u32(&state, 3), 1);
+    assert_ne!(read_f32(&state, 1).to_bits(), (-80.0_f32).to_bits());
     assert_eq!(
-        read_f32(&state, 3).to_bits(),
+        read_f32(&state, 1).to_bits(),
         expected.to_bits(),
         "the step is re-derived from the remaining distance and the remaining count"
     );
@@ -208,8 +300,8 @@ fn a_mid_ramp_restore_arrives_on_the_same_sample() {
     let mut right = vec![0.0_f32; 1];
     render_scalar(restored.as_mut(), &mut left, &mut right, 1, 128, &[]);
     let (state, _) = snapshot(restored.as_ref());
-    assert_eq!(read_u32(&state, 5), 0);
-    assert_eq!(read_f32(&state, 3).to_bits(), (-80.0_f32).to_bits());
+    assert_eq!(read_u32(&state, 3), 0);
+    assert_eq!(read_f32(&state, 1).to_bits(), (-80.0_f32).to_bits());
 }
 
 /// Every preparation-legal parameter value survives a round trip, including a subnormal.
@@ -219,14 +311,13 @@ fn preparation_legal_parameter_states_round_trip() {
     let mut effect = prepare(request(&values));
     let (mut left, right) = snapshot(effect.as_ref());
     let subnormal = f32::from_bits(1);
-    // Word 1 is `lookahead_ms`, words 9 and 10 are ramp 2's current and target: all three admit a
-    // positive subnormal, because their domains start at zero.
-    for word in [1_usize, 9, 10] {
+    // Makeup and mix admit positive subnormals in their continuous domains.
+    for word in [16_usize, 19, 20] {
         write_f32(&mut left, word, subnormal);
     }
     restore(effect.as_mut(), 1, &left, &right).expect("a legal subnormal restores");
     let (restored_left, _) = snapshot(effect.as_ref());
-    for word in [1_usize, 9, 10] {
+    for word in [16_usize, 19, 20] {
         assert_eq!(
             read_f32(&restored_left, word).to_bits(),
             subnormal.to_bits()
@@ -252,23 +343,15 @@ fn resets_clear_state_and_only_the_full_one_restores_defaults() {
 
     effect.reset(ResetKind::DiscontinuityKeepParameters);
     let (state, _) = snapshot(effect.as_ref());
-    assert_eq!(read_u32(&state, 0), 0, "cursor cleared");
     assert_eq!(
-        read_f32(&state, 2).to_bits(),
+        read_f32(&state, 0).to_bits(),
         0.0_f32.to_bits(),
         "G cleared"
     );
-    assert_eq!(read_u32(&state, 5), 0, "ramps snapped");
-    assert_eq!(read_f32(&state, 3).to_bits(), (-70.0_f32).to_bits(), "kept");
-    assert!(
-        state[STATE_HEADER_WORDS * 4..]
-            .chunks_exact(4)
-            .all(|word| word == 0.0_f32.to_le_bytes()),
-        "rings cleared"
-    );
+    assert_eq!(read_u32(&state, 3), 0, "ramps snapped");
+    assert_eq!(read_f32(&state, 1).to_bits(), (-70.0_f32).to_bits(), "kept");
 
     effect.reset(ResetKind::FullToDefaults);
     let (state, _) = snapshot(effect.as_ref());
-    assert_eq!(read_f32(&state, 1).to_bits(), 5.0_f32.to_bits());
-    assert_eq!(read_f32(&state, 3).to_bits(), (-18.0_f32).to_bits());
+    assert_eq!(read_f32(&state, 1).to_bits(), (-18.0_f32).to_bits());
 }

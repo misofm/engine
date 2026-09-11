@@ -32,7 +32,7 @@ fn point_at(
     }
 }
 
-fn asymmetric_values() -> [effect_contract::InitialParameterValue; 16] {
+fn asymmetric_values() -> [effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2] {
     let pairs = [
         (-31.0, -13.0),
         (3.0, 7.0),
@@ -41,7 +41,6 @@ fn asymmetric_values() -> [effect_contract::InitialParameterValue; 16] {
         (80.0, 300.0),
         (-3.0, 4.0),
         (0.25, 0.75),
-        (10.0, 15.0),
     ];
     core::array::from_fn(|slot| effect_contract::InitialParameterValue {
         parameter_index: (slot / 2) as u32,
@@ -67,7 +66,7 @@ fn read_u32(payload: &[u8], word: usize) -> u32 {
 }
 
 fn ramp_word(parameter: usize, field: usize) -> usize {
-    3 + parameter * 3 + field
+    1 + parameter * 3 + field
 }
 
 fn assert_state_bits(actual: PreparedParameterState, current: f32, target: f32) {
@@ -76,17 +75,9 @@ fn assert_state_bits(actual: PreparedParameterState, current: f32, target: f32) 
 }
 
 fn payload_state(payload: &[u8], parameter: usize) -> PreparedParameterState {
-    if parameter == 7 {
-        let value = read_f32(payload, 1);
-        PreparedParameterState {
-            current_value: value,
-            target_value: value,
-        }
-    } else {
-        PreparedParameterState {
-            current_value: read_f32(payload, ramp_word(parameter, 0)),
-            target_value: read_f32(payload, ramp_word(parameter, 1)),
-        }
+    PreparedParameterState {
+        current_value: read_f32(payload, ramp_word(parameter, 0)),
+        target_value: read_f32(payload, ramp_word(parameter, 1)),
     }
 }
 
@@ -230,7 +221,7 @@ fn native_parameter_access_is_typed_and_transactional() {
     let mut rejected = prepare(request(&values));
     let mut rejected_reference = prepare(request(&values));
     let payload = snapshot(&*rejected);
-    for parameter in 0..8 {
+    for parameter in 0..7 {
         for (channel, section) in [
             (ParameterChannel::Left, &payload.0),
             (ParameterChannel::Right, &payload.1),
@@ -240,7 +231,7 @@ fn native_parameter_access_is_typed_and_transactional() {
             assert_state_bits(actual, expected.current_value, expected.target_value);
         }
     }
-    for parameter in [8, u32::MAX] {
+    for parameter in [7, u32::MAX] {
         assert_read_rejected(
             &*rejected,
             parameter,
@@ -286,14 +277,7 @@ fn native_parameter_access_is_typed_and_transactional() {
         7,
         ParameterChannel::Left,
         f32::NAN,
-        ParameterAccessError::NotAutomatable,
-    );
-    assert_apply_rejected(
-        &mut *rejected,
-        7,
-        ParameterChannel::Both,
-        f32::NAN,
-        ParameterAccessError::InvalidChannel,
+        ParameterAccessError::InvalidParameterIndex,
     );
 
     let bounds = [
@@ -644,11 +628,6 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
     );
 }
 
-fn assert_nonzero_ring_history(payload: &(Vec<u8>, Vec<u8>)) {
-    assert!(payload.0[24 * 4..].iter().any(|&byte| byte != 0));
-    assert!(payload.1[24 * 4..].iter().any(|&byte| byte != 0));
-}
-
 fn span_equivalence(parameter: u32, channel: ParameterChannel, target: f32) {
     let values = asymmetric_values();
     let mut via_point = prepare(request(&values));
@@ -659,7 +638,6 @@ fn span_equivalence(parameter: u32, channel: ParameterChannel, target: f32) {
     assert_pcm_bits(&warm_point.0, &warm_span.0);
     assert_pcm_bits(&warm_point.1, &warm_span.1);
     assert_eq!(snapshot(&*via_point), snapshot(&*via_span));
-    assert_nonzero_ring_history(&snapshot(&*via_point));
 
     via_point
         .apply_parameter_point(parameter, channel, target)

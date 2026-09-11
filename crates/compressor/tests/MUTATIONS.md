@@ -8,6 +8,20 @@ claim about code that was not run.
 Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), workspace `.cargo/config.toml` pin
 `-C target-feature=+avx2,+fma`, debug profile unless noted.
 
+## Issue #737 supersession notice
+
+The causal compressor change removed its lookahead/detector history and staged idle body. The
+historical rows below that name those retired structures are preserved as evidence, but are no
+longer live gates: rows 1 and 4, rows 25--32, and M2-C1, M2-C2 and M2-C6--C8. Their current causal
+replacements are the live `lane_identity`, `partition`, `nonfinite`, `mono_collapse`,
+`silent_fixed_point`, and `causality` tests. The remaining rows in the original tables retain the
+status recorded when their current production behavior was tested.
+
+The current causal-compressor signed-zero regression in `silent_fixed_point` is an equivalence
+check, not a gate for the shared predicate: Sol's sign-mask mutation of `block_is_positive_zero`
+stayed GREEN in the compressor, while the corresponding EQ test remains the discriminatory gate.
+The historical red-mutation records below remain preserved as evidence.
+
 Reproduce one row with:
 
 ```
@@ -58,16 +72,16 @@ to `origin/main` on this branch.
 
 | binary | proves |
 |---|---|
-| `contract` | E13: descriptor rows, latency, payload sizes, `scratch_fixed_bytes: 64`, parameter domains against the runtime's specs, the `L`/`D` lookahead derivation, the bank fallback ordering, the strengthened bank block guard, the three link laws |
+| `contract` | E13: descriptor rows, zero latency, payload sizes, `scratch_fixed_bytes: 64`, parameter domains against the runtime's specs, the causal bank fallback ordering, the strengthened bank block guard, the three link laws |
 | `static_curve` | E1: Giannoulis, Massberg and Reiss equation 4 against an `f64` transcription over a 3x4x3x737 grid — worst deviation **4.578e-6 dB**, gate 1e-4; knee continuity at both edges; the hard-knee threshold sample exact |
 | `oracle` | E5: two configurations against the independent `f64` `ReferencePeakCompressor` — worst **4.694e-7** and **1.192e-7**, gate 2e-5 |
 | `lane_identity` | E2: a bound bank against `W` scalar instances with per-track parameters — output bits, per-track payload bytes; plus the corpus at `W = 1`, 4 and 8 word for word |
-| `partition` | E3: 4,096 frames in blocks of {1, 7, 64, 128, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
+| `partition` | E3: 4,096 frames in blocks of {1, 7, 63, 64, 65, 127, 128, 129, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
 | `cross_target` | E4: pinned SHA-256 over the four-case corpus at all three widths, plus finiteness and non-vacuity; the same corpus is replayed under wasmtime by `tools/wasm-gates` |
 | `identity` | E8: bypass, `mix == 0`, `mix == 1`, `G == 0 && makeup == +0`, the `Average` link's exact level, and that every identity keeps the state warm |
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
-| `nonfinite` | E9, D7: the boundary check trips once per block at the latency and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
+| `nonfinite` | E9, D7: the boundary check trips once per block and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
 
 ### E14 (retired, measured once)
 
@@ -110,7 +124,7 @@ mutation applied to the same kernel read through the new address. Same host and 
 | 143-E6-b | `observe_resident` writes `0.0` into both lanes instead of reading `Channel::gain_reduction_db` | `compressor/src/lib.rs` | `observation` (whole binary) | RED — 5 of 6 tests fail; `the_compressor_reports_the_reduction_its_kernel_smoothed` reports `0` where reduction was required |
 | 143-E2-a | `observe_resident_bank` broadcasts lane 0's reading to every lane | `compressor/src/lib.rs` | `observation::every_bank_lane_reads_its_own_reduction` | RED — `lane 1 left reading is its own, not a neighbour's`, left `0` vs right `3239051021` |
 
-## Round 2 — the staged idle body and the pre-gathered detector taps
+## Round 2 — historical staged idle body and pre-gathered detector taps (superseded by #737)
 
 `kernel::process_block` sends an idle segment to `idle_frames_staged` when every live lane's
 detector distance `D` is at least the segment length, and to `frames_loop` otherwise. The claim is
@@ -139,7 +153,7 @@ Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), workspace `.cargo/config.toml` pin
 | 30 | `segment_is_stageable` returns `false` unconditionally, so every idle segment takes the per-frame body | Applied and run: **GREEN** in `staged_idle`, and necessarily so — that is the whole point of the guard. The staged body is a cost optimisation with no semantics of its own, exactly as the ramping/idle split of row 24 is, and no bit-identity test can distinguish a renderer from itself. What distinguishes the two is the benchmark: `examples/lane_sample_timing` reports 2.61 → 1.93 ns/lane-sample at `W = 8` with the staged body in and out. The mutation that *is* gated is the one that takes the staged body where it is illegal, which is rows 25 and 27 |
 | 32 | row 31's mutation, gated by a test that rejects the **right** channel rather than the left | Applied and run: **GREEN**, and necessarily so. `Channel::clear_state` zeroes the rejected channel's rings as well as its cursor, so when the *right* channel is the one reset every candidate tap row of its detector ring reads `+0.0` and the two cursors cannot be told apart. Only a **left**-only rejection leaves the diverged channel holding real signal, which is why row 31's test injects there. Recorded because the obvious way to write that test is vacuous |
 
-## Mono-collapse M2 — the collapsed kernel and the disengage copy
+## Mono-collapse M2 — historical collapsed-kernel staging records (superseded where noted by #737)
 
 Driver as above: one mutation at a time, `cargo test -p compressor --test mono_collapse`,
 tree restored between rows.

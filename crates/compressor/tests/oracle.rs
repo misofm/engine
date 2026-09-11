@@ -1,7 +1,7 @@
 //! E5 — the rendered signal tracks the independent `f64` oracle.
 //!
 //! `dsp_reference::ReferencePeakCompressor` is an independent transcription: its own
-//! rings, its own `f64` curve, its own two-rounding one-pole, and the platform libm for `log10`,
+//! current-sample state, its own `f64` curve, its own two-rounding one-pole, and the platform libm for `log10`,
 //! `exp` and `powf`. It is deliberately *not* what the engine computes any more — this is the test
 //! that says the class-B changes of #88 (one-rounding ballistic, `f64` coefficient design,
 //! `log2`/`exp2` conversions, precomputed ramp step) did not change what the effect *is*.
@@ -36,7 +36,6 @@ fn deviation(parameters: ReferenceCompressorParameters, input: &[f32]) -> f64 {
         (4, parameters.release_ms as f32),
         (5, parameters.makeup_db as f32),
         (6, parameters.mix as f32),
-        (7, parameters.lookahead_ms as f32),
     ]);
     let mut effect = prepare(request(&values));
     let mut reference = ReferencePeakCompressor::new(48_000.0, parameters).expect("oracle");
@@ -51,8 +50,8 @@ fn deviation(parameters: ReferenceCompressorParameters, input: &[f32]) -> f64 {
 
     // The run must actually compress, or the comparison is vacuous.
     assert!(
-        left[960..].iter().any(|sample| *sample != 0.0),
-        "nothing was rendered past the latency"
+        left.iter().any(|sample| *sample != 0.0),
+        "causal output was unexpectedly silent"
     );
     assert!(
         expected[1_200].abs() < input[1_200].abs() * 0.99,
@@ -88,7 +87,6 @@ fn scalar_output_matches_the_independent_f64_oracle() {
         release_ms: 20.0,
         makeup_db: 0.0,
         mix: 1.0,
-        lookahead_ms: 0.0,
     };
     let worst_plain = deviation(plain, &step);
     println!("E5 (a) hard knee, mix 1, no makeup: worst {worst_plain:.3e}");
@@ -102,9 +100,8 @@ fn scalar_output_matches_the_independent_f64_oracle() {
         release_ms: 100.0,
         makeup_db: 3.0,
         mix: 0.7,
-        lookahead_ms: 5.0,
     };
     let worst_full = deviation(full, &step);
-    println!("E5 (b) soft knee, mix 0.7, makeup +3, lookahead 5 ms: worst {worst_full:.3e}");
+    println!("E5 (b) soft knee, mix 0.7, makeup +3: worst {worst_full:.3e}");
     assert!(worst_full <= 2.0e-5, "configuration (b): {worst_full:e}");
 }
