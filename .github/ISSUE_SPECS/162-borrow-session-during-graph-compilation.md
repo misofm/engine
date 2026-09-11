@@ -101,3 +101,21 @@ frozen. Required artifact/PR/main gates and synchronized closure remain pending.
 with this frozen49f83155 history for one root-owned artifact qualification.
 Compiler source/evidence is unchanged; artifact, required PR/main qualification
 and upstream closure remain pending. Active slots are #221/#162.
+
+## Shared artifact qualification — 2026-09-11
+
+Astra XHIGH combined-source PASS at5e45c7a10a3713d06bdef2e7b875ad16b4afa91d:
+merge29e68c26 preserves reviewed221/162 trees/history, and the combined compiler
+ownership/retry/canonical/PCM control passed with unchanged lock. Evidence:
+/tmp/issue221-xhigh-mp0nkqhi/combined-review.md and adjacent source/command records.
+
+Root probe and ordinary build reproduced Wasm SHA-256
+a24d0cae46f097336c02268b946f92fbf4419f05b6e05d20a1476f19c76d7e60
+(provisional pin06f0ab6b); all five companion artifact files remain byte-identical
+to qualified80abeec2. Static artifact, expected-resource parity, hermetic host,
+SDK types/headless/package, Chromium/Firefox/WebKit matrix with mutations, and
+generated-matrix check all passed. Matrix candidate is frozen source5e45c7a1.
+Actual argv/env/head/exit/stdout/stderr, six-file comparison and artifact bytes:
+/tmp/issue162-221-artifact-pc2gtj6w. Only expected matrix candidate/digest changes
+are committed; no generated compiler captures or performance claim.
+Independent artifact/exact-head review and required PR/main CI remain pending.
