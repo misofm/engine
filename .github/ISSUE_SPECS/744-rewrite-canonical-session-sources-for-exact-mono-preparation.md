@@ -118,7 +118,7 @@ The existing native A/B fixtures now exercise unequal valid lane filters (`80/18
 nonzero output, and unequal L/R output assertions remain in place for the duplicate-stereo versus
 prepared-mono case; the native parametric-EQ fixture uses the same asymmetric controls.
 
-Evidence from this clean worktree:
+Evidence from the implementation worktree before root checkpoint `8537516a`:
 
 - `cargo test --locked -p session-validator --test fold_mono`: 8 tests passed.
 - `cargo test --locked -p session-validator`: all 8 focused tests, 1 skill test, 9 existing validator tests, and doc-tests passed.
@@ -134,3 +134,24 @@ The prior 193-test SDK headless evidence remains valid; no SDK/runtime/ABI files
 revision, so the approved scope does not rerun that harness. No production code, DSP, transport,
 store, codec, package, release, or dependency behavior changed. Attempt 2 is paused for the
 independent Astra medium verdict and root checkpoint; no commit or push was made by Luna.
+
+## Attempt 2 adversarial verdict — PASS
+
+Root checkpointed and pushed attempt 2 as `8537516a8da9f0aa5b06b21b36d7ac81c504d4e2`.
+Astra medium independently reviewed that clean checkpoint and recorded PASS: both A/B fixtures
+now exercise actual unequal lane filters/fader gains; the separate canonical negative-zero
+witness is preserved; complete nonzero PCM comparisons remain; the recorded existing gates
+exercise the first left-only affected block, lane-state divergence and re-equalisation. The
+reviewer independently ran the 8 focused tests successfully. No production-code change or
+new finding arose in this revision. Review context is the non-implementing planner thread,
+independent of Luna, as disclosed above.
+
+Root built the native executable from committed reviewed source
+`8537516a8da9f0aa5b06b21b36d7ac81c504d4e2` using
+`cargo build --locked -p session-validator --release`, target `x86_64-unknown-linux-gnu`,
+Rust 1.97.1. Its SHA-256 is
+`a916ce9c080256bc72f0de460d5e8d1c8850e32ecea3136a4e20c531fb481103`.
+The executable, provenance and review are retained outside Git for the CLI consumer. This
+is the accepted tool slice only; sparse transport, cache, CLI orchestration, publication and
+deployed app integration remain separate required work. Root synchronizes and closes this
+issue once this PASS evidence commit is upstream, then delivers the reviewed PR.
