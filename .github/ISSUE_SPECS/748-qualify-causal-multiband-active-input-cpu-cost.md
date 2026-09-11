@@ -105,3 +105,24 @@ Both exactly match actual emitted input_digest values. Independent oracle and
 per-channel nonzero counts are `/tmp/issue748-independent-input-preflight.json`.
 Root audits and checkpoints this completed tranche before clean-source release
 preflight and Astra clearance. This is not final verification or measurement.
+
+## Attempt 1 — Astra medium FAIL before timing
+
+Astra records one consolidated FAIL for48e02b5d before measurement. Bank
+metadata verification omitted explicit latency0. Activity validation accepted
+nonzero input/output counts beyond blocks*128 and incoherent gain ranges,
+including positive minima paired with negative maxima. Required unknown-subject,
+wrong-effect-only, duplicate identity and wrong exact witness controls were
+missing; two host refusal messages retained gate-specific issue labeling.
+Bounded attempt2 corrects those checks and focused mutations in existing paths,
+aligns Rust Activity::valid, and neutralizes stale refusal labels. No stimulus,
+count, timer, DSP, dependency, framework or measurement change is authorized.
+
+Actual fixture evidence passed: both independent input hashes and every channel's
+nonzero input count match; complete4/32 band activities have high maxima
+-13.362556458/-12.899791718dB and worst quiet minimum-0.000000585dB. Actual clean
+release preflight `/tmp/.issue748-multiband-active-preflight-18b8fpdf` passed with
+zero timed calls, transcript `/tmp/issue748-root-real-preflight.log`.
+This activity evidence is retained but does not satisfy missing negative gates.
+No warmup/measured multiband phase ran; the sole allowance remains unused.
+Full review record: `/tmp/issue748-astra-a1-verdict.md`.
