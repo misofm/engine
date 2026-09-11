@@ -465,3 +465,29 @@ Product and no_alloc_render rerun PASS at the corrected source (receipt
 Astra medium is resolving this against the frozen retained segment-cache law
 and explicit absence of a stronger arbitrary time-constant-ramp partition
 guarantee. No final attempt verdict or product PASS is claimed.
+
+
+## Partition decision and SDK candidate — 2026-09-11
+
+Astra medium independently confirmed the baseline partition test PASS, but its
+initial ratio ramp was masked by the old960-sample detector delay. Retained
+BandCache refreshes ratio/attack/release at segment starts; caller block length
+changes refresh timing. The causal discrepancy therefore follows the frozen
+update law. Root accepts Astra's bounded correction: retain the original
+ratio/attack trajectories with exact ramp payload/endpoints, finite active
+output and engaged-gain assertions; separately retain full PCM/state bitwise
+partition equality for the original threshold/makeup subset at1/7/64/128/512.
+Preserve matched-schedule split/forced and scalar/bank bit equality. No numeric
+tolerance relaxation or production redesign is approved. The5ULP witness is
+not a global bound. General coefficient-ramp partition independence needs a
+separate algorithm ruling. Evidence: /tmp/issue739-partition-scope-ruling.md.
+
+Current SDK assets/catalog were regenerated from the descriptor; Luna added
+positive low_threshold and negative retired-lookahead type assertions. SDK
+type and generated checks PASS. The mechanically derived current SIMD digest
+0c633b091457c4ab9ec17f08327802f423874124182bc794a7988ed1c536fa73
+is installed as a candidate pin after successful official builder probe.
+Scalar-Wasm build PASS; artifact/browser/full-product qualification is pending.
+The external Wasm witness independently rejects the preserved old artifact
+on actual first-sample0 versus causal0.4155027946733788, not setup failure.
+Synthetic validator fixtures and primitive corpus digests remain unchanged.
