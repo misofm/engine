@@ -101,3 +101,33 @@ The private bounded conversion/packaging tranche is upstream. Attempt 1 failed S
 Sol attempt 2 readiness PASS covers strict release/session/digest/shape admission, conservative workspace accounting, manifest-versus-independent-census checks, correct total baseline and exact archive member/byte evidence. Root independently reran focused synthetic tests and whitespace checks. Controls prove 30 sparse reconstructions, 240 common windows, 30 manifest checks and 30 archive-only reconstructions on synthetic data. The previously qualified codec and packaging helper remain unchanged. The single untimed real preparation and final evidence review remain outstanding.
 
 The user's clarified target includes a future, more separated source set with potentially much more exact silence. Preserve the engine's existing PCM contract: sparse transport and a later sparse packed-PCM browser cache can both be adapter capabilities. A compact span inside Rust or DSP skipping requires a separate measured need. The candidate transport groups each recording's stem manifests and units in one uncompressed archive for complete offline download; Walrus quilt grouping remains a deployment choice, not codec granularity.
+
+## Real preparation and measured bytes
+
+The single untimed preparation completed. All 30 full sparse reconstructions, 240 common seek windows, 30 manifest/census comparisons and 30 archive-only reconstructions passed. All 30 declared release digests match canonical PCM; none matches its compressed FLAC byte hash. All source shapes and lengths were preserved. Every downloaded body matched its recorded response length. No upload, release mutation, codec tuning or benchmark occurred.
+
+| Anonymous recording | Stems | Existing FLAC bytes | Complete candidate bytes | Size change | Sample frames omitted from decode |
+|---|---:|---:|---:|---:|---:|
+| 1 | 8 | 92,362,259 | 92,567,704 | +0.222% | 16.33% |
+| 2 | 8 | 70,669,885 | 70,853,875 | +0.260% | 49.15% |
+| 3 | 6 | 107,965,745 | 109,009,593 | +0.967% | 24.37% |
+| 4 | 8 | 160,668,363 | 161,930,103 | +0.785% | 14.82% |
+| Total | 30 | 431,666,252 | 434,361,275 | +0.624% | 25.71% |
+
+The four complete archives contain 4,184 independent FLAC units. Accounting is exact: 432,203,890 bytes of FLAC payload, 1,223,273 bytes of manifests/checksums/recording indexes, and 934,112 bytes of ZIP structure. Total growth is 2,695,023 bytes. Unchanged engine-session documents and runtime assets are excluded from both sides. These are local file-body sizes, not measured network traffic, download time or Walrus charged storage.
+
+**Negative download result:** this fixed candidate is slightly larger than the existing already-FLAC release and does not achieve a download-byte reduction for this corpus. No positive saving is claimed. Old encoder settings were not established, so the result does not isolate silence removal from FLAC settings or unit boundaries.
+
+There are 56,054,821 omittable frames in 218,052,920 total stereo source frames. This is a decoder-sample reduction, not a measured CPU-time reduction: FLAC silence is cheap, and hashing/storage/chunk overhead remain. The current adapter does all FLAC decoding during offline preparation and plays from dense cached PCM; these changes therefore initially affect preparation, not playback codec work.
+
+## Integration decision
+
+Make sparse sources a first-class adapter capability while preserving the Rust PCM input contract. The first production slice adds bounded manifest/container validation and a package-aware sparse resolver feeding today's verified canonical PCM store. Canonical identity, shape, timeline, full verification, seeks, backpressure and underrun semantics remain unchanged. Caller-side delivery selection and publishing mappings must support the new container before online references change.
+
+A second independently closable adapter slice stores packed active canonical PCM plus intervals. It preserves decode-once preparation while avoiding gap writes/reads: this corpus has 1,308,317,520 dense canonical PCM bytes versus 971,988,594 active-region bytes, a potential 336,328,926 logical-byte reduction before cache metadata. Physical allocation and browser time remain unmeasured. Full canonical hashing still includes implicit zeros. Retaining compressed FLAC for playback instead would introduce new playback decode work and needs separate qualification.
+
+Neither slice requires Rust changes. Rust source-queue gap records or graph/DSP skipping require separate measured justification; a JavaScript-only compact gap expanded before the existing planar boundary also need not change Rust. Effects, tails, lookahead/PDC, sidechains and automation still determine valid DSP work.
+
+For complete download, the current candidates group recording stem assets in one ZIP_STORED container suitable for an ordinary Walrus blob. Quilts may instead group packaged stems; decoder units should not automatically become individual patch requests. The user's future more-separated stems may expose much higher silence, but no future size or speed percentage is established here.
+
+Private upstream evidence includes conversion code/tests, immutable input/execution receipts, four archive receipts, per-stem counts, a complete report and file-level adapter/app/CDN/Rust scope. Candidate audio/archives remain local. Final Sol review remains pending.
