@@ -35,7 +35,7 @@ This evidence makes no claim about realtime DSP savings, audio callback deadline
 
 ## Status
 
-All ten prototypes, real-corpus qualification, the single descriptive run, repaired reporting and complete local download bundles are finished. Final Sol review and remote issue synchronization remain pending. Historical checkpoints below preserve earlier provisional/failing verdicts.
+Complete: final Sol attempt 2 PASS covers all ten prototypes, real-corpus qualification, the single descriptive run, repaired reporting and complete local download bundles. The private evidence and public decision record are upstream. Historical checkpoints below preserve earlier provisional/failing verdicts.
 
 ## Implementation checkpoint 1
 
@@ -103,3 +103,7 @@ Recommend exact-zero intervals plus independent FLAC units in a complete offline
 Keep production work separate: (1) an external canonical sparse asset packer/reader with byte-exact reconstruction and bounded validation; (2) one worker/host adapter feeding the existing bounded PCM ingress, with generation-tagged seeks, render-quantum reblocking, known-zero versus underrun semantics and duration-independent decoded memory; (3) actual complete-session transport qualification. Compact gap queue entries and DSP skipping require later independent evidence. Source silence alone cannot skip effect state/tails, lookahead/PDC, sidechains, automation or partially active SIMD banks.
 
 All claims are local descriptive evidence from exactly one warmup and two measured rounds. There was no machine isolation or cold-cache control. No actual network, Walrus, browser/mobile or render-callback timing was performed. No production engine code changed. Private reproducibility artifacts include raw operation records, corpus qualification, plots, bundle-size receipts and a decision/integration note; public records contain only sanitized aggregates.
+
+## Final adversarial verdict
+
+**Sol attempt 2: PASS.** Independent review reproduced raw/frozen evidence identities, all 93 successful operations and the completion record, correctness/corruption counts, all ten actual archive sizes/hashes/member inventories, publication identities and decision arithmetic. No benchmark rerun or frozen workload mutation occurred. The public aggregates are accurate and contain no private corpus identity. The external proof-of-concept outcome is complete; future production integration remains outside this issue. Delivery is recorded in PR #736 and the private companion PR.

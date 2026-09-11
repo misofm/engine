@@ -48,4 +48,8 @@ Make the private report adapter treat both a missing `metadata_bytes_read` field
 
 Terra supplied the minimal two-file repair. Sol attempt 1 PASS: explicit-null and missing counts remain unavailable, numeric counts sum exactly, mixed numeric/unavailable rows fail closed, and the adapter has no codec/benchmark dispatch path. Root independently reran the focused synthetic regression and whitespace checks. The repair checkpoint is upstream in the private repository.
 
-The real report then succeeded once against the preserved raw record. All ten complete local download archives were materialized from existing artifacts and matched their prior size model. Publication records bind the original raw digest and demonstrate unchanged codec, workload, freeze, qualification and timing evidence. The earlier report failure is preserved. No benchmark or codec worker was rerun. Final Sol publication review and remote synchronization remain pending.
+The real report then succeeded once against the preserved raw record. All ten complete local download archives were materialized from existing artifacts and matched their prior size model. Publication records bind the original raw digest and demonstrate unchanged codec, workload, freeze, qualification and timing evidence. The earlier report failure is preserved. No benchmark or codec worker was rerun. Final Sol publication review passed. The repair and publication evidence are upstream.
+
+## Final adversarial verdict
+
+**Sol attempt 1 and publication: PASS.** Independent review confirmed nullable behavior, unchanged raw/freeze/codec/workload evidence, all derived-file identities and complete archive accounting. The report-only successor is complete without another benchmark or codec-worker invocation. Parent #734 also received its final PASS. Delivery is recorded in PR #736 and the private companion PR.
