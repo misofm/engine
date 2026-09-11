@@ -31,9 +31,10 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations. The compressor family of issue #88 is the last one appended, and
-//! `tests/g5_native_corpus.rs` asserts that it is the last, so that a family inserted rather than
-//! appended fails instead of silently renumbering every pin after it.
+//! the same computations. The original layout ends with the compressor family of issue #88.
+//! Issue #213 appends two builtin cases after that family, preserving the original eight-case
+//! builtin block and every later index. `tests/g5_native_corpus.rs` checks both the preserved
+//! layout and the two appended cases.
 
 use builtins::corpus as builtins_corpus;
 use compressor::corpus as compressor_corpus;
@@ -140,6 +141,9 @@ pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 /// block kernels, so it is the case that would move if the fusion in `input_chain_block` were not
 /// the scheduling change it claims to be.
 pub const BUILTINS_CASE_COUNT: usize = builtins_corpus::CASE_COUNT;
+
+/// Original builtin block; later additions live at the global tail to preserve case indexes.
+pub const BUILTINS_ORIGINAL_CASE_COUNT: usize = 8;
 
 /// Cases delegated to [`true_peak_limiter::corpus`] (issue #90 E12), replayed under
 /// wasm.
@@ -443,14 +447,18 @@ fn case_of(index: usize) -> Case {
         return Case::GateExpander(index);
     }
     let index = index - GATE_EXPANDER_CASE_COUNT;
-    if index < BUILTINS_CASE_COUNT {
+    if index < BUILTINS_ORIGINAL_CASE_COUNT {
         return Case::Builtins(index);
     }
-    let index = index - BUILTINS_CASE_COUNT;
+    let index = index - BUILTINS_ORIGINAL_CASE_COUNT;
     if index < LIMITER_CASE_COUNT {
         return Case::Limiter(index);
     }
-    Case::Compressor(index - LIMITER_CASE_COUNT)
+    let index = index - LIMITER_CASE_COUNT;
+    if index < COMPRESSOR_CASE_COUNT {
+        return Case::Compressor(index);
+    }
+    Case::Builtins(BUILTINS_ORIGINAL_CASE_COUNT + index - COMPRESSOR_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three

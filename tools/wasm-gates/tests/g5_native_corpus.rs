@@ -276,7 +276,7 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         "the builtins block must cover every case that crate pins"
     );
     let builtins_base = gate_expander_base + corpus::GATE_EXPANDER_CASE_COUNT;
-    for case in 0..corpus::BUILTINS_CASE_COUNT {
+    for case in 0..corpus::BUILTINS_ORIGINAL_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(builtins_base + case),
             builtins::corpus::BUILTINS_DIGESTS[case],
@@ -296,7 +296,7 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         true_peak_limiter::corpus::CASE_COUNT,
         "the true-peak limiter block must cover every case that crate pins"
     );
-    let limiter_base = builtins_base + corpus::BUILTINS_CASE_COUNT;
+    let limiter_base = builtins_base + corpus::BUILTINS_ORIGINAL_CASE_COUNT;
     for case in 0..corpus::LIMITER_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(limiter_base + case),
@@ -319,10 +319,24 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
     );
     let compressor_base = limiter_base + corpus::LIMITER_CASE_COUNT;
     assert_eq!(
-        compressor_base + corpus::COMPRESSOR_CASE_COUNT,
+        compressor_base + corpus::COMPRESSOR_CASE_COUNT + 2,
         corpus::CASE_COUNT,
-        "the compressor must be the last family in the pin order"
+        "exactly two new builtin cases follow the original final compressor case"
     );
+    assert_eq!(corpus::BUILTINS_ORIGINAL_CASE_COUNT, 8);
+    assert_eq!(corpus::BUILTINS_CASE_COUNT, 10);
+    for case in 8..10 {
+        let index = compressor_base + corpus::COMPRESSOR_CASE_COUNT + case - 8;
+        assert_eq!(
+            corpus::expected_digest(index),
+            builtins::corpus::BUILTINS_DIGESTS[case]
+        );
+        assert_eq!(
+            corpus::case_name(index),
+            format!("builtins/{}", builtins::corpus::CASE_NAMES[case])
+        );
+        assert!(corpus::is_width_dependent(index));
+    }
     for case in 0..corpus::COMPRESSOR_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(compressor_base + case),
