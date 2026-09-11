@@ -137,9 +137,35 @@ for width, backend in ((1, "scalar"), (8, "Simd8")):
         elif bad == "missing-band":
             activity.pop()
         elif bad == "wrong-effect":
-            row["issue"] = 746
-            row["record"] = "gate_active"
-            row.pop("effect_id")
+            row["effect_id"] = "miso.gate"
+        elif bad == "duplicate-identity":
+            activity[-1]["lane"] = activity[0]["lane"]
+            activity[-1]["channel"] = activity[0]["channel"]
+            activity[-1]["band"] = activity[0]["band"]
+        elif bad == "wrong-high-witness":
+            activity[0]["high_witnesses"] += 1
+        elif bad == "wrong-quiet-witness":
+            activity[0]["quiet_witnesses"] += 1
+        elif bad == "overbound-input":
+            for item in activity:
+                item["nonzero_input_samples"] = blocks * 128 + 1
+        elif bad == "overbound-output":
+            for item in activity:
+                item["nonzero_output_samples"] = blocks * 128 + 1
+        elif bad == "positive-high-min":
+            for item in activity:
+                item["high_gain_min_db"] = 1.0
+        elif bad == "positive-quiet-min":
+            for item in activity:
+                item["quiet_gain_min_db"] = 1.0
+        elif bad == "reversed-high-range":
+            for item in activity:
+                item["high_gain_min_db"] = -4.0
+                item["high_gain_max_db"] = -5.0
+        elif bad == "reversed-quiet-range":
+            for item in activity:
+                item["quiet_gain_min_db"] = -0.05
+                item["quiet_gain_max_db"] = -0.08
     if bad == "missing-metadata":
         row.pop("cpu_model")
         row["missing_metadata"] = ["cpu_model"]
@@ -230,6 +256,10 @@ def assert_preflight_controls(directory: Path, subject: Path, perf: Path, log: P
     assert len(subject_calls) == 1
     assert subject_calls[0][-1] == "--preflight"
     before = log.read_text(encoding="utf-8")
+    unknown = directory / "unknown-subject-output"
+    assert call(subject, perf, unknown, cpu, "--preflight", "--subject", "unknown") == 2
+    assert not unknown.exists()
+    assert log.read_text(encoding="utf-8") == before
     existing = directory / "existing"
     existing.mkdir()
     assert call(subject, perf, existing, cpu, "--preflight") == 1
@@ -299,7 +329,11 @@ def assert_multiband_controls(directory: Path, subject: Path, perf: Path, log: P
         if line
     ]
     assert len(preflight) > len([json.loads(line) for line in before.splitlines() if line])
-    for bad in ("all-high", "all-low", "identity", "missing-band", "wrong-effect"):
+    for bad in (
+        "all-high", "all-low", "identity", "missing-band", "wrong-effect", "duplicate-identity",
+        "wrong-high-witness", "wrong-quiet-witness", "overbound-input", "overbound-output",
+        "positive-high-min", "positive-quiet-min", "reversed-high-range", "reversed-quiet-range",
+    ):
         os.environ["STUB_BAD"] = bad
         bad_output = directory / f"multiband-bad-{bad}"
         assert call(subject, perf, bad_output, cpu, "--preflight", "--subject", "multiband-active") == 1

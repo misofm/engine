@@ -404,12 +404,20 @@ def multiband_activity_valid(row: dict[str, Any], width: int) -> bool:
             or not math.isfinite(high_max)
             or not math.isfinite(quiet_min)
             or not math.isfinite(quiet_max)
+            or high_min > high_max
+            or quiet_min > quiet_max
+            or high_min > MULTIBAND_QUIET_GAIN_CEILING_DB
+            or high_max > MULTIBAND_QUIET_GAIN_CEILING_DB
+            or quiet_min > MULTIBAND_QUIET_GAIN_CEILING_DB
+            or quiet_max > MULTIBAND_QUIET_GAIN_CEILING_DB
             or high_max >= MULTIBAND_HIGH_GAIN_LIMIT_DB
             or quiet_min <= MULTIBAND_QUIET_GAIN_FLOOR_DB
             or quiet_max > MULTIBAND_QUIET_GAIN_CEILING_DB
             or finite != expected_samples
             or nonzero_input <= 0
+            or nonzero_input > expected_samples
             or nonzero_output <= 0
+            or nonzero_output > expected_samples
             or not math.isfinite(input_energy)
             or input_energy <= 0.0
             or not math.isfinite(output_energy)
@@ -555,10 +563,10 @@ def validate_subject_rows(
 def host_context(root: Path, binary: Path, perf: Path, cpu: int) -> dict[str, Any]:
     machine = platform.machine().lower()
     if machine not in ("x86_64", "amd64"):
-        raise RunnerError(f"issue #746 requires x86_64 for native AVX2 W8, got {machine}")
+        raise RunnerError(f"native AVX2 W8 requires x86_64, got {machine}")
     flags = cpu_flags()
     if "avx2" not in flags or "fma" not in flags:
-        raise RunnerError("issue #746 requires AVX2 and FMA host features")
+        raise RunnerError("native AVX2 W8 requires AVX2 and FMA host features")
     try:
         allowed = sorted(os.sched_getaffinity(0))
     except (AttributeError, OSError) as error:

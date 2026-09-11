@@ -151,12 +151,23 @@ impl Activity {
         self.high_witnesses == expected_witnesses
             && self.quiet_witnesses == expected_witnesses
             && self.high_gain_min_db.is_finite()
+            && self.high_gain_max_db.is_finite()
+            && self.quiet_gain_min_db.is_finite()
+            && self.quiet_gain_max_db.is_finite()
+            && self.high_gain_min_db <= self.high_gain_max_db
+            && self.quiet_gain_min_db <= self.quiet_gain_max_db
+            && self.high_gain_min_db <= QUIET_GAIN_CEILING_DB
+            && self.high_gain_max_db <= QUIET_GAIN_CEILING_DB
+            && self.quiet_gain_min_db <= QUIET_GAIN_CEILING_DB
+            && self.quiet_gain_max_db <= QUIET_GAIN_CEILING_DB
             && self.high_gain_max_db < HIGH_GAIN_LIMIT_DB
             && self.quiet_gain_min_db > QUIET_GAIN_FLOOR_DB
             && self.quiet_gain_max_db <= QUIET_GAIN_CEILING_DB
             && self.finite_output_samples == expected_samples
             && self.nonzero_input_samples > 0
+            && self.nonzero_input_samples <= expected_samples
             && self.nonzero_output_samples > 0
+            && self.nonzero_output_samples <= expected_samples
             && self.input_energy.is_finite()
             && self.input_energy > 0.0
             && self.output_energy.is_finite()
@@ -510,6 +521,7 @@ fn verify_bank(
         || key.quality != EffectQuality::Normal
         || key.bypass
         || key.link_mode != LinkMode::DualMono
+        || key.latency != LatencySamples(0)
         || key.ports.sidechain != PreparedSidechainPort::None
         || key.state_sizes != expected_sizes
         || key.scratch_bytes != 0
@@ -894,6 +906,24 @@ mod tests {
         item.output_energy = 1.0;
         assert!(item.valid(2, 4));
         item.quiet_gain_min_db = QUIET_GAIN_FLOOR_DB;
+        assert!(!item.valid(2, 4));
+        item.quiet_gain_min_db = QUIET_GAIN_FLOOR_DB + 0.01;
+        item.high_gain_min_db = -4.0;
+        item.high_gain_max_db = -5.0;
+        assert!(!item.valid(2, 4));
+        item.high_gain_min_db = HIGH_GAIN_LIMIT_DB - 1.0;
+        item.high_gain_max_db = HIGH_GAIN_LIMIT_DB - 0.1;
+        item.quiet_gain_min_db = -0.05;
+        item.quiet_gain_max_db = -0.08;
+        assert!(!item.valid(2, 4));
+        item.quiet_gain_max_db = QUIET_GAIN_CEILING_DB;
+        item.high_gain_min_db = f64::NAN;
+        assert!(!item.valid(2, 4));
+        item.high_gain_min_db = HIGH_GAIN_LIMIT_DB - 1.0;
+        item.nonzero_input_samples = 5;
+        assert!(!item.valid(2, 4));
+        item.nonzero_input_samples = 1;
+        item.nonzero_output_samples = 5;
         assert!(!item.valid(2, 4));
     }
 

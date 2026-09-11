@@ -126,3 +126,16 @@ zero timed calls, transcript `/tmp/issue748-root-real-preflight.log`.
 This activity evidence is retained but does not satisfy missing negative gates.
 No warmup/measured multiband phase ran; the sole allowance remains unused.
 Full review record: `/tmp/issue748-astra-a1-verdict.md`.
+
+## Attempt 2 — correction checkpoint
+
+Luna xhigh explicitly completed and paused after changing only multiband_active
+and the two existing Python paths. Bank verification now asserts latency0;
+Rust/Python activity checks require finite, nonpositive, ordered gain ranges and
+bounded nonzero counts. Focused mutations cover unknown-subject no-launch,
+wrong-effect-only, duplicate identities, exact witnesses, excess counts,
+positive gains and reversed ranges; stale gate-only host labels are neutral.
+Reported focused Rust tests6, Python runner tests, strict Clippy, fmt/diff and
+bench-policy check/self-test PASS. Retained real preflight records validate.
+No warmup/measured multiband phase ran. Root checkpoints before clean release
+preflight and Astra review; this remains pre-measurement evidence only.
