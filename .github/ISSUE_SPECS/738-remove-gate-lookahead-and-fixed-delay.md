@@ -181,3 +181,22 @@ Raw failed preparation is `/tmp/issue738-gates/realtime-audit.*` and
 `/tmp/issue738-luna-tiny-audit-repair.md`. Root must rebuild and rerun the realtime
 audit after this checkpoint. This is not a timed benchmark and supplies no CPU
 number; #746 remains the measurement successor.
+
+
+## Focused repair and actual realtime qualification
+
+Pushed test checkpoint 35ac102a integrates Luna XHIGH's isolated repair f66db7c8.
+Contract20, oracle3, identity5, state7 and library/W4 4 pass, with formatting
+and diff checks. The repaired fixtures require active nonclamped linked attenuation,
+exact hold/retrigger and current-sidechain witnesses, all-rate caps and old-state
+rejection, active-ramp reset, W4 continuation and atomic bank rollback/fault peers.
+Receipt: `/tmp/issue738-luna-test-repair.md`. Sol review remains pending; this
+checkpoint does not yet authorize corpus sealing or claim final delivery.
+
+The corrected release realtime audit at b48a1d87 passes 100000 blocks of128frames
+with an eight-lane bank and connected scalar path: allocations, deallocations,
+locks, logs, file/network I/O and syscalls all zero. External trace validation
+finds one render interval and zero violations. Receipts are
+`/tmp/issue738-gates/realtime-audit-corrected.*` and
+`/tmp/issue738-gates/realtime-trace-corrected.*`. The initial preparation failure
+remains preserved. No timed benchmark ran and no CPU improvement is claimed.
