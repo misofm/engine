@@ -35,8 +35,12 @@ This evidence makes no claim about realtime DSP savings, audio callback deadline
 
 ## Status
 
-Sol scope PASS recorded. Root verified existing numbered local specs have remote counterparts and prepared isolated public-record and private-prototype branches. Implementation and timing have not begun.
+Sol scope PASS recorded. Root verified existing numbered local specs have remote counterparts and prepared isolated public-record and private-prototype branches. The private prototype implementation is upstream; real-corpus qualification and timing remain pending.
 
 ## Implementation checkpoint 1
 
 The private codec tranche is committed and upstream. Synthetic PCM24 reconstruction, sparse windows, a Zstd payload corruption control, invalid decoded-length rejection, create-new output behavior, and Python compilation pass. Zstd content frames spool to a file. All-corpus qualification, complete corruption/cap controls, dense comparison readers, the frozen benchmark runner and independent adversarial review remain outstanding. No real-corpus benchmark invocation has run.
+
+## Implementation checkpoint 2
+
+The private harness now exposes corpus freeze, all-variant preparation/qualification, and one warmup plus two measured rounds through isolated worker processes. Root independently reran the synthetic selftest and create-new persistence preflight successfully; both attest zero timed-workload invocations. The private checkpoint is upstream. Sol is reviewing attempt 1 before real-corpus qualification/timing. These passing controls are provisional evidence, not a claim that every issue gate has passed.
