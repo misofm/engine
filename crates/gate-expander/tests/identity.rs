@@ -188,6 +188,38 @@ fn bypass_preserves_current_signed_zero_and_advances_state() {
 }
 
 #[test]
+fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
+    let mut effect = prepare(request(&active_values()));
+    let mut equal_left = noise(701, 257, 0.3);
+    let mut equal_right = equal_left.clone();
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut equal_left,
+        &mut equal_right,
+        None,
+        17,
+        &[],
+        0,
+    );
+    assert_bits_eq(&equal_left, &equal_right, "equal input remains dual-mono");
+
+    let mut zero_left = vec![0.0_f32; 257];
+    let mut zero_right = zero_left.clone();
+    let report = render_scalar_sidechain(
+        effect.as_mut(),
+        &mut zero_left,
+        &mut zero_right,
+        None,
+        17,
+        &[],
+        257,
+    );
+    assert!(zero_left.iter().all(|sample| sample.to_bits() == 0));
+    assert!(zero_right.iter().all(|sample| sample.to_bits() == 0));
+    assert_eq!(report, effect_contract::ProcessReport::default());
+}
+
+#[test]
 fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {
     if Backend::current() != Backend::Simd4 {
         return;

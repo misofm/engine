@@ -9,7 +9,8 @@ use effect_contract::{
 use gate_expander::STATE_LAYOUT_VERSION;
 use support::{
     Values, active_values, assert_bits_eq, initial_values, noise, packed_w8, prepare,
-    prepare_bank_w8, render_scalar_sidechain, request, snapshot, snapshot_bank, track_of,
+    prepare_bank_at_rate, prepare_bank_w8, render_scalar_sidechain, request, retarget_spans,
+    snapshot, snapshot_bank, track_of,
 };
 
 fn word(bytes: &[u8], index: usize) -> u32 {
@@ -47,30 +48,64 @@ fn render_bank(
 
 #[test]
 fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
-    let mut values = active_values();
-    values[10].value = 1.0;
-    values[11].value = 1.0;
+    let values = active_values();
     let mut effect = prepare(request(&values));
-    let mut left = noise(3, 128, 0.5);
-    let mut right = noise(4, 128, 0.5);
-    render_scalar_sidechain(effect.as_mut(), &mut left, &mut right, None, 128, &[], 0);
-    let (_, before, _) = snapshot(effect.as_ref());
+    let mut left = vec![0.01; 17];
+    let mut right = vec![0.01; 17];
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut left,
+        &mut right,
+        None,
+        17,
+        &retarget_spans(0),
+        0,
+    );
+    let (_, before_left, before_right) = snapshot(effect.as_ref());
+    assert_ne!(
+        word(&before_left, 0),
+        0,
+        "the reset witness has active gain"
+    );
+    assert_eq!(word(&before_left, 6 + 3), 47.0_f32.to_bits());
+    assert_eq!(word(&before_right, 6 + 3), 47.0_f32.to_bits());
     effect.reset(ResetKind::DiscontinuityKeepParameters);
-    let (_, discontinuity, _) = snapshot(effect.as_ref());
-    assert_eq!(word(&discontinuity, 0), 0);
-    assert_eq!(word(&discontinuity, 1), 1.0_f32.to_bits());
-    assert_eq!(word(&discontinuity, 2), 48.0_f32.to_bits());
-    assert_eq!(word(&discontinuity, 3), word(&before, 3));
-    assert_eq!(word(&discontinuity, 4), word(&before, 4));
-    assert_eq!(word(&discontinuity, 5), word(&before, 5));
+    let (_, discontinuity_left, discontinuity_right) = snapshot(effect.as_ref());
+    for (label, before, after) in [
+        ("left", &before_left, &discontinuity_left),
+        ("right", &before_right, &discontinuity_right),
+    ] {
+        assert_eq!(word(after, 0), 0, "{label}: gain reset");
+        assert_eq!(word(after, 1), 1.0_f32.to_bits(), "{label}: gate open");
+        assert_eq!(word(after, 2), 0, "{label}: hold reset");
+        for index in 3..=5 {
+            assert_eq!(
+                word(after, index),
+                word(before, index),
+                "{label}: timing {index}"
+            );
+        }
+        for ramp in 0..4 {
+            let slot = 6 + ramp * 4;
+            assert_eq!(
+                word(after, slot),
+                word(after, slot + 1),
+                "{label}: ramp {ramp} target"
+            );
+            assert_eq!(word(after, slot + 2), 0, "{label}: ramp {ramp} step");
+            assert_eq!(word(after, slot + 3), 0, "{label}: ramp {ramp} remaining");
+        }
+    }
     effect.reset(ResetKind::FullToDefaults);
-    let (_, full, _) = snapshot(effect.as_ref());
-    assert_eq!(word(&full, 0), 0);
-    assert_eq!(word(&full, 1), 1.0_f32.to_bits());
-    assert_eq!(word(&full, 2), 48.0_f32.to_bits());
-    assert_eq!(word(&full, 3), 1.0_f32.to_bits());
-    assert_eq!(word(&full, 4), 1.0_f32.to_bits());
-    assert_eq!(word(&full, 5), 5.0_f32.to_bits());
+    let (_, full_left, full_right) = snapshot(effect.as_ref());
+    for full in [&full_left, &full_right] {
+        assert_eq!(word(full, 0), 0);
+        assert_eq!(word(full, 1), 1.0_f32.to_bits());
+        assert_eq!(word(full, 2), 0);
+        assert_eq!(word(full, 3), 1.0_f32.to_bits());
+        assert_eq!(word(full, 4), 0);
+        assert_eq!(word(full, 5), 5.0_f32.to_bits());
+    }
 }
 
 #[test]
@@ -170,24 +205,30 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
                 )
                 .is_err()
         );
-        if rate == 48_000 {
-            let values: [Values; 8] = core::array::from_fn(|_| initial_values());
-            if let Some(mut bank) = prepare_bank_w8(&values, LinkMode::DualMono) {
-                let sizes = bank.metadata().program_key.state_sizes;
-                assert!(
-                    bank.restore_track_state_payload(
-                        0,
-                        STATE_LAYOUT_VERSION,
-                        StatePayloadInput {
-                            common: &common,
-                            left: &old_lane,
-                            right: &old_lane
-                        },
-                    )
-                    .is_err()
-                );
-                assert_eq!(sizes.left_bytes, 88);
-            }
+        let values: [Values; 8] = core::array::from_fn(|_| initial_values());
+        if let Some(mut bank) = prepare_bank_at_rate(
+            &values,
+            LinkMode::DualMono,
+            BankWidth::Eight,
+            lane::Backend::Simd8,
+            128,
+            rate,
+        ) {
+            let sizes = bank.metadata().program_key.state_sizes;
+            assert!(
+                bank.restore_track_state_payload(
+                    0,
+                    STATE_LAYOUT_VERSION,
+                    StatePayloadInput {
+                        common: &common,
+                        left: &old_lane,
+                        right: &old_lane
+                    },
+                )
+                .is_err(),
+                "old raw bank payload at {rate} Hz"
+            );
+            assert_eq!(sizes.left_bytes, 88);
         }
         let mut short_left = vec![0; sizes.left_bytes as usize - 1];
         let mut short_right = vec![0; sizes.right_bytes as usize];
@@ -207,7 +248,19 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
 fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let values = active_values();
     let mut effect = prepare(request(&values));
+    let mut warm_left = vec![0.01_f32; 17];
+    let mut warm_right = warm_left.clone();
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut warm_left,
+        &mut warm_right,
+        None,
+        17,
+        &[],
+        0,
+    );
     let before = snapshot(effect.as_ref());
+    assert_ne!(word(&before.1, 0), 0, "rollback witness has live gain");
     let mut right = before.2.clone();
     right[87] = 0xff;
     let sizes = effect.metadata().state_sizes;
@@ -218,12 +271,101 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
             .is_err()
     );
     assert_eq!(snapshot(effect.as_ref()), before);
+
+    let values: [Values; 8] = core::array::from_fn(|track| {
+        let mut values = active_values();
+        support::set_parameter(&mut values, 0, -20.0 - track as f32, -20.0 - track as f32);
+        values
+    });
+    let Some(mut control) = prepare_bank_w8(&values, LinkMode::DualMono) else {
+        return;
+    };
+    let Some(mut target) = prepare_bank_w8(&values, LinkMode::DualMono) else {
+        return;
+    };
+    let prefix_left = packed_w8(&vec![vec![0.01_f32; 17]; 8]);
+    let prefix_right = prefix_left.clone();
+    let mut control_prefix_left = prefix_left.clone();
+    let mut control_prefix_right = prefix_right.clone();
+    render_bank(
+        &mut *control,
+        &mut control_prefix_left,
+        &mut control_prefix_right,
+        17,
+    );
+    let mut target_prefix_left = prefix_left;
+    let mut target_prefix_right = prefix_right;
+    render_bank(
+        &mut *target,
+        &mut target_prefix_left,
+        &mut target_prefix_right,
+        17,
+    );
+    let state_before: Vec<_> = (0..8).map(|track| snapshot_bank(&*target, track)).collect();
+    assert!(state_before.iter().any(|payload| word(&payload.1, 0) != 0));
+    let mut malformed_right = state_before[3].2.clone();
+    malformed_right[87] = 0xff;
+    let sizes = target.metadata().program_key.state_sizes;
+    assert!(
+        target
+            .restore_track_state_payload(
+                3,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput::new(
+                    &state_before[3].0,
+                    &state_before[3].1,
+                    &malformed_right,
+                    sizes,
+                )
+                .expect("bank payload sizes"),
+            )
+            .is_err()
+    );
+    for track in 0..8 {
+        assert_eq!(
+            snapshot_bank(&*target, track),
+            state_before[track as usize],
+            "bank lane {track} survives malformed right restore"
+        );
+    }
+    let continuation = packed_w8(&vec![vec![0.01_f32; 17]; 8]);
+    let mut control_left = continuation.clone();
+    let mut control_right = continuation.clone();
+    let mut target_left = continuation.clone();
+    let mut target_right = continuation;
+    render_bank(&mut *control, &mut control_left, &mut control_right, 17);
+    render_bank(&mut *target, &mut target_left, &mut target_right, 17);
+    for track in 0..8 {
+        assert_bits_eq(
+            &track_of(&target_left, track, 8),
+            &track_of(&control_left, track, 8),
+            &format!("bank lane {track} left after rejected restore"),
+        );
+        assert_bits_eq(
+            &track_of(&target_right, track, 8),
+            &track_of(&control_right, track, 8),
+            &format!("bank lane {track} right after rejected restore"),
+        );
+    }
 }
 
 #[test]
 fn scalar_and_bank_recovery_is_channel_and_lane_local() {
-    let values = initial_values();
+    let values = active_values();
     let mut scalar = prepare(request(&values));
+    let mut warm_left = vec![0.01; 17];
+    let mut warm_right = warm_left.clone();
+    render_scalar_sidechain(
+        scalar.as_mut(),
+        &mut warm_left,
+        &mut warm_right,
+        None,
+        17,
+        &[],
+        0,
+    );
+    let before = snapshot(scalar.as_ref());
+    assert_ne!(word(&before.1, 0), 0, "scalar fault witness has live gain");
     let mut left = vec![0.2; 128];
     let mut right = vec![0.2; 128];
     left[0] = f32::NAN;
@@ -231,15 +373,61 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     assert_eq!(report.nonfinite_left_blocks, 128);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert!(right.iter().all(|sample| sample.is_finite()));
+    let fresh = prepare(request(&values));
+    let after = snapshot(scalar.as_ref());
+    let fresh_state = snapshot(fresh.as_ref());
+    assert_eq!(after.1, fresh_state.1, "faulted scalar channel full-resets");
+    assert_ne!(
+        after.2, fresh_state.2,
+        "the peer channel keeps its active state"
+    );
 
-    let values: [Values; 8] = core::array::from_fn(|_| initial_values());
+    let values: [Values; 8] = core::array::from_fn(|track| {
+        let mut values = active_values();
+        support::set_parameter(&mut values, 0, -20.0 - track as f32, -20.0 - track as f32);
+        values
+    });
+    let Some(mut control) = prepare_bank_w8(&values, LinkMode::DualMono) else {
+        return;
+    };
     let Some(mut bank) = prepare_bank_w8(&values, LinkMode::DualMono) else {
         return;
     };
+    let warm_left = packed_w8(&vec![vec![0.01; 17]; 8]);
+    let warm_right = warm_left.clone();
+    let mut control_warm_left = warm_left.clone();
+    let mut control_warm_right = warm_right.clone();
+    let mut bank_warm_left = warm_left;
+    let mut bank_warm_right = warm_right;
+    render_bank(
+        &mut *control,
+        &mut control_warm_left,
+        &mut control_warm_right,
+        17,
+    );
+    render_bank(&mut *bank, &mut bank_warm_left, &mut bank_warm_right, 17);
+    let before_bank: Vec<_> = (0..8).map(|track| snapshot_bank(&*bank, track)).collect();
+    assert!(before_bank.iter().all(|payload| word(&payload.1, 0) != 0));
     let mut packed_left = packed_w8(&vec![vec![0.2; 128]; 8]);
     let mut packed_right = packed_left.clone();
     packed_left[3] = f32::INFINITY;
+    let mut control_left = packed_w8(&vec![vec![0.2; 128]; 8]);
+    let mut control_right = control_left.clone();
     let offsets = [0_u32; 9];
+    let control_report = control.process_bank(
+        EffectBankProcessBlock::new(
+            &mut control_left,
+            &mut control_right,
+            None,
+            128,
+            BankWidth::Eight,
+            17,
+            &[],
+            &offsets,
+            128,
+        )
+        .unwrap(),
+    );
     let report = bank.process_bank(
         EffectBankProcessBlock::new(
             &mut packed_left,
@@ -257,13 +445,31 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     assert_eq!(report.reports[3].nonfinite_left_blocks, 128);
     for track in 0..8 {
         if track != 3 {
-            assert!(
-                track_of(&packed_left, track, 8)
-                    .iter()
-                    .all(|sample| sample.is_finite())
+            assert_bits_eq(
+                &track_of(&packed_left, track, 8),
+                &track_of(&control_left, track, 8),
+                &format!("peer track {track} left PCM"),
+            );
+            assert_eq!(
+                snapshot_bank(&*bank, track as u32),
+                snapshot_bank(&*control, track as u32),
+                "peer track {track} state"
             );
         }
     }
+    assert_eq!(report.reports[3].nonfinite_right_blocks, 0);
+    assert_eq!(control_report.reports[3].nonfinite_right_blocks, 0);
+    assert_bits_eq(
+        &track_of(&packed_right, 3, 8),
+        &track_of(&control_right, 3, 8),
+        "fault lane right PCM remains live",
+    );
+    let fresh_bank = prepare_bank_w8(&values, LinkMode::DualMono).expect("W8 backend");
+    assert_eq!(
+        snapshot_bank(&*bank, 3).1,
+        snapshot_bank(&*fresh_bank, 3).1,
+        "fault lane left full-resets to prepared defaults"
+    );
 }
 
 #[test]

@@ -39,10 +39,22 @@ pub fn prepare_bank(
     backend: Backend,
     quantum: u32,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    prepare_bank_at_rate(values, link_mode, width, backend, quantum, 48_000)
+}
+
+/// Prepares a bank at a specific launch rate for state/resource compatibility tests.
+pub fn prepare_bank_at_rate(
+    values: &[Values; 8],
+    link_mode: LinkMode,
+    width: BankWidth,
+    backend: Backend,
+    quantum: u32,
+    sample_rate: u32,
+) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let requests: Vec<PrepareEffectRequest<'_>> = values[..width.lanes() as usize]
         .iter()
         .map(|set| {
-            let mut request = request_at(set, 48_000, quantum);
+            let mut request = request_at(set, sample_rate, quantum);
             request.link_mode = link_mode;
             request
         })

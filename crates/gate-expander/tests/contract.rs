@@ -11,7 +11,10 @@ use effect_contract::{
 use gate_expander::{
     GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory, STATE_LAYOUT_VERSION,
 };
-use support::{initial_values, prepare, render_scalar, request, request_at_rate, snapshot};
+use support::{
+    initial_values, prepare, render_scalar, render_scalar_sidechain, request, request_at_rate,
+    snapshot,
+};
 
 fn word(bytes: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().expect("word"))
@@ -45,35 +48,42 @@ fn descriptor_and_exact_zero_latency_resources_are_frozen() {
 #[test]
 fn exact_state_and_scratch_caps_prepare_and_one_byte_below_rejects() {
     let values = initial_values();
-    let quality = GATE_EXPANDER_DESCRIPTOR.qualities[1];
-    let mut exact = request(&values);
-    exact.limits = PrepareEffectLimits {
-        maximum_total_state_bytes: 184,
-        maximum_scratch_bytes: 64,
-        maximum_automation_spans_per_block: 16,
-    };
-    GateExpanderFactory.prepare(exact).expect("exact caps");
-    let mut state_short = exact;
-    state_short.limits.maximum_total_state_bytes = 183;
-    assert_eq!(
+    for quality in GATE_EXPANDER_DESCRIPTOR.qualities {
+        let mut exact = request_at_rate(&values, quality.sample_rate);
+        exact.limits = PrepareEffectLimits {
+            maximum_total_state_bytes: quality.maximum_state.total().expect("state total"),
+            maximum_scratch_bytes: quality.scratch_fixed_bytes,
+            maximum_automation_spans_per_block: 16,
+        };
         GateExpanderFactory
-            .prepare(state_short)
-            .err()
-            .expect("state limit")
-            .code,
-        "effect.resource.limit"
-    );
-    let mut scratch_short = exact;
-    scratch_short.limits.maximum_scratch_bytes = 63;
-    assert_eq!(
-        GateExpanderFactory
-            .prepare(scratch_short)
-            .err()
-            .expect("scratch limit")
-            .code,
-        "effect.resource.limit"
-    );
-    assert_eq!(quality.maximum_state.total(), Some(184));
+            .prepare(exact)
+            .unwrap_or_else(|error| panic!("exact caps at {} Hz: {error:?}", quality.sample_rate));
+        let mut state_short = exact;
+        state_short.limits.maximum_total_state_bytes -= 1;
+        assert_eq!(
+            GateExpanderFactory
+                .prepare(state_short)
+                .err()
+                .expect("state limit")
+                .code,
+            "effect.resource.limit",
+            "state cap at {} Hz",
+            quality.sample_rate
+        );
+        let mut scratch_short = exact;
+        scratch_short.limits.maximum_scratch_bytes -= 1;
+        assert_eq!(
+            GateExpanderFactory
+                .prepare(scratch_short)
+                .err()
+                .expect("scratch limit")
+                .code,
+            "effect.resource.limit",
+            "scratch cap at {} Hz",
+            quality.sample_rate
+        );
+        assert_eq!(quality.maximum_state.total(), Some(184));
+    }
 }
 
 #[test]
@@ -172,13 +182,28 @@ fn initial_values_require_interleaved_lane_records_and_normal_values() {
 }
 
 #[test]
-fn same_index_bypass_and_ratio_one_are_exact_identity_at_all_rates() {
+fn missing_and_misordered_initial_records_return_exact_errors() {
+    let mut missing = initial_values().to_vec();
+    missing.pop();
+    let error = GateExpanderFactory
+        .prepare(request(&missing))
+        .err()
+        .expect("missing initial record");
+    assert_eq!(error.code, "effect.parameter.initial");
+
+    let mut misordered = initial_values();
+    misordered[2].parameter_index = 3;
+    let error = GateExpanderFactory
+        .prepare(request(&misordered))
+        .err()
+        .expect("misordered initial record");
+    assert_eq!(error.code, "effect.parameter.initial");
+}
+
+#[test]
+fn bypass_is_exact_identity_at_all_rates() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
-        let mut values = initial_values();
-        values[0].value = -40.0;
-        values[1].value = -40.0;
-        values[2].value = 1.0;
-        values[3].value = 1.0;
+        let values = initial_values();
         let mut request = request_at_rate(&values, rate);
         request.bypass = true;
         let mut effect = GateExpanderFactory.prepare(request).expect("prepare");
@@ -189,17 +214,36 @@ fn same_index_bypass_and_ratio_one_are_exact_identity_at_all_rates() {
         assert_eq!(left, expected.0);
         assert_eq!(right, expected.1);
         assert_eq!(effect.metadata().latency, LatencySamples(0));
+    }
+}
 
-        let mut enabled_values = initial_values();
-        support::set_parameter(&mut enabled_values, 1, 1.0, 1.0);
-        support::set_parameter(&mut enabled_values, 2, 0.0, 0.0);
-        let mut enabled = prepare(request_at_rate(&enabled_values, rate));
-        let mut enabled_left = [f32::from_bits(0x8000_0000), 0.25, -0.5];
-        let mut enabled_right = [-0.0, -0.25, 0.5];
-        let expected_enabled = (enabled_left.clone(), enabled_right.clone());
-        render_scalar(enabled.as_mut(), &mut enabled_left, &mut enabled_right, 3);
-        assert_eq!(enabled_left, expected_enabled.0);
-        assert_eq!(enabled_right, expected_enabled.1);
+#[test]
+fn enabled_ratio_one_is_exact_identity_with_a_nonzero_sample_zero() {
+    for rate in [44_100, 48_000, 88_200, 96_000] {
+        let mut values = support::active_values();
+        support::set_parameter(&mut values, 1, 1.0, 1.0);
+        let mut effect = prepare(request_at_rate(&values, rate));
+        let mut left = [0.5, -0.25, 0.125];
+        let mut right = [-0.5, 0.25, -0.125];
+        let expected = (left, right);
+        render_scalar(effect.as_mut(), &mut left, &mut right, 3);
+        assert_eq!(left, expected.0, "ratio one at {rate} Hz");
+        assert_eq!(right, expected.1, "ratio one at {rate} Hz");
+    }
+}
+
+#[test]
+fn enabled_range_zero_is_exact_identity_with_a_nonzero_sample_zero() {
+    for rate in [44_100, 48_000, 88_200, 96_000] {
+        let mut values = support::active_values();
+        support::set_parameter(&mut values, 2, 0.0, 0.0);
+        let mut effect = prepare(request_at_rate(&values, rate));
+        let mut left = [0.5, -0.25, 0.125];
+        let mut right = [-0.5, 0.25, -0.125];
+        let expected = (left, right);
+        render_scalar(effect.as_mut(), &mut left, &mut right, 3);
+        assert_eq!(left, expected.0, "range zero at {rate} Hz");
+        assert_eq!(right, expected.1, "range zero at {rate} Hz");
     }
 }
 
@@ -229,6 +273,134 @@ fn opening_and_future_suffixes_are_current_sample_causal() {
         left_a[1].abs() < 0.5,
         "closed state is established before the trigger"
     );
+}
+
+fn detector_level_db(amplitude: f32) -> f32 {
+    use gate_expander::kernel::{LEVEL_FLOOR, LEVEL_MAX_DB, LEVEL_MIN_DB};
+    let level = math::fast_db::fast_level_db::<f32>(amplitude.max(LEVEL_FLOOR));
+    level.min(LEVEL_MAX_DB).max(LEVEL_MIN_DB)
+}
+
+fn transition_values(threshold: f32, hysteresis: f32) -> support::Values {
+    let mut values = initial_values();
+    support::set_parameter(&mut values, 0, threshold, threshold);
+    support::set_parameter(&mut values, 1, 20.0, 20.0);
+    support::set_parameter(&mut values, 2, 48.0, 48.0);
+    support::set_parameter(&mut values, 3, hysteresis, hysteresis);
+    support::set_parameter(&mut values, 4, 1.0, 1.0);
+    support::set_parameter(&mut values, 5, 0.0, 0.0);
+    support::set_parameter(&mut values, 6, 5.0, 5.0);
+    values
+}
+
+#[test]
+fn a_closed_gate_opens_on_the_current_sample_and_uses_first_attack() {
+    let values = transition_values(-20.0, 6.0);
+    let mut effect = prepare(request(&values));
+    let mut quiet = [0.01_f32, 0.01];
+    let mut quiet_right = quiet;
+    render_scalar(effect.as_mut(), &mut quiet, &mut quiet_right, 2);
+    let (_, closed, _) = snapshot(effect.as_ref());
+    assert_eq!(
+        word(&closed, 1),
+        0,
+        "the quiet prefix establishes closed state"
+    );
+    assert!(
+        f32::from_bits(word(&closed, 0)) < 0.0,
+        "the closed prefix establishes negative gain"
+    );
+
+    let mut trigger = [0.5_f32];
+    let mut trigger_right = trigger;
+    render_scalar(effect.as_mut(), &mut trigger, &mut trigger_right, 1);
+    assert!(
+        trigger[0] > 0.0 && trigger[0] < 0.5,
+        "first attack is not unity"
+    );
+    let (_, opened, _) = snapshot(effect.as_ref());
+    assert_eq!(
+        word(&opened, 1),
+        1.0_f32.to_bits(),
+        "trigger opens the gate"
+    );
+}
+
+#[test]
+fn hold_zero_closes_on_the_first_sample_below_the_close_band() {
+    let values = transition_values(-20.0, 6.0);
+    let mut effect = prepare(request(&values));
+    let mut left = [0.01_f32];
+    let mut right = left;
+    render_scalar(effect.as_mut(), &mut left, &mut right, 1);
+    let (_, payload, _) = snapshot(effect.as_ref());
+    assert_eq!(word(&payload, 1), 0, "hold zero closes immediately");
+    assert!(
+        left[0].abs() < 0.01,
+        "the first closing sample is attenuated"
+    );
+}
+
+#[test]
+fn opening_and_rearm_are_inclusive_at_exact_thresholds() {
+    let trigger = 0.1_f32;
+    let level = detector_level_db(trigger);
+    let mut values = transition_values(level, 6.0);
+    let mut render = |threshold: f32, source: &[f32]| {
+        support::set_parameter(&mut values, 0, threshold, threshold);
+        let mut effect = prepare(request(&values));
+        let mut left = source.to_vec();
+        let mut right = left.clone();
+        render_scalar(effect.as_mut(), &mut left, &mut right, 128);
+        let (_, payload, _) = snapshot(effect.as_ref());
+        (left, payload)
+    };
+    let below = level.next_down();
+    let above = level.next_up();
+    let source = [0.01_f32, trigger];
+    let (_below_output, below_state) = render(below, &source);
+    let (_equal_output, equal_state) = render(level, &source);
+    let (_above_output, above_state) = render(above, &source);
+    assert_eq!(word(&below_state, 1), 1.0_f32.to_bits());
+    assert_eq!(word(&equal_state, 1), 1.0_f32.to_bits());
+    assert_eq!(word(&above_state, 1), 0);
+
+    let hold_level = 0.1_f32;
+    let close_level = detector_level_db(hold_level);
+    let hysteresis = 6.0_f32;
+    let mut threshold = close_level + hysteresis;
+    while (threshold - hysteresis).to_bits() != close_level.to_bits() {
+        threshold = if threshold - hysteresis > close_level {
+            threshold.next_down()
+        } else {
+            threshold.next_up()
+        };
+    }
+    let mut threshold_below = threshold;
+    while (threshold_below - hysteresis).to_bits() == close_level.to_bits() {
+        threshold_below = threshold_below.next_down();
+    }
+    let mut threshold_above = threshold;
+    while (threshold_above - hysteresis).to_bits() == close_level.to_bits() {
+        threshold_above = threshold_above.next_up();
+    }
+    let mut values = transition_values(threshold, hysteresis);
+    let source = [trigger, hold_level];
+    let mut run_rearm = |threshold: f32| {
+        support::set_parameter(&mut values, 0, threshold, threshold);
+        let mut effect = prepare(request(&values));
+        let mut left = source;
+        let mut right = left;
+        render_scalar(effect.as_mut(), &mut left, &mut right, 128);
+        let (_, payload, _) = snapshot(effect.as_ref());
+        (left[1], payload)
+    };
+    let (_below_rearm, below_state) = run_rearm(threshold_below);
+    let (_equal_rearm, equal_state) = run_rearm(threshold);
+    let (_above_rearm, above_state) = run_rearm(threshold_above);
+    assert_eq!(word(&below_state, 1), 1.0_f32.to_bits());
+    assert_eq!(word(&equal_state, 1), 1.0_f32.to_bits());
+    assert_eq!(word(&above_state, 1), 0);
 }
 
 #[test]
@@ -261,6 +433,84 @@ fn connected_sidechain_uses_current_detector_word() {
     );
     assert_eq!(report.nonfinite_left_blocks, 0);
     assert!(main_left.iter().all(|sample| sample.is_finite()));
+}
+
+#[test]
+fn connected_sidechain_is_current_and_not_ignored_or_delayed() {
+    let mut values = support::active_values();
+    support::set_parameter(&mut values, 0, -20.0, -20.0);
+    support::set_parameter(&mut values, 1, 4.0, 4.0);
+    support::set_parameter(&mut values, 2, 48.0, 48.0);
+    support::set_parameter(&mut values, 5, 0.0, 0.0);
+    let mut preparation = request(&values);
+    preparation.ports = PreparedPorts {
+        sidechain: PreparedSidechainPort::Connected {
+            id: support::sidechain_port(),
+            required: false,
+        },
+    };
+    let mut effect = GateExpanderFactory.prepare(preparation).expect("sidechain");
+    let mut main_left = [0.01_f32, 0.01];
+    let mut main_right = main_left;
+    let side_left = [0.5_f32, 0.0];
+    let side_right = side_left;
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut main_left,
+        &mut main_right,
+        Some((&side_left, &side_right)),
+        2,
+        &[],
+        0,
+    );
+    assert_eq!(main_left[0].to_bits(), 0.01_f32.to_bits());
+    assert_eq!(main_right[0].to_bits(), 0.01_f32.to_bits());
+    assert!(
+        main_left[1].abs() < 0.01,
+        "the next quiet sidechain word closes"
+    );
+}
+
+#[test]
+fn a_valid_connected_sidechain_uses_scalar_fallback_after_bank_rejection() {
+    let values = [initial_values(); 4];
+    let mut requests: Vec<_> = values.iter().map(|set| request(set)).collect();
+    for item in &mut requests {
+        item.ports = PreparedPorts {
+            sidechain: PreparedSidechainPort::Connected {
+                id: support::sidechain_port(),
+                required: false,
+            },
+        };
+    }
+    assert!(
+        GateExpanderFactory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: lane::Backend::Simd4,
+                width: BankWidth::Four,
+                requests: &requests,
+            })
+            .expect("valid connected requests")
+            .is_none(),
+        "connected sidechain must use scalar fallback"
+    );
+    let mut scalar = GateExpanderFactory
+        .prepare(requests[0])
+        .expect("connected scalar fallback");
+    let mut main_left = [0.01_f32];
+    let mut main_right = [0.01_f32];
+    let side = [0.5_f32];
+    let report = render_scalar_sidechain(
+        scalar.as_mut(),
+        &mut main_left,
+        &mut main_right,
+        Some((&side, &side)),
+        1,
+        &[],
+        0,
+    );
+    assert_eq!(report, effect_contract::ProcessReport::default());
+    assert_eq!(main_left[0].to_bits(), 0.01_f32.to_bits());
 }
 
 #[test]
@@ -346,11 +596,11 @@ fn production_hold_is_k_plus_one_and_retrigger_is_current_sample() {
     support::set_parameter(
         &mut values,
         5,
-        2.0 * 1000.0 / 48_000.0,
-        2.0 * 1000.0 / 48_000.0,
+        3.0 * 1000.0 / 48_000.0,
+        3.0 * 1000.0 / 48_000.0,
     );
     let mut effect = prepare(request(&values));
-    let mut left = vec![0.5, 1.0e-4, 1.0e-4, 1.0e-4, 0.5];
+    let mut left = vec![0.5, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 0.5];
     let mut right = left.clone();
     render_scalar(effect.as_mut(), &mut left, &mut right, 5);
     assert_eq!(left[0].to_bits(), 0.5_f32.to_bits(), "trigger");
@@ -364,9 +614,14 @@ fn production_hold_is_k_plus_one_and_retrigger_is_current_sample() {
         1.0e-4_f32.to_bits(),
         "second held sample remains open"
     );
+    assert_eq!(
+        left[3].to_bits(),
+        1.0e-4_f32.to_bits(),
+        "third held sample remains open"
+    );
     assert!(
-        left[3].abs() < 1.0e-4,
+        left[4].abs() < 1.0e-4,
         "the sample after K held samples closes"
     );
-    assert!(left[4] > left[3], "retrigger uses the current sample");
+    assert!(left[5] > left[4], "retrigger uses the current sample");
 }

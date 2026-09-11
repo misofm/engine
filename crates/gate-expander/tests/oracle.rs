@@ -56,9 +56,10 @@ fn corpus_values() -> Values {
     values
 }
 
-/// DC-free square-wave bursts: the sign flips every eight samples, and the amplitude alternates
-/// between -30 and -50 dBFS every 4 800 samples, in antiphase between the two channels so that
-/// the three link modes produce three different detector levels.
+/// DC-free square-wave bursts: the sign flips every eight samples, with a shared active interval
+/// and a shared quiet interval before an antiphase tail. The shared intervals force every link mode
+/// to exercise both attenuation and quiet-state decisions; the tail still gives the link modes
+/// distinct detector levels.
 ///
 /// The quiet level is -50 dBFS rather than something deeper on purpose. At `rho = 4` and
 /// `T = -40` the curve gives `3 * (-50 + 40) = -30 dB`, which is inside the 48 dB range: a level
@@ -72,8 +73,24 @@ fn corpus_signals() -> (Vec<f32>, Vec<f32>) {
     for frame in 0..FRAMES {
         let burst = (frame / 4_800) % 2 == 0;
         let sign = if (frame / 8) % 2 == 0 { 1.0 } else { -1.0 };
-        left[frame] = sign * if burst { loud } else { quiet };
-        right[frame] = sign * if burst { quiet } else { loud };
+        let shared = frame < 9_600;
+        let amplitude = if burst { loud } else { quiet };
+        left[frame] = sign
+            * if shared {
+                amplitude
+            } else if burst {
+                loud
+            } else {
+                quiet
+            };
+        right[frame] = sign
+            * if shared {
+                amplitude
+            } else if burst {
+                quiet
+            } else {
+                loud
+            };
     }
     (left, right)
 }
@@ -187,21 +204,27 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
             &trace.phase_right,
             &format!("{link:?} right"),
         );
-        if link == LinkMode::DualMono {
+        assert!(
+            worst_left.max(worst_right) > 0.0,
+            "{link:?}: the corpus never attenuated, so the comparison is vacuous"
+        );
+        for (channel, gains) in [
+            ("left", &trace.gain_db_left),
+            ("right", &trace.gain_db_right),
+        ] {
+            let active_nonclamped = gains
+                .iter()
+                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0);
             assert!(
-                worst_left.max(worst_right) > 0.0,
-                "{link:?}: the corpus never attenuated, so the comparison is vacuous"
+                active_nonclamped,
+                "{link:?} {channel}: active attenuation is absent or range-clamped"
             );
-        }
-        // And the attenuation must not be sitting on the range clamp, where the dB conversion
-        // stops being observable at all.
-        if link == LinkMode::DualMono {
+            let quiet_nonclamped = gains[4_800..9_600]
+                .iter()
+                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0);
             assert!(
-                trace
-                    .gain_db_left
-                    .iter()
-                    .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0),
-                "{link:?}: every attenuated sample is pinned to the range clamp"
+                quiet_nonclamped,
+                "{link:?} {channel}: quiet interval is absent or range-clamped"
             );
         }
         eprintln!(

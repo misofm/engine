@@ -1323,4 +1323,129 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn internal_w4_pcm_and_serialized_continuation_are_bit_exact() {
+        const WIDTH: usize = 4;
+        const PREFIX: usize = 17;
+        const FRAMES: usize = 129;
+        let track_sets: [_; MAX_WIDTH] = core::array::from_fn(|track| values(-20.0 - track as f32));
+        let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
+        for track in 0..WIDTH {
+            defaults[track] = initial_defaults(&track_sets[track]).expect("defaults");
+        }
+        let shared = metadata(&track_sets[0]);
+        let mut donor = PreparedGate::<Simd4, false>::new(shared, Some(BankWidth::Four), defaults)
+            .expect("internal W4 donor");
+        let mut restored =
+            PreparedGate::<Simd4, false>::new(shared, Some(BankWidth::Four), defaults)
+                .expect("internal W4 restore target");
+
+        let mut prefix_left = vec![0.01_f32; PREFIX * WIDTH];
+        let mut prefix_right = prefix_left.clone();
+        let mut reports = [ProcessReport::default(); MAX_WIDTH];
+        donor.run_block(
+            &mut prefix_left,
+            &mut prefix_right,
+            None,
+            PREFIX,
+            &mut reports,
+        );
+        assert!(lane_get(donor.state[0].gain_db, 2) < 0.0);
+
+        let sizes = donor.metadata.state_sizes;
+        let mut payloads = Vec::new();
+        for lane in 0..WIDTH {
+            let mut common = vec![0; sizes.common_bytes as usize];
+            let mut left_payload = vec![0; sizes.left_bytes as usize];
+            let mut right_payload = vec![0; sizes.right_bytes as usize];
+            donor
+                .snapshot_track_state_payload(
+                    lane as u32,
+                    StatePayloadOutput::new(
+                        &mut common,
+                        &mut left_payload,
+                        &mut right_payload,
+                        sizes,
+                    )
+                    .expect("W4 payload sizes"),
+                )
+                .expect("W4 snapshot");
+            payloads.push((common, left_payload, right_payload));
+        }
+        for (lane, (common, left_payload, right_payload)) in payloads.iter().enumerate() {
+            restored
+                .restore_track_state_payload(
+                    lane as u32,
+                    STATE_LAYOUT_VERSION,
+                    StatePayloadInput::new(common, left_payload, right_payload, sizes)
+                        .expect("W4 payload"),
+                )
+                .expect("W4 restore");
+        }
+
+        let continuation_frames = FRAMES - PREFIX;
+        let mut donor_left = vec![0.0_f32; continuation_frames * WIDTH];
+        let mut donor_right = vec![0.0_f32; continuation_frames * WIDTH];
+        let mut restored_left = donor_left.clone();
+        let mut restored_right = donor_right.clone();
+        for frame in 0..continuation_frames {
+            for lane in 0..WIDTH {
+                let sample = noise(101 + lane as u64, continuation_frames)[frame];
+                donor_left[frame * WIDTH + lane] = sample;
+                donor_right[frame * WIDTH + lane] = -sample;
+                restored_left[frame * WIDTH + lane] = sample;
+                restored_right[frame * WIDTH + lane] = -sample;
+            }
+        }
+        donor.run_block(
+            &mut donor_left,
+            &mut donor_right,
+            None,
+            continuation_frames,
+            &mut reports,
+        );
+        restored.run_block(
+            &mut restored_left,
+            &mut restored_right,
+            None,
+            continuation_frames,
+            &mut reports,
+        );
+        assert_eq!(donor_left, restored_left, "W4 continuation left PCM");
+        assert_eq!(donor_right, restored_right, "W4 continuation right PCM");
+        let mut donor_common = vec![0; sizes.common_bytes as usize];
+        let mut donor_left_payload = vec![0; sizes.left_bytes as usize];
+        let mut donor_right_payload = vec![0; sizes.right_bytes as usize];
+        donor
+            .snapshot_track_state_payload(
+                2,
+                StatePayloadOutput::new(
+                    &mut donor_common,
+                    &mut donor_left_payload,
+                    &mut donor_right_payload,
+                    sizes,
+                )
+                .expect("W4 output sizes"),
+            )
+            .expect("W4 output snapshot");
+        let mut restored_common = vec![0; sizes.common_bytes as usize];
+        let mut restored_left_payload = vec![0; sizes.left_bytes as usize];
+        let mut restored_right_payload = vec![0; sizes.right_bytes as usize];
+        restored
+            .snapshot_track_state_payload(
+                2,
+                StatePayloadOutput::new(
+                    &mut restored_common,
+                    &mut restored_left_payload,
+                    &mut restored_right_payload,
+                    sizes,
+                )
+                .expect("W4 restored output sizes"),
+            )
+            .expect("W4 restored output snapshot");
+        assert_eq!(donor_common, restored_common);
+        assert_eq!(donor_left_payload, restored_left_payload);
+        assert_eq!(donor_right_payload, restored_right_payload);
+    }
 }
