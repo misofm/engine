@@ -152,3 +152,27 @@ Python f64 spelling comparison; both failed before qualification credit and were
 corrected to the actual `session_validator` binary and explicit unchanged f32 proof.
 Current corpus/descriptor/artifact pins and descendant expectations remain pending.
 CPU qualification follows the approved bounded example amendment, not a console run.
+
+
+## Attempt 1 contract-test checkpoint
+
+Luna XHIGH adapted the causal contract, identities, ramps, payloads, fault, mono,
+partition and silent-fixed-point tests. The new causality test compares equal
+prefixes with differing future main/sidechain suffixes. Actual scalar and supported
+bank impulse preparation/render now covers all four launch rates. Named sealed
+math-crossing annotations are restored and current source prose no longer claims
+retired rings/taps/staging. No DSP tolerance was broadened.
+
+Root independently ran locked compressor integration compilation and the compressor
+test suite with only `the_corpus_matches_its_pins_at_every_width` explicitly skipped:
+71 top-level tests passed, plus one repeated nested allocation subprocess test.
+The lib target contains zero tests and is not credited as behavior evidence.
+Focused strict Clippy (`--lib --tests`) and workspace formatting checks passed.
+Commands/output are preserved at `/tmp/issue737-contract-checkpoint`; preliminary
+Sol review is at `/home/bl/issue737-sol-attempt1-core-review`.
+
+This remains an intermediate checkpoint, not final PASS. W1/W4/W8 serialized-state
+coverage, root-qualified scalar corpus pins, descendant session/control/envelope/PDC
+gates, bounded CPU example qualification, supported Wasm/artifact qualification,
+and final Sol review/CI remain pending. Sol's live-tranche checklist must be rechecked
+on coherent source; passing tests alone do not resolve its coverage questions.

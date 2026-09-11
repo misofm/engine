@@ -2,8 +2,8 @@
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E6 — D11: one division at the event, iterated additions, an exact snap on the last sample.
 //!
-//! The ramp state is visible through the payload: word `3 + 3i` is parameter `i`'s `current`,
-//! `4 + 3i` its `target` and `5 + 3i` its `remaining`. `step` is deliberately **not** serialised —
+//! The ramp state is visible through the payload: word `1 + 3i` is parameter `i`'s `current`,
+//! `2 + 3i` its `target` and `3 + 3i` its `remaining`. `step` is deliberately **not** serialised —
 //! the layout is a frozen contract fixture — which is what makes a mid-ramp restore class B
 //! (`tests/payload.rs`).
 
@@ -76,11 +76,11 @@ fn block_point_steps_by_a_precomputed_increment_and_snaps_exactly() {
         }
         let payload = state(effect.as_ref());
         assert_eq!(
-            read_f32(&payload, 3).to_bits(),
+            read_f32(&payload, 1).to_bits(),
             expected.to_bits(),
             "after {updates} updates"
         );
-        assert_eq!(read_u32(&payload, 5), SMOOTHING - updates as u32);
+        assert_eq!(read_u32(&payload, 3), SMOOTHING - updates as u32);
     }
 
     // The 64th update assigns the target exactly, whatever the accumulated sum was.
@@ -99,11 +99,11 @@ fn block_point_steps_by_a_precomputed_increment_and_snaps_exactly() {
     );
     let payload = state(effect.as_ref());
     assert_eq!(
-        read_f32(&payload, 3).to_bits(),
+        read_f32(&payload, 1).to_bits(),
         THRESHOLD_TARGET.to_bits(),
         "the last update is an assignment, not an addition"
     );
-    assert_eq!(read_u32(&payload, 5), 0);
+    assert_eq!(read_u32(&payload, 3), 0);
 
     // And it did not arrive early: 63 additions do not reach the target.
     let mut sum = THRESHOLD_DEFAULT;
@@ -129,7 +129,7 @@ fn a_restarting_point_ramps_from_the_current_value() {
         128,
         &[(0, point(0, ParameterChannel::Left, THRESHOLD_TARGET))],
     );
-    let mid = read_f32(&state(effect.as_ref()), 3);
+    let mid = read_f32(&state(effect.as_ref()), 1);
 
     let mut left = vec![0.0_f32; 1];
     let mut right = vec![0.0_f32; 1];
@@ -144,11 +144,11 @@ fn a_restarting_point_ramps_from_the_current_value() {
     let payload = state(effect.as_ref());
     let restarted_step = (-30.0_f32 - mid) / SMOOTHING as f32;
     assert_eq!(
-        read_f32(&payload, 3).to_bits(),
+        read_f32(&payload, 1).to_bits(),
         (mid + restarted_step).to_bits()
     );
-    assert_eq!(read_u32(&payload, 4), (-30.0_f32).to_bits());
-    assert_eq!(read_u32(&payload, 5), SMOOTHING - 1);
+    assert_eq!(read_u32(&payload, 2), (-30.0_f32).to_bits());
+    assert_eq!(read_u32(&payload, 3), SMOOTHING - 1);
 }
 
 /// Automation is per channel and per parameter, and an out-of-order or duplicate span is counted
@@ -172,8 +172,8 @@ fn automation_validation_is_unchanged() {
     assert_eq!(report.invalid_spans, 1, "the out-of-order span is rejected");
     let payload = state(effect.as_ref());
     // Parameter 2 was applied, parameter 0 was not.
-    assert_eq!(read_u32(&payload, 5 + 3 * 2), SMOOTHING - 1);
-    assert_eq!(read_u32(&payload, 5), 0);
+    assert_eq!(read_u32(&payload, 3 + 3 * 2), SMOOTHING - 1);
+    assert_eq!(read_u32(&payload, 3), 0);
 
     // `Both` is not a channel this effect accepts.
     let mut effect = prepare(request_with_quantum(&values, 128));
@@ -189,26 +189,7 @@ fn automation_validation_is_unchanged() {
         .expect("block"),
     );
     assert_eq!(report.invalid_spans, 1);
-    assert_eq!(read_u32(&state(effect.as_ref()), 5), 0);
-
-    // `lookahead` is not automatable: parameter index 7 is out of the ramped range.
-    let mut effect = prepare(request_with_quantum(&values, 128));
-    let report = effect.process(
-        effect_contract::EffectProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            0,
-            &[point(7, ParameterChannel::Left, 0.0)],
-            128,
-        )
-        .expect("block"),
-    );
-    assert_eq!(report.invalid_spans, 1);
-    assert_eq!(
-        read_f32(&state(effect.as_ref()), 1).to_bits(),
-        5.0_f32.to_bits()
-    );
+    assert_eq!(read_u32(&state(effect.as_ref()), 3), 0);
 }
 
 /// A finished ramp leaves exactly the coefficients a fresh preparation at that value would.
@@ -316,7 +297,9 @@ fn bank_threshold(track: usize) -> f32 {
 /// Lane 2 is prepared with a makeup of exactly `+0.0` and every lane with a mix strictly between
 /// `0` and `1`, so the step-8 identity masks are genuinely mixed across the bank rather than
 /// uniformly true or uniformly false.
-fn bank_track_values(track: usize) -> [effect_contract::InitialParameterValue; 16] {
+fn bank_track_values(
+    track: usize,
+) -> [effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2] {
     support::values_with(&[
         (0, bank_threshold(track)),
         (1, 2.0 + track as f32),
@@ -325,7 +308,6 @@ fn bank_track_values(track: usize) -> [effect_contract::InitialParameterValue; 1
         (4, 30.0 + 20.0 * track as f32),
         (5, -1.0 + 0.5 * track as f32),
         (6, 0.4 + 0.05 * (track % 4) as f32),
-        (7, 1.0 * (track % 3) as f32),
     ])
 }
 
@@ -355,7 +337,7 @@ fn bank_lane_bits_with(points: &[(usize, usize, u32, f32)]) -> Vec<Vec<u32>> {
 /// compress. The Points ride the left channel, so the right channel of an automated track is
 /// itself an idle channel dragged through the ramping body -- the asymmetry the guard exists for.
 fn bank_lane_bits_from(
-    values: &[[effect_contract::InitialParameterValue; 16]],
+    values: &[[effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2]],
     points: &[(usize, usize, u32, f32)],
 ) -> Vec<Vec<u32>> {
     let (_, width) = support::native_bank_width().expect("a native bank width");
@@ -570,7 +552,7 @@ const SILENT_RELEASE_MS: f32 = 50.0;
 const SILENT_BLOCKS: usize = 160;
 /// Well inside the settled silence, so the claim is certainly held when the Point arrives.
 const SILENT_AUTOMATED_BLOCK: usize = 120;
-/// Enough trailing tone for the tone to clear the lookahead line and be compared.
+/// Enough trailing tone for the post-silence live path to be compared.
 const SILENT_TRAILING_BLOCKS: usize = 12;
 
 /// Renders tone, a long silence carrying one Point on one lane, then tone again.

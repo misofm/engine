@@ -18,7 +18,7 @@ use lane::Backend;
 /// Parameters in the descriptor table.
 pub const PARAMETER_COUNT: usize = 7;
 
-/// Fixed scalar words before the rings, per channel section.
+/// Fixed scalar words in one causal channel section.
 pub const STATE_HEADER_WORDS: usize = compressor::STATE_HEADER_WORDS;
 
 /// The sidechain port identifier.
@@ -68,7 +68,7 @@ pub fn request_with_quantum<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 15_568,
+            maximum_total_state_bytes: 176,
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
@@ -248,13 +248,16 @@ pub fn restore_track(
     version: u32,
     left: &[u8],
     right: &[u8],
-    sizes_from: &dyn PreparedNativeEffect,
+    _sizes_from: &dyn PreparedNativeEffect,
 ) -> Result<(), effect_contract::StatePayloadError> {
-    let sizes = sizes_from.metadata().state_sizes;
     bank.restore_track_state_payload(
         track,
         version,
-        StatePayloadInput::new(&[], left, right, sizes).expect("payload"),
+        StatePayloadInput {
+            common: &[],
+            left,
+            right,
+        },
     )
 }
 
@@ -265,10 +268,13 @@ pub fn restore(
     left: &[u8],
     right: &[u8],
 ) -> Result<(), effect_contract::StatePayloadError> {
-    let sizes = effect.metadata().state_sizes;
     effect.restore_state_payload(
         version,
-        StatePayloadInput::new(&[], left, right, sizes).expect("payload"),
+        StatePayloadInput {
+            common: &[],
+            left,
+            right,
+        },
     )
 }
 

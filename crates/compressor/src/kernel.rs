@@ -6,17 +6,17 @@
 
 use effect_contract::LinkMode;
 use effect_runtime::bank;
-use effect_runtime::dynamics::{gain_delta_db, GainComputerCoef};
+use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
 use effect_runtime::ramp::LinearRamp;
 use lane::kernels::gain_mix_step;
-use lane::{flush, Lane};
+use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 use crate::design::{
-    design_lane, ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE,
-    COEF_INV_TWO_KNEE, COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords,
-    MAX_WIDTH, PARAMETER_COUNT, RAMP_COUNT,
+    ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
+    COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH, PARAMETER_COUNT,
+    RAMP_COUNT, design_lane,
 };
 
 const LEVEL_FLOOR: f32 = 1.0e-8;
@@ -49,10 +49,7 @@ pub(crate) struct Channel<L: Lane> {
 
 impl<L: Lane> Channel<L> {
     /// Creates a channel and designs all coefficient words on the control side.
-    pub(crate) fn new(
-        defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
-        sample_rate: u32,
-    ) -> Self {
+    pub(crate) fn new(defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH], sample_rate: u32) -> Self {
         let mut channel = Self {
             defaults: *defaults,
             words: [[0.0; MAX_WIDTH]; crate::design::COEF_COUNT],
@@ -220,8 +217,16 @@ impl<L: Lane> Invariants<L> {
             level_min: L::splat(LEVEL_MIN_DB),
             level_max: L::splat(LEVEL_MAX_DB),
             reduction_min: L::splat(GAIN_REDUCTION_MIN_DB),
-            linked: if matches!(link, LinkMode::DualMono) { none } else { all },
-            averaged: if matches!(link, LinkMode::Average) { all } else { none },
+            linked: if matches!(link, LinkMode::DualMono) {
+                none
+            } else {
+                all
+            },
+            averaged: if matches!(link, LinkMode::Average) {
+                all
+            } else {
+                none
+            },
             bypassed: if bypass { all } else { none },
         }
     }
@@ -254,6 +259,12 @@ fn link_frame<L: Lane>(
 }
 
 #[inline(always)]
+// FAST-DB-CROSSING X1: detector level conversion is a dynamics reading, never a pinned
+// coefficient word; the sealed fast approximation is required by the compressor contract.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "FAST-DB-CROSSING X1: dynamics detector reading, never a pinned coefficient"
+)]
 fn curve_target<L: Lane>(detected: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     let floored = detected.max(invariants.level_floor);
     let level = fast_level_db(floored)
@@ -273,6 +284,11 @@ fn ballistic<L: Lane>(target: L, gain_reduction_db: &mut L, coef: &Coef<L>) -> L
 }
 
 #[inline(always)]
+// FAST-DB-CROSSING X2: applied gain conversion is a dynamics result, never a pinned coefficient.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "FAST-DB-CROSSING X2: applied gain from a smoothed reduction, never a pinned coefficient"
+)]
 fn gain_mix<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     let gain = fast_gain_from_db(smoothed.add(coef.makeup));
     let wet = input.mul(gain);

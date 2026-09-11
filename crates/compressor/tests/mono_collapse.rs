@@ -27,9 +27,7 @@ use effect_contract::{
     PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 
-/// Blocks per arm: enough that the detector ring and the lookahead delay are full of collapsed-run
-/// samples before anything is compared, so a stale ring shows up as a difference rather than as a
-/// value the first block happened to hide.
+/// Blocks per arm provide repeated causal processing before comparisons.
 const BLOCKS: usize = 24;
 const FRAMES: usize = 64;
 
@@ -61,7 +59,7 @@ fn request_configured<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 15_568,
+            maximum_total_state_bytes: 176,
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
@@ -101,8 +99,8 @@ fn offsets(lanes: usize) -> Vec<u32> {
 /// This is what puts a **ramp in flight**, and a ramp is what selects the collapsed kernel's
 /// per-frame body: `process_block_mono` splits the block at `max_remaining`, runs the ramping
 /// prefix through `frames_loop_mono::<_, true>` -- which advances the ramps and reloads the
-/// coefficient words every frame -- and only then considers the staged idle body. Without it the
-/// whole file would exercise one of the two collapsed loops.
+/// coefficient words every frame -- and only then considers the idle body. Without it the whole
+/// file would exercise one of the two collapsed loops.
 fn automation(step: usize, lanes: usize) -> (Vec<PreparedAutomationSpan>, Vec<u32>) {
     let first = (step * FRAMES) as u64;
     let threshold = -30.0 + (step % 5) as f32 * 3.0;
@@ -177,23 +175,17 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
         return;
     };
     let lanes = width.lanes() as usize;
-    // Both lookaheads on purpose: the kernel has **two** idle bodies and which one a block takes
-    // is a function of the lookahead alone. `min_delay = latency - lookahead`, so a *long*
-    // lookahead makes the read-back distance short and forces the per-frame body, and a short one
-    // leaves it long enough to pre-gather the taps and take the staged body. A test at one
-    // lookahead exercises one of the two collapsed loops and says nothing about the other.
     for (link_mode, ramping, body) in [
         (LinkMode::DualMono, true, "per-frame"),
-        (LinkMode::DualMono, false, "staged"),
+        (LinkMode::DualMono, false, "idle"),
         (LinkMode::Average, true, "per-frame"),
-        (LinkMode::Average, false, "staged"),
+        (LinkMode::Average, false, "idle"),
         (LinkMode::Maximum, true, "per-frame"),
-        (LinkMode::Maximum, false, "staged"),
+        (LinkMode::Maximum, false, "idle"),
     ] {
-        let lookahead_ms = 1.0_f32;
         let _ = body;
         // A threshold and ratio that put the detector on both sides of the knee for this content.
-        let values = support::values_with(&[(0, -30.0), (1, 4.0), (7, lookahead_ms)]);
+        let values = support::values_with(&[(0, -30.0), (1, 4.0)]);
         let requests: Vec<_> = (0..lanes)
             .map(|_| request_linked(&values, link_mode))
             .collect();
@@ -250,15 +242,11 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
 
         // The **state** is the sharper statement, and it is where the subnormal link nuance lands.
         //
-        // A detector reading below `level_floor` (1e-8) is clamped before it reaches the static
-        // curve, so a subnormal that arrives at the link cannot move the rendered sample. It is
-        // written into the detector ring first, unclamped, and the ring is serialised -- so
-        // `0.5*|p| + 0.5*|p|` against `|p|` is a difference the payload carries and the audio does
-        // not. Comparing the payload is therefore the only way to state the operand-order rule at
-        // all, and it is the reason this file compares state and not only samples.
+        // A detector reading below `level_floor` is clamped before the static curve, so a
+        // subnormal exercises operand order without changing the output sample.
         //
         // Red mutation: replace the collapsed link with `main_left.abs()` in `frames_loop_mono` or
-        // `idle_frames_staged_mono` -- the "the link is a no-op on a mono bank" simplification.
+        // The idle mono body -- the "the link is a no-op on a mono bank" simplification.
         // Every sample assertion above stays green and this fails.
         let scalar = support::prepare(request_linked(&values, link_mode));
         collapsed.desymmetrize_channels();
@@ -280,15 +268,15 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
 /// strip; this one localises it to the compressor's own copy list, so a missing field here fails
 /// with this crate's name on it.
 ///
-/// Red mutation: delete any line of `Channel::copy_state_from` -- `cursor`, `gain_reduction_db`,
-/// `main`, `detector`, `words`, `ramps`, `delay`, `lookahead_ms` -- and this fails.
+/// Red mutation: delete either coefficient/ramp or envelope state from `copy_state_from` and this
+/// transition comparison fails.
 #[test]
 fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     let Some((_, width)) = support::native_bank_width() else {
         return;
     };
     let lanes = width.lanes() as usize;
-    let values = support::values_with(&[(0, -30.0), (1, 4.0), (7, 1.0)]);
+    let values = support::values_with(&[(0, -30.0), (1, 4.0)]);
     let requests: Vec<_> = (0..lanes)
         .map(|_| request_linked(&values, LinkMode::Average))
         .collect();
@@ -367,15 +355,15 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     }
 }
 
-/// A mono reopen copies a uniform left delay population over a ragged right population, and the
-/// very next public dual render agrees in complete PCM and serialised state with its dual oracle.
+/// A mono reopen copies the retained left processing state over a deliberately different right
+/// channel, and the next dual render agrees in complete PCM and serialised state with its oracle.
 #[test]
-fn mono_reopen_drives_the_next_render_from_the_copied_delay_population() {
+fn mono_reopen_drives_the_next_render_from_the_copied_state() {
     let Some((_, width)) = support::native_bank_width() else {
         return;
     };
     let lanes = width.lanes() as usize;
-    let uniform_values = support::values_with(&[(0, -30.0), (1, 4.0), (7, 0.0)]);
+    let uniform_values = support::values_with(&[(0, -30.0), (1, 4.0)]);
     let requests: Vec<_> = (0..lanes)
         .map(|_| request_linked(&uniform_values, LinkMode::Average))
         .collect();
@@ -384,8 +372,7 @@ fn mono_reopen_drives_the_next_render_from_the_copied_delay_population() {
     let sizes = support::prepare(request_linked(&uniform_values, LinkMode::Average));
 
     for track in 0..lanes {
-        let ragged_values =
-            support::values_with(&[(0, -30.0), (1, 4.0), (7, 2.5 * (track % 8) as f32)]);
+        let ragged_values = support::values_with(&[(0, -9.0), (1, 8.0), (2, 12.0), (6, 0.2)]);
         let uniform_source = support::prepare(request_linked(&uniform_values, LinkMode::Average));
         let ragged_source = support::prepare(request_linked(&ragged_values, LinkMode::Average));
         let (uniform_left, uniform_right) = support::snapshot(uniform_source.as_ref());
@@ -523,7 +510,7 @@ fn a_statically_bypassed_bank_collapses_to_the_dual_bits() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let values = support::values_with(&[(0, -30.0), (1, 4.0), (7, 1.0)]);
+    let values = support::values_with(&[(0, -30.0), (1, 4.0)]);
     let requests: Vec<_> = (0..lanes)
         .map(|_| request_configured(&values, LinkMode::Average, true))
         .collect();

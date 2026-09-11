@@ -26,9 +26,9 @@
 //!
 //! The four cases together reach every branch of the kernel that a rendered block can reach: the
 //! three link laws, a hard and two soft knees, an upward and a downward ratio, the three identity
-//! selects (`bypass` is not a corpus case because it is the input unchanged), a lookahead of zero
-//! and two non-zero taps, and — in the last case — the ramping body, its per-frame redesign and
-//! the exponential that designs a ballistic coefficient.
+//! selects (`bypass` is not a corpus case because it is the input unchanged), and — in the last
+//! case — the ramping body, its per-frame redesign and the exponential that designs a ballistic
+//! coefficient.
 
 use effect_contract::LinkMode;
 use lane::Lane;

@@ -473,7 +473,7 @@ impl<L: Lane> Instance<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        // #163 phase 4 item 1: a reset moves the rings and the recursive word, so the claim goes.
+        // A reset changes the recursive word and ramps, so any silent fixed-point claim goes.
         self.silent_fixed_point = false;
         let rate = self.metadata.sample_rate;
         match kind {
@@ -509,8 +509,8 @@ impl<L: Lane> Instance<L> {
         //   second buffer whose contents could differ from the block that was observed;
         // * the bypass flag is the one that was in force when the claim was earned, since it
         //   selects a different path through the kernel;
-        // * both input planes are exactly `+0.0`, which short-circuits on the first chunk for a
-        //   block carrying signal.
+        // * both input planes are exactly `+0.0`, which is the only input for which a settled
+        //   causal compressor can skip the kernel while preserving output and state bits.
         let quiet = self.left.max_remaining() == 0
             && self.right.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
@@ -518,12 +518,9 @@ impl<L: Lane> Instance<L> {
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
-            // Both rings are known all-`+0.0` (that is one of the legs the claim was earned on),
-            // the one recursive word is at its fixed point, and the buffers already hold the
-            // `+0.0` the kernel would have written. The cursor is the only state that must still
-            // move: advancing it by `frames` is exactly what `frames` per-sample increments do,
-            // and it keeps the state bit-identical to the slow path rather than merely
-            // equivalent.
+            // The recursive words are at their fixed point and the buffers already hold the
+            // `+0.0` the current-sample kernel would write, so the whole block is bit-identical
+            // to the slow path. There is no history cursor to advance.
             return;
         }
         let before = quiet.then(|| (self.left.recursive_bits(), self.right.recursive_bits()));
@@ -538,8 +535,7 @@ impl<L: Lane> Instance<L> {
             (&mut self.left, &mut self.right),
         );
         // Earn or lose the claim from what this block actually did: the recursive gain-reduction
-        // word came out as it went in, both delay rings are entirely `+0.0` (so a later cursor
-        // position reads the same silence a slow path would), and the output is `+0.0` to the bit.
+        // word came out as it went in and the output is `+0.0` to the bit.
         self.silent_fixed_point = match before {
             Some((left_before, right_before)) => {
                 left_before == self.left.recursive_bits()
@@ -564,11 +560,10 @@ impl<L: Lane> Instance<L> {
     /// Renders one block of the **collapsed** track: the left plane only.
     ///
     /// Every leg reads the left channel, which is the dual body's predicate with the right
-    /// channel's conjunct deleted -- and it is the same predicate, not a weaker one: a collapsed
-    /// bank's two channels hold the same ramps, the same rings and the same recursive word by the
-    /// induction the witness states, so `right.max_remaining() == 0` and
-    /// `block_is_positive_zero(right)` are the left conjuncts restated. Reading them off a right
-    /// plane the chain did not gather is what would be wrong.
+    /// channel's conjunct deleted. A collapsed bank's two channels hold the same ramps and
+    /// recursive word by the induction the witness states, so the right-channel checks are the
+    /// left checks restated. Reading them off a right plane the chain did not gather is what would
+    /// be wrong.
     ///
     /// `record` is called with the **same** verdict for both channels, because the right plane the
     /// seam is about to write is this left plane.
@@ -599,8 +594,7 @@ impl<L: Lane> Instance<L> {
         );
         self.silent_fixed_point = match before {
             Some(left_before) => {
-                left_before == self.left.recursive_bits()
-                    && block_is_positive_zero(&left[..words])
+                left_before == self.left.recursive_bits() && block_is_positive_zero(&left[..words])
             }
             None => false,
         };
@@ -645,9 +639,9 @@ impl<L: Lane> Instance<L> {
         input: StatePayloadInput<'_>,
         lane: usize,
     ) -> Result<(), StatePayloadError> {
-        // #163 phase 4 item 1: a restore writes rings, the recursive word and the coefficients
-        // from a payload this instance never rendered, so any standing claim is void. Withdrawn
-        // before the version check so a rejected restore cannot leave a half-trusted claim either.
+        // A restore writes the recursive word and coefficients from a payload this instance never
+        // rendered, so any standing claim is void. Withdraw it before the version check so a
+        // rejected restore cannot leave a half-trusted claim either.
         self.silent_fixed_point = false;
         if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
@@ -674,9 +668,9 @@ impl<L: Lane> Instance<L> {
 ///
 /// # The word list, and why it is exactly this
 ///
-/// Every per-lane word the compressor's kernel loads is a `Channel` field
-/// (`compressor::kernel::Channel`), and the render path reads exactly four of them
-/// per lane:
+/// Every designed per-lane word the compressor's kernel loads is a `Channel` field
+/// (`compressor::kernel::Channel`), and the render path reads the coefficient words and ramps
+/// listed below:
 ///
 /// * `words[c][l]` -- the eight designed coefficients (`COEF_COUNT`), the documented "source of
 ///   truth; `Coef` is a load of these". `Coef::load` reads them and derives `wet_identity`,
@@ -686,24 +680,18 @@ impl<L: Lane> Instance<L> {
 ///   `max_remaining` reads `remaining` to size the ramping prefix, and `advance_ramps` reads
 ///   `current`, `target` and `step` to move it. A ramp mid-flight is symmetric exactly when both
 ///   channels are the same distance from the same target by the same step.
-/// * `delay[l]` -- the detector read-back distance, read every frame by `gather_detector` and
-///   `fill_taps`, and by `min_delay`, which gates the staged idle body.
-/// * `lookahead_ms[l]` -- what `delay` was derived from. The kernel never reads it, but `redesign`
-///   does, so two channels that agree on `delay` and disagree here would diverge at the next
-///   restore or reset. Cheap, and it closes that hole.
 ///
 /// Deliberately excluded, each for its own reason:
 ///
-/// * `gain_reduction_db`, `main`, `detector`, `cursor` -- running state, not designed words.
+/// * `gain_reduction_db` -- running state, not designed words.
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
 /// * `metadata.link_mode`, `metadata.bypass`, `metadata.sample_rate`, `silent_fixed_point`,
-///   `silent_bypass`, `ring_length` -- whole-instance or per-channel-shared, so they cannot be
+///   `silent_bypass` -- whole-instance or per-channel-shared, so they cannot be
 ///   asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
 ///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
 ///   the original operation order.
-/// * `staged` -- scratch, written before it is read on every call that touches it.
 impl<L: Lane> Instance<L> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= L::WIDTH {
@@ -879,8 +867,8 @@ impl PreparedNativeEffect for PreparedCompressor {
 
     /// Reads the resident current and target values in the units listed above.
     ///
-    /// The same index and channel validation applies. Lookahead reports its fixed prepared value
-    /// as both current and target. Reading never changes smoother or envelope state. Direct
+    /// The same index and channel validation applies. Reading never changes smoother or envelope
+    /// state. Direct
     /// native scheduling shares the [`lane::CanonicalFpEnv`] precondition documented on
     /// [`Self::apply_parameter_point`].
     fn parameter_state(

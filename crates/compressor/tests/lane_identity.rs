@@ -8,7 +8,7 @@
 //! * the **width** half runs the frozen corpus through the same kernel at `W = 1`, 4 and 8 and
 //!   compares the result words, which covers the two widths a given host cannot bind.
 //!
-//! The tracks are deliberately heterogeneous — different lookahead, threshold, ratio, knee and mix
+//! The tracks are deliberately heterogeneous — different threshold, ratio, knee and mix
 //! — because a bank that used lane 0's coefficients for every lane would pass a homogeneous test.
 
 mod support;
@@ -26,7 +26,9 @@ const FRAMES: usize = 2_048;
 const QUANTUM: u32 = 128;
 
 /// Per-track parameters: no two tracks agree on anything the kernel reads per lane.
-fn track_values(track: usize) -> [effect_contract::InitialParameterValue; 16] {
+fn track_values(
+    track: usize,
+) -> [effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2] {
     values_with(&[
         (0, -10.0 - 6.0 * track as f32),
         (1, 1.5 + 2.0 * track as f32),
@@ -35,7 +37,6 @@ fn track_values(track: usize) -> [effect_contract::InitialParameterValue; 16] {
         (4, 20.0 + 40.0 * track as f32),
         (5, -3.0 + track as f32),
         (6, 0.25 + 0.1 * (track % 4) as f32),
-        (7, 2.5 * (track % 5) as f32),
     ])
 }
 

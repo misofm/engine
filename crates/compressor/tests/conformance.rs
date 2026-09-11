@@ -1,6 +1,6 @@
 //! Effect-contract conformance (issue 011 harness) against the production factory.
 //!
-//! 882 samples of lookahead at 44.1 kHz, a linked detector and a lookahead ring whose write index advances on silence.
+//! A linked detector, causal current-sample processing, and a zero-allocation render path.
 //!
 //! Issue #105 phase 2 F1: the harness runs against every production `NativeEffectFactory`, not
 //! just its own reference mock. The whole test is the macro -- see
@@ -85,7 +85,7 @@ fn scoped_allocator_attribution_controls_are_live_and_isolated() {
 }
 
 /// The installed allocator is live for both allocation and free, while repeated production
-/// renders through the uniform staged, uniform D=0 and ragged bank paths move neither counter.
+/// renders through uniform and ragged bank paths move neither counter.
 #[test]
 fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
     const CHILD: &str = "MISO_ENGINE_COMPRESSOR_ALLOCATION_AUDIT_CHILD";
@@ -110,12 +110,12 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
     assert!(liveness.allocations > 0, "allocation counter is not live");
     assert!(liveness.deallocations > 0, "free counter is not live");
 
-    let staged_values = support::values_with(&[(0, -24.0), (1, 4.0), (7, 0.0)]);
-    let live_values = support::values_with(&[(0, -24.0), (1, 4.0), (7, 20.0)]);
-    let mut staged = support::prepare(support::request(&staged_values));
+    let uniform_values = support::values_with(&[(0, -24.0), (1, 4.0)]);
+    let live_values = support::values_with(&[(0, -24.0), (1, 4.0)]);
+    let mut uniform = support::prepare(support::request(&uniform_values));
     let mut live = support::prepare(support::request(&live_values));
-    let mut staged_left = [0.375_f32; 128];
-    let mut staged_right = [-0.625_f32; 128];
+    let mut uniform_left = [0.375_f32; 128];
+    let mut uniform_right = [-0.625_f32; 128];
     let mut live_left = [-0.0_f32; 128];
     let mut live_right = [0.5_f32; 128];
 
@@ -124,11 +124,7 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
         let lanes = width.lanes() as usize;
         let values: Vec<_> = (0..lanes)
             .map(|lane| {
-                support::values_with(&[
-                    (0, -20.0 - lane as f32),
-                    (1, 3.0 + lane as f32 * 0.25),
-                    (7, 2.5 * lane as f32),
-                ])
+                support::values_with(&[(0, -20.0 - lane as f32), (1, 3.0 + lane as f32 * 0.25)])
             })
             .collect();
         let requests: Vec<_> = values
@@ -153,18 +149,18 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
         for block in 0..32_u64 {
             let target = targets[block as usize % targets.len()];
             assert_eq!(
-                staged.apply_parameter_point(5, ParameterChannel::Left, target),
+                uniform.apply_parameter_point(5, ParameterChannel::Left, target),
                 Ok(())
             );
-            let accepted = staged
+            let accepted = uniform
                 .parameter_state(5, ParameterChannel::Left)
                 .expect("native point state");
             assert_eq!(accepted.target_value.to_bits(), target.to_bits());
             assert_eq!(
-                staged.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
+                uniform.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
                 Err(effect_contract::ParameterAccessError::InvalidValue)
             );
-            let after_rejection = staged
+            let after_rejection = uniform
                 .parameter_state(5, ParameterChannel::Left)
                 .expect("native point state");
             assert_eq!(
@@ -176,19 +172,27 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
                 accepted.target_value.to_bits()
             );
             assert_eq!(
-                staged.parameter_state(u32::MAX, ParameterChannel::Right),
+                uniform.parameter_state(u32::MAX, ParameterChannel::Right),
                 Err(effect_contract::ParameterAccessError::InvalidParameterIndex)
             );
-            staged.process(
+            let silent = (8..16).contains(&(block as usize));
+            if silent {
+                uniform_left.fill(0.0);
+                uniform_right.fill(0.0);
+            } else {
+                uniform_left.fill(0.375);
+                uniform_right.fill(-0.625);
+            }
+            uniform.process(
                 EffectProcessBlock::new(
-                    &mut staged_left,
-                    &mut staged_right,
+                    &mut uniform_left,
+                    &mut uniform_right,
                     None,
                     block * 128,
                     &[],
                     128,
                 )
-                .expect("staged block"),
+                .expect("uniform block"),
             );
             live.process(
                 EffectProcessBlock::new(
@@ -215,11 +219,25 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
                 )
                 .expect("ragged block"),
             );
+            ragged.process_bank_mono(
+                EffectBankProcessBlock::new(
+                    &mut ragged_left,
+                    &mut ragged_right,
+                    None,
+                    128,
+                    bank_width,
+                    block * 128,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("mono block"),
+            );
         }
     });
     black_box((
-        &staged_left,
-        &staged_right,
+        &uniform_left,
+        &uniform_right,
         &live_left,
         &live_right,
         &ragged_left,

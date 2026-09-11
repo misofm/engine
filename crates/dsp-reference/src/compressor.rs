@@ -82,8 +82,7 @@ impl ReferencePeakCompressor {
         } else if level < threshold - 0.5 * knee {
             0.0
         } else {
-            (reciprocal_ratio - 1.0) * (level - threshold + 0.5 * knee).powi(2)
-                / (2.0 * knee)
+            (reciprocal_ratio - 1.0) * (level - threshold + 0.5 * knee).powi(2) / (2.0 * knee)
         }
         .clamp(-100.0, 0.0);
         let attack = 1.0 - (-1.0 / (0.001 * self.parameters.attack_ms * self.sample_rate_hz)).exp();

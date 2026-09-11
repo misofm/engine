@@ -112,10 +112,8 @@ fn the_corpus_is_finite() {
 }
 
 /// No case is vacuous: each one produces many distinct non-zero values, and the cases differ from
-/// one another.
-///
-/// Without this a corpus that rendered silence — because, say, the ring never filled — would agree
-/// with itself on every target and prove nothing.
+/// one another. Without this a corpus that rendered silence would agree with itself on every target
+/// and prove nothing.
 #[test]
 fn no_case_is_vacuous() {
     let mut digests = Vec::new();

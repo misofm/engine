@@ -11,13 +11,18 @@
 
 mod support;
 
-use effect_contract::{AutomationSpanKind, ParameterChannel, PreparedAutomationSpan};
+use effect_contract::{
+    AutomationSpanKind, EffectProcessBlock, LinkMode, ParameterChannel, PreparedAutomationSpan,
+    PreparedSidechainPort,
+};
 
-use support::{noise, prepare, render_scalar, request_with_quantum, snapshot, values_with};
+use support::{
+    noise, prepare, render_scalar, request_with_quantum, sidechain_port, snapshot, values_with,
+};
 
 const FRAMES: usize = 4_096;
 const QUANTUM: u32 = 512;
-const PARTITIONS: [usize; 5] = [1, 7, 64, 128, 512];
+const PARTITIONS: [usize; 9] = [1, 7, 63, 64, 65, 127, 128, 129, 512];
 
 /// A Point on every smoothed parameter, both channels, in the strictly increasing order the
 /// contract requires.
@@ -45,14 +50,14 @@ fn every_parameter() -> Vec<(u64, PreparedAutomationSpan)> {
 
 /// Output bits and state bytes are identical at every partition.
 ///
-/// Red mutation (MUTATIONS.md row 4): drop the ring wrap, so `next` runs past `B`. Two mutations
+/// Red mutation (MUTATIONS.md row 4): make the block loop lose its frame offset. Two mutations
 /// that might be expected here are recorded elsewhere instead, honestly: keeping `g` in a local is
 /// invisible to *this* test (both partitions lose it identically) and is gated by `cross_target`
 /// (row 7), and `ramping = frames` is an equivalent mutation (row 24) because advancing a ramp with
 /// `remaining == 0` is a no-op.
 #[test]
 fn block_partitions_are_invariant() {
-    let values = values_with(&[(0, -24.0), (1, 6.0), (2, 9.0), (7, 5.0)]);
+    let values = values_with(&[(0, -24.0), (1, 6.0), (2, 9.0)]);
     let input_left = noise(FRAMES, 0x9A_27_10_01, 0.85);
     let input_right = noise(FRAMES, 0x9A_27_10_02, 0.85);
     let spans = every_parameter();
@@ -117,7 +122,6 @@ fn bank_block_partitions_are_invariant() {
                 (0, -12.0 - 4.0 * track as f32),
                 (1, 2.0 + track as f32),
                 (2, 3.0 * (track % 3) as f32),
-                (7, 2.5 * (track % 4) as f32),
             ])
         })
         .collect();
@@ -171,6 +175,68 @@ fn bank_block_partitions_are_invariant() {
                 reference = Some(bits);
             }
             Some(expected) => assert_eq!(&bits, expected, "bank partition {partition}"),
+        }
+    }
+}
+
+/// A linked detector with an explicit sidechain is partition invariant too. This is the
+/// ordinary live path that replaced the old staged/tap partition assertion.
+#[test]
+fn linked_sidechain_partitions_are_invariant() {
+    let values = values_with(&[(0, -36.0), (1, 12.0), (2, 0.0), (6, 1.0)]);
+    let main_left = noise(FRAMES, 0x9A_27_10_11, 0.7);
+    let main_right = noise(FRAMES, 0x9A_27_10_12, 0.7);
+    let detector = noise(FRAMES, 0x9A_27_10_13, 0.9);
+
+    type Rendered = (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>);
+    let mut reference: Option<Rendered> = None;
+    for partition in PARTITIONS {
+        let mut preparation = request_with_quantum(&values, QUANTUM);
+        preparation.link_mode = LinkMode::Average;
+        preparation.ports.sidechain = PreparedSidechainPort::Connected {
+            id: sidechain_port(),
+            required: false,
+        };
+        let mut effect = prepare(preparation);
+        let mut left = main_left.clone();
+        let mut right = main_right.clone();
+        let mut offset = 0;
+        while offset < FRAMES {
+            let end = (offset + partition).min(FRAMES);
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left[offset..end],
+                    &mut right[offset..end],
+                    Some((&detector[offset..end], &detector[offset..end])),
+                    offset as u64,
+                    &[],
+                    QUANTUM,
+                )
+                .expect("bounded sidechain block"),
+            );
+            offset = end;
+        }
+        let (state_left, state_right) = snapshot(effect.as_ref());
+        let rendered = (
+            left.iter().map(|sample| sample.to_bits()).collect(),
+            right.iter().map(|sample| sample.to_bits()).collect(),
+            state_left,
+            state_right,
+        );
+        match &reference {
+            None => reference = Some(rendered),
+            Some((expected_left, expected_right, expected_state_left, expected_state_right)) => {
+                assert_eq!(&rendered.0, expected_left, "left, partition {partition}");
+                assert_eq!(&rendered.1, expected_right, "right, partition {partition}");
+                assert_eq!(
+                    &rendered.2, expected_state_left,
+                    "left state, partition {partition}"
+                );
+                assert_eq!(
+                    &rendered.3, expected_state_right,
+                    "right state, partition {partition}"
+                );
+            }
         }
     }
 }
