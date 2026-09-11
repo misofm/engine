@@ -93,3 +93,11 @@ Treat these downloads as frozen private inputs. Terra's attempt begins with rece
 ## Sol scope verdict
 
 **PASS to create and synchronize one sanitized preparation/research issue.** The slice answers the user's immediate question against the correct existing-FLAC baseline, creates reviewable private candidate assets, and produces a concrete integration scope without crossing into production code or publication. Its success criterion is exact reconstruction and truthful complete-package byte accounting, not a required positive savings result.
+
+## Implementation checkpoint and readiness review
+
+The private bounded conversion/packaging tranche is upstream. Attempt 1 failed Sol review on aggregate-baseline accounting, workspace admission, an absent eligible-gap fixture and incomplete input/package controls; no real conversion ran on that attempt.
+
+Sol attempt 2 readiness PASS covers strict release/session/digest/shape admission, conservative workspace accounting, manifest-versus-independent-census checks, correct total baseline and exact archive member/byte evidence. Root independently reran focused synthetic tests and whitespace checks. Controls prove 30 sparse reconstructions, 240 common windows, 30 manifest checks and 30 archive-only reconstructions on synthetic data. The previously qualified codec and packaging helper remain unchanged. The single untimed real preparation and final evidence review remain outstanding.
+
+The user's clarified target includes a future, more separated source set with potentially much more exact silence. Preserve the engine's existing PCM contract: sparse transport and a later sparse packed-PCM browser cache can both be adapter capabilities. A compact span inside Rust or DSP skipping requires a separate measured need. The candidate transport groups each recording's stem manifests and units in one uncompressed archive for complete offline download; Walrus quilt grouping remains a deployment choice, not codec granularity.
