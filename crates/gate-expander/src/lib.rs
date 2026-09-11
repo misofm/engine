@@ -11,15 +11,12 @@
 //! A prepared instance is `PreparedGate<L, CONNECTED>`. The scalar instance is `L = f32`, which is
 //! literally the `WIDTH = 1` instantiation of the same kernel, so it is the oracle for the four-
 //! and eight-lane banks rather than a second implementation of the same arithmetic. `CONNECTED`
-//! is `true` only for a scalar instance with a sidechain patched in: a bank requires an
-//! unconnected sidechain, so a bank never allocates the detector ring at all (finding F4).
+//! selects the current connected sidechain source; it does not change timing or allocate history.
 //!
 //! # Realtime rules
 //!
-//! Every allocation happens in [`NativeEffectFactory::prepare`] and
-//! [`NativeEffectFactory::bind_homogeneous_bank`] — two `Box<[f32]>` rings per instance, four when
-//! a sidechain is connected. `process` and `process_bank` touch nothing else, take no lock, make
-//! no syscall and call no platform libm.
+//! Preparation allocates the instance and fixed control state only. `process` and `process_bank`
+//! touch no audio history, take no lock, make no syscall and call no platform libm.
 #![allow(missing_docs)]
 
 pub mod corpus;
@@ -47,15 +44,12 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4, Simd8};
 
-use kernel::{
-    GateArgs, GateCoef, GateRing, GateState, MAX_WIDTH, RAMP_COUNT, classify_detector_access,
-    gate_block_with_access,
-};
+use kernel::{gate_block, GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT};
 
-const PARAMETER_COUNT: usize = 8;
+const PARAMETER_COUNT: usize = 7;
 
 /// Effect-owned words at the front of each channel section of the state payload.
-const STATE_LANE_HEADER_WORDS: usize = 23;
+const STATE_LANE_HEADER_WORDS: usize = 22;
 
 /// Samples every smoothed parameter takes to reach a new target, from the descriptor.
 const RAMP_SAMPLES: u32 = 64;
@@ -216,19 +210,6 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         SmoothingRule::None,
         0,
     ),
-    parameter(
-        8,
-        "lookahead",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        10.0,
-        2.0,
-        ParameterMapping::Linear,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
 ];
 
 const PORTS: [PortDescriptor; 3] = [
@@ -252,21 +233,14 @@ const PORTS: [PortDescriptor; 3] = [
     },
 ];
 
-/// State layout 2, per channel: 23 effect words, then the two cursor-normalised rings.
-///
-/// Layout 1 carried a physical ring cursor, a `u32` phase word and three-word ramps, and put no
-/// header in the common section at all. Layout 2 drops the cursor (a payload is normalised so that
-/// word `j` of a ring is the sample written `N - j` samples ago, which is what lets a track be
-/// restored into a bank whose shared cursor is somewhere else), carries the open flag and the hold
-/// countdown as the `f32` lane words the kernel actually holds, gives each ramp its precomputed
-/// step (D11), and adopts the runtime codec's two-word common header.
-const fn quality(sample_rate: u32, latency: u64) -> effect_contract::QualityDescriptor {
-    let per_lane = (STATE_LANE_HEADER_WORDS as u32 + 2 * latency as u32) * 4;
+/// Causal quality resources: 22 words per channel, the common two-word codec header and no delay.
+const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
+    let per_lane = (STATE_LANE_HEADER_WORDS as u32) * 4;
     let common = payload::HEADER_WORDS * payload::WORD_BYTES as u32;
     effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
-        latency: LatencySamples(latency),
+        latency: LatencySamples(0),
         tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: common,
@@ -279,18 +253,15 @@ const fn quality(sample_rate: u32, latency: u64) -> effect_contract::QualityDesc
 }
 
 const QUALITIES: [effect_contract::QualityDescriptor; 4] = [
-    quality(44_100, 441),
-    quality(48_000, 480),
-    quality(88_200, 882),
-    quality(96_000, 960),
+    quality(44_100),
+    quality(48_000),
+    quality(88_200),
+    quality(96_000),
 ];
 
 /// State payload layout version.
 ///
-/// Bumped from 1 to 2 by #89: the payload is cursor-normalised, the phase and hold words are the
-/// `f32` lane words the kernel holds, each ramp carries its precomputed D11 step, and the common
-/// section carries the runtime codec's two-word header. `maximum_state` moves in the same change,
-/// which is why the two are one bump and not two.
+/// State layout identity retained by the amended prelaunch descriptor.
 pub const STATE_LAYOUT_VERSION: u32 = 1;
 
 /// The one declared observation tap: the branching smoother's own gain word.
@@ -342,47 +313,31 @@ const GATE_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
     ParameterSpec::logarithmic(0.1, 50.0, 1.0),
     ParameterSpec::continuous(0.0, 1000.0, 100.0),
     ParameterSpec::logarithmic(5.0, 2000.0, 100.0),
-    ParameterSpec::continuous(0.0, 10.0, 2.0),
 ];
 
 /// Factory for the launch gate/expander.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GateExpanderFactory;
 
-/// The four unsmoothed times of one lane and channel, kept for the state payload and for the
-/// coefficient re-derivation a restore performs.
+/// The three unsmoothed times of one lane and channel, kept for state restore and coefficient
+/// re-derivation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct LaneTiming {
-    lookahead_ms: f32,
     attack_ms: f32,
     hold_ms: f32,
     release_ms: f32,
 }
 
-/// One channel's owned delay storage.
-struct Ring {
-    main: Box<[f32]>,
-    detector: Box<[f32]>,
-    tap: [u32; MAX_WIDTH],
-}
-
 /// A prepared gate at one lane width.
 ///
-/// `CONNECTED` is `true` only when a sidechain is patched in, which is a scalar-only
-/// configuration: the detector ring is allocated exactly then, and is a zero-length slice
-/// otherwise.
+/// `CONNECTED` selects whether the current detector words come from the sidechain.
 struct PreparedGate<L: Lane, const CONNECTED: bool> {
     metadata: PreparedEffectMetadata,
     bank_width: Option<BankWidth>,
     defaults: [[[f32; PARAMETER_COUNT]; 2]; MAX_WIDTH],
     coef: [GateCoef<L>; 2],
     state: [GateState<L>; 2],
-    ring: [Ring; 2],
     timing: [[LaneTiming; 2]; MAX_WIDTH],
-    cursor: u32,
-    slots: usize,
-    slot_mask: u32,
-    delay: u32,
     ramp_frames_left: u32,
 }
 
@@ -435,7 +390,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         payload::StateLayout {
             version: STATE_LAYOUT_VERSION,
             common_words: 0,
-            lane_words: STATE_LANE_HEADER_WORDS as u32 + 2 * self.delay,
+            lane_words: STATE_LANE_HEADER_WORDS as u32,
         }
     }
 
@@ -447,9 +402,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         defaults: [[[f32; PARAMETER_COUNT]; 2]; MAX_WIDTH],
     ) -> Option<Self> {
         let width = L::WIDTH;
-        let delay = u32::try_from(metadata.latency.0).ok()?;
-        let slots = (delay as usize).checked_add(1)?.next_power_of_two();
-        let slot_mask = u32::try_from(slots - 1).ok()?;
         let connected = matches!(
             metadata.ports.sidechain,
             PreparedSidechainPort::Connected { .. }
@@ -457,13 +409,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         if connected != CONNECTED {
             return None;
         }
-        let detector = |slots: usize| -> Box<[f32]> {
-            if CONNECTED {
-                vec![0.0; slots * width].into_boxed_slice()
-            } else {
-                Vec::new().into_boxed_slice()
-            }
-        };
         let mut gate = Self {
             metadata,
             bank_width,
@@ -477,23 +422,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 link_avg: L::splat(f32::from(u8::from(metadata.link_mode == LinkMode::Average))),
             }; 2],
             state: [GateState::default(); 2],
-            ring: [
-                Ring {
-                    main: vec![0.0; slots * width].into_boxed_slice(),
-                    detector: detector(slots),
-                    tap: [0; MAX_WIDTH],
-                },
-                Ring {
-                    main: vec![0.0; slots * width].into_boxed_slice(),
-                    detector: detector(slots),
-                    tap: [0; MAX_WIDTH],
-                },
-            ],
             timing: [[LaneTiming::default(); 2]; MAX_WIDTH],
-            cursor: 0,
-            slots,
-            slot_mask,
-            delay,
             ramp_frames_left: 0,
         };
         for channel in 0..2 {
@@ -508,7 +437,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     fn seed_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
         let values = self.defaults[lane][channel];
         self.timing[lane][channel] = LaneTiming {
-            lookahead_ms: values[7],
             attack_ms: values[4],
             hold_ms: values[5],
             release_ms: values[6],
@@ -527,13 +455,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Some(())
     }
 
-    /// Recomputes one lane's tap and one-pole coefficients from its timing.
+    /// Recomputes one lane's hold count and one-pole coefficients from its timing.
     fn rederive_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
         let timing = self.timing[lane][channel];
         let sample_rate = self.metadata.sample_rate;
-        let lookahead = rounded_samples(timing.lookahead_ms, sample_rate)?.min(self.delay);
         let hold = rounded_samples(timing.hold_ms, sample_rate)?;
-        self.ring[channel].tap[lane] = self.delay - lookahead;
         lane_set(&mut self.coef[channel].hold_samples, lane, hold as f32);
         lane_set(
             &mut self.coef[channel].attack,
@@ -552,27 +478,12 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// resting ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7
     /// recovery action for a lane whose block failed the boundary check.
     fn reset_lane_full(&mut self, channel: usize, lane: usize) {
-        self.clear_lane_rings(channel, lane);
         let _ = self.seed_lane(channel, lane);
-    }
-
-    /// Clears one lane's column of one channel's rings.
-    fn clear_lane_rings(&mut self, channel: usize, lane: usize) {
-        let width = L::WIDTH;
-        let slots = self.slots;
-        let ring = &mut self.ring[channel];
-        for slot in 0..slots {
-            ring.main[slot * width + lane] = 0.0;
-            if CONNECTED {
-                ring.detector[slot * width + lane] = 0.0;
-            }
-        }
     }
 
     /// `ResetKind::DiscontinuityKeepParameters` for one lane: history goes, the smoothed values
     /// snap to their targets and the unsmoothed times are kept.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
-        self.clear_lane_rings(channel, lane);
         let hold = lane_get(self.coef[channel].hold_samples, lane);
         lane_set(&mut self.state[channel].gain_db, lane, 0.0);
         lane_set(&mut self.state[channel].hysteresis.open, lane, OPEN_WORD);
@@ -596,7 +507,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 }
             }
         }
-        self.cursor = 0;
         self.ramp_frames_left = 0;
     }
 
@@ -710,20 +620,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         frames: usize,
     ) {
         let (state_left, state_right) = self.state.split_at_mut(1);
-        let (ring_left, ring_right) = self.ring.split_at_mut(1);
-        let Ring {
-            main: main_left,
-            detector: detector_left,
-            tap: tap_left,
-        } = &mut ring_left[0];
-        let Ring {
-            main: main_right,
-            detector: detector_right,
-            tap: tap_right,
-        } = &mut ring_right[0];
-        let detector_access =
-            classify_detector_access(self.metadata.link_mode, L::WIDTH, tap_left, tap_right);
-        gate_block_with_access::<L, CONNECTED, RAMPING>(
+        gate_block::<L, CONNECTED, RAMPING>(
             GateArgs {
                 left,
                 right,
@@ -731,23 +628,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 frames,
                 coef: (&self.coef[0], &self.coef[1]),
                 state: (&mut state_left[0], &mut state_right[0]),
-                rings: (
-                    GateRing {
-                        main: main_left,
-                        detector: detector_left,
-                        tap: tap_left,
-                    },
-                    GateRing {
-                        main: main_right,
-                        detector: detector_right,
-                        tap: tap_right,
-                    },
-                ),
-                cursor: &mut self.cursor,
-                slot_mask: self.slot_mask,
-                delay: self.delay,
             },
-            detector_access,
         );
     }
 
@@ -803,29 +684,15 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         payload::write_f32(bytes, 1, lane_get(state.hysteresis.open, lane));
         payload::write_f32(bytes, 2, lane_get(state.hysteresis.hold, lane));
         let timing = self.timing[lane][channel];
-        payload::write_f32(bytes, 3, timing.lookahead_ms);
-        payload::write_f32(bytes, 4, timing.attack_ms);
-        payload::write_f32(bytes, 5, timing.hold_ms);
-        payload::write_f32(bytes, 6, timing.release_ms);
+        payload::write_f32(bytes, 3, timing.attack_ms);
+        payload::write_f32(bytes, 4, timing.hold_ms);
+        payload::write_f32(bytes, 5, timing.release_ms);
         for (index, ramp) in state.ramps.iter().enumerate() {
             let word = STATE_RAMP_WORD + index * 4;
             payload::write_f32(bytes, word, lane_get(ramp.current, lane));
             payload::write_f32(bytes, word + 1, lane_get(ramp.target, lane));
             payload::write_f32(bytes, word + 2, lane_get(ramp.step, lane));
             payload::write_f32(bytes, word + 3, lane_get(ramp.remaining, lane));
-        }
-        let width = L::WIDTH;
-        let ring = &self.ring[channel];
-        let live = self.cursor.wrapping_sub(self.delay);
-        for word in 0..self.delay as usize {
-            let slot = ((live.wrapping_add(word as u32) & self.slot_mask) as usize) * width + lane;
-            payload::write_f32(bytes, STATE_LANE_HEADER_WORDS + word, ring.main[slot]);
-            let detector = if CONNECTED { ring.detector[slot] } else { 0.0 };
-            payload::write_f32(
-                bytes,
-                STATE_LANE_HEADER_WORDS + self.delay as usize + word,
-                detector,
-            );
         }
     }
 
@@ -855,14 +722,12 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         let open = payload::read_f32(bytes, 1);
         let hold = payload::read_f32(bytes, 2);
         let timing = LaneTiming {
-            lookahead_ms: payload::read_f32(bytes, 3),
-            attack_ms: payload::read_f32(bytes, 4),
-            hold_ms: payload::read_f32(bytes, 5),
-            release_ms: payload::read_f32(bytes, 6),
+            attack_ms: payload::read_f32(bytes, 3),
+            hold_ms: payload::read_f32(bytes, 4),
+            release_ms: payload::read_f32(bytes, 5),
         };
         for (index, value) in [
-            (7_usize, timing.lookahead_ms),
-            (4, timing.attack_ms),
+            (4_usize, timing.attack_ms),
             (5, timing.hold_ms),
             (6, timing.release_ms),
         ] {
@@ -901,13 +766,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             }
             *ramp = [current, target, step, remaining];
         }
-        for word in 0..2 * self.delay as usize {
-            let value = payload::read_f32(bytes, STATE_LANE_HEADER_WORDS + word);
-            let detector = word >= self.delay as usize;
-            if !normal_or_zero(value) || (detector && !CONNECTED && value.to_bits() != 0) {
-                return Err(state_error("effect.state.ring"));
-            }
-        }
         Ok(LaneRestore {
             gain_db: normalize_zero(gain_db),
             open,
@@ -923,7 +781,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         channel: usize,
         lane: usize,
         parsed: &LaneRestore,
-        bytes: &[u8],
+        _bytes: &[u8],
     ) -> Result<(), StatePayloadError> {
         self.timing[lane][channel] = parsed.timing;
         self.rederive_lane(channel, lane)
@@ -939,19 +797,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         if parsed.ramps.iter().any(|ramp| ramp[3] != 0.0) {
             self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
-        }
-        let width = L::WIDTH;
-        let live = self.cursor.wrapping_sub(self.delay);
-        let delay = self.delay as usize;
-        let mask = self.slot_mask;
-        let ring = &mut self.ring[channel];
-        for word in 0..delay {
-            let slot = ((live.wrapping_add(word as u32) & mask) as usize) * width + lane;
-            ring.main[slot] = payload::read_f32(bytes, STATE_LANE_HEADER_WORDS + word);
-            if CONNECTED {
-                ring.detector[slot] =
-                    payload::read_f32(bytes, STATE_LANE_HEADER_WORDS + delay + word);
-            }
         }
         Ok(())
     }
@@ -980,7 +825,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
 }
 
 /// Word index of the first ramp quadruple in a channel section.
-const STATE_RAMP_WORD: usize = 7;
+const STATE_RAMP_WORD: usize = 6;
 
 /// One validated channel section, held on the stack until both channels have been accepted.
 struct LaneRestore {

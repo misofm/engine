@@ -87,3 +87,18 @@ No completed gate listening record was identified in `dsp-research/listening/`; 
 Root synchronizes this stateless local spec with existing open GH #738/title before implementation, keeps bounded CPU successor #746 synchronized, and records coherent checkpoint evidence. After Sol's singular final PASS on the frozen candidate, run required qualification on the exact PR head, merge through current policy, verify required qualification on the exact resulting main commit, synchronize evidence and close/verify GH #738. Only then report it delivered and begin active #739 implementation. Remove the completed clean, fully pushed worktree with preserved evidence; retain branches/history and any unique work.
 
 Scope verdict: **Astra XHIGH PASS** at `d2aeb62d4ed2b1b875a2e03ef31cd89c988081e9`. No implementation, timing, listening or qualification PASS is claimed by this brief.
+
+
+## Attempt 1 core checkpoint
+
+Luna XHIGH supplied the causal kernel/runtime, independent reference and corpus
+plumbing, plus seven-parameter support/contract scaffolding. Both current main
+words are loaded before either output write; no ring/tap/cursor/classifier remains.
+The descriptor and codec expose zero latency and common8+left88+right88 bytes.
+`cargo check -p gate-expander -p dsp-reference` and three library tests pass; this
+is a compiling core checkpoint, not final qualification. Old integration files
+still contain retired delay/lookahead assumptions and await the next tranche.
+Root preserved `/tmp/issue738-luna-tranche1.md` and restored only incidental
+Cargo.lock dependency-order normalization. No corpus/artifact pin, metadata,
+benchmark, or historical evidence changed. Oracle/current tests, admission/PDC,
+root-owned fixture/metadata/pins, realtime/targets and final Sol/CI remain.

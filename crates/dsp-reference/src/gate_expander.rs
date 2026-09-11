@@ -73,8 +73,6 @@ pub struct ReferenceGateTiming {
     pub hold_ms: f64,
     /// Release time constant in milliseconds.
     pub release_ms: f64,
-    /// Lookahead in milliseconds, at most the fixed latency.
-    pub lookahead_ms: f64,
 }
 
 /// How the two channels' detectors are linked.
@@ -121,40 +119,28 @@ fn round_half_up(value: f64) -> f64 {
 /// One channel's derived, sample-domain timing.
 #[derive(Clone, Copy)]
 struct Derived {
-    detector_delay: usize,
     hold_samples: u64,
     attack_rate: f64,
     release_rate: f64,
 }
 
-fn derive(
-    timing: ReferenceGateTiming,
-    latency: usize,
-) -> Result<Derived, ReferenceGateExpanderError> {
+fn derive(timing: ReferenceGateTiming) -> Result<Derived, ReferenceGateExpanderError> {
     if timing.sample_rate == 0
         || !timing.attack_ms.is_finite()
         || !timing.hold_ms.is_finite()
         || !timing.release_ms.is_finite()
-        || !timing.lookahead_ms.is_finite()
         || timing.attack_ms <= 0.0
         || timing.release_ms <= 0.0
         || timing.hold_ms < 0.0
-        || timing.lookahead_ms < 0.0
     {
         return Err(ReferenceGateExpanderError::InvalidInput);
     }
     let rate = f64::from(timing.sample_rate);
-    let lookahead = round_half_up(timing.lookahead_ms * rate / 1000.0);
-    if lookahead < 0.0 || lookahead > usize::MAX as f64 {
-        return Err(ReferenceGateExpanderError::InvalidInput);
-    }
-    let lookahead = (lookahead as usize).min(latency);
     let hold = round_half_up(timing.hold_ms * rate / 1000.0);
     if hold < 0.0 || hold > u64::MAX as f64 {
         return Err(ReferenceGateExpanderError::InvalidInput);
     }
     Ok(Derived {
-        detector_delay: latency - lookahead,
         hold_samples: hold as u64,
         // `1 - exp(-1 / (tau * fs))`, the per-sample rate coefficient of `G += b * (C - G)`.
         attack_rate: 1.0 - (-1000.0 / (timing.attack_ms * rate)).exp(),
@@ -171,10 +157,9 @@ struct ChannelState {
 
 /// Renders a whole signal through the `f64` transcription of the gate/expander.
 ///
-/// A full transcription of brief 014's gain computer as amended by #89: the `log2`/`exp2`
-/// realisation of the dB conversions, the single-rounding `G + b * (C - G)` one-pole and the
-/// `1e-20` flush band. Hold counters and ring taps are integers and the rings are plain vectors,
-/// so nothing about the production kernel's layout can leak into the oracle.
+/// A full f64 transcription of the causal gain computer: current-sample detector, single-rounding
+/// `G + b * (C - G)` one-pole and the `1e-20` flush band. Hold counters are integer samples, so
+/// nothing about the production kernel's layout can leak into the oracle.
 ///
 /// The fixed latency is `sample_rate / 100`, as the descriptor's qualities pin it. Parameters are
 /// static for the whole render: ramps belong to the control plane and are not modelled.
@@ -227,8 +212,7 @@ pub fn reference_gate_expander_process(
             return Err(ReferenceGateExpanderError::InvalidInput);
         }
     }
-    let latency = timing.0.sample_rate as usize / 100;
-    let derived = (derive(timing.0, latency)?, derive(timing.1, latency)?);
+    let derived = (derive(timing.0)?, derive(timing.1)?);
 
     let mut state = [
         ChannelState {
@@ -255,28 +239,15 @@ pub fn reference_gate_expander_process(
         dry_left: Vec::with_capacity(frames),
         dry_right: Vec::with_capacity(frames),
     };
-    let at = |signal: &[f64], index: isize| -> f64 {
-        if index < 0 {
-            0.0
-        } else {
-            signal[index as usize]
-        }
-    };
-
     for frame in 0..frames {
-        let index = frame as isize;
-        let dry = (
-            at(main.0, index - latency as isize),
-            at(main.1, index - latency as isize),
-        );
+        let dry = (main.0[frame], main.1[frame]);
         for channel in 0..2 {
             let (parameters, hysteresis, derived, partner) = if channel == 0 {
                 (params_left, hysteresis_db.0, derived.0, 1)
             } else {
                 (params_right, hysteresis_db.1, derived.1, 0)
             };
-            let tap = index - derived.detector_delay as isize;
-            let sources = [at(detector_source.0, tap), at(detector_source.1, tap)];
+            let sources = [detector_source.0[frame], detector_source.1[frame]];
             let own = sources[channel].abs();
             let other = sources[partner].abs();
             let level = match link {
@@ -346,13 +317,12 @@ pub fn reference_gate_expander_process(
 mod tests {
     use super::*;
 
-    fn timing(lookahead_ms: f64, hold_ms: f64) -> ReferenceGateTiming {
+    fn timing(hold_ms: f64) -> ReferenceGateTiming {
         ReferenceGateTiming {
             sample_rate: 48_000,
             attack_ms: 1.0,
             hold_ms,
             release_ms: 5.0,
-            lookahead_ms,
         }
     }
 
@@ -398,7 +368,7 @@ mod tests {
 
     #[test]
     fn hold_expiry_closes_exactly_one_sample_after_the_countdown_reaches_zero() {
-        // Two-sample hold, and a full 10 ms lookahead so the detector tap is the current sample.
+        // Two-sample hold. The detector is current-sample causal.
         // The level is above the threshold for one sample, then silent: the gate stays open for
         // the two held samples and closes on the third silent one.
         let parameters = ReferenceGateExpanderParameters {
@@ -407,8 +377,7 @@ mod tests {
             range_db: 48.0,
         };
         let rate = 48_000_u32;
-        let latency = rate as usize / 100;
-        let frames = latency + 8;
+        let frames = 8;
         let mut left = vec![0.0_f64; frames];
         left[0] = 1.0;
         let right = vec![0.0_f64; frames];
@@ -417,7 +386,7 @@ mod tests {
             parameters,
             parameters,
             (6.0, 6.0),
-            (timing(10.0, hold_ms), timing(10.0, hold_ms)),
+            (timing(hold_ms), timing(hold_ms)),
             ReferenceGateLink::DualMono,
             (&left, &right),
             None,
@@ -440,29 +409,28 @@ mod tests {
             range_db: 48.0,
         };
         let rate = 48_000_u32;
-        let latency = rate as usize / 100;
         let amplitude = 10.0_f64.powf(-40.0 / 20.0);
         // Zero hold, so the gate is closed by the time the trigger arrives.
-        let mut left = vec![0.0_f64; latency + 8];
-        left[latency + 4] = amplitude;
-        let right = vec![0.0_f64; latency + 8];
+        let mut left = vec![0.0_f64; 8];
+        left[4] = amplitude;
+        let right = vec![0.0_f64; 8];
         let trace = reference_gate_expander_process(
             parameters,
             parameters,
             (6.0, 6.0),
-            (timing(10.0, 0.0), timing(10.0, 0.0)),
+            (timing(0.0), timing(0.0)),
             ReferenceGateLink::DualMono,
             (&left, &right),
             None,
         )
         .expect("reference render");
         assert_eq!(
-            trace.level_db_left[latency + 4],
+            trace.level_db_left[4],
             -40.0,
             "the trigger sample sits exactly on the threshold"
         );
-        assert_eq!(trace.phase_left[latency + 3], ReferenceGatePhase::Closed);
-        assert_eq!(trace.phase_left[latency + 4], ReferenceGatePhase::Open);
+        assert_eq!(trace.phase_left[3], ReferenceGatePhase::Closed);
+        assert_eq!(trace.phase_left[4], ReferenceGatePhase::Open);
     }
 
     #[test]
@@ -476,10 +444,9 @@ mod tests {
             range_db: 48.0,
         };
         let rate = 48_000_u32;
-        let latency = rate as usize / 100;
         let hold_ms = 3.0 * 1000.0 / f64::from(rate);
         let band = 10.0_f64.powf(-43.0 / 20.0);
-        let frames = latency + 32;
+        let frames = 32;
         let mut left = vec![0.0_f64; frames];
         left[0] = 1.0;
         // Frames 1 and 2 are silent, so the countdown falls to 1; frames 3 to 6 sit in the band.
@@ -491,7 +458,7 @@ mod tests {
             parameters,
             parameters,
             (6.0, 6.0),
-            (timing(10.0, hold_ms), timing(10.0, hold_ms)),
+            (timing(hold_ms), timing(hold_ms)),
             ReferenceGateLink::DualMono,
             (&left, &right),
             None,
@@ -508,28 +475,27 @@ mod tests {
     }
 
     #[test]
-    fn the_dry_path_is_delayed_by_the_fixed_latency() {
+    fn the_dry_path_is_current_sample_causal() {
         let parameters = ReferenceGateExpanderParameters {
             threshold_db: -80.0,
             ratio: 1.0,
             range_db: 0.0,
         };
-        let latency = 480;
-        let mut left = vec![0.0_f64; latency + 4];
+        let mut left = vec![0.0_f64; 4];
         left[0] = 0.75;
-        let right = vec![0.0_f64; latency + 4];
+        let right = vec![0.0_f64; 4];
         let trace = reference_gate_expander_process(
             parameters,
             parameters,
             (6.0, 6.0),
-            (timing(0.0, 0.0), timing(0.0, 0.0)),
+            (timing(0.0), timing(0.0)),
             ReferenceGateLink::DualMono,
             (&left, &right),
             None,
         )
         .expect("reference render");
-        assert_eq!(trace.dry_left[latency], 0.75);
-        assert_eq!(trace.dry_left[latency - 1], 0.0);
+        assert_eq!(trace.dry_left[0], 0.75);
+        assert_eq!(trace.dry_left[1], 0.0);
     }
 
     #[test]
@@ -546,7 +512,7 @@ mod tests {
                 parameters,
                 parameters,
                 (6.0, 6.0),
-                (timing(0.0, 0.0), timing(0.0, 0.0)),
+                (timing(0.0), timing(0.0)),
                 ReferenceGateLink::DualMono,
                 (&left, &right),
                 None,
