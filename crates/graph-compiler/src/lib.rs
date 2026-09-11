@@ -3162,6 +3162,163 @@ mod tests {
         .expect("effects")
     }
 
+    #[test]
+    fn borrowed_session_returns_original_inputs_on_early_and_late_rejection() {
+        let prepare = || {
+            let effects = cross_index_effect_fixture();
+            let builtins = prepare_session_builtins(
+                &effects.session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("builtins");
+            (effects, builtins)
+        };
+        let compile = |effects, builtins, caps| {
+            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                plan_id: 162,
+                effects,
+                builtins,
+                caps,
+                dispatch: Backend::Scalar,
+            })
+        };
+        let (baseline_effects, baseline_builtins) = prepare();
+        let baseline = compile(baseline_effects, baseline_builtins, integration_caps())
+            .unwrap_or_else(|failure| panic!("baseline: {:?}", failure.diagnostics));
+        let (mut effects, mut builtins) = prepare();
+        let session_tracks = effects.session.normalized_model().tracks.as_ptr();
+        let processors = effects
+            .entries
+            .iter()
+            .map(|entry| &*entry.processor as *const dyn PreparedNativeEffect as *const ())
+            .collect::<Vec<_>>();
+        let builtin_tracks = builtins
+            .tails()
+            .map(|(track, _)| track.as_ptr())
+            .collect::<Vec<_>>();
+        for maximum_nodes in [0, 1] {
+            let mut constrained = integration_caps();
+            constrained.maximum_nodes = maximum_nodes;
+            let failure = match compile(effects, builtins, constrained) {
+                Ok(_) => panic!("zero cap rejects early; nonzero node cap rejects after planning"),
+                Err(failure) => failure,
+            };
+            assert_eq!(
+                failure
+                    .diagnostics
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| (diagnostic.code, diagnostic.path.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![("graph.resource.limit", "$.graph_compile_caps")]
+            );
+            assert_eq!(
+                failure.effects.session.normalized_model().tracks.as_ptr(),
+                session_tracks
+            );
+            assert_eq!(
+                failure
+                    .effects
+                    .entries
+                    .iter()
+                    .map(|entry| &*entry.processor as *const dyn PreparedNativeEffect as *const ())
+                    .collect::<Vec<_>>(),
+                processors
+            );
+            assert_eq!(
+                failure
+                    .builtins
+                    .tails()
+                    .map(|(track, _)| track.as_ptr())
+                    .collect::<Vec<_>>(),
+                builtin_tracks
+            );
+            assert!(
+                failure
+                    .builtins
+                    .validate_for_session(&failure.effects.session)
+                    .0
+                    .is_empty()
+            );
+            effects = failure.effects;
+            builtins = failure.builtins;
+        }
+        let recovered = compile(effects, builtins, integration_caps())
+            .unwrap_or_else(|failure| panic!("retry: {:?}", failure.diagnostics));
+        assert_eq!(
+            GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes,
+            GraphCompiler::evidence(recovered.graph(), recovered.report()).canonical_bytes
+        );
+        let render = |artifact: PreparedGraphBuiltinsArtifact| {
+            let envelope = artifact.envelope();
+            let frames = envelope.quantum.0 as usize;
+            let nodes = artifact
+                .external_binding_nodes()
+                .map(|node| {
+                    let processor: Box<dyn GraphRuntimeProcessor> = match node {
+                        GraphNodeId::TrackStage {
+                            track_id,
+                            stage: TrackStage::Input,
+                        } => Box::new(AsymmetricTrackImpulseBinding {
+                            left: if track_id.as_str() == "cross0" {
+                                0.25
+                            } else {
+                                0.5
+                            },
+                            right: -0.125,
+                        }),
+                        _ => Box::new(IdentityBinding),
+                    };
+                    GraphNodeBinding::new(node.clone(), processor)
+                })
+                .collect();
+            let mut bound = artifact
+                .into_bound(GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: Vec::new(),
+                })
+                .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            (0..4)
+                .map(|block| {
+                    let mut pcm = vec![0.0; frames * 2];
+                    bound
+                        .plan
+                        .render(
+                            RenderIo {
+                                input: None,
+                                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                                    .expect("output"),
+                            },
+                            RenderTime {
+                                absolute_sample: block * frames as u64,
+                            },
+                        )
+                        .expect("render");
+                    pcm
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = render(baseline);
+        assert!(expected.iter().flatten().any(|sample| *sample != 0.0));
+        assert_pcm_bits_equal(
+            &expected,
+            &render(recovered),
+            "original effects and builtins survive rejected compiles",
+        );
+    }
+
     fn cross_index_metadata_latency(track: &str, rack: EffectRack, effect: &str) -> u64 {
         match (track, rack, effect) {
             ("cross0", EffectRack::Simd1, "chain0") => 11,

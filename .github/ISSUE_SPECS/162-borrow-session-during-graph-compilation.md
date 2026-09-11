@@ -55,3 +55,16 @@ The dominant F5 cost — the canonical dump, its SHA-256 and the Graphviz string
 ## Provenance
 
 Filed from the `allow-hygiene` window-cleanup pass (job 4, item 4), which was scoped to file-or-fix this debt and explicitly not to perform the restructure.
+
+## Astra LOW attempt 1 focused checkpoint
+
+The smallest lexical borrowing solution compiled: borrow effects.session directly
+and pass that reference to the index helper. No large extraction or equivalent
+copy is needed. The focused test preserves original session allocation, distinct
+processor ownership and builtins allocations across early zero-cap and late
+node-cap failures, then retries successfully with identical canonical graph
+and nonzero four-block PCM. Formatting and this focused test passed. Actual
+argv/env/source/exits/logs: `/tmp/engine-162-attempt1`. Incidental Cargo lock
+ordering was preserved externally and restored; no dependency change.
+Root checkpoints now; full compiler tests, strict Clippy and independent review
+remain. No allocation-count or performance claim beyond removing this clone.
