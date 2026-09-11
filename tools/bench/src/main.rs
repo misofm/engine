@@ -27,6 +27,8 @@ mod graph;
 mod input_symmetry;
 #[cfg(not(target_arch = "wasm32"))]
 mod input_symmetry_capture;
+#[cfg(not(target_arch = "wasm32"))]
+mod multiband_active;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 mod rack;
@@ -43,6 +45,7 @@ const SUBJECTS: &[&str] = &[
     "effect-contract",
     "effect-interchange",
     "gate-active",
+    "multiband-active",
     "graph",
     "input-symmetry",
     "input-symmetry-capture",
@@ -60,6 +63,7 @@ fn run_subject(subject: &str) {
         "effect-contract" => effect_contract::main(),
         "effect-interchange" => effect_interchange::main(),
         "gate-active" => gate_active::main(),
+        "multiband-active" => multiband_active::main(),
         "graph" => graph::main(),
         "input-symmetry" => input_symmetry::main(),
         "input-symmetry-capture" => input_symmetry_capture::main(),
