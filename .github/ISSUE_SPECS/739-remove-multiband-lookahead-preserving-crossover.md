@@ -592,3 +592,12 @@ All earlier substantive inherited/partition/target failures listed above remain
 preserved. This limitation is candidly disclosed and does not replace a test
 gate. Required exact PR/main qualification and delivery synchronization remain
 root-owned. CPU748 and human listening26 remain pending without a claim.
+
+
+## Delivery complete — 2026-09-11
+
+PR749 merged as fe9fc8d4e29ca1d6bca3e101b68b43b05f8078b9. Exact PR
+qualification34616211883 and resulting-main34616871402PASS. GitHub739
+CLOSED and verified; delivery comment5636915560, parent560/349 and
+listening26 synchronized. Clean delivered worktree removed; branch/history
+and external evidence retained. CPU748 and human listening26 remain pending.
