@@ -252,7 +252,7 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
 /// The parameter set the audit renders with: a high threshold, a steep ratio and a short hold, so
 /// the gate is actually working rather than resting in its identity path.
 fn active_values() -> Vec<InitialParameterValue> {
-    let chosen = [-20.0_f32, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0, 10.0];
+    let chosen = [-20.0_f32, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0];
     let mut values = Vec::with_capacity(chosen.len() * 2);
     for (index, value) in chosen.iter().enumerate() {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {

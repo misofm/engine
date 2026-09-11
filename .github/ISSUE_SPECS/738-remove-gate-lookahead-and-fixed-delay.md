@@ -168,3 +168,16 @@ remains withheld. A separate isolated Luna XHIGH test-only repair at
 witnesses; integration owns disjoint paths. No final PASS or new production defect
 is asserted. Root must integrate the repaired checkpoint and obtain Sol approval
 before accepting current scalar corpus pins and final target/artifact qualification.
+
+
+## Realtime audit preparation correction
+
+The first actual audit invocation aborted at bank preparation: its local initial
+value array still had the retired eighth lookahead value. No render marker or
+render interval ran (zero BEGIN markers in the preserved trace). Luna removed
+that final setup value only; locked audit check, formatting and diff checks pass.
+Raw failed preparation is `/tmp/issue738-gates/realtime-audit.*` and
+`/tmp/issue738-realtime/trace*`; repair receipt
+`/tmp/issue738-luna-tiny-audit-repair.md`. Root must rebuild and rerun the realtime
+audit after this checkpoint. This is not a timed benchmark and supplies no CPU
+number; #746 remains the measurement successor.
