@@ -1,0 +1,50 @@
+# interchange source-path scan prunes only ./target — npm trees red it
+
+## Approved current scope — 2026-09-11
+
+Fix only the generated-artifact traversal in
+scripts/check-effect-interchange-qualification.sh to prune node_modules directories
+at any depth, preserving the existing root target exclusion and fail-closed traversal
+errors. Extend scripts/test-effect-interchange-policy.sh with root and nested npm
+Wasm acceptance and genuine source-path Wasm refusal. Do not exempt arbitrary source
+paths or files merely named node_modules. Reuse the existing mutation harness; verify
+normal baseline and all existing policy controls. No generic scan framework.
+
+Astra LOW implements; Astra XHIGH independently verifies. Five attempts maximum.
+Root commits exact paths at each coherent compiling/focused-green tranche and pushes
+promptly before more edits. At most two active issues (#285/#176); isolated worktrees
+and no overlapping paths. No timed benchmark, fixture regeneration, compiler captures,
+DSP/runtime change, or performance claim. Preserve actual commands/environment/source/
+exit/output evidence externally; ordinary compiler feedback is corrected within the
+unfinished pass, while substantive failed gates receive bounded adversarial review.
+Required exact-head PR and main qualification, upstream evidence and verified GitHub
+closure precede clean delivered-worktree removal. Root owns delivery and any artifact
+qualification; these tooling-only slices should not require a new shipped pin.
+
+## Historical issue body
+
+check-effect-interchange-qualification.sh's 'generated artifact exists under a source path' scan prunes only ./target, so any node_modules containing a .wasm (playwright-core's webp_codec.wasm) turns it red. Cost two agents a sweep run each (#272, #278). Fix: prune node_modules/ (any depth) in the scan; self-test row proving a planted wasm under src/ still reds.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## Astra LOW attempt 1 focused checkpoint
+
+Only the scan and existing policy harness changed. Actual node_modules directories
+are pruned at any depth; root target exclusion and traversal-status refusal remain.
+Root/nested npm Wasm and root-target acceptance, plus src/module.wasm,
+src/node_modules.wasm and nested src/target/module.wasm rejection controls passed.
+Shell syntax, real-tree baseline and full policy harness exited0. The harness
+includes synthetic benchmark108/fake-launch lifecycle controls, not timed work.
+Receipts: /tmp/issue285-attempt1 (actual argv/env/source/exit/logs). Independent
+review and required PR/main qualification remain pending.
+
+## Independent review and joint delivery checkpoint
+
+Astra XHIGH attempt1 SOURCE PASS at3625c5d2. Fourteen independent controls
+prove old/new npm regression, source-artifact refusal, root-target behavior and
+empty/nonempty traversal-error refusal. Successful LOW baseline/full-policy
+receipts reused. Exact head/base and GitHub parity verified. Review and actual
+commands/source/exits/logs: /tmp/issue285-xhigh-o4odaeua/review.md.
+
+Root merges the two accepted histories for one tooling delivery. No shipped
+engine/SDK source or artifact pin changed. Combined exact-head review, required
+PR/main qualification and synchronized closure remain pending.

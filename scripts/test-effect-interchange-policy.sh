@@ -286,6 +286,22 @@ expect_precise_failure() {
     [[ "$status" -eq 1 ]] || { printf 'effect interchange precise mutation wrong status: %s=%s\n' "$label" "$status" >&2; exit 96; }
     rg -F "$diagnostic" "$log" >/dev/null || { cat "$log" >&2; exit 96; }
 }
+# Installed npm payloads are not source artifacts, at the root or under a nested package.
+# The target exception remains root-only, and similarly named source paths remain inspected.
+for directory in node_modules/issue285 packages/nested/node_modules/issue285 target/issue285; do
+    mkdir -p "$temp/$directory"
+    printf 'generated Wasm fixture\n' >"$temp/$directory/module.wasm"
+    check
+    rm "$temp/$directory/module.wasm"
+done
+mkdir -p "$temp/src/target"
+for artifact in src/module.wasm src/node_modules.wasm src/target/module.wasm; do
+    printf 'source-path Wasm fixture\n' >"$temp/$artifact"
+    expect_precise_failure "${artifact//\//-}" 'generated artifact exists under a source path'
+    rm "$temp/$artifact"
+done
+check
+
 mv "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256" "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256.saved"
 expect_precise_failure missing-manifest 'missing immutable baseline manifest'
 mv "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256.saved" "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256"

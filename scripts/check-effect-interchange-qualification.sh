@@ -238,7 +238,7 @@ if [[ -s "$fixture_scan" ]]; then
     fail 'untracked/generated corpus appeared in interchange fixture directory'
 fi
 artifact_scan="$scratch/artifacts.out"; artifact_error="$scratch/artifacts.err"
-if find . -path './target' -prune -o -type f \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.wasm' -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print >"$artifact_scan" 2>"$artifact_error"; then status=0; else status=$?; fi
+if find . \( -path './target' -o \( -type d -name node_modules \) \) -prune -o -type f \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.wasm' -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print >"$artifact_scan" 2>"$artifact_error"; then status=0; else status=$?; fi
 if [[ "$status" -ne 0 ]]; then cat "$artifact_scan" "$artifact_error" >&2; fail "generated artifact traversal failed (status $status)"; fi
 if [[ -s "$artifact_scan" ]]; then
     fail 'generated artifact exists under a source path'
