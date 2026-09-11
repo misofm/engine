@@ -17,3 +17,14 @@ Record actual argv/environment/source/exits/logs externally; pause green for roo
 Required follow-up F1 from strip Job 3's adversarial verification. The fold's three GREEN clauses (sole-readership of the last slot, the in-between master scan, one-master retain) are genuinely shadowed in every compilable session today — proven by five adversarially constructed shapes — but the shadowing rests on incidental deterministic-schedule facts (submix-destination edges sorting before output-destination routes; sidechain consumers scheduling before routes) that nothing pins. A scheduler-order change would make the sole-readership clause the only defense, with zero red tests.
 
 Fix: an M1-style `route_folds_over_program` corpus differential driving the runtime's own `route_fold` clause code over the seeded random-graph corpus (house precedent: #208's scatter_redirects_over_program, which this same round demanded and landed). Must land BEFORE the next change in the route-fold/mixdown class. Also fold in a comment-level guard for the `plain_route_gains`/`node_kind` cascade coupling (F7 residual).
+## Astra LOW attempt 1 focused checkpoint
+
+Added an appended cfg(test) observation seam calling actual route_fold, an
+independent backward-writer oracle in the existing seeded cohort corpus, and
+one accepted plus three bounded valid-program guard controls. Production
+predicates are unchanged; coupling comment replacement preserves line count.
+Focused route-fold fixture, seeded cohort corpus and formatting passed.
+Evidence: `/tmp/issue220-attempt1` actual argv/env/source/log/exit records.
+Incidental lock ordering preserved externally and restored. Root checkpoints;
+independent XHIGH validity/oracle review, three physical guard removals, focused
+strict Clippy/broader graph tests and required PR/main qualification remain.

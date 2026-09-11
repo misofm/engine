@@ -1610,6 +1610,8 @@ fn bank_window_hoisting_preserves_dataflow_on_random_graphs() {
 #[test]
 fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
     let mut state = 0x0fed_cba9_8765_4321_u64;
+    let mut route_accepted = 0usize;
+    let mut route_refused = 0usize;
     let mut chained_graphs = 0usize;
     let mut merged_runs = 0usize;
     let mut redirected_lanes = 0usize;
@@ -1748,6 +1750,40 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
             "graph {graph}: the runtime and the model disagree about which lanes redirect"
         );
 
+        // Reuse the same seeded semantic graph, with output-stage banks whose last slots
+        // feed routes directly. Re-lower with these banks so their hoisting windows are valid.
+        let matrix_banks: Vec<Vec<GraphNodeId>> = (0..4)
+            .map(|cohort| {
+                (0..track_count)
+                    .filter(|track| cohort_of_track[*track] == cohort)
+                    .map(|track| stage_node(&format!("t{track:02}"), TrackStage::PostMatrix))
+                    .collect()
+            })
+            .filter(|members: &Vec<_>| members.len() > 1)
+            .collect();
+        let route_program =
+            lower(&spec, &schedule, &levels, &delays, &matrix_banks).expect("route lowering");
+        let route_lanes = member_lanes(&spec, &matrix_banks);
+        let route_runs = runs_in_runtime_order(&route_program, &route_lanes);
+        let routes = route_constants(&spec);
+        let expected = route_fold_model(&route_program, &spec, &route_lanes, &route_runs, &routes);
+        if expected.is_some() {
+            route_accepted += 1;
+        } else {
+            route_refused += 1;
+        }
+        assert_eq!(
+            crate::runtime::route_folds_over_program(
+                &route_program,
+                &spec,
+                &route_lanes,
+                &route_runs,
+                &routes
+            ),
+            expected,
+            "graph {graph}: route-fold decisions differ"
+        );
+
         // The narrow-window arm: every bank's own span, and no union across banks.
         let narrow = lower_with_per_bank_windows(&spec, &schedule, &levels, &delays, &banks)
             .expect("lowers");
@@ -1760,6 +1796,8 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
             unaware_divergences += 1;
         }
     }
+    assert!(route_accepted > 0, "route corpus must admit folds");
+    assert!(route_refused > 0, "route corpus must refuse folds");
     assert_eq!(chained_graphs, 3563, "the chained corpus moved");
     assert_eq!(
         merged_runs, 3752,
@@ -1781,4 +1819,246 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
         unaware_divergences, 1665,
         "the number of graphs reaching the pre-#169 defect moved"
     );
+}
+
+/// Independent route-fold oracle: resolve every input backwards to its last writer, then
+/// group complete bank lanes by their unique destination. No runtime predicate is used.
+/// These fixtures have route constants and bank memberships but no host bindings or observers.
+fn route_fold_model(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+    runs: &[Vec<Vec<usize>>],
+    routes: &std::collections::BTreeMap<GraphNodeId, crate::RouteTransform>,
+) -> Option<crate::runtime::RouteFoldObservation> {
+    let writer = |index: usize, buffer: BufferRef| {
+        (0..index)
+            .rev()
+            .find(|prior| program.ops[*prior].output == buffer)
+    };
+    let incoming: Vec<Vec<Option<usize>>> = program
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(index, op)| {
+            program
+                .inputs_of(op)
+                .iter()
+                .map(|input| writer(index, input.buffer))
+                .collect()
+        })
+        .collect();
+    let mut uses = vec![Vec::new(); program.ops.len()];
+    for (index, op) in program.ops.iter().enumerate() {
+        for producer in incoming[index]
+            .iter()
+            .copied()
+            .flatten()
+            .chain(op.sidechain.and_then(|input| writer(index, input.buffer)))
+        {
+            uses[producer].push(index);
+        }
+    }
+    let mut groups = Vec::new();
+    for (run, slots) in runs.iter().enumerate() {
+        if !lanes.contains_key(&program.ops[slots[0][0]].node) {
+            continue;
+        }
+        let mut group = Vec::new();
+        for producer in slots.last().expect("last slot") {
+            let [route] = uses[*producer].as_slice() else {
+                break;
+            };
+            let op = &program.ops[*route];
+            let Some(transform) = routes.get(&spec.nodes[op.node as usize].id) else {
+                break;
+            };
+            if lanes.contains_key(&op.node)
+                || op.sidechain.is_some()
+                || incoming[*route] != [Some(*producer)]
+                || program
+                    .inputs_of(op)
+                    .iter()
+                    .any(|input| input.delay.is_some())
+                || program.ops[*producer].output == program.output
+                || op.output == program.output
+            {
+                break;
+            }
+            group.push((
+                run,
+                *route,
+                [
+                    transform.gain * transform.ll,
+                    transform.gain * transform.lr,
+                    transform.gain * transform.rl,
+                    transform.gain * transform.rr,
+                ]
+                .map(f32::to_bits),
+                false,
+            ));
+        }
+        if group.len() == slots.last().expect("last slot").len() {
+            groups.push(group);
+        }
+    }
+    let first = groups.first()?.first()?.1;
+    let [master] = uses[first].as_slice() else {
+        return None;
+    };
+    groups.retain(|group| group.iter().all(|lane| uses[lane.1] == [*master]));
+    let mut admitted: Vec<_> = groups.into_iter().flatten().collect();
+    let opening = admitted.first()?.0;
+    let op = &program.ops[*master];
+    if op.sidechain.is_some()
+        || lanes.contains_key(&op.node)
+        || program
+            .inputs_of(op)
+            .iter()
+            .any(|input| input.delay.is_some())
+        || incoming[*master] != admitted.iter().map(|lane| Some(lane.1)).collect::<Vec<_>>()
+        || admitted
+            .iter()
+            .any(|lane| program.ops[lane.1].output == op.output)
+    {
+        return None;
+    }
+    let closing = runs
+        .iter()
+        .position(|run| run.iter().flatten().any(|index| index == master))?;
+    if closing <= opening {
+        return None;
+    }
+    for slots in &runs[opening + 1..closing] {
+        for index in slots.iter().flatten() {
+            if admitted.iter().any(|lane| lane.1 == *index) {
+                continue;
+            }
+            let other = &program.ops[*index];
+            if other.output == op.output
+                || program
+                    .inputs_of(other)
+                    .iter()
+                    .copied()
+                    .chain(other.sidechain)
+                    .any(|input| {
+                        input.buffer == op.output
+                            || input.delay.is_some_and(|delay| delay.staging == op.output)
+                    })
+            {
+                return None;
+            }
+        }
+    }
+    admitted[0].3 = true;
+    Some((*master, admitted))
+}
+
+fn route_constants(
+    spec: &GraphSpec,
+) -> std::collections::BTreeMap<GraphNodeId, crate::RouteTransform> {
+    spec.nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            matches!(node.id, GraphNodeId::Route { .. }).then_some((
+                node.id.clone(),
+                crate::RouteTransform {
+                    gain: 0.75,
+                    ll: 1.0 + index as f32 / 32.0,
+                    lr: -0.125,
+                    rl: 0.25,
+                    rr: -0.5,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Future topological orders can expose hazards currently hidden by canonical node ordering.
+/// This tiny valid program owns distinct route buffers and reuses a dead source slot for the
+/// master, just as arena colouring can. Additional readers execute after routes, so the plain
+/// route and association guards cannot accidentally stand in for the reader guards.
+#[test]
+fn route_fold_shadowed_clauses_over_valid_programs() {
+    for hazard in 0..4 {
+        let ids = [
+            stage_node("source", TrackStage::Input),
+            stage_node("a", TrackStage::PostMatrix),
+            stage_node("b", TrackStage::PostMatrix),
+            GraphNodeId::Route { route_id: gid("a") },
+            GraphNodeId::Route { route_id: gid("b") },
+            stage_node("observer", TrackStage::PostFader),
+            GraphNodeId::Output {
+                output_id: gid("out"),
+            },
+        ];
+        let (spec, _, _) = build(ids.iter().cloned().map(node).collect(), Vec::new());
+        // source -> two bank lanes -> two routes -> master. The observer normally reads the
+        // source before its slot is reused. Hazard 1 reads a last-slot buffer; hazard 2 reads a
+        // route in addition to the master; hazard 3 reads the soon-to-be master's old contents.
+        let observer_input = match hazard {
+            1 => 1,
+            2 => 4,
+            _ => 0,
+        };
+        let buffers = [0, 1, 2, 3, 4, 5, if hazard == 3 { 0 } else { 6 }];
+        let input_buffers: [&[u32]; 7] = [&[], &[0], &[0], &[1], &[2], &[observer_input], &[3, 4]];
+        let mut inputs = Vec::new();
+        let mut ops = Vec::new();
+        for index in 0..ids.len() {
+            let start = inputs.len() as u32;
+            inputs.extend(input_buffers[index].iter().map(|buffer| InputRef {
+                buffer: BufferRef(*buffer),
+                delay: None,
+            }));
+            ops.push(Op {
+                node: node_index(&spec, &ids[index]).expect("node"),
+                level: index as u64,
+                inputs: (start, inputs.len() as u32),
+                sidechain: None,
+                output: BufferRef(buffers[index]),
+                in_place: false,
+            });
+        }
+        let mut node_buffer = vec![BufferRef(0); ids.len()];
+        let mut node_op = vec![None; ids.len()];
+        for (index, op) in ops.iter().enumerate() {
+            node_buffer[op.node as usize] = op.output;
+            node_op[op.node as usize] = Some(index as u32);
+        }
+        let program = ExecutionProgram {
+            ops: ops.into_boxed_slice(),
+            inputs: inputs.into_boxed_slice(),
+            delays: Box::new([]),
+            node_buffer: node_buffer.into_boxed_slice(),
+            node_op: node_op.into_boxed_slice(),
+            taps: Box::new([]),
+            buffers: 7,
+            output: BufferRef(buffers[6]),
+        };
+        let lanes = [(program.ops[1].node, (0, 0)), (program.ops[2].node, (0, 1))]
+            .into_iter()
+            .collect();
+        let runs = vec![
+            vec![vec![0]],
+            vec![vec![1, 2]],
+            vec![vec![3]],
+            vec![vec![4]],
+            vec![vec![5]],
+            vec![vec![6]],
+        ];
+        let routes = route_constants(&spec);
+        let expected = route_fold_model(&program, &spec, &lanes, &runs, &routes);
+        assert_eq!(
+            expected.is_some(),
+            hazard == 0,
+            "hazard {hazard}: independent oracle"
+        );
+        assert_eq!(
+            crate::runtime::route_folds_over_program(&program, &spec, &lanes, &runs, &routes),
+            expected,
+            "hazard {hazard}"
+        );
+    }
 }

@@ -3380,8 +3380,8 @@ const fn folded_route(transform: &RouteTransform) -> [f32; 4] {
 /// `parts` as it answers, so it can be asked exactly once and only while its op is being built.
 /// The fold has to know before any op is built -- it decides which ops are built at all -- so this
 /// restates the same cascade as a query, in the same precedence order, and returns `None` for
-/// every arm that is not a plain route. A node that a host bound, that a bank owns, that a source
-/// set fills or that carries a prepared effect is not a route however the session named it.
+/// every arm that is not a plain route. Keep its exclusions coupled to new `node_kind` arms.
+/// Bindings, banks, sources and effects take precedence regardless of the node's session name.
 fn plain_route_gains(parts: &RuntimeParts, node: &GraphNodeId, index: u32) -> Option<[f32; 4]> {
     if parts.source_inputs.contains(node)
         || parts.membership.contains_key(&index)
@@ -6169,4 +6169,80 @@ mod tests {
             "the folded route is a distinct rounding, not a coincidence"
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) type RouteFoldObservation = (usize, Vec<(usize, usize, [u32; 4], bool)>);
+
+/// Observe the actual route-fold proof for unbound program fixtures. Constants are supplied by
+/// the fixture; no admission predicate is replicated here. Like the scatter seam, run layout
+/// comes from the independent program interpreter. Observers and prepared effects are absent.
+#[cfg(test)]
+pub(crate) fn route_folds_over_program(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    lanes: &BTreeMap<u32, (usize, usize)>,
+    runs: &[Vec<Vec<usize>>],
+    routes: &BTreeMap<GraphNodeId, RouteTransform>,
+) -> Option<RouteFoldObservation> {
+    let mut parts = RuntimeParts::new(
+        spec,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Default::default(),
+        Vec::new(),
+        1,
+    );
+    parts.routes.clone_from(routes);
+    parts.membership = lanes
+        .iter()
+        .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
+        .collect();
+    let units: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            let banked = lanes.contains_key(&program.ops[run[0][0]].node);
+            (
+                if banked {
+                    vec![Membership::Effect(0); run.len()]
+                } else {
+                    Vec::new()
+                },
+                run.iter().flatten().copied().collect(),
+            )
+        })
+        .collect();
+    route_fold(program, spec, &parts, &units).map(|fold| {
+        let mut routes = fold.retired.into_iter().collect::<Vec<_>>();
+        // Retirement is a set, but lane order is render order, not op-index order.
+        let (readers, _) = op_dataflow(program);
+        let lanes = fold
+            .runs
+            .into_iter()
+            .flat_map(|(run, folded)| {
+                runs[run]
+                    .last()
+                    .expect("last slot")
+                    .iter()
+                    .zip(folded)
+                    .map(|(producer, lane)| {
+                        let route = readers[*producer][0];
+                        routes.retain(|retired| *retired != route);
+                        (run, route, lane.coefficients.map(f32::to_bits), lane.store)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            routes.is_empty(),
+            "every retired route belongs to a folded lane"
+        );
+        (fold.master_op, lanes)
+    })
 }
