@@ -339,3 +339,64 @@ fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
     assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
     assert!(diagnostics.0[0].path.contains("comp0"));
 }
+
+#[test]
+fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("canonical session fixture");
+    {
+        let effect = &mut model.tracks[0].dynamic.effects[0];
+        effect.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.multiband-compressor")
+                .expect("multiband effect ID"),
+        };
+        effect.params = vec![EffectParam {
+            parameter_id: 1,
+            channel: ParameterChannel::Both,
+            unit: SessionParameterUnit::Hz,
+            value: 1_000.0,
+        }];
+    }
+    let valid_session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("multiband session remains structurally compilable");
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let prepared = prepare_native_session_effects(&valid_session, &registry, caps())
+        .expect("current multiband parameter set prepares");
+    assert_eq!(prepared.entries.len(), 1);
+
+    model.tracks[0].dynamic.effects[0].params.push(EffectParam {
+        parameter_id: 2,
+        channel: ParameterChannel::Both,
+        unit: SessionParameterUnit::Hz,
+        value: 1_000.0,
+    });
+    let rejected_session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("retired ID does not change session structure");
+    let diagnostics = match prepare_native_session_effects(&rejected_session, &registry, caps()) {
+        Ok(_) => panic!("retired multiband parameter must prevent prepared publication"),
+        Err(diagnostics) => diagnostics,
+    };
+    assert_eq!(diagnostics.0.len(), 1);
+    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
+    assert!(diagnostics.0[0].path.contains("eq"));
+}

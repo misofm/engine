@@ -366,6 +366,83 @@ static OLD_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     observations: &compressor::COMPRESSOR_OBSERVATIONS,
 };
 
+const OLD_MULTIBAND_LOOKAHEAD: ParameterDescriptor = ParameterDescriptor {
+    id: ParameterId(2),
+    display_name: "lookahead",
+    display_unit: "ms",
+    unit: ParameterUnit::Milliseconds,
+    domain: ParameterDomain::Continuous,
+    minimum: Some(0.0),
+    maximum: Some(20.0),
+    default_value: 5.0,
+    mapping: ParameterMapping::Linear,
+    automation_rate: AutomationRate::None,
+    channel_policy: ParameterChannelPolicy::PerLane,
+    smoothing: SmoothingRule::None,
+    smoothing_samples: 0,
+    readable: true,
+    automatable: false,
+    enum_choices: &[],
+    lattice: default_parameter_lattice(
+        ParameterUnit::Milliseconds,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+    ),
+};
+
+static OLD_MULTIBAND_PARAMETERS: [ParameterDescriptor; 12] = [
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[0],
+    OLD_MULTIBAND_LOOKAHEAD,
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[1],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[2],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[3],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[4],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[5],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[6],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[7],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[8],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[9],
+    multiband_compressor::MULTIBAND_COMPRESSOR_PARAMETERS[10],
+];
+
+const fn old_multiband_quality(sample_rate: u32) -> QualityDescriptor {
+    let ring = sample_rate / 50 + 1;
+    let lane_bytes = (48 + 2 * ring) * 4;
+    QualityDescriptor {
+        quality: EffectQuality::Normal,
+        sample_rate,
+        latency: LatencySamples((sample_rate / 50) as u64),
+        tail: TailSamples::Infinite,
+        maximum_state: StatePayloadSizes {
+            common_bytes: 0,
+            left_bytes: lane_bytes,
+            right_bytes: lane_bytes,
+        },
+        scratch_fixed_bytes: 0,
+        scratch_bytes_per_frame: 0,
+    }
+}
+
+static OLD_MULTIBAND_QUALITIES: [QualityDescriptor; 4] = [
+    old_multiband_quality(44_100),
+    old_multiband_quality(48_000),
+    old_multiband_quality(88_200),
+    old_multiband_quality(96_000),
+];
+
+static OLD_MULTIBAND_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+    id: effect_id("miso.multiband-compressor"),
+    display_name: "Multiband Compressor",
+    contract_major: 1,
+    contract_minor: 1,
+    state_layout_version: 1,
+    supported_link_modes: LinkModeSet::ALL,
+    parameters: &OLD_MULTIBAND_PARAMETERS,
+    ports: multiband_compressor::MULTIBAND_COMPRESSOR_DESCRIPTOR.ports,
+    qualities: &OLD_MULTIBAND_QUALITIES,
+    observations: &multiband_compressor::MULTIBAND_COMPRESSOR_OBSERVATIONS,
+};
+
 #[allow(clippy::too_many_arguments)]
 const fn quality(
     quality: EffectQuality,
@@ -959,6 +1036,88 @@ fn old_compressor_descriptor_bound_state_is_rejected_by_the_causal_descriptor() 
     assert_eq!(
         rejection.code,
         effect_package::EffectStateDiagnosticCode::Descriptor
+    );
+}
+
+#[test]
+fn old_multiband_descriptor_bound_state_is_rejected_transactionally() {
+    let old_wire = encoded(&OLD_MULTIBAND_DESCRIPTOR);
+    verify_effect_descriptor_wire(&old_wire, 1 << 20).unwrap();
+    let old_bound =
+        bind_effect_descriptor_wire(&OLD_MULTIBAND_DESCRIPTOR, &old_wire, 1 << 20).unwrap();
+    let initial_values: Vec<_> = OLD_MULTIBAND_PARAMETERS
+        .iter()
+        .enumerate()
+        .flat_map(|(index, parameter)| {
+            [
+                InitialParameterValue {
+                    parameter_index: index as u32,
+                    channel: ParameterChannel::Left,
+                    value: parameter.default_value,
+                },
+                InitialParameterValue {
+                    parameter_index: index as u32,
+                    channel: ParameterChannel::Right,
+                    value: parameter.default_value,
+                },
+            ]
+        })
+        .collect();
+    let replay = EffectStateReplayView {
+        effect_id: OLD_MULTIBAND_DESCRIPTOR.id,
+        request: PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            initial_values: &initial_values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        },
+    };
+    let requirements =
+        effect_state_requirements(old_bound, replay, EffectStateLimits::default()).unwrap();
+    let old_sizes = OLD_MULTIBAND_QUALITIES[1].maximum_state;
+    assert_eq!(old_sizes.left_bytes, 7_880);
+    assert_eq!(old_sizes.right_bytes, 7_880);
+    let mut old_envelope = vec![0_u8; requirements.envelope_bytes as usize];
+    encode_effect_state(
+        old_bound,
+        replay,
+        &vec![0_u8; old_sizes.common_bytes as usize],
+        &vec![0_u8; old_sizes.left_bytes as usize],
+        &vec![0_u8; old_sizes.right_bytes as usize],
+        EffectStateLimits::default(),
+        &mut old_envelope,
+    )
+    .unwrap();
+    verify_effect_state(old_bound, &old_envelope, EffectStateLimits::default()).unwrap();
+    let before = old_envelope.clone();
+
+    let current_wire = encoded(&multiband_compressor::MULTIBAND_COMPRESSOR_DESCRIPTOR);
+    let current_bound = bind_effect_descriptor_wire(
+        &multiband_compressor::MULTIBAND_COMPRESSOR_DESCRIPTOR,
+        &current_wire,
+        1 << 20,
+    )
+    .unwrap();
+    assert_ne!(old_bound.identity(), current_bound.identity());
+    let rejection = verify_effect_state(current_bound, &old_envelope, EffectStateLimits::default())
+        .expect_err("old multiband state envelope must reject");
+    assert_eq!(
+        rejection.code,
+        effect_package::EffectStateDiagnosticCode::Descriptor
+    );
+    assert_eq!(
+        old_envelope, before,
+        "descriptor refusal leaves the envelope intact"
     );
 }
 

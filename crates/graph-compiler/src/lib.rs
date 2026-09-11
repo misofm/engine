@@ -5613,6 +5613,126 @@ mod tests {
             "bypassing the delayed limiter preserves its compensation"
         );
     }
+
+    #[test]
+    fn mixed_causal_multiband_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
+        let mut model = accepted_multiband_compressor_graph_fixture();
+        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
+        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed multiband/limiter fixture");
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, caps)
+            .expect("prepared mixed multiband effects");
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "multiband-compressor")
+                .count(),
+            9
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .count(),
+            1
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "multiband-compressor")
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .all(|entry| entry.metadata.latency == LatencySamples(486))
+        );
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_019,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| {
+            panic!("mixed multiband/limiter graph: {:?}", failure.diagnostics)
+        });
+        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert!(
+            artifact
+                .graph
+                .inserted_delays
+                .iter()
+                .any(|delay| delay.samples == LatencySamples(486))
+        );
+        for route in &artifact.graph.route_timings {
+            let route_id = route.route_id.as_str();
+            if route_id == "eq9-main" {
+                assert_eq!(route.source_arrival, LatencySamples(486));
+                assert_eq!(route.compensation_delay, LatencySamples(0));
+                assert_eq!(route.destination_arrival, LatencySamples(486));
+            } else if route_id.ends_with("-main") {
+                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
+                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
+                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+            }
+        }
+
+        let mut bypass_model = model;
+        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed bypass fixture");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+            .expect("prepared mixed multiband bypass effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_020,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(
+            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            "bypassing the delayed limiter preserves PDC route timing"
+        );
+        assert_eq!(
+            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            "bypassing the delayed limiter preserves its compensation"
+        );
+    }
+
     #[test]
     fn mixed_causal_gate_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
         let mut model = accepted_gate_expander_graph_fixture();
@@ -9254,7 +9374,7 @@ mod tests {
             .expect("prepared bank-capable multiband effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(960)
+            entry.metadata.latency == LatencySamples(0)
                 && entry.metadata.tail == TailSamples::Infinite
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
         }));
@@ -9410,9 +9530,9 @@ mod tests {
                 .canonical_bytes
         );
         assert!(artifact.graph.route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(960)
+            route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(960)
+                && route.destination_arrival == LatencySamples(0)
         }));
         let expected_schedule = artifact.graph.sequential_schedule.clone();
         let expected_route_timings = artifact.graph.route_timings.clone();
@@ -9462,7 +9582,7 @@ mod tests {
                 observers: Vec::new(),
             })
             .unwrap_or_else(|failure| panic!("multiband scalar bind: {}", failure.code));
-        let mut reached_latency = false;
+        let mut reached_current_sample = false;
         let mut reached_release_probe = false;
         for block in 0..20_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
@@ -9503,19 +9623,16 @@ mod tests {
                 let absolute = block * frames as u64 + frame as u64;
                 let left = bank_pcm[frame];
                 let right = bank_pcm[frames + frame];
-                if absolute < 960 {
-                    assert_eq!(left, 0.0, "left output before fixed latency");
-                    assert_eq!(right, 0.0, "right output before fixed latency");
-                } else if absolute < 1_024 {
-                    reached_latency |= left != 0.0 && right != 0.0;
-                } else if (2_240..2_304).contains(&absolute) {
+                if absolute == 0 {
+                    reached_current_sample = left != 0.0 && right != 0.0;
+                } else if absolute == 1_280 {
                     reached_release_probe |= left != 0.0 && right != 0.0;
                 }
             }
         }
         assert!(
-            reached_latency,
-            "active burst crosses fixed 960-sample latency"
+            reached_current_sample,
+            "active burst renders at the current first sample"
         );
         assert!(
             reached_release_probe,
@@ -9558,9 +9675,9 @@ mod tests {
             expected_canonical_bytes
         );
         assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(960)
+            route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(960)
+                && route.destination_arrival == LatencySamples(0)
         }));
 
         let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)

@@ -529,3 +529,19 @@ Production sources are unchanged since7d57cff4; intermediate revisions changed
 tests/spec/generated metadata/pins only. Existing browser matrix/results are
 refreshed at candidate06eb5998. Thin descendants, proportional full native
 gates and final adversarial verdict/delivery remain; no CPU/listening claim.
+
+
+## Thin descendant checkpoint — 2026-09-11
+
+Luna xhigh completed the scoped integration tests: native-session7PASS,
+lattice10PASS with63rows/189checks, observation-identity3PASS, descriptor
+qualification9PASS, causal multiband graph1PASS, mixed limiter PDC1PASS,
+host-web atomic retiredID2 rejection1PASS. Total32PASS, workspace fmtPASS.
+The actual old multiband descriptor envelope rejects transactionally; live
+ID2 is rejected before publication/ack/revision advance. Multiband contributes
+zero added delay beside unchanged limiter PDC.
+Initial compiler and graph fixture failures are preserved with explanations
+in /tmp/issue739-luna-descendants.md and distinct logs. Only scoped tests
+and explanatory primitive-corpus comments changed; no production algorithm
+or corpus digest changed. Final consolidated public boundary assertions,
+full affected native/policy gates and Astra medium verdict remain.

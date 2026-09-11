@@ -97,7 +97,9 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
         }
         // The menu is a *semantic* addition to the descriptor, so `contract_minor` moves. No state
         // byte changed -- the tap reads state that was already there -- so `state_layout_version`
-        // does not, and every persisted envelope of these effects still restores.
+        // does not. Envelopes bound to this exact descriptor continue to verify; an envelope bound
+        // to a different descriptor identity, such as the pre-causal multiband descriptor, still
+        // rejects at the descriptor boundary.
         assert_eq!(
             descriptor.contract_minor, 1,
             "{}: declaring the first tap is a minor bump",
