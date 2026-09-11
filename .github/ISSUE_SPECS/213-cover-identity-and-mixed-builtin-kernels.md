@@ -70,6 +70,20 @@ unchanged, with later global indexes preserved. No benchmark, compiler capture,
 fixture regeneration or shipped artifact pin change occurred. Independent Astra
 XHIGH review and required reviewed-head PR/main CI remain pending delivery gates.
 
+## Independent review and artifact qualification
+
+Astra XHIGH records attempt 1 PASS at `1eda852f`: an external float32 oracle
+independently reproduces both new digests and detects omitted identity addition,
+bypassed real filters, and a reset at the split block. Independent focused tests
+pass. One stale corpus-layout comment was corrected without executable changes.
+Root's ordinary shipped artifact build passed; all six files are byte-identical
+to the delivered artifact, including Wasm SHA-256
+`a24d0cae46f097336c02268b946f92fbf4419f05b6e05d20a1476f19c76d7e60`.
+The first invocation rejected a missing output directory before building; its
+receipt is preserved, and the corrected ordinary build passed without repinning.
+Review: `/tmp/issue213-astra-xhigh-review`; artifact and comparison receipts:
+`/tmp/issue213-artifact-zjos1zzu`. Required PR/main CI remains pending.
+
 ## Historical issue body
 
 Verifier finding F2 from strip Job 1 (#212): every builtins case in the frozen gate corpus (`crates/miso-engine-builtins/src/corpus.rs::lane_parameters`) carries non-zero cutoffs on every lane, so the wasm G5 gates never execute `identity_chain_block`/`mixed_chain_block`. Present class-A evidence for wasm is the sealed benchmark digest identity (all three legs, both arms) — sound today, but the elided path has no standing cross-target regression gate.
