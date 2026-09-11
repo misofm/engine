@@ -293,3 +293,15 @@ contract change. All six candidate artifacts and build receipts are preserved in
 `/tmp/issue737-artifact`. Supported browser/runtime qualification and CI remain
 pending; a matching content hash alone is not acceptance. No compiler captures
 or unrelated generated output are committed.
+
+
+## Broad descendant gate finding
+
+Both locked compressor debug/release all-target suites pass. The broader descendant
+sweep exposed two stale catalog-count expectations in
+`crates/effect-compiler/tests/parameter_lattice.rs`: removing compressor ID 8 changes
+66 shipped effect parameter rows to 65, and three sampled points per row from 198
+to 195. The already verified metadata export proves this is the intended single-row
+delta. Authorize this necessary current-metadata test update without weakening the
+lattice laws or changing another parameter; preserve the failing receipt at
+`/tmp/issue737-local-gates`. Remaining descendant/artifact gates must still complete.
