@@ -64,3 +64,7 @@ An existing corrected lossless DEFLATE archive is approximately 147.3 MB. Its ex
 Sol corrected the reproduced gap defect and completed the bounded parser, frozen-schedule, corruption/locality and runner-lifecycle controls. Sol recorded readiness PASS for real-corpus untimed qualification. Root independently reran selftest and preflight; both passed with zero timed-workload invocations. The correction and adapted reporting are upstream.
 
 The corrected corpus was admitted, and every PCM identity matches the independent input census. Artifact preparation is in progress. Full reconstruction, common seeks, representative corruption qualification and the single timed invocation remain outstanding; this is not an issue-completion verdict. Reporting is frozen around complete-session bytes, local decode cost, and an explicitly untimed conservative single-archive body-size model.
+
+## Real-corpus qualification
+
+All 490 full-stem PCM reconstructions, all 3,920 common frozen seek windows, and all 43 representative-copy corruption/locality cases passed. Root preserved the private correctness evidence and an execution freeze binding code, corpus, environment, reporter and exact command, then pushed the checkpoint. The single benchmark invocation has started with one warmup and two measured rounds. No timing result or completion claim is made until the complete record passes validation and final Sol review.
