@@ -58,6 +58,18 @@ and output are preserved at `/tmp/issue213-astra1`. Global Wasm corpus compilati
 scalar/simd128 execution and independent Astra XHIGH review remain pending; this
 checkpoint does not claim those gates have passed.
 
+## Attempt 1 target qualification
+
+At pushed source `ce5feaed`, Astra LOW reports 84 builtin tests passed (one
+benchmark ignored), seven native G5 tests passed, and both scalar and simd128
+Wasmtime 47.0.3 guests passed 141 cases / 355 comparisons with zero mismatches.
+Affected-package all-target Clippy with warnings denied and builtin policy passed.
+Twelve command receipts, toolchain identities and guest hashes are preserved at
+`/tmp/issue213-astra1`. Existing eight digest byte arrays and case names are
+unchanged, with later global indexes preserved. No benchmark, compiler capture,
+fixture regeneration or shipped artifact pin change occurred. Independent Astra
+XHIGH review and required reviewed-head PR/main CI remain pending delivery gates.
+
 ## Historical issue body
 
 Verifier finding F2 from strip Job 1 (#212): every builtins case in the frozen gate corpus (`crates/miso-engine-builtins/src/corpus.rs::lane_parameters`) carries non-zero cutoffs on every lane, so the wasm G5 gates never execute `identity_chain_block`/`mixed_chain_block`. Present class-A evidence for wasm is the sealed benchmark digest identity (all three legs, both arms) — sound today, but the elided path has no standing cross-target regression gate.
