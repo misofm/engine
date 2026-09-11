@@ -130,4 +130,8 @@ Neither slice requires Rust changes. Rust source-queue gap records or graph/DSP 
 
 For complete download, the current candidates group recording stem assets in one ZIP_STORED container suitable for an ordinary Walrus blob. Quilts may instead group packaged stems; decoder units should not automatically become individual patch requests. The user's future more-separated stems may expose much higher silence, but no future size or speed percentage is established here.
 
-Private upstream evidence includes conversion code/tests, immutable input/execution receipts, four archive receipts, per-stem counts, a complete report and file-level adapter/app/CDN/Rust scope. Candidate audio/archives remain local. Final Sol review remains pending.
+Private upstream evidence includes conversion code/tests, immutable input/execution receipts, four archive receipts, per-stem counts, a complete report and file-level adapter/app/CDN/Rust scope. Candidate audio/archives remain local. Final Sol review passed.
+
+## Final adversarial verdict
+
+**Sol attempt 2 / final evidence: PASS.** Independent review reproduced immutable input/code identities, all qualification counts, every archive's actual size/hash/CRC/member inventory, exact byte/frame arithmetic and the preserved successful HTTP body lengths. The private report and source-level scope make the negative wire-size result explicit and contain no unsupported time, filesystem, network or DSP claims. The private evidence and sanitized public decision record are upstream. The preparation/scoping outcome is complete; production implementation and publication remain separate future work.
