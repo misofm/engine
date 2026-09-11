@@ -58,3 +58,9 @@ The private aligned-input census and original-prefix padding verification are up
 The user clarified that all files required by a session are downloaded before startup. Compare complete package bytes, including every required manifest, index and dictionary; keep transfer bundling/request overhead distinct from local decoder-unit size. Existing dense files serve as baselines. A new sparse package remains the intended product candidate.
 
 An existing corrected lossless DEFLATE archive is approximately 147.3 MB. Its exact size may be reported as an untimed existing-artifact reference, so storage/transfer savings are not presented only against expanded WAV bytes. This does not add a timed variant or change the frozen workload. No actual network or progressive-startup claim is introduced.
+
+## Attempt 2 readiness evidence
+
+Sol corrected the reproduced gap defect and completed the bounded parser, frozen-schedule, corruption/locality and runner-lifecycle controls. Sol recorded readiness PASS for real-corpus untimed qualification. Root independently reran selftest and preflight; both passed with zero timed-workload invocations. The correction and adapted reporting are upstream.
+
+The corrected corpus was admitted, and every PCM identity matches the independent input census. Artifact preparation is in progress. Full reconstruction, common seeks, representative corruption qualification and the single timed invocation remain outstanding; this is not an issue-completion verdict. Reporting is frozen around complete-session bytes, local decode cost, and an explicitly untimed conservative single-archive body-size model.
