@@ -105,3 +105,19 @@ AVX2/FMA. Receipt `/tmp/issue387-xhigh-zpkzo4q1/fuzz.log` retained. Root authori
 bounded verification attempt2 using the existing CI RUSTFLAGS target-feature
 settings (+avx2,+fma) for one 900-second seeded invocation. No product change,
 completed fuzz time, or fuzz PASS is claimed from the failed launch.
+
+## Independent review and artifact qualification PASS
+
+Astra XHIGH approved unchanged sourceee779e2f: isolated parser/native C ABI
+baseline aborts and actual ea8f Wasm trap were reproduced; candidate refuses
+with correct diagnostics while legal controls pass. Strict Clippy passed.
+Corrected seeded ASAN parser fuzz completed 13,404,077 executions in901seconds,
+exit0, no crash artifacts. Initial pre-workload flag failure remains preserved.
+Review: `/tmp/issue387-xhigh-zpkzo4q1/review.md` and verdict/manifest receipts.
+
+Root ordinary artifact build reproduced pin80abeec2688be94807bf4086861639fa63e4111df1d1978e37b1288ff2151de4.
+All five non-Wasm artifact hashes match qualified main ea8f's payload. Existing
+static, resource/native parity, hermetic host, SDK type/headless/package,
+three-browser matrix and generated-matrix gates passed. Actual command/source,
+exit/log and six-file hashes: `/tmp/issue387-artifact-y1odl9dw`.
+No timing claim. Required PR/full-workspace CI and post-main PASS remain.
