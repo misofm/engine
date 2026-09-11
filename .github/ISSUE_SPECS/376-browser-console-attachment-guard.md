@@ -54,3 +54,15 @@ This reads very misleadingly from the caller's side: `faderDb`, `mute`, and `sol
 ## Why this matters
 
 Both gaps compounded to turn a one-line missing boot option into a debugging session that needed a full headless-Chrome CDP reproduction to pin down — the engine looked entirely healthy (correct session shape, correct track list, real audio playing) right up until every single real-time control silently failed. Root cause and full repro trace are in the companion issue misofm/engine-web-adapter#9, which is what actually caused this for us (it doesn't default or surface the missing `policy.console` option) — this issue is specifically about the two SDK/engine-side gaps that made the resulting failure hard to diagnose once it happened.
+
+## Astra LOW attempt 1 checkpoint
+
+BrowserEngine.console now returns a cached rejected Promise with MisoUsageError
+and the browser policy path when captured commandQueueRecords is absent/zero.
+Attached-console behavior, async contract and console-free boot/close remain.
+Focused tests include mutation during boot, no transport on refusal, positive
+command admission, and packaged public browser/headless error behavior.
+Typecheck, 61 focused SDK tests and sdk-package check against the unchanged
+qualified80abeec2 artifact passed. Actual commands/env/exits/logs:
+`/tmp/issue376-attempt1`. No physical-browser opt-in run is claimed; required
+CI/browser delivery remains. Root checkpoints; independent XHIGH review pending.

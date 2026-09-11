@@ -339,3 +339,47 @@ test("preparation admits several independent mono and stereo sources", async () 
     ["s0", 1, 257n], ["s1", 2, 258n], ["s2", 1, 259n], ["s3", 2, 260n],
   ]);
 });
+
+
+for (const initialConsole of [undefined, {}, { commandQueueRecords: 0 }, { commandQueueRecords: 64 }]) {
+  test(`console attachment uses captured boot policy: ${JSON.stringify(initialConsole)}`, async () => {
+    const attached = (initialConsole?.commandQueueRecords ?? 0) > 0;
+    const policy = initialConsole === undefined ? {} : { console: { ...initialConsole } };
+    let maps = 0; let commands = 0; const closed = [];
+    const engine = await createEngine({
+      document: new Uint8Array([1]), policy,
+      scratchBoot: async () => {
+        policy.console ??= {};
+        policy.console.commandQueueRecords = attached ? 0 : 64;
+        return shape;
+      },
+      createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
+        audioWorklet: { async addModule() {} }, async close() { closed.push("context"); } }),
+      createHost: async request => {
+        assert.equal((request.options.console?.commandQueueRecords ?? 0) > 0, attached);
+        return {
+          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false }; },
+          async command(request) { commands++; return { result: 0, reason: 0, rejectedIndex: 0,
+            admitted: request.commands.length, appliedAtSample: 128n }; },
+          async dispose() { closed.push("host"); },
+        };
+      },
+    });
+    let pending;
+    assert.doesNotThrow(() => { pending = engine.console(); });
+    assert.ok(pending instanceof Promise);
+    assert.equal(engine.console(), pending, "console Promise is cached");
+    if (attached) {
+      const controls = await pending;
+      assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
+      assert.equal(maps, 1); assert.equal(commands, 1);
+    } else {
+      await assert.rejects(pending, error => error instanceof MisoUsageError &&
+        error.message.includes("no console attached") && error.message.includes("policy.console.commandQueueRecords"));
+      assert.equal(maps, 0); assert.equal(commands, 0);
+    }
+    assert.equal(engine.context.state, "running");
+    await engine.close(); await engine.close();
+    assert.deepEqual(closed, ["host", "context"]);
+  });
+}
