@@ -282,12 +282,6 @@
                 "channel": "both",
                 "unit": "milliseconds",
                 "value": 100.0
-              },
-              {
-                "parameter_id": 8,
-                "channel": "both",
-                "unit": "milliseconds",
-                "value": 2.0
               }
             ],
             "sidechain": {

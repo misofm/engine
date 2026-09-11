@@ -55,7 +55,6 @@ ALLOWED = {
     ("tools/parameter-metadata/src/lib.rs", "before #242 renamed the vocabulary"),
     ("tools/parameter-metadata/src/lib.rs", "`nudge` is retired"),
     # Ordinary English about moving a test value, unrelated to the parameter ladder.
-    ("crates/gate-expander/tests/contract.rs", "threshold is nudged"),
     ("crates/gate-expander/tests/MUTATIONS.md", "the test nudges the threshold"),
     ("crates/parametric-eq/tests/stationary_hoist.rs", "let nudged ="),
     ("crates/parametric-eq/tests/stationary_hoist.rs", "quiet, nudged,"),

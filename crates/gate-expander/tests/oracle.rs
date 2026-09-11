@@ -40,7 +40,6 @@ const HYSTERESIS: f32 = 6.0;
 const ATTACK_MS: f32 = 1.0;
 const HOLD_MS: f32 = 5.0;
 const RELEASE_MS: f32 = 100.0;
-const LOOKAHEAD_MS: f32 = 2.0;
 
 /// The tolerance derived in the module documentation. Never loosened.
 const TOLERANCE_DB: f64 = 0.02;
@@ -54,13 +53,13 @@ fn corpus_values() -> Values {
     set_parameter(&mut values, 4, ATTACK_MS, ATTACK_MS);
     set_parameter(&mut values, 5, HOLD_MS, HOLD_MS);
     set_parameter(&mut values, 6, RELEASE_MS, RELEASE_MS);
-    set_parameter(&mut values, 7, LOOKAHEAD_MS, LOOKAHEAD_MS);
     values
 }
 
-/// DC-free square-wave bursts: the sign flips every eight samples, and the amplitude alternates
-/// between -30 and -50 dBFS every 4 800 samples, in antiphase between the two channels so that
-/// the three link modes produce three different detector levels.
+/// DC-free square-wave bursts: the sign flips every eight samples, with a shared active interval
+/// and a shared quiet interval before an antiphase tail. The shared intervals force every link mode
+/// to exercise both attenuation and quiet-state decisions; the tail still gives the link modes
+/// distinct detector levels.
 ///
 /// The quiet level is -50 dBFS rather than something deeper on purpose. At `rho = 4` and
 /// `T = -40` the curve gives `3 * (-50 + 40) = -30 dB`, which is inside the 48 dB range: a level
@@ -74,8 +73,24 @@ fn corpus_signals() -> (Vec<f32>, Vec<f32>) {
     for frame in 0..FRAMES {
         let burst = (frame / 4_800) % 2 == 0;
         let sign = if (frame / 8) % 2 == 0 { 1.0 } else { -1.0 };
-        left[frame] = sign * if burst { loud } else { quiet };
-        right[frame] = sign * if burst { quiet } else { loud };
+        let shared = frame < 9_600;
+        let amplitude = if burst { loud } else { quiet };
+        left[frame] = sign
+            * if shared {
+                amplitude
+            } else if burst {
+                loud
+            } else {
+                quiet
+            };
+        right[frame] = sign
+            * if shared {
+                amplitude
+            } else if burst {
+                quiet
+            } else {
+                loud
+            };
     }
     (left, right)
 }
@@ -91,7 +106,6 @@ fn reference(link: LinkMode, left: &[f32], right: &[f32]) -> dsp_reference::Refe
         attack_ms: f64::from(ATTACK_MS),
         hold_ms: f64::from(HOLD_MS),
         release_ms: f64::from(RELEASE_MS),
-        lookahead_ms: f64::from(LOOKAHEAD_MS),
     };
     let link = match link {
         LinkMode::DualMono => ReferenceGateLink::DualMono,
@@ -194,15 +208,25 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
             worst_left.max(worst_right) > 0.0,
             "{link:?}: the corpus never attenuated, so the comparison is vacuous"
         );
-        // And the attenuation must not be sitting on the range clamp, where the dB conversion
-        // stops being observable at all.
-        assert!(
-            trace
-                .gain_db_left
+        for (channel, gains) in [
+            ("left", &trace.gain_db_left),
+            ("right", &trace.gain_db_right),
+        ] {
+            let active_nonclamped = gains
                 .iter()
-                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0),
-            "{link:?}: every attenuated sample is pinned to the range clamp"
-        );
+                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0);
+            assert!(
+                active_nonclamped,
+                "{link:?} {channel}: active attenuation is absent or range-clamped"
+            );
+            let quiet_nonclamped = gains[4_800..9_600]
+                .iter()
+                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0);
+            assert!(
+                quiet_nonclamped,
+                "{link:?} {channel}: quiet interval is absent or range-clamped"
+            );
+        }
         eprintln!(
             "{link:?}: worst deviation from the f64 model {:.3e} dB (limit {TOLERANCE_DB})",
             worst_left.max(worst_right)

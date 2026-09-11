@@ -16,13 +16,11 @@
 //! # What the cases cover
 //!
 //! Each case drives the production [`gate_block`] through a whole signal at one link mode, with
-//! per-lane thresholds, ratios, ranges, hysteresis bands, hold times and lookaheads, so a case
-//! exercises the gather, the transition, the curve, both one-pole rates and the identity select.
+//! per-lane thresholds, ratios, ranges, hysteresis bands and hold times, so a case exercises the
+//! current-sample detector, transition, curve, both one-pole rates and identity select.
 //! No case produces a NaN: master plan D5 excludes NaN payloads because wasm canonicalises them.
 
-use crate::kernel::{
-    GateArgs, GateCoef, GateRamp, GateRing, GateState, MAX_WIDTH, RAMP_COUNT, gate_block,
-};
+use crate::kernel::{GateArgs, GateCoef, GateRamp, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
 use lane::Lane;
 
 /// Independent single-lane signals in every case; a multiple of the widest backend.
@@ -30,13 +28,6 @@ pub const LANES: usize = 8;
 
 /// Frames per signal: long enough for the hold to expire and the release to settle several times.
 pub const FRAMES: usize = 1024;
-
-/// Fixed latency of the corpus, in samples. A short ring keeps the wasm leg quick while still
-/// exercising the wrap of a power-of-two slot count.
-pub const DELAY: u32 = 48;
-
-/// Ring slots, `(DELAY + 1).next_power_of_two()`.
-const SLOTS: usize = 64;
 
 /// Number of frozen cases.
 pub const CASE_COUNT: usize = 6;
@@ -96,7 +87,7 @@ fn signal(case: usize, lane: usize, channel: usize, out: &mut [f32]) {
 }
 
 /// The per-lane parameters of a case, chosen so no two lanes share a decision boundary.
-fn parameters(lane: usize, channel: usize) -> [f32; 8] {
+fn parameters(lane: usize, channel: usize) -> [f32; 7] {
     let bias = lane as f32 + channel as f32 * 0.5;
     [
         -60.0 + bias * 3.0, // threshold
@@ -106,7 +97,6 @@ fn parameters(lane: usize, channel: usize) -> [f32; 8] {
         0.5 + bias * 0.25,  // attack ms
         0.1 + bias * 0.05,  // hold ms
         8.0 + bias * 2.0,   // release ms
-        0.0,                // lookahead ms, converted to a tap below
     ]
 }
 
@@ -185,19 +175,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         }
         let (coef_left, mut state_left) = prepare::<L>(case, group, 0);
         let (coef_right, mut state_right) = prepare::<L>(case, group, 1);
-        let mut main_left = vec![0.0_f32; SLOTS * width];
-        let mut main_right = vec![0.0_f32; SLOTS * width];
-        let mut empty_left: Vec<f32> = Vec::new();
-        let mut empty_right: Vec<f32> = Vec::new();
-        let mut tap_left = [0_u32; MAX_WIDTH];
-        let mut tap_right = [0_u32; MAX_WIDTH];
-        for offset in 0..width {
-            let lane = group * width + offset;
-            // Lookahead 0, 6, 12, ... samples, so every lane taps a different slot.
-            tap_left[offset] = DELAY - (lane as u32 * 6).min(DELAY);
-            tap_right[offset] = DELAY - ((lane as u32 * 6 + 3).min(DELAY));
-        }
-        let mut cursor = 0_u32;
         if case == 5 {
             gate_block::<L, false, true>(GateArgs {
                 left: &mut left[..64 * width],
@@ -206,21 +183,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 frames: 64,
                 coef: (&coef_left, &coef_right),
                 state: (&mut state_left, &mut state_right),
-                rings: (
-                    GateRing {
-                        main: &mut main_left,
-                        detector: &mut empty_left,
-                        tap: &tap_left,
-                    },
-                    GateRing {
-                        main: &mut main_right,
-                        detector: &mut empty_right,
-                        tap: &tap_right,
-                    },
-                ),
-                cursor: &mut cursor,
-                slot_mask: (SLOTS - 1) as u32,
-                delay: DELAY,
             });
         }
         let done = if case == 5 { 64 } else { 0 };
@@ -231,21 +193,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
             frames: FRAMES - done,
             coef: (&coef_left, &coef_right),
             state: (&mut state_left, &mut state_right),
-            rings: (
-                GateRing {
-                    main: &mut main_left,
-                    detector: &mut empty_left,
-                    tap: &tap_left,
-                },
-                GateRing {
-                    main: &mut main_right,
-                    detector: &mut empty_right,
-                    tap: &tap_right,
-                },
-            ),
-            cursor: &mut cursor,
-            slot_mask: (SLOTS - 1) as u32,
-            delay: DELAY,
         });
         for offset in 0..width {
             let lane = group * width + offset;

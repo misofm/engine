@@ -10,7 +10,9 @@ Detector and gain computer are separately declared: an example one-pole envelope
 
 ## Coefficients and update rules
 
-Attack, release, hold, lookahead, detector mode, knee, and sidechain filters are parameterized explicitly. Convert time units to coefficients at prepare/event update and use bounded smoothing for gain targets.
+Attack, release, hold, detector mode, and sidechain filters are parameterized explicitly. The V1
+gate/expander detects the current sample and adds zero audio latency. Convert time units to
+coefficients at prepare/event update and use bounded smoothing for gain targets.
 
 ## Numerical and stability limits
 
@@ -18,7 +20,8 @@ Times must be finite and nonnegative; ratio, threshold, knee, and range use boun
 
 ## Latency and tail
 
-Lookahead declares exact integer samples and bypass retains that latency. Envelope/hold state creates a declared finite tail policy and reset clears it deterministically.
+The V1 gate/expander reports exact zero added samples in enabled and bypassed modes. Envelope/hold
+state creates a declared finite tail policy and reset clears it deterministically.
 
 ## Units, mappings, automation and smoothing
 
@@ -30,7 +33,8 @@ L/R detector and gain states are independent by default. Peak, RMS, average, or 
 
 ## Adopted decisions
 
-Prepared fixed-size detector, delay, and filter state only; lookahead rings are allocated before render. The callback has bounded work per frame and performs no allocation or blocking.
+Prepared fixed-size detector and filter state only; the causal gate owns no audio-history ring. The
+callback has bounded work per frame and performs no allocation or blocking.
 
 ## Denormal, signed-zero and NaN policy
 
@@ -42,15 +46,18 @@ Non-finite input is sanitized before detector math; non-finite envelope/gain res
 
 ## Fixtures
 
-Use level steps, attack/release bursts, threshold sweeps, hold transitions, sidechain impulses, asymmetric channels, lookahead impulses, silence/subnormal, and non-finite input fixtures.
+Use level steps, attack/release bursts, threshold sweeps, hold transitions, sidechain impulses,
+asymmetric channels, same-index causal impulses, silence/subnormal, and non-finite input fixtures.
 
 ## Objective tests and tolerances
 
-Check `f64` envelope/gain agreement within effect-declared tolerance, exact reported lookahead/PDC, finite output, detector-link behavior, scalar repeat identity, and bypass latency preservation.
+Check `f64` envelope/gain agreement within effect-declared tolerance, exact zero reported gate PDC,
+finite output, detector-link behavior, scalar repeat identity, and bypass current-sample identity.
 
 ## Rejected alternatives and tradeoffs
 
-The reference uses separate `f64` detector, curve, and delay types, not production structs or tables. A dependency/source scan fails if production dynamics kernels enter the reference path.
+The reference uses separate `f64` detector and curve types, not production structs or tables. A
+dependency/source scan fails if production dynamics kernels enter the reference path.
 
 ## Known gaps and follow-up
 

@@ -281,6 +281,78 @@ static OLD_COMPRESSOR_QUALITIES: [QualityDescriptor; 4] = [
     old_compressor_quality(96_000, 1920),
 ];
 
+const OLD_GATE_LOOKAHEAD: ParameterDescriptor = ParameterDescriptor {
+    id: ParameterId(8),
+    display_name: "lookahead",
+    display_unit: "ms",
+    unit: ParameterUnit::Milliseconds,
+    domain: ParameterDomain::Continuous,
+    minimum: Some(0.0),
+    maximum: Some(10.0),
+    default_value: 2.0,
+    mapping: ParameterMapping::Linear,
+    automation_rate: AutomationRate::None,
+    channel_policy: ParameterChannelPolicy::PerLane,
+    smoothing: SmoothingRule::None,
+    smoothing_samples: 0,
+    readable: true,
+    automatable: false,
+    enum_choices: &[],
+    lattice: default_parameter_lattice(
+        ParameterUnit::Milliseconds,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+    ),
+};
+
+static OLD_GATE_PARAMETERS: [ParameterDescriptor; 8] = [
+    gate_expander::GATE_EXPANDER_PARAMETERS[0],
+    gate_expander::GATE_EXPANDER_PARAMETERS[1],
+    gate_expander::GATE_EXPANDER_PARAMETERS[2],
+    gate_expander::GATE_EXPANDER_PARAMETERS[3],
+    gate_expander::GATE_EXPANDER_PARAMETERS[4],
+    gate_expander::GATE_EXPANDER_PARAMETERS[5],
+    gate_expander::GATE_EXPANDER_PARAMETERS[6],
+    OLD_GATE_LOOKAHEAD,
+];
+
+const fn old_gate_quality(sample_rate: u32, latency: u64) -> QualityDescriptor {
+    let per_lane = (23 + 2 * latency as u32) * 4;
+    QualityDescriptor {
+        quality: EffectQuality::Normal,
+        sample_rate,
+        latency: LatencySamples(latency),
+        tail: TailSamples::Finite(0),
+        maximum_state: StatePayloadSizes {
+            common_bytes: 8,
+            left_bytes: per_lane,
+            right_bytes: per_lane,
+        },
+        scratch_fixed_bytes: 64,
+        scratch_bytes_per_frame: 0,
+    }
+}
+
+static OLD_GATE_QUALITIES: [QualityDescriptor; 4] = [
+    old_gate_quality(44_100, 441),
+    old_gate_quality(48_000, 480),
+    old_gate_quality(88_200, 882),
+    old_gate_quality(96_000, 960),
+];
+
+static OLD_GATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+    id: effect_id("miso.gate-expander"),
+    display_name: "Gate / Expander",
+    contract_major: 1,
+    contract_minor: 1,
+    state_layout_version: 1,
+    supported_link_modes: LinkModeSet::ALL,
+    parameters: &OLD_GATE_PARAMETERS,
+    ports: gate_expander::GATE_EXPANDER_DESCRIPTOR.ports,
+    qualities: &OLD_GATE_QUALITIES,
+    observations: &gate_expander::GATE_EXPANDER_OBSERVATIONS,
+};
+
 static OLD_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.compressor"),
     display_name: "Compressor",
@@ -721,6 +793,97 @@ fn every_current_production_descriptor_encodes_and_verifies() {
         verify_effect_package(&package, EffectPackageLimits::default()).unwrap();
         effect_package_cid(&package, EffectPackageLimits::default()).unwrap();
     }
+}
+
+#[test]
+fn old_gate_descriptor_bound_state_is_rejected_by_the_causal_descriptor() {
+    for (quality, (rate, latency, lane_bytes)) in OLD_GATE_QUALITIES.iter().zip([
+        (44_100, 441, 3_620),
+        (48_000, 480, 3_932),
+        (88_200, 882, 7_148),
+        (96_000, 960, 7_772),
+    ]) {
+        assert_eq!(quality.sample_rate, rate);
+        assert_eq!(quality.latency, LatencySamples(latency));
+        assert_eq!(quality.maximum_state.common_bytes, 8);
+        assert_eq!(quality.maximum_state.left_bytes, lane_bytes);
+        assert_eq!(quality.maximum_state.right_bytes, lane_bytes);
+        assert_eq!(quality.scratch_fixed_bytes, 64);
+    }
+
+    let old_wire = encoded(&OLD_GATE_DESCRIPTOR);
+    verify_effect_descriptor_wire(&old_wire, 1 << 20).unwrap();
+    let old_bound = bind_effect_descriptor_wire(&OLD_GATE_DESCRIPTOR, &old_wire, 1 << 20).unwrap();
+    let mut initial_values = Vec::with_capacity(16);
+    for (index, parameter) in OLD_GATE_PARAMETERS.iter().enumerate() {
+        let value = if index == 7 {
+            2.0
+        } else {
+            parameter.default_value
+        };
+        initial_values.push(InitialParameterValue {
+            parameter_index: index as u32,
+            channel: ParameterChannel::Left,
+            value,
+        });
+        initial_values.push(InitialParameterValue {
+            parameter_index: index as u32,
+            channel: ParameterChannel::Right,
+            value,
+        });
+    }
+    let replay = EffectStateReplayView {
+        effect_id: OLD_GATE_DESCRIPTOR.id,
+        request: PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: port_id("sidechain-in"),
+                    required: false,
+                },
+            },
+            initial_values: &initial_values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        },
+    };
+    let requirements =
+        effect_state_requirements(old_bound, replay, EffectStateLimits::default()).unwrap();
+    let old_sizes = OLD_GATE_QUALITIES[1].maximum_state;
+    let mut old_envelope = vec![0_u8; requirements.envelope_bytes as usize];
+    encode_effect_state(
+        old_bound,
+        replay,
+        &vec![0_u8; old_sizes.common_bytes as usize],
+        &vec![0_u8; old_sizes.left_bytes as usize],
+        &vec![0_u8; old_sizes.right_bytes as usize],
+        EffectStateLimits::default(),
+        &mut old_envelope,
+    )
+    .unwrap();
+    verify_effect_state(old_bound, &old_envelope, EffectStateLimits::default()).unwrap();
+
+    let current_wire = encoded(&gate_expander::GATE_EXPANDER_DESCRIPTOR);
+    let current_bound = bind_effect_descriptor_wire(
+        &gate_expander::GATE_EXPANDER_DESCRIPTOR,
+        &current_wire,
+        1 << 20,
+    )
+    .unwrap();
+    assert_ne!(old_bound.identity(), current_bound.identity());
+    let rejection = verify_effect_state(current_bound, &old_envelope, EffectStateLimits::default())
+        .unwrap_err();
+    assert_eq!(
+        rejection.code,
+        effect_package::EffectStateDiagnosticCode::Descriptor
+    );
 }
 
 #[test]

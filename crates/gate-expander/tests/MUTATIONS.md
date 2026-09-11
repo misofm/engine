@@ -66,7 +66,12 @@ band is entered, removing the reload changes nothing, because the in-band arm is
 short-circuits the decrement. The test was rewritten to spend part of the countdown before the band
 is entered rather than accepting the mutant as covered.
 
-## Production gates (#89 §7)
+## Archived production gates (#89 §7)
+
+The rows in this archived section preserve the historical #89 mutation transcripts. Rows that
+targeted the removed lookahead/ring/tap implementation (4, 5, 8 and 11) are historical evidence
+only and are not current-contract claims. The live #738 mutation summary is at the end of this
+file.
 
 Reproduce with `cargo test --locked -p gate-expander --test <binary>` unless a row
 says otherwise. Every row below was applied, run, recorded and reverted in one session.
@@ -81,7 +86,7 @@ says otherwise. Every row below was applied, run, recorded and reverted in one s
 | 9 | the boundary check scans only the gain words, not the output block | `src/lib.rs` | `state` | RED |
 | 10 | the boundary check scans only the output block, not the gain words | `src/lib.rs` | `--lib` | RED |
 | 11 | the detector tap is one sample early (`N - L - 1`) | `src/lib.rs` | `contract` | RED |
-| 12 | the one-pole rounds twice instead of fusing (D3) | `src/kernel.rs` | `determinism` | RED |
+| 12 | the one-pole rounds twice instead of fusing (D3) — superseded/historical after #163 | `src/kernel.rs` | `determinism` | RED |
 | 13 | the D7 `flush` is removed from the one recursive word | `src/kernel.rs` | `state` | RED |
 | 14 | the render path allocates one `Vec` per block | `src/lib.rs` | audit bin | RED |
 | 15 | the opening comparison becomes strict: `level_db.gt(threshold)` instead of `.ge(...)` | `src/kernel.rs` | `contract` | RED |
@@ -255,3 +260,23 @@ test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... FAILED
 test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... FAILED
 test result: FAILED. 7 passed; 2 failed
 ```
+
+## Current causal contract summary (#738)
+
+These are the live focused mutation surfaces for the amended causal gate. They replace the
+lookahead/ring-specific rows above without deleting their historical transcripts.
+
+| mutation | focused gate |
+|---|---|
+| hold closes after decrement instead of testing the prior countdown | `dsp-reference` hold tests |
+| opening or rearm comparison becomes strict | `dsp-reference` threshold/rearm tests |
+| fast dB conversion or recursive flush changes | `oracle`, `state` |
+| current main word is loaded after either channel writes | causal opening test |
+| dry identity path changes signed zero | `identity` |
+| one channel commits before the other is parsed | `contract`/`state` rollback |
+| boundary gain/output scan or lane-local recovery is weakened | `state` scalar/bank recovery |
+| 64-sample endpoint or serialized continuation changes | `identity`/`state` |
+| exact resource caps or bank peer isolation changes | `contract`/`state` |
+
+No CPU timing or listening claim belongs to this record. Causal-gate CPU is tracked by #746 and
+listening remains pending #26.

@@ -12,7 +12,7 @@ use effect_contract::{
 use gate_expander::{GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory};
 
 /// Number of frozen parameters.
-pub const PARAMETER_COUNT: usize = 8;
+pub const PARAMETER_COUNT: usize = 7;
 
 /// One prepared parameter set.
 pub type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
@@ -39,10 +39,22 @@ pub fn prepare_bank(
     backend: Backend,
     quantum: u32,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    prepare_bank_at_rate(values, link_mode, width, backend, quantum, 48_000)
+}
+
+/// Prepares a bank at a specific launch rate for state/resource compatibility tests.
+pub fn prepare_bank_at_rate(
+    values: &[Values; 8],
+    link_mode: LinkMode,
+    width: BankWidth,
+    backend: Backend,
+    quantum: u32,
+    sample_rate: u32,
+) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let requests: Vec<PrepareEffectRequest<'_>> = values[..width.lanes() as usize]
         .iter()
         .map(|set| {
-            let mut request = request_at(set, 48_000, quantum);
+            let mut request = request_at(set, sample_rate, quantum);
             request.link_mode = link_mode;
             request
         })
@@ -85,7 +97,6 @@ pub fn active_values() -> Values {
     set_parameter(&mut values, 4, 1.0, 1.0);
     set_parameter(&mut values, 5, 0.0, 0.0);
     set_parameter(&mut values, 6, 5.0, 5.0);
-    set_parameter(&mut values, 7, 10.0, 10.0);
     values
 }
 

@@ -267,6 +267,46 @@ fn ten_thousand_session_parameter_mutations_reject_transactionally_without_panic
 }
 
 #[test]
+fn retired_gate_parameter_id_eight_rejects_before_native_publication() {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("actual gate session fixture");
+    let gate = model
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.dynamic.effects.iter_mut())
+        .find(|effect| effect.id.as_str() == "gate")
+        .expect("fixture gate effect");
+    gate.params.push(EffectParam {
+        parameter_id: 8,
+        channel: ParameterChannel::Both,
+        unit: SessionParameterUnit::Milliseconds,
+        value: 2.0,
+    });
+    let compiled = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("session model remains structurally compilable");
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
+        Ok(_) => panic!("retired gate parameter must prevent prepared publication"),
+        Err(diagnostics) => diagnostics,
+    };
+    assert_eq!(diagnostics.0.len(), 1);
+    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
+    assert!(diagnostics.0[0].path.contains("gate"));
+}
+
+#[test]
 fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/compressor-dynamic-observation.json"

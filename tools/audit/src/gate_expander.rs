@@ -6,9 +6,9 @@
 //! `strace` brackets: nothing between `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` and `..._RT_END` may be a
 //! syscall.
 //!
-//! Zero allocation is the claim under audit. The gate allocates exactly two `Box<[f32]>` rings per
-//! instance at preparation (four when a sidechain is connected) and nothing afterwards; the
-//! boundary check, the lane recovery and the parameter smoothing all work in place.
+//! Zero allocation is the claim under audit. Preparation owns fixed control state only; the causal
+//! render path has no audio-history allocation and nothing is allocated afterwards. The boundary
+//! check, lane recovery and parameter smoothing all work in place.
 
 use bench_support::alloc as bench_alloc;
 use effect_contract::{
@@ -252,7 +252,7 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
 /// The parameter set the audit renders with: a high threshold, a steep ratio and a short hold, so
 /// the gate is actually working rather than resting in its identity path.
 fn active_values() -> Vec<InitialParameterValue> {
-    let chosen = [-20.0_f32, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0, 10.0];
+    let chosen = [-20.0_f32, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0];
     let mut values = Vec::with_capacity(chosen.len() * 2);
     for (index, value) in chosen.iter().enumerate() {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {

@@ -95,6 +95,15 @@ fn feed_compressor_block(host: &mut AudioWorkletEngineHost, quantum: u32, block:
     assert_eq!(host.render_next(), RESULT_OK);
 }
 
+/// The actual three-track session fixture with its dynamic-rack causal gate at track `t2`.
+fn gate_console_host(quantum: u32) -> AudioWorkletEngineHost {
+    observation_host(quantum, 0, None)
+}
+
+fn feed_gate_block(host: &mut AudioWorkletEngineHost, block: u64) {
+    feed_and_render_tracks(host, block, 0.25);
+}
+
 fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
     let model = parse_host_session(core::str::from_utf8(document).expect("UTF-8 session"))
         .expect("accepted host session");
@@ -1728,6 +1737,112 @@ fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
     feed_compressor_block(&mut baseline, QUANTUM, 1);
     feed_compressor_block(&mut candidate, QUANTUM, 1);
     assert_eq!(candidate.output_pcm(), baseline.output_pcm());
+}
+
+#[test]
+fn real_gate_id_eight_rejects_atomically_at_the_web_command_boundary() {
+    const QUANTUM: u32 = 128;
+    let mut baseline = gate_console_host(QUANTUM);
+    let mut candidate = gate_console_host(QUANTUM);
+
+    feed_gate_block(&mut baseline, 0);
+    feed_gate_block(&mut candidate, 0);
+    let session_before = candidate
+        .ready
+        .as_ref()
+        .expect("ready gate session")
+        .session
+        .canonical_json()
+        .to_owned();
+    let resources_before = *candidate.resources();
+    let tracks_before = candidate.console_tracks().to_vec();
+    let sources_before = candidate.session_source_count();
+    let status_before = *candidate.status();
+
+    // The actual observation-frame fixture addresses gate on track t2, dynamic rack (wire rack 1), slot 0.
+    // A valid threshold update shares the batch with the retired lookahead ID 8. Atomic admission
+    // must reject both before changing the prepared model or the render/control revision.
+    stage_command(
+        &mut candidate,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        2,
+        0,
+        1,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut candidate,
+        1,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        2,
+        0,
+        8,
+        0,
+        [2.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(candidate.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        candidate.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(candidate.command_report().rejected_index, 1);
+    assert_eq!(candidate.command_report().admitted, 0);
+    assert_eq!(
+        candidate
+            .ready
+            .as_ref()
+            .expect("ready gate session")
+            .session
+            .canonical_json(),
+        session_before
+    );
+    assert_eq!(*candidate.resources(), resources_before);
+    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.session_source_count(), sources_before);
+    let status_after = *candidate.status();
+    assert_eq!(
+        (
+            status_after.state,
+            status_after.backend,
+            status_after.sample_rate_hz,
+            status_after.quantum_frames,
+            status_after.next_absolute_sample,
+            status_after.rendered_quanta,
+            status_after.reserved,
+        ),
+        (
+            status_before.state,
+            status_before.backend,
+            status_before.sample_rate_hz,
+            status_before.quantum_frames,
+            status_before.next_absolute_sample,
+            status_before.rendered_quanta,
+            status_before.reserved,
+        ),
+        "rejection changes only the typed last-result report",
+    );
+
+    // The valid threshold record was not admitted behind ID 8: the next rendered PCM and render
+    // clock remain identical to the untouched actual-gate host.
+    feed_gate_block(&mut baseline, 1);
+    feed_gate_block(&mut candidate, 1);
+    assert_eq!(candidate.output_pcm(), baseline.output_pcm());
+    assert_eq!(
+        (
+            candidate.status().next_absolute_sample,
+            candidate.status().rendered_quanta,
+        ),
+        (
+            baseline.status().next_absolute_sample,
+            baseline.status().rendered_quanta,
+        )
+    );
 }
 
 /// A three-field reader for `expected.json`, so the test needs no JSON dependency.
