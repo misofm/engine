@@ -42,16 +42,47 @@
 //! are host policy rather than session-document fields, so this authoring tool validates the model
 //! and its checked arithmetic without choosing a deployment budget.
 
-use std::{fmt::Write as _, process::ExitCode};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    fs::File,
+    io::{Read as _, Seek, SeekFrom},
+    process::ExitCode,
+};
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use session::{
-    CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, compile_session,
-    parse_session_json,
+    CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, SourceBitDepth, StableId,
+    canonical_session_json, compile_session, parse_session_json,
 };
+
+/// Maximum canonical session bytes accepted by the bounded fold-mono command.
+pub const FOLD_MONO_MAX_SESSION_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum replacement-map bytes accepted by the bounded fold-mono command.
+pub const FOLD_MONO_MAX_MAP_BYTES: usize = 256 * 1024;
+/// Maximum source identities in one replacement map.
+pub const FOLD_MONO_MAX_ENTRIES: usize = 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IdentityReplacement {
+    old: String,
+    new: String,
+}
+
+/// A failed bounded fold-mono transformation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoldMonoError(String);
+
+impl std::fmt::Display for FoldMonoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FoldMonoError {}
 
 /// The five pipeline stages, in execution order.
 pub const STAGE_NAMES: [&str; 5] = [
@@ -396,8 +427,291 @@ fn skipped_tail(mut stages: Vec<StageOutcome>, from: usize) -> ValidationReport 
     }
 }
 
+fn fold_error(message: impl Into<String>) -> FoldMonoError {
+    FoldMonoError(message.into())
+}
+
+fn diagnostic_text(set: &DiagnosticSet) -> String {
+    set.diagnostics()
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{} {}{}",
+                diagnostic.code,
+                diagnostic.path,
+                if diagnostic.message.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", diagnostic.message)
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn bounded_file(path: &str, maximum: usize) -> Result<Vec<u8>, FoldMonoError> {
+    let mut file =
+        File::open(path).map_err(|error| fold_error(format!("cannot read {path}: {error}")))?;
+    let byte_length = file
+        .metadata()
+        .map_err(|error| fold_error(format!("cannot stat {path}: {error}")))?
+        .len();
+    if byte_length > u64::try_from(maximum).expect("control-tool limit fits u64") {
+        return Err(fold_error(format!(
+            "{path} exceeds the {}-byte limit",
+            maximum
+        )));
+    }
+    // A bounded read remains bounded even if the file changes after metadata was observed.
+    let mut bytes = Vec::with_capacity(usize::try_from(byte_length).unwrap_or(maximum));
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| fold_error(format!("cannot seek {path}: {error}")))?;
+    file.take(u64::try_from(maximum).expect("control-tool limit fits u64") + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| fold_error(format!("cannot read {path}: {error}")))?;
+    if bytes.len() > maximum {
+        return Err(fold_error(format!(
+            "{path} exceeds the {}-byte limit",
+            maximum
+        )));
+    }
+    Ok(bytes)
+}
+
+fn valid_sha256_identity(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_fold_map(bytes: &[u8]) -> Result<Vec<IdentityReplacement>, FoldMonoError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(fold_error("replacement map must be LF-terminated"));
+    }
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| fold_error("replacement map must be UTF-8"))?;
+    let mut replacements = Vec::new();
+    let mut old_identities = HashSet::new();
+    for line in text.split_terminator('\n') {
+        if line.is_empty() {
+            return Err(fold_error("replacement map has a blank line"));
+        }
+        let Some((old, new)) = line.split_once('\t') else {
+            return Err(fold_error(
+                "replacement map lines require exactly old<TAB>new",
+            ));
+        };
+        validate_replacement_identity(old, new, &mut old_identities)?;
+        if replacements.len() == FOLD_MONO_MAX_ENTRIES {
+            return Err(fold_error(format!(
+                "replacement map exceeds the {}-entry limit",
+                FOLD_MONO_MAX_ENTRIES
+            )));
+        }
+        replacements.push(IdentityReplacement {
+            old: old.to_owned(),
+            new: new.to_owned(),
+        });
+    }
+    Ok(replacements)
+}
+
+fn validate_replacement_identity<'a>(
+    old: &'a str,
+    new: &str,
+    old_identities: &mut HashSet<&'a str>,
+) -> Result<(), FoldMonoError> {
+    if !valid_sha256_identity(old) || !valid_sha256_identity(new) {
+        return Err(fold_error(
+            "replacement identities must be sha256: followed by 64 lowercase hex digits",
+        ));
+    }
+    if old == new {
+        return Err(fold_error("replacement identity cannot map to itself"));
+    }
+    if !old_identities.insert(old) {
+        return Err(fold_error("replacement map repeats an old identity"));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SourceShape {
+    bit_depth: SourceBitDepth,
+    channels: u8,
+    frames: u64,
+}
+
+fn fold_mono_document(
+    source_text: &str,
+    replacements: &[IdentityReplacement],
+) -> Result<String, FoldMonoError> {
+    if source_text.len() > FOLD_MONO_MAX_SESSION_BYTES {
+        return Err(fold_error(format!(
+            "session exceeds the {}-byte limit",
+            FOLD_MONO_MAX_SESSION_BYTES
+        )));
+    }
+    let mut model = parse_session_json(source_text)
+        .map_err(|set| fold_error(format!("invalid session: {}", diagnostic_text(&set))))?;
+    let canonical = canonical_session_json(&model)
+        .map_err(|set| fold_error(format!("invalid session: {}", diagnostic_text(&set))))?;
+    if canonical != source_text {
+        return Err(fold_error("session input must be canonical JSON"));
+    }
+    // Even an empty map must pass the same complete control-plane compile gate. Its accepted
+    // result is returned byte-for-byte below, so no canonical writer can alter a no-op.
+    compile_session(&model, compile_caps()).map_err(|set| {
+        fold_error(format!(
+            "session compilation failed: {}",
+            diagnostic_text(&set)
+        ))
+    })?;
+    if replacements.is_empty() {
+        return Ok(source_text.to_owned());
+    }
+
+    let by_old: HashMap<&str, &IdentityReplacement> = replacements
+        .iter()
+        .map(|replacement| (replacement.old.as_str(), replacement))
+        .collect();
+    let mut matched = HashSet::new();
+    let mut original_shapes: HashMap<&str, SourceShape> = HashMap::new();
+    for source in &model.sources {
+        let shape = SourceShape {
+            bit_depth: source.bit_depth,
+            channels: source.channels,
+            frames: source.frames,
+        };
+        if let Some(replacement) = by_old.get(source.content.as_str()) {
+            matched.insert(replacement.old.as_str());
+            if shape.channels != 2
+                || !matches!(
+                    shape.bit_depth,
+                    SourceBitDepth::Pcm16 | SourceBitDepth::Pcm24
+                )
+            {
+                return Err(fold_error(format!(
+                    "mapped source {} must be two-channel PCM16 or PCM24",
+                    source.id
+                )));
+            }
+            if let Some(previous) = original_shapes.insert(source.content.as_str(), shape)
+                && previous != shape
+            {
+                return Err(fold_error(format!(
+                    "sources sharing {} have conflicting shapes",
+                    source.content
+                )));
+            }
+        }
+    }
+    if matched.len() != replacements.len() {
+        let missing = replacements
+            .iter()
+            .find(|replacement| !matched.contains(replacement.old.as_str()))
+            .expect("matched count differs only when one replacement is missing");
+        return Err(fold_error(format!(
+            "mapped identity {} does not occur in the session",
+            missing.old
+        )));
+    }
+
+    // Mapping is simultaneous: every lookup uses the original content identity, so A->B and
+    // B->C never cascade A through B to C.
+    let affected_source_ids: HashSet<StableId> = model
+        .sources
+        .iter()
+        .filter(|source| by_old.contains_key(source.content.as_str()))
+        .map(|source| source.id.clone())
+        .collect();
+    let mut final_shapes: HashMap<&str, SourceShape> = HashMap::new();
+    for source in &mut model.sources {
+        let replacement = by_old.get(source.content.as_str()).copied();
+        if let Some(replacement) = replacement {
+            source.content = replacement.new.clone();
+            source.channels = 1;
+        }
+        let shape = SourceShape {
+            bit_depth: source.bit_depth,
+            channels: source.channels,
+            frames: source.frames,
+        };
+        if let Some(previous) = final_shapes.insert(source.content.as_str(), shape)
+            && previous != shape
+        {
+            return Err(fold_error(format!(
+                "resulting identity {} has conflicting source shapes",
+                source.content
+            )));
+        }
+    }
+    for track in &mut model.tracks {
+        if affected_source_ids.contains(&track.source_id) {
+            track.left_source_channel = 0;
+            track.right_source_channel = 0;
+        }
+    }
+    model.revision = model
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| fold_error("session revision exhausted"))?;
+    let compiled = compile_session(&model, compile_caps()).map_err(|set| {
+        fold_error(format!(
+            "transformed session is invalid: {}",
+            diagnostic_text(&set)
+        ))
+    })?;
+    let output = compiled.canonical_json().to_owned();
+    if output.len() > FOLD_MONO_MAX_SESSION_BYTES {
+        return Err(fold_error(format!(
+            "transformed session exceeds the {}-byte limit",
+            FOLD_MONO_MAX_SESSION_BYTES
+        )));
+    }
+    Ok(output)
+}
+
+/// Apply complete, pre-validated identity replacements to one canonical session document.
+///
+/// The replacement slice is intentionally kept internal to the command parser; callers should
+/// use the bounded CLI map protocol rather than constructing a migration manifest of their own.
+pub fn fold_mono_session_document(
+    source_text: &str,
+    replacements: &[(String, String)],
+) -> Result<String, FoldMonoError> {
+    if replacements.len() > FOLD_MONO_MAX_ENTRIES {
+        return Err(fold_error(format!(
+            "replacement map exceeds the {}-entry limit",
+            FOLD_MONO_MAX_ENTRIES
+        )));
+    }
+    let mut old_identities = HashSet::new();
+    let parsed = replacements
+        .iter()
+        .map(|(old, new)| {
+            validate_replacement_identity(old, new, &mut old_identities)?;
+            Ok(IdentityReplacement {
+                old: old.clone(),
+                new: new.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, FoldMonoError>>()?;
+    fold_mono_document(source_text, &parsed)
+}
+
 const USAGE: &str = "\
 usage: session_validator validate [--canonical] <session.json>
+
+  session_validator fold-mono --map <folds.tsv> <canonical-session.json>
+      Apply bounded producer-verified stereo-to-mono identity replacements and write the
+      complete canonical transformed session to stdout. Diagnostics are written to stderr.
 
   validate <path>
       Run every session pipeline stage over <path> and print a PASS/FAIL line per stage
@@ -410,17 +724,16 @@ usage: session_validator validate [--canonical] <session.json>
 
 Read-only: no file is written, no artifact is produced, no audio is rendered.
 
-Exit codes: 0 every stage passed, 1 a stage failed, 2 usage or I/O error.
+Exit codes: 0 accepted, 1 validation/transformation failure, 2 usage or I/O error.
 ";
 
 /// Run the command line. Returns the process exit code; `--help` prints the full contract.
 #[must_use]
 pub fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     let arguments: Vec<String> = arguments.collect();
-    let mut canonical = false;
-    let mut path: Option<&str> = None;
     let mut rest = arguments.iter().map(String::as_str);
     match rest.next() {
+        Some("fold-mono") => return run_fold_mono(rest.collect()),
         Some("validate") => {}
         Some("--help" | "-h") => {
             print!("{USAGE}");
@@ -428,6 +741,8 @@ pub fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
         }
         _ => return usage("expected the `validate` subcommand"),
     }
+    let mut canonical = false;
+    let mut path: Option<&str> = None;
     for argument in rest {
         match argument {
             "--canonical" if !canonical => canonical = true,
@@ -468,6 +783,60 @@ pub fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+fn run_fold_mono(arguments: Vec<&str>) -> ExitCode {
+    let mut arguments = arguments.into_iter();
+    if arguments.next() != Some("--map") {
+        return usage("fold-mono requires `--map <folds.tsv> <canonical-session.json>`");
+    }
+    let Some(map_path) = arguments.next() else {
+        return usage("fold-mono requires a replacement-map path");
+    };
+    let Some(session_path) = arguments.next() else {
+        return usage("fold-mono requires a canonical-session path");
+    };
+    if arguments.next().is_some() {
+        return usage("fold-mono accepts exactly one map and one session path");
+    }
+    let map = match bounded_file(map_path, FOLD_MONO_MAX_MAP_BYTES) {
+        Ok(map) => map,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let session = match bounded_file(session_path, FOLD_MONO_MAX_SESSION_BYTES) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let map = match parse_fold_map(&map) {
+        Ok(map) => map,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source = match std::str::from_utf8(&session) {
+        Ok(source) => source,
+        Err(_) => {
+            eprintln!("session must be UTF-8");
+            return ExitCode::FAILURE;
+        }
+    };
+    match fold_mono_document(source, &map) {
+        Ok(output) => {
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
     }
 }
 

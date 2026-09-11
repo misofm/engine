@@ -52,3 +52,32 @@ Astra medium approves this scope after the Astra xhigh mono plan. Mappings apply
 Start implementation only after adapter #54 is accepted with upstream evidence and synchronized GitHub state. One active implementation issue; root checkpoints exact paths once focused-green and publishes evidence before more implementation. Record commands/results and bounded-memory behavior; independent adversarial review receives one PASS/FAIL per attempt, with the actual reviewer/context limitation disclosed. Close the GitHub issue when PASS evidence is upstream and verify its state. Preserve a source-attested native executable for the CLI consumer; do not commit generated binaries or private audio. No timing or broad target-matrix work is required.
 
 Issue-boundary audit: all 372 local numbered engine specs have matching GitHub issue numbers; prior owned research issue #741 is closed. Historical heading decoration/brief labels do not change those issue identities and are preserved. This new spec title/number and GitHub body are synchronized before implementation. No unrelated issue state or history is changed.
+
+## Attempt 1 implementation evidence (Luna)
+
+The native `session_validator fold-mono --map <folds.tsv> <canonical-session.json>` command now
+reads both inputs through bounded handles (8 MiB session, 256 KiB map), accepts only the exact
+LF-terminated two-column SHA-256 map grammar, rejects noncanonical input, and transforms one
+transactional typed model. Mappings are simultaneous; all mapped sources must be PCM16/PCM24 with
+two channels and matching shape, resulting identity/shape conflicts are refused, source IDs and
+all unrelated model fields are preserved, every affected track channel reference becomes zero,
+and a successful non-empty transform increments revision exactly once with checked arithmetic.
+Empty maps return canonical input bytes exactly. Final candidates pass `compile_session` and the
+canonical writer; failures emit no document. A bounded SDK render-eval covers duplicate stereo
+planes versus the prepared mono source, and native tests cover asymmetric builtins/matrix and a
+valid native EQ fixture with exact PCM bit equality and nonzero output.
+
+Evidence from the clean worktree:
+
+- `cargo test --locked -p session-validator`: 8 focused fold-mono tests, 1 skill test, 9 existing validator tests, and doc-tests passed.
+- `cargo clippy --locked -p session-validator --all-targets -- -D warnings`: passed.
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-sdk-headless.sh`: 193 SDK tests passed, including the new duplicate-stereo/mono case.
+- `git diff --check`: passed.
+
+No session runtime, SDK runtime/ABI, DSP, codec, package, release, or dependency behavior was
+changed. No generated Wasm artifact or executable is committed. Source-attested executable
+metadata for the uncommitted baseline build is `source_revision=4651563a949cf81165890b99ea9fd99754061825`,
+`target=x86_64-unknown-linux-gnu`, `sha256=f3f34b73f3904dd70c4fd2807caf882a05e60f6b4e8114a23e0bb0ae1feb1f42`,
+from `cargo build --locked -p session-validator --release`. Independent Astra medium verdict and
+root checkpoint are pending.
