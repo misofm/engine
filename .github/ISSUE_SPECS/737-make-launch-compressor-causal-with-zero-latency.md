@@ -371,3 +371,20 @@ Update those live explanations without changing code, gates, historical measurem
 records, or other effects. Preserve Rust source line counts where practical, then
 prove the rebuilt shipped artifact identity unchanged. Final source review and
 exact-head PR/main CI remain required before closure.
+
+
+## Final review: negative-zero evidence correction
+
+The final prose checkpoint 6975d07a and docs-only main integration 2498f1cd rebuild
+to all six identical qualified artifact bytes. Sol independently applied the
+sign-masked shared silence predicate in an external archive: the compressor
+negative-zero test still passes. Its old red-mutation claim is therefore retired
+for the causal compressor; this is an equivalence regression, not proof that this
+compressor requires the strict shared predicate. Preserve the helper implementation
+and the EQ/shared-caller contract. Authorize a bounded comment correction in
+`crates/effect-runtime/src/bank.rs` and
+`crates/compressor/tests/silent_fixed_point.rs`, and an explicit current note in
+`crates/compressor/tests/MUTATIONS.md`. No production or test behavior change is
+required. Sol's mutation receipt is preserved at
+`/home/bl/issue737-sol-attempt1-checkpoint-review/negative-zero-mutation.*`.
+The final verdict remains pending this factual correction; no gate is weakened.
