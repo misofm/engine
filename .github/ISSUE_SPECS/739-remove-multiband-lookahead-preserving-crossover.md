@@ -393,3 +393,22 @@ Sol accepted this clarification, alongside lattice63rows/189checks. No productio
 control framework change is authorized. Tracked JSON inventory found only shipped
 SDK metadata plus the synthetic validator fixture, and no session JSON to update.
 CPU #748 remains queued with zero timing; listening #26 remains pending.
+
+
+## Resume scope revalidation — 2026-09-11
+
+The current owner requests Astra medium scoping and verification with Luna xhigh
+implementation for #739 and three subsequently selected issues. This supersedes
+historical model routing only; prior evidence attribution remains unchanged.
+Astra medium revalidated the frozen scope at recovery e4bf39ea and unchanged
+main17d755e9: PASS to resume existing attempt1, not implementation PASS.
+Root confirmed clean recovery/upstream0/0 and no local numbered spec missing its
+GitHub issue. The captured inherited reset RED remains authoritative.
+
+Resume bounded core/reset, then existing public suites plus independent causal
+oracle, then thin compatibility/control/PDC descendants, checkpointing each green
+tranche before the next. One additional semantic leftover is compact automation
+index subtraction: the old offset2 must become1 after retiring stable ID2.
+Frozen DSP/state/resources/tolerances and all final gates remain unchanged.
+Root owns generated SDK/catalog, artifacts, evidence and delivery; CPU748 and
+listening26 stay separate. No source/test/measurement PASS is claimed by scoping.
