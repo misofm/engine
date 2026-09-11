@@ -1,4 +1,4 @@
-# Nightly workflow failure: precise budget selection and saved-crash replay
+# nightly workflow is failing
 
 ## Approved current scope — 2026-09-11
 
@@ -60,3 +60,37 @@ The scheduled nightly workflow failed.
 Run: https://github.com/misofm/engine/actions/runs/33851070103
 
 Close this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.
+
+## Attempt 1 bounded qualification — 2026-09-11
+
+Source checkpoint `fe84a621` passed all four real release `--list` checks: each
+exact selector discovered its single intended ignored test. Each corresponding
+workflow command then ran once with Rust 1.97.1 and passed (one test each, zero
+failures). The four existing test bodies and thresholds were unchanged. The
+unrelated #522 opt-in timing test was not selected. No timing retry occurred.
+
+Saved artifact `10143260782` (`nightly-fuzz`, run `34453343273`, source
+`0dc066337d990a368801138d1c1f8b63830cd57e`) was downloaded, and its ZIP SHA-256
+`b2378161d43eaff315278f0a2ed521e29d39d206aaedc77f08439c6c265c330d` matches
+GitHub metadata. The two original crash files were extracted without mutation:
+
+| Target | Bytes | Crash input SHA-256 |
+| --- | ---: | --- |
+| session_compile | 1067 | `353c8401d5745bcde3c2d4aecefd86cdf159e39a056b2a7621c02b7dd09ed57d` |
+| session_parse | 2891 | `5acaaa541898e42b1f40733075296cd955476360f741ff74a3dc635e871d6538` |
+
+Both fixed-file replays exited zero on current guarded source using
+`cargo +nightly-2026-08-20 fuzz run --sanitizer address --target
+x86_64-unknown-linux-gnu --target-dir /tmp/issue360-fuzz-target <target>
+<saved-crash> -- -runs=1 -max_total_time=180`, cargo-fuzz 0.13.2 and
+`RUSTFLAGS='-C target-feature=+avx2,+fma'`. Each runtime log confirms one input
+executed once and that fuzzing was not performed. The harness compile caps and
+parser source remain unchanged; no production correction was needed.
+
+External evidence is `/tmp/issue360-qualification`: exact command/environment/
+source/exit receipts, toolchain versions, all list and budget logs, replay logs,
+failed nightly log, archive metadata/digest proof, original ZIP/crash bytes and
+source-preservation hashes. Selection/policy checkpoint evidence remains at
+`/tmp/issue360-attempt1-selection`. No full nightly dispatch, random fuzzing,
+benchmark campaign, or performance improvement claim was used. Independent
+review and normal reviewed-head PR/main qualification remain delivery gates.
