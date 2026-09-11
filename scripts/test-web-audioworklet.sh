@@ -43,6 +43,45 @@ cleanup() {
   rm -rf -- "$mutation_dir"
 }
 trap cleanup EXIT
+
+# Issue #288: mutate the real qualification caller module and run the same hermetic boot check.
+# Keep the helper import's relative layout under the temporary directory so a missing module or
+# an import-path mistake cannot masquerade as a contract failure.
+qualification_source="$repo_root/hosts/host-web/qualification/qualification.js"
+qualification_module_dir="$mutation_dir/qualification-module"
+mkdir -p "$qualification_module_dir/hosts/host-web/qualification" \
+  "$qualification_module_dir/hosts/host-web/web"
+qualification_helper="$repo_root/hosts/host-web/web/hex-lower.js"
+qualification_mutations=(
+  'outer document|s/^    document: sessionDocument,$/    sessionDocument: sessionDocument,/|renderCorpusSegment real host guard rejected'
+  'shared boot key|s/^    options: bootOptions(frames),$/    boot: bootOptions(frames),/|renderCorpusSegment real host guard rejected'
+  'diagnostic options|s/^        options: bootOptions(QUANTUM_FRAMES),$/        limits: bootOptions(QUANTUM_FRAMES),/|diagnoseReady initializer was refused'
+)
+for entry in "${qualification_mutations[@]}"; do
+  name=${entry%%|*}
+  remainder=${entry#*|}
+  expression=${remainder%%|*}
+  expected=${remainder#*|}
+  mutated_qualification="$qualification_module_dir/hosts/host-web/qualification/qualification.js"
+  qualification_log="$mutation_dir/qualification-${name// /-}.log"
+  sed "$expression" "$qualification_source" >"$mutated_qualification"
+  if diff -q "$qualification_source" "$mutated_qualification" >/dev/null; then
+    echo "qualification mutation matched nothing: $name" >&2
+    exit 1
+  fi
+  cp "$qualification_helper" "$qualification_module_dir/hosts/host-web/web/hex-lower.js"
+  if node "$repo_root/scripts/test-web-audioworklet.mjs" \
+    --qualification-module "$mutated_qualification" >"$qualification_log" 2>&1; then
+    echo "qualification mutation escaped the hermetic check: $name" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$expected" "$qualification_log"; then
+    echo "qualification mutation failed for an unexpected reason: $name" >&2
+    sed -n '1,12p' "$qualification_log" >&2
+    exit 1
+  fi
+  echo "qualification source mutation passed: $name"
+done
 webdriver_runner="$repo_root/scripts/web-audioworklet-browser-correctness.py"
 python3 -B "$webdriver_runner" --self-test-webdriver-responses
 mutated_webdriver="$mutation_dir/web-audioworklet-browser-correctness.py"

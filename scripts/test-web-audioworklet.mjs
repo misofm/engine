@@ -9,6 +9,13 @@ const hostUrl = process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE === undefined
 const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
   ? new URL("hosts/host-web/web/miso-engine-v1-audio-worklet.js", root)
   : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
+const qualificationModuleIndex = process.argv.indexOf("--qualification-module");
+if (qualificationModuleIndex !== -1 && typeof process.argv[qualificationModuleIndex + 1] !== "string") {
+  throw new TypeError("--qualification-module requires a file path");
+}
+const qualificationUrl = qualificationModuleIndex === -1
+  ? new URL("hosts/host-web/qualification/qualification.js", root)
+  : pathToFileURL(process.argv[qualificationModuleIndex + 1]);
 
 const limits = Object.freeze({
   sourceRingFrames: 256,
@@ -977,7 +984,7 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum, backend = 1) {
+function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -1030,10 +1037,11 @@ function createFakeExports(quantum, backend = 1) {
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 5: 8192, 6: commandPointer, 7: meterFramePointer,
+    2: 4096, 3: 5000, 5: 8192, 6: consoleAttached ? commandPointer : 0, 7: meterFramePointer,
   };
   const capacities = {
-    2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4, 6: 256 * 48,
+    2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4,
+    6: consoleAttached ? 256 * 48 : 0,
     7: meterFrameFloats * 4,
   };
   calls.commands = [];
@@ -1165,6 +1173,288 @@ function withTelemetryClock(clock, callback) {
   }
 }
 
+// Issue #288: exercise the qualification caller's real boot objects through the same host and
+// worklet guards as the main-realm suite. The returned sentinel deliberately stops before any
+// source/render loop; only the wrapper's real create/dispose and the diagnostic initializer run.
+async function testQualificationBoot({ registered, makeFake, setNextFake, setProcessorPortFactory, document }) {
+  const originalOfflineAudioContext = globalThis.OfflineAudioContext;
+  const originalAudioWorkletNode = globalThis.AudioWorkletNode;
+  const originalFetch = globalThis.fetch;
+  const originalCompile = WebAssembly.compile;
+  const originalValidate = WebAssembly.validate;
+  const originalSampleRate = globalThis.sampleRate;
+  const originalRenderQuantumSize = globalThis.renderQuantumSize;
+  const qualificationUrlWithCacheKey = `${qualificationUrl.href}?boot-contract-test`;
+  const {
+    createMisoAudioWorkletHost,
+  } = await import(`${hostUrl.href}?qualification-boot-host`);
+  const { qualificationBootContract: hooks } = await import(qualificationUrlWithCacheKey);
+  const observed = [];
+  const nodes = [];
+  const fetchUrls = [];
+  let realReady = 0;
+  let realDisposed = 0;
+
+  class QualificationPort {
+    constructor() {
+      this.peer = null;
+      this.handler = null;
+      this.pending = [];
+      this.closed = false;
+    }
+
+    get onmessage() {
+      return this.handler;
+    }
+
+    set onmessage(handler) {
+      this.handler = handler;
+      if (typeof handler !== "function") return;
+      for (const event of this.pending.splice(0)) queueMicrotask(() => this.handler?.(event));
+    }
+
+    postMessage(message, transfer = []) {
+      this.peer?.deliver(message, transfer);
+    }
+
+    deliver(message, transfer = []) {
+      const event = { data: structuredClone(message, { transfer }) };
+      if (typeof this.handler !== "function") this.pending.push(event);
+      else queueMicrotask(() => this.handler?.(event));
+    }
+
+    close() {
+      this.closed = true;
+    }
+  }
+
+  class QualificationOfflineAudioContext {
+    constructor(numberOfChannels, length, sampleRate) {
+      this.numberOfChannels = numberOfChannels;
+      this.length = length;
+      this.sampleRate = sampleRate;
+      this.renderQuantumSize = 128;
+      this.state = "suspended";
+      this.destination = {};
+      this.audioWorklet = {
+        addModule: async () => undefined,
+      };
+    }
+
+  }
+
+  class QualificationNode {
+    static latest = null;
+
+    constructor(context, _name, options = {}) {
+      const hostPort = new QualificationPort();
+      const processorPort = new QualificationPort();
+      hostPort.peer = processorPort;
+      processorPort.peer = hostPort;
+      this.port = hostPort;
+      this.options = options;
+      this.onprocessorerror = null;
+      this.disconnectCount = 0;
+      const processorOptions = options.processorOptions?.options;
+      setNextFake(makeFake(
+        context.renderQuantumSize,
+        1,
+        processorOptions?.consoleCommandQueueRecords !== 0n,
+      ));
+      setProcessorPortFactory(() => processorPort);
+      try {
+        this.processor = new registered({ processorOptions: options.processorOptions });
+      } finally {
+        setProcessorPortFactory(null);
+      }
+      QualificationNode.latest = this;
+      nodes.push(this);
+    }
+
+    disconnect() {
+      this.disconnectCount += 1;
+    }
+  }
+
+  class QualificationStop extends Error {
+    constructor(label) {
+      super(`qualification boot probe stopped before ${label} loop`);
+      this.label = label;
+    }
+  }
+
+  globalThis.OfflineAudioContext = QualificationOfflineAudioContext;
+  globalThis.AudioWorkletNode = QualificationNode;
+  globalThis.sampleRate = 48000;
+  globalThis.renderQuantumSize = 128;
+  globalThis.fetch = async (url) => {
+    fetchUrls.push(String(url));
+    return {
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([0]).buffer,
+    };
+  };
+  WebAssembly.compile = async () => Object.freeze({ qualification: true });
+  WebAssembly.validate = () => true;
+
+  const bounded = (promise, label) => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`qualification boot contract: ${label} timed out`)), 1000);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
+  const forwardingCreateHost = (label) => async (options) => {
+    observed.push({ label, options });
+    if (options.document !== undefined) {
+      assert(options.document instanceof Uint8Array && options.document.byteLength > 0,
+        `qualification boot contract: ${label} document must be nonempty`);
+    }
+    assert.equal(options.context.sampleRate, 48000,
+      `qualification boot contract: ${label} sample rate mismatch`);
+    assert.equal(options.context.renderQuantumSize, 128,
+      `qualification boot contract: ${label} quantum mismatch`);
+    if (label === "renderCorpusSegment" && options.options !== undefined) {
+      await assert.rejects(
+        () => createMisoAudioWorkletHost({
+          ...options,
+          options: { ...options.options, qualificationExtra: true },
+        }),
+        (error) => error?.tag === "miso.error.v1" && error.result === 1,
+        "qualification boot contract: real guard must reject an extra option",
+      );
+    }
+    let host;
+    try {
+      host = await bounded(createMisoAudioWorkletHost(options), `${label} real host`);
+    } catch (error) {
+      throw new Error(
+        `qualification boot contract: ${label} real host guard rejected `
+        + `(${error?.tag ?? error?.message ?? String(error)} result=${error?.result ?? "?"})`,
+      );
+    }
+    assert.equal(host.backend, "simd128", `qualification boot contract: ${label} backend`);
+    realReady += 1;
+    try {
+      await bounded(host.dispose(), `${label} real dispose`);
+    } catch (error) {
+      throw new Error(`qualification boot contract: ${label} real host dispose failed: ${error}`);
+    }
+    realDisposed += 1;
+    if (label === "typedUnsupportedAttestation") {
+      // The real guard has already accepted and disposed this boot. The helper's catch is then
+      // exercised with the typed refusal it expects, instead of mistaking a guard failure for it.
+      throw Object.freeze({
+        tag: "miso.unsupported.v1", requestId: 0, result: 7, capability: "simd128",
+      });
+    }
+    throw new QualificationStop(label);
+  };
+
+  try {
+    const documentBytes = new Uint8Array(document);
+    await hooks.renderCorpusSegment(
+      forwardingCreateHost("renderCorpusSegment"),
+      documentBytes,
+      [{ startFrame: 0, leftBase: 0, leftStep: 0, frames: 128, final: true }],
+    );
+    assert.equal(
+      await hooks.typedUnsupportedAttestation(
+        forwardingCreateHost("typedUnsupportedAttestation"), documentBytes,
+      ),
+      true,
+      "qualification boot contract: typed unsupported catch did not receive its typed refusal",
+    );
+    await hooks.runConsoleQualification(
+      forwardingCreateHost("runConsoleQualification"), documentBytes,
+    );
+    await hooks.runObservationRun(
+      forwardingCreateHost("runObservationRun"), documentBytes, true,
+    );
+    const performanceDescriptor = Object.getOwnPropertyDescriptor(globalThis, "performance");
+    Object.defineProperty(globalThis, "performance", {
+      configurable: true,
+      enumerable: performanceDescriptor?.enumerable ?? true,
+      writable: true,
+      value: { now: (() => { let reads = 0; return () => reads++ === 0 ? 0 : 120; })() },
+    });
+    try {
+      await hooks.runStallQualification(
+        forwardingCreateHost("runStallQualification"), documentBytes,
+      );
+    } finally {
+      if (performanceDescriptor === undefined) delete globalThis.performance;
+      else Object.defineProperty(globalThis, "performance", performanceDescriptor);
+    }
+
+    assert.deepEqual(
+      observed.map(({ label }) => label),
+      [
+        "renderCorpusSegment", "typedUnsupportedAttestation", "runConsoleQualification",
+        "runObservationRun", "runStallQualification",
+      ],
+      "qualification boot contract: caller witness set changed",
+    );
+    assert.equal(realReady, 5, "qualification boot contract: five real ready witnesses required");
+    assert.equal(realDisposed, 5, "qualification boot contract: five real dispose witnesses required");
+    assert.equal(sentinelStops, 4, "qualification boot contract: every non-attestation path must stop its sentinel");
+    const plain = observed.filter(({ label }) =>
+      label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
+    assert(plain.every(({ options }) => options.options.consoleCommandQueueRecords === 0n
+      && options.options.consoleMeterBlocks === 0n
+      && options.options.consoleObservationTaps === 0n
+      && options.options.consoleMasterTrackPlusOne === 0n),
+    "qualification boot contract: plain option variant changed");
+    const consoleOptions = observed.find(({ label }) => label === "runConsoleQualification").options.options;
+    assert.equal(consoleOptions.consoleCommandQueueRecords, 64n);
+    assert.equal(consoleOptions.consoleMeterBlocks, 2n);
+    assert.equal(consoleOptions.consoleObservationTaps, 0n);
+    assert.equal(consoleOptions.consoleMasterTrackPlusOne, 0n);
+    const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
+    assert.equal(observationOptions.consoleCommandQueueRecords, 64n);
+    assert.equal(observationOptions.consoleMeterBlocks, 2n);
+    assert.equal(observationOptions.consoleObservationTaps, 4n);
+    assert.equal(observationOptions.consoleMasterTrackPlusOne, 1n);
+
+    const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
+    assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");
+    assert.equal(diagnosis.message.tag, "miso.ready.v1",
+      "qualification boot contract: diagnoseReady initializer was refused before ready");
+    assert.equal(diagnosis.message.result, 0,
+      `qualification boot contract: diagnoseReady initializer was refused (result ${diagnosis.message.result})`);
+    assert.equal(diagnosis.message.backend, "simd128");
+    const diagnosticNode = QualificationNode.latest;
+    assert(diagnosticNode?.processor instanceof registered,
+      "qualification boot contract: diagnoseReady did not use the registered real worklet class");
+    assert.equal(diagnosticNode.processor.ready, true,
+      "qualification boot contract: diagnoseReady initializer did not become ready");
+    assert(diagnosticNode.options.processorOptions.document instanceof Uint8Array
+      && diagnosticNode.options.processorOptions.document.byteLength > 0);
+    assert(fetchUrls.length >= 6 && fetchUrls.every((url) => typeof url === "string"),
+      "qualification boot contract: fetch escaped the hermetic fixture");
+    console.log(
+      `qualification boot contract passed: callers=${observed.length} `
+      + `real-ready=${realReady} real-disposed=${realDisposed} diagnose-ready=1`,
+    );
+  } finally {
+    if (originalOfflineAudioContext === undefined) delete globalThis.OfflineAudioContext;
+    else globalThis.OfflineAudioContext = originalOfflineAudioContext;
+    if (originalAudioWorkletNode === undefined) delete globalThis.AudioWorkletNode;
+    else globalThis.AudioWorkletNode = originalAudioWorkletNode;
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    WebAssembly.compile = originalCompile;
+    WebAssembly.validate = originalValidate;
+    if (originalSampleRate === undefined) delete globalThis.sampleRate;
+    else globalThis.sampleRate = originalSampleRate;
+    if (originalRenderQuantumSize === undefined) delete globalThis.renderQuantumSize;
+    else globalThis.renderQuantumSize = originalRenderQuantumSize;
+    setProcessorPortFactory(null);
+    if (originalPerformance === undefined) delete globalThis.performance;
+    else Object.defineProperty(globalThis, "performance", originalPerformance);
+  }
+}
+
 async function testProcessor() {
   const originalProcessor = globalThis.AudioWorkletProcessor;
   const originalRegister = globalThis.registerProcessor;
@@ -1180,6 +1470,7 @@ async function testProcessor() {
   let instanceCount = 0;
   let throwInstance = false;
   let throwReadyPost = false;
+  let processorPortFactory = null;
   class FakePort {
     onmessage = null;
     posts = [];
@@ -1193,7 +1484,7 @@ async function testProcessor() {
   }
   class FakeProcessor {
     constructor() {
-      this.port = new FakePort();
+      this.port = processorPortFactory?.() ?? new FakePort();
     }
   }
   globalThis.AudioWorkletProcessor = FakeProcessor;
@@ -1644,6 +1935,14 @@ async function testProcessor() {
         );
       }
     }
+
+    await testQualificationBoot({
+      registered,
+      makeFake: createFakeExports,
+      setNextFake: (fake) => { nextFake = fake; },
+      setProcessorPortFactory: (factory) => { processorPortFactory = factory; },
+      document: processorSessionDocument,
+    });
   } finally {
     globalThis.AudioWorkletProcessor = originalProcessor;
     globalThis.registerProcessor = originalRegister;

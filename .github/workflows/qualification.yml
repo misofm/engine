@@ -267,6 +267,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Issue #288: catch stale qualification caller boot shapes before the Rust and artifact
+      # gates. This suite is hermetic and uses only the existing host/worklet fixtures.
+      - name: Hermetic browser host, worklet, and qualification boot tests
+        run: node scripts/test-web-audioworklet.mjs
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: lint

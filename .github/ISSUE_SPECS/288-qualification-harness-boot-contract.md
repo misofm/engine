@@ -65,3 +65,17 @@ Issue-boundary reconciliation found no missing remote numbered issue.
 The existing issue288 is retitled to match this stateless scope; no new
 issue number is allocated. Implement one bounded tranche on dedicated
 branch codex/qualification-harness-boot-288 with checkpoint pushes.
+
+
+## Attempt1 implementation checkpoint — 2026-09-11
+
+Luna xhigh completed the four scoped paths. Existing hermetic tests execute
+actual qualification callers through real host/worklet guards: callers5,
+real-ready5, real-disposed5, diagnose-ready1. Three targeted qualification
+mutants change unique sites and fail for the intended real-guard diagnostic;
+existing host/worklet mutations remain passing. The early Node step runs
+in the existing required lint job.
+Node suite, full shell mutation wrapper, shell/JS syntax, diff check and
+CI path-routing checker/testsPASS. Evidence summary:
+/tmp/issue288-luna-implementation.md. No shipped host/worklet, artifact pin,
+SDK, dependency or DSP change. Astra medium adversarial review is pending.
