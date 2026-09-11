@@ -68,3 +68,12 @@ This is a scope correction before source edits, not a failed implementation atte
 ## Historical issue body
 
 Required follow-up F2 from strip Job 3's verification: the `debug_assert!(false)` arms in `apply_route_fold` are commented as inert, but by the time any arm runs the route ops are already retired from unit emission — a reachable instance in RELEASE would be silent wrong audio (stale route buffers / vanished contribution), not a safe decline. Each arm was verified unreachable today (routes are singleton plain units; membership⇒Bank; active masks are planner prefixes), and the code runs at bind on the control plane — so the fix is cheap: make them hard bind errors. Also (F6, same area): console-workload's `GraphIdentity` do-nothing Bound processor should become `GraphNodeBinding::identity` per the new zero-input contract.
+## Attempt 1 checkpoint: rack construction
+
+Astra LOW added opaque owned active/fold configuration and a consuming constructor;
+arm_fold shares its private installation helper. Formatting and six focused rack
+fold tests passed (cargo test --locked -p rack fold --lib). Evidence with actual
+argv/env/source/log/exits: /tmp/issue221-attempt1-rack. Graph is unchanged; borrowed
+preflight, public ownership controls and full old/new PCM controls remain pending.
+Root checkpoints this coherent tranche before further implementation; no PASS
+verdict or delivery is claimed.

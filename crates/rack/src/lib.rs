@@ -1597,6 +1597,39 @@ pub struct BankChain {
     transitions: [u64; 3],
 }
 
+/// Owned chain masks validated before graph bindings transfer their processors. The constructor
+/// consumes this configuration as its only active/fold source; it cannot arm an existing chain.
+pub struct PreparedFoldConfiguration {
+    width: BankWidth,
+    active: Box<[bool]>,
+    fold: Box<[bool]>,
+}
+
+impl PreparedFoldConfiguration {
+    pub fn new(
+        width: BankWidth,
+        active: Box<[bool]>,
+        fold: Box<[bool]>,
+    ) -> Result<Self, RackError> {
+        let lanes = width.lanes() as usize;
+        if active.len() != lanes
+            || !active.iter().any(|lane| *lane)
+            || fold.len() != lanes
+            || fold
+                .iter()
+                .zip(active.iter())
+                .any(|(fold, active)| *fold && !*active)
+        {
+            return Err(RackError::Shape);
+        }
+        Ok(Self {
+            width,
+            active,
+            fold,
+        })
+    }
+}
+
 impl BankChain {
     /// Validates the whole shape once, off the render thread: `active` and every slot mask have
     /// exactly `lanes` entries, a slot may only be active on an active lane, and at least one lane
@@ -1666,6 +1699,21 @@ impl BankChain {
             collapses: 0,
             transitions: [0; 3],
         })
+    }
+
+    /// Construct from masks validated before processor ownership transfer. Ordinary scratch and
+    /// slot checks remain those of `new`; installing the configuration introduces no fold error.
+    pub fn new_with_prepared_fold(
+        scratch: AoSoaScratch,
+        configuration: PreparedFoldConfiguration,
+        slots: Vec<BankSlot>,
+    ) -> Result<Self, RackError> {
+        if scratch.width() != configuration.width {
+            return Err(RackError::WidthMismatch);
+        }
+        let mut chain = Self::new(scratch, configuration.active, slots)?;
+        chain.install_fold(configuration.fold);
+        Ok(chain)
     }
 
     /// How many leading slots a collapsed block of this chain would run one-plane, or `0`.
@@ -1896,16 +1944,20 @@ impl BankChain {
         {
             return Err(RackError::Shape);
         }
+        self.install_fold(lanes);
+        Ok(())
+    }
+
+    fn install_fold(&mut self, lanes: Box<[bool]>) {
         if !lanes.iter().any(|lane| *lane) {
             self.fold = Box::default();
-            return Ok(());
+            return;
         }
         if self.staging_left.len() != self.scratch.left.len() {
             self.staging_left = vec![0.0; self.scratch.left.len()].into_boxed_slice();
             self.staging_right = vec![0.0; self.scratch.right.len()].into_boxed_slice();
         }
         self.fold = lanes;
-        Ok(())
     }
 
     /// Lanes whose scatter this chain folds; empty when it folds none. Evidence only.
@@ -2691,6 +2743,93 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_fold_configuration_preserves_masks_and_constructor_checks() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![true; lanes - 1].into_boxed_slice(),
+                    vec![false; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![true; lanes].into_boxed_slice(),
+                    vec![false; lanes - 1].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![false; lanes].into_boxed_slice(),
+                    vec![false; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            let mut active = vec![true; lanes];
+            active[lanes - 1] = false;
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    active.clone().into_boxed_slice(),
+                    vec![true; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            for fold in [vec![false; lanes], active.clone()] {
+                let configuration = PreparedFoldConfiguration::new(
+                    width,
+                    active.clone().into_boxed_slice(),
+                    fold.clone().into_boxed_slice(),
+                )
+                .expect("configuration");
+                let chain = BankChain::new_with_prepared_fold(
+                    AoSoaScratch::new(width, 16).expect("scratch"),
+                    configuration,
+                    Vec::new(),
+                )
+                .expect("chain");
+                assert_eq!(&*chain.active, active);
+                assert_eq!(
+                    chain.fold_lanes(),
+                    if fold.iter().any(|lane| *lane) {
+                        &fold[..]
+                    } else {
+                        &[]
+                    }
+                );
+                if fold.iter().any(|lane| *lane) {
+                    assert_eq!(chain.staging_left.len(), chain.scratch.left.len());
+                    assert_eq!(chain.staging_right.len(), chain.scratch.right.len());
+                }
+            }
+            let configuration = PreparedFoldConfiguration::new(
+                width,
+                active.clone().into_boxed_slice(),
+                active.into_boxed_slice(),
+            )
+            .expect("configuration");
+            let other = if width == BankWidth::Four {
+                BankWidth::Eight
+            } else {
+                BankWidth::Four
+            };
+            assert!(matches!(
+                BankChain::new_with_prepared_fold(
+                    AoSoaScratch::new(other, 16).expect("scratch"),
+                    configuration,
+                    Vec::new()
+                ),
+                Err(RackError::WidthMismatch)
+            ));
+        }
+    }
 
     #[test]
     fn resident_output_lane_checks_shape_and_preserves_final_planes_after_collapse() {
