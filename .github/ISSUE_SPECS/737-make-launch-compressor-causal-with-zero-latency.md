@@ -226,3 +226,16 @@ The intentional new sound/time indices explain the change from historical captur
 Root derivation: `/tmp/issue737-corpus-candidate`; independent review and raw
 commands: `/home/bl/issue737-sol-attempt1-checkpoint-review/BOUNDED_REVIEW.md`.
 Real scalar-Wasm/simd128 execution remains a separate required confirmation.
+
+
+## Final bounded integration scope clarification
+
+Authorize a focused test in `hosts/host-web/src/tests.rs`, using the existing real
+compressor command-staging/admission helpers, to reject effect-local stable ID 8
+with `COMMAND_REASON_UNKNOWN_PARAMETER`, zero admitted commands and unchanged
+render/session state. An opaque `ParameterHandle` test cannot prove that boundary.
+No production host/control implementation change or new protocol surface is needed.
+The actual old-compressor envelope test remains in the already scoped effect-package
+qualification tests, and mixed delayed-path alignment remains in graph-compiler's
+existing integration test module. These three tests close specific frozen gates;
+no new framework or broader host redesign is authorized.
