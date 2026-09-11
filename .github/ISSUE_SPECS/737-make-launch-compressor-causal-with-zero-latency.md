@@ -176,3 +176,14 @@ coverage, root-qualified scalar corpus pins, descendant session/control/envelope
 gates, bounded CPU example qualification, supported Wasm/artifact qualification,
 and final Sol review/CI remain pending. Sol's live-tranche checklist must be rechecked
 on coherent source; passing tests alone do not resolve its coverage questions.
+
+
+## Current SDK metadata transition
+
+Root generated the current parameter metadata from Rust and verified the sole
+semantic delta is removal of compressor ID 8: every retained parameter record and
+every other effect's metadata is identical. Existing SDK codegen changes only the
+catalog; generated ABI/provenance are byte-identical. The existing TypeScript
+negative test now explains that lookahead is absent. Candidate derivation and
+semantic comparison are preserved at `/tmp/issue737-metadata-candidate`. This
+updates current metadata only; historical evidence remains unchanged.
