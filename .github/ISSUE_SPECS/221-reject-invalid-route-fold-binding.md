@@ -124,3 +124,17 @@ stopped before Clippy; no retry or correction was made. Preserve this useful
 compiling checkpoint and /tmp/issue221-attempt1-pcm logs/argv/env/exits. Astra
 XHIGH is reviewing whether the additional master identity explains the counter
 and what bounded correction is warranted; attempt PASS is not claimed.
+
+## Astra XHIGH attempt 1 FAIL; bounded attempt 2
+
+At d1cb3653 required chain_shape exited101; Clippy is unrun. Review confirms
+the requested master identity changes DECLINED to SYMMETRIC, adding one eligible
+census lane without changing unit/track/collapse counts. Correct only
+tools/console-workload/tests/chain_shape.rs: mono (64,[65,129]), half-mono
+(32,[129,193]), and adjacent derivation. Preserve structural64/32/0, folds,
+shape, PCM and cohort assertions. Add a discriminating last/master row assertion:
+nonbanked, one lane, lane_tracks [""], upstream_of_seam_stages0 and lane_eligible
+[true], identifying the extra lane as the vacuous master witness. No production
+correction authorized. Reuse rack PCM/pairing/poison passes; run corrected
+chain_shape followed by outstanding strict gates, then independent review.
+This is attempt2 of the user-authorized five-attempt maximum.
