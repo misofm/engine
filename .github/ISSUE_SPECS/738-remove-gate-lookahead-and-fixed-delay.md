@@ -102,3 +102,16 @@ Root preserved `/tmp/issue738-luna-tranche1.md` and restored only incidental
 Cargo.lock dependency-order normalization. No corpus/artifact pin, metadata,
 benchmark, or historical evidence changed. Oracle/current tests, admission/PDC,
 root-owned fixture/metadata/pins, realtime/targets and final Sol/CI remain.
+
+
+## Current session fixture checkpoint
+
+Root removed exactly the gate ID8=2ms row from
+`fixtures/session/v1/observation-frame-shape.json`. The actual current-engine
+`session_validator validate --canonical` passes; the decoded canonical result
+is otherwise identical to the candidate. Final SHA-256
+`138c4eca45b7ee430013934323dfa606c686a7eff3f74dcfbb9cc17bd62f4878`.
+Raw before/candidate/canonical and delta are in `/tmp/issue738-fixture`, validation
+receipt in `/tmp/issue738-gates/canonical-fixture.*`. Synthetic metadata parser
+fixtures are not live registry mirrors and do not require blanket resealing.
+Current generated metadata remains root-owned and pending qualification.
