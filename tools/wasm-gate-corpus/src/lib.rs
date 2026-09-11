@@ -141,6 +141,9 @@ pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 /// the scheduling change it claims to be.
 pub const BUILTINS_CASE_COUNT: usize = builtins_corpus::CASE_COUNT;
 
+/// Original builtin block; later additions live at the global tail to preserve case indexes.
+pub const BUILTINS_ORIGINAL_CASE_COUNT: usize = 8;
+
 /// Cases delegated to [`true_peak_limiter::corpus`] (issue #90 E12), replayed under
 /// wasm.
 ///
@@ -443,14 +446,18 @@ fn case_of(index: usize) -> Case {
         return Case::GateExpander(index);
     }
     let index = index - GATE_EXPANDER_CASE_COUNT;
-    if index < BUILTINS_CASE_COUNT {
+    if index < BUILTINS_ORIGINAL_CASE_COUNT {
         return Case::Builtins(index);
     }
-    let index = index - BUILTINS_CASE_COUNT;
+    let index = index - BUILTINS_ORIGINAL_CASE_COUNT;
     if index < LIMITER_CASE_COUNT {
         return Case::Limiter(index);
     }
-    Case::Compressor(index - LIMITER_CASE_COUNT)
+    let index = index - LIMITER_CASE_COUNT;
+    if index < COMPRESSOR_CASE_COUNT {
+        return Case::Compressor(index);
+    }
+    Case::Builtins(BUILTINS_ORIGINAL_CASE_COUNT + index - COMPRESSOR_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three

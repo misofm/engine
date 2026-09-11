@@ -30,6 +30,34 @@ Root owns shipped artifact qualification/pinning; no unilateral pin changes.
 Preserve actual argv/env/source/exit/output evidence externally. Ordinary compile
 feedback remains within unfinished pass; substantive failure gets bounded review.
 
+## Attempt 1 exact-path freeze — 2026-09-11
+
+- `crates/builtins/src/corpus.rs`: exactly two appended cases, independent scalar
+  expected words using the existing `dsp-reference` recurrence, and test-only
+  delegating Lane arithmetic observation to distinguish actual dispatch.
+- `tools/wasm-gate-corpus/src/lib.rs`: retain the original eight-case builtin block
+  and append the new builtin cases after the previous global last case. This
+  preserves existing limiter/compressor indexes as well as all builtin indexes.
+- `tools/wasm-gates/tests/g5_native_corpus.rs`: ownership and preserved-index checks
+  for that existing corpus dispatch.
+- This issue spec: scoped decisions and evidence.
+
+No production DSP algorithm or public test-observation surface changes. The test
+Lane wrapper delegates every operation to the selected real backend and counts
+only `fma` operations: identity has no recurrences, mixed has two sections per
+frame, and the full-chain control has four. Unlike a prepared-plan observation,
+this detects actually executing the wrong kernel even when the output is equal.
+
+## Attempt 1 focused checkpoint
+
+Astra LOW reports PASS for `cargo test --locked -p builtins --lib --test determinism`:
+11 unit and two integration tests cover independently derived scalar expectations,
+actual dispatch at scalar/four/eight lanes, forced-full controls and all ten digests.
+The original eight digest literals remain unchanged. Receipts with command, source
+and output are preserved at `/tmp/issue213-astra1`. Global Wasm corpus compilation,
+scalar/simd128 execution and independent Astra XHIGH review remain pending; this
+checkpoint does not claim those gates have passed.
+
 ## Historical issue body
 
 Verifier finding F2 from strip Job 1 (#212): every builtins case in the frozen gate corpus (`crates/miso-engine-builtins/src/corpus.rs::lane_parameters`) carries non-zero cutoffs on every lane, so the wasm G5 gates never execute `identity_chain_block`/`mixed_chain_block`. Present class-A evidence for wasm is the sealed benchmark digest identity (all three legs, both arms) — sound today, but the elided path has no standing cross-target regression gate.

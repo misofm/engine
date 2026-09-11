@@ -36,7 +36,7 @@ pub const LANES: usize = 8;
 pub const FRAMES: usize = 256;
 
 /// Number of corpus cases.
-pub const CASE_COUNT: usize = 8;
+pub const CASE_COUNT: usize = 10;
 
 /// Human-readable name of each case, indexed by case number.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
@@ -52,6 +52,8 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     // have got wrong without moving a single pin.
     "input_stage/trim_ramp",
     "input_stage/trim_ramp_mono",
+    "input_stage/identity_sections",
+    "input_stage/mixed_sections",
 ];
 
 /// `xorshift64*`. Integer-only, so every target builds the same input sequence.
@@ -130,12 +132,37 @@ fn symmetric_lane_parameters(lane: usize) -> BuiltinParameters {
     }
 }
 
+/// Settled section-elision cases. Zero-dB trim gives an independently exact signed
+/// unit gain; lane/channel polarity and the enabled cutoff still differ per lane.
+fn elided_lane_parameters(case: usize, lane: usize) -> BuiltinParameters {
+    let mut parameters = BuiltinParameters::default();
+    parameters.left.polarity_invert = lane % 2 == 1;
+    parameters.right.polarity_invert = lane % 3 == 1;
+    if case == 9 {
+        // Identity before a real section on left, after a real section on right.
+        parameters.left.lpf_hz = 3_000.0 + 200.0 * lane as f32;
+        parameters.right.hpf_hz = 600.0 + 100.0 * lane as f32;
+    }
+    parameters
+}
+
 /// The per-lane input signal of one case.
 fn lane_signal(case: usize, lane: usize, channel: usize) -> Vec<f32> {
     let mut rng = Rng::new(0x8500_0000 ^ (case as u64) << 16 ^ (lane as u64) << 8 ^ channel as u64);
     (0..FRAMES)
         .map(|frame| match case {
             0 | 4 | 5 | 6 | 7 => rng.next_sample(),
+            8 | 9 => match frame % 32 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f32::NAN,
+                3 => f32::INFINITY,
+                4 => f32::NEG_INFINITY,
+                5 => 1.0e30,
+                6 => f32::from_bits(1),
+                7 => -f32::from_bits(1),
+                _ => rng.next_sample(),
+            },
             1 => f32::from(u8::from(frame == lane + channel)),
             2 => f32::from_bits(1 + (rng.next_u32() & 0x007F_FFFF)),
             _ => match (frame + lane) % 8 {
@@ -183,7 +210,15 @@ pub fn case_values<L: Lane>(case: usize) -> Vec<f32> {
     let right: Vec<Vec<f32>> = (0..LANES).map(|lane| lane_signal(case, lane, 1)).collect();
     let prepared: Vec<BuiltinChain> = (0..LANES)
         .map(|lane| {
-            BuiltinChain::new(48_000, lane_parameters(lane)).expect("corpus parameters prepare")
+            BuiltinChain::new(
+                48_000,
+                if case >= 8 {
+                    elided_lane_parameters(case, lane)
+                } else {
+                    lane_parameters(lane)
+                },
+            )
+            .expect("corpus parameters prepare")
         })
         .collect();
 
@@ -205,6 +240,16 @@ pub fn case_values<L: Lane>(case: usize) -> Vec<f32> {
                     .collect();
                 let mut stage = InputStage::<L>::new(&tracks);
                 let report = stage.process(&mut left_block, &mut right_block, FRAMES);
+                counters[0] += report.sanitized_input as f32;
+                counters[1] += report.recovered_left_state as f32;
+                counters[2] += report.recovered_right_state as f32;
+            }
+            8 | 9 => {
+                let tracks: Vec<_> = (first..first + L::WIDTH)
+                    .map(|lane| prepared[lane].input.stage.lane_track(0))
+                    .collect();
+                let mut stage = InputStage::<L>::new(&tracks);
+                let report = process_elided_case(&mut stage, &mut left_block, &mut right_block);
                 counters[0] += report.sanitized_input as f32;
                 counters[1] += report.recovered_left_state as f32;
                 counters[2] += report.recovered_right_state as f32;
@@ -366,6 +411,24 @@ pub fn case_values<L: Lane>(case: usize) -> Vec<f32> {
     output
 }
 
+/// The shared two-block render used by both appended cases and their dispatch witness.
+fn process_elided_case<L: Lane>(
+    stage: &mut InputStage<L>,
+    left: &mut [f32],
+    right: &mut [f32],
+) -> crate::BuiltinProcessReport {
+    // An odd split retains recursive state across the block boundary.
+    let split = 73 * L::WIDTH;
+    let mut total = crate::BuiltinProcessReport::default();
+    for (start, end, frames) in [(0, split, 73), (split, left.len(), FRAMES - 73)] {
+        let report = stage.process(&mut left[start..end], &mut right[start..end], frames);
+        total.sanitized_input += report.sanitized_input;
+        total.recovered_left_state += report.recovered_left_state;
+        total.recovered_right_state += report.recovered_right_state;
+    }
+    total
+}
+
 /// SHA-256 of each case's result words, little-endian by lane, pinned from the scalar `Lane`
 /// instantiation (master plan §8: never from a vector or wasm run).
 pub const BUILTINS_DIGESTS: [[u8; 32]; CASE_COUNT] = [
@@ -417,4 +480,256 @@ pub const BUILTINS_DIGESTS: [[u8; 32]; CASE_COUNT] = [
         0x76, 0x44, 0x18, 0x92, 0x02, 0xf3, 0x4d, 0x16, 0xce, 0x9a, 0xe2, 0xaa, 0xc8, 0x9b, 0x56,
         0xff, 0xaa,
     ],
+    // Derived only from the independent scalar expectation below (issue #213).
+    [
+        0xd8, 0xd7, 0x81, 0xde, 0x39, 0x22, 0x04, 0xec, 0x36, 0xb6, 0x0b, 0x0b, 0x70, 0xa7, 0x68,
+        0x6e, 0x76, 0x01, 0x29, 0xc3, 0x39, 0x7a, 0x4a, 0x5d, 0xff, 0xe5, 0xda, 0x27, 0x93, 0x49,
+        0xc9, 0x22,
+    ],
+    [
+        0x3b, 0x8b, 0x3c, 0x72, 0xf2, 0xcc, 0x22, 0x74, 0x20, 0x6e, 0x32, 0xe3, 0x68, 0xde, 0x90,
+        0x56, 0x5d, 0xa6, 0xf7, 0x74, 0x61, 0x6b, 0xb8, 0x5a, 0xff, 0xd4, 0x68, 0x08, 0xdb, 0xfe,
+        0xb4, 0xce,
+    ],
 ];
+
+#[cfg(test)]
+mod elision_tests {
+    use super::*;
+    use core::cell::Cell;
+    use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
+    use lane::{Simd4, Simd8};
+    use sha2::{Digest, Sha256};
+
+    fn digest(values: &[f32]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for value in values {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+        hash.finalize().into()
+    }
+
+    /// Independent scalar expectation: signed unit trim, input sanitisation, then
+    /// the identity map x + +0 and/or the existing equation-derived scalar TPT twin.
+    /// No production preparation, Lane arithmetic or corpus output supplies this oracle.
+    fn expected(case: usize, omit_identity_add: bool, bypass_real: bool) -> Vec<f32> {
+        let mut out = Vec::with_capacity(LANES * FRAMES * 2 + 3);
+        let mut sanitized = 0;
+        for channel in 0..2 {
+            for lane in 0..LANES {
+                let sign = if (channel == 0 && lane % 2 == 1) || (channel == 1 && lane % 3 == 1) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let (cutoff, kind) = if channel == 0 {
+                    (3_000.0 + 200.0 * lane as f32, ReferenceTptOutput::LowPass)
+                } else {
+                    (600.0 + 100.0 * lane as f32, ReferenceTptOutput::HighPass)
+                };
+                let mut filter =
+                    ReferenceRetainedTptF32::conditioned_butterworth(48_000, cutoff, kind).unwrap();
+                for x in lane_signal(case, lane, channel) {
+                    let clean = if !x.is_finite() || x.abs() >= 1.0e30 {
+                        sanitized += 1;
+                        0.0
+                    } else {
+                        x
+                    };
+                    let mut y = clean * sign;
+                    if !omit_identity_add && (case == 8 || channel == 0) {
+                        y += 0.0;
+                    }
+                    if case == 9 && !bypass_real {
+                        y = f32::from_bits(filter.process(y).output_bits);
+                    }
+                    if !omit_identity_add && case == 9 && channel == 1 {
+                        y += 0.0;
+                    }
+                    out.push(y);
+                }
+            }
+        }
+        out.extend([sanitized as f32, 0.0, 0.0]);
+        out
+    }
+
+    #[test]
+    fn derive_new_scalar_expectations() {
+        for case in 8..10 {
+            let oracle = expected(case, false, false);
+            // Print only independently derived expectations, never production/SIMD output.
+            println!("{} {:?}", CASE_NAMES[case], digest(&oracle));
+            assert_eq!(
+                digest(&oracle),
+                BUILTINS_DIGESTS[case],
+                "independently derived new pin"
+            );
+            assert_eq!(oracle[LANES * FRAMES * 2..], [512.0, 0.0, 0.0]);
+            assert_eq!(
+                case_values::<f32>(case)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                oracle.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+        assert_ne!(
+            digest(&expected(8, false, false)),
+            digest(&expected(8, true, false)),
+            "signed-zero input must detect dropping the identity add"
+        );
+        assert_ne!(
+            digest(&expected(9, false, false)),
+            digest(&expected(9, false, true)),
+            "mixed input must detect bypassing the real sections"
+        );
+    }
+
+    thread_local! { static FMAS: Cell<usize> = const { Cell::new(0) }; }
+
+    /// Test-only observation of actual arithmetic in the generic production kernel.
+    /// Every value/mask operation delegates unchanged to the real backend.
+    #[derive(Clone, Copy)]
+    struct Observed<L>(L);
+
+    macro_rules! unary {
+        ($($name:ident),*) => { $(fn $name(self) -> Self { Self(self.0.$name()) })* };
+    }
+    macro_rules! binary {
+        ($($name:ident),*) => { $(fn $name(self, rhs: Self) -> Self { Self(self.0.$name(rhs.0)) })* };
+    }
+    macro_rules! comparison {
+        ($($name:ident),*) => { $(fn $name(self, rhs: Self) -> Self::Mask { self.0.$name(rhs.0) })* };
+    }
+    impl<L: Lane> Lane for Observed<L> {
+        const WIDTH: usize = L::WIDTH;
+        const SVF_CASCADE_DEPTH: usize = L::SVF_CASCADE_DEPTH;
+        type Mask = L::Mask;
+        fn splat(x: f32) -> Self {
+            Self(L::splat(x))
+        }
+        fn zero() -> Self {
+            Self(L::zero())
+        }
+        fn load(src: &[f32]) -> Self {
+            Self(L::load(src))
+        }
+        fn store(self, dst: &mut [f32]) {
+            self.0.store(dst);
+        }
+        fn store_bits(self, dst: &mut [u32]) {
+            self.0.store_bits(dst);
+        }
+        unary!(sqrt, neg, abs, floor);
+        binary!(add, sub, mul, div);
+        comparison!(lt, le, gt, ge, eq);
+        fn fma(self, b: Self, c: Self) -> Self {
+            FMAS.with(|count| count.set(count.get() + 1));
+            Self(self.0.fma(b.0, c.0))
+        }
+        fn mask_and(a: Self::Mask, b: Self::Mask) -> Self::Mask {
+            L::mask_and(a, b)
+        }
+        fn mask_or(a: Self::Mask, b: Self::Mask) -> Self::Mask {
+            L::mask_or(a, b)
+        }
+        fn mask_not(a: Self::Mask) -> Self::Mask {
+            L::mask_not(a)
+        }
+        fn mask_any(a: Self::Mask) -> bool {
+            L::mask_any(a)
+        }
+        fn select(m: Self::Mask, a: Self, b: Self) -> Self {
+            Self(L::select(m, a.0, b.0))
+        }
+        fn andnot(self, m: Self::Mask) -> Self {
+            Self(self.0.andnot(m))
+        }
+        fn exp2_int(n: Self) -> Self {
+            Self(L::exp2_int(n.0))
+        }
+        fn exp2_int_in_range(n: Self) -> Self {
+            Self(L::exp2_int_in_range(n.0))
+        }
+        fn frexp(self) -> (Self, Self) {
+            let (m, e) = self.0.frexp();
+            (Self(m), Self(e))
+        }
+    }
+
+    fn dispatch_at<L: Lane>(case: usize) {
+        let signals: [Vec<_>; 2] =
+            core::array::from_fn(|ch| (0..LANES).map(|lane| lane_signal(case, lane, ch)).collect());
+        let oracle = expected(case, false, false);
+        for first in (0..LANES).step_by(L::WIDTH) {
+            let tracks: Vec<_> = (first..first + L::WIDTH)
+                .map(|lane| {
+                    BuiltinChain::new(48_000, elided_lane_parameters(case, lane))
+                        .unwrap()
+                        .input
+                        .stage
+                        .lane_track(0)
+                })
+                .collect();
+            for force_full in [false, true] {
+                let mut stage = InputStage::<Observed<L>>::new(&tracks);
+                assert!(!stage.ramping, "settled corpus must enter elided dispatch");
+                assert_eq!(
+                    stage.plan.elided,
+                    if case == 8 {
+                        [[true, true]; 2]
+                    } else {
+                        [[true, false], [false, true]]
+                    }
+                );
+                if force_full {
+                    stage.plan = crate::InputChainPlan::NONE;
+                }
+                let mut left = interleave::<L>(&signals[0], first);
+                let mut right = interleave::<L>(&signals[1], first);
+                FMAS.with(|count| count.set(0));
+                let report = process_elided_case(&mut stage, &mut left, &mut right);
+                let actual = FMAS.with(Cell::get);
+                // Each executed section performs two recurrence and two mix multiply-adds.
+                let sections = if force_full {
+                    4
+                } else if case == 8 {
+                    0
+                } else {
+                    2
+                };
+                assert_eq!(
+                    actual,
+                    sections * 4 * FRAMES,
+                    "case {case}, width {}, force_full {force_full}",
+                    L::WIDTH
+                );
+                assert_eq!(report.sanitized_input, (64 * L::WIDTH) as u64);
+                assert_eq!(
+                    (report.recovered_left_state, report.recovered_right_state),
+                    (0, 0)
+                );
+                for (ch, block) in [&left, &right].into_iter().enumerate() {
+                    for slot in 0..L::WIDTH {
+                        for frame in 0..FRAMES {
+                            assert_eq!(
+                                block[frame * L::WIDTH + slot].to_bits(),
+                                oracle[(ch * LANES + first + slot) * FRAMES + frame].to_bits()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn appended_cases_execute_identity_and_mixed_dispatch_with_full_controls() {
+        for case in 8..10 {
+            dispatch_at::<f32>(case);
+            dispatch_at::<Simd4>(case);
+            dispatch_at::<Simd8>(case);
+        }
+    }
+}
