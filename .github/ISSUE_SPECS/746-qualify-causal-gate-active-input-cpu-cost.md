@@ -137,3 +137,16 @@ Root release build PASS. Actual wrapper/CPU15 runner --preflight exited1:
 The final measurement directory was not created. No warmup or measured DSP
 ran; the exactly-once measurement allowance is unused. This failure is retained
 without relabeling the earlier focused test reports as sufficient qualification.
+
+## Attempt 2 — correction checkpoint
+
+Luna xhigh explicitly finished and paused. Corrected the shared-metadata splice
+locally; strengthened exact rate/round/count, finite elapsed/activity and actual
+report validation; added malformed/nonzero/fractional/NaN/wrong-dimension,
+executable-refusal, failure-persistence and known-conversion controls.
+Only the existing subject and two Python paths changed. Reported locked check,
+strict Clippy, focused bench tests, Python controls, fmt/diff, bench policy and
+release build PASS. Actual dirty-tree release preflight was untimed and PASS at
+`/tmp/.issue746-preflight-whx04vo9`, with timed_subject_invocations0.
+Root will recapture preflight against this clean committed correction, then
+request Astra clearance before the still-unused sole measurement invocation.

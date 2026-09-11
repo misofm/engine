@@ -694,6 +694,11 @@ impl Measurement {
             .phase
             .round()
             .map_or_else(|| "null".to_owned(), |round| round.to_string());
+        // The shared metadata projection is intentionally a field fragment and therefore ends
+        // with a comma. It is the final fragment in this record, so remove only that delimiter
+        // before closing the object rather than changing the shared helper used by other subjects.
+        let metadata = metadata.record_fields();
+        let metadata = metadata.strip_suffix(',').unwrap_or(&metadata);
         format!(
             concat!(
                 "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"gate_active\",",
@@ -719,7 +724,7 @@ impl Measurement {
             elapsed = process_elapsed,
             activity = activity,
             reports = reports,
-            metadata = metadata.record_fields(),
+            metadata = metadata,
         )
     }
 }
@@ -783,6 +788,46 @@ mod tests {
         activity.nonzero_input_samples = 1;
         activity.nonzero_output_samples = 1;
         assert!(activity.valid());
+    }
+
+    #[test]
+    fn record_splice_does_not_leave_trailing_metadata_comma() {
+        let activity = vec![
+            Activity {
+                lane: 0,
+                channel: "left",
+                high_plateaus: 1,
+                low_plateaus: 1,
+                high_ratio_witness: HIGH_RATIO_LIMIT + 0.01,
+                low_ratio_witness: LOW_RATIO_LIMIT - 0.001,
+                finite_output_samples: 1,
+                nonzero_input_samples: 1,
+                nonzero_output_samples: 1,
+            },
+            Activity {
+                lane: 0,
+                channel: "right",
+                high_plateaus: 1,
+                low_plateaus: 1,
+                high_ratio_witness: HIGH_RATIO_LIMIT + 0.01,
+                low_ratio_witness: LOW_RATIO_LIMIT - 0.001,
+                finite_output_samples: 1,
+                nonzero_input_samples: 1,
+                nonzero_output_samples: 1,
+            },
+        ];
+        let record = super::Measurement {
+            phase: Phase::Preflight,
+            width: WIDTH_SCALAR,
+            backend: "scalar",
+            blocks: PREFLIGHT_BLOCKS,
+            elapsed_ns: Vec::new(),
+            activity,
+            reports: vec![super::ReportCounts::default()],
+        }
+        .record(bench_support::metadata::Metadata::gather());
+        assert!(!record.ends_with(",}"));
+        assert!(record.ends_with('}'));
     }
 
     #[test]

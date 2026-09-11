@@ -282,24 +282,41 @@ def json_rows(data: bytes, label: str) -> list[dict[str, Any]]:
     return rows
 
 
+def exact_int(value: Any, label: str, *, nonnegative: bool = True) -> int:
+    """Accept JSON integer counts without coercing bools, floats, or numeric strings."""
+
+    if type(value) is not int or (nonnegative and value < 0):
+        qualifier = "nonnegative " if nonnegative else ""
+        raise RunnerError(f"{label} must be a {qualifier}integer")
+    return value
+
+
 def activity_valid(row: dict[str, Any], width: int) -> bool:
     activity = row.get("activity")
     if not isinstance(activity, list) or len(activity) != width * CHANNELS:
         return False
-    expected_samples = int(row["blocks"]) * FRAMES
+    try:
+        blocks = exact_int(row["blocks"], "blocks")
+    except RunnerError:
+        return False
+    expected_samples = blocks * FRAMES
     seen: set[tuple[int, str]] = set()
     for item in activity:
         if not isinstance(item, dict):
             return False
         try:
-            key = (int(item["lane"]), str(item["channel"]))
-            high_count = int(item["high_plateaus"])
-            low_count = int(item["low_plateaus"])
+            lane = exact_int(item["lane"], "activity lane")
+            channel = item["channel"]
+            if not isinstance(channel, str):
+                return False
+            key = (lane, channel)
+            high_count = exact_int(item["high_plateaus"], "high plateau count")
+            low_count = exact_int(item["low_plateaus"], "low plateau count")
             high_ratio = float(item["high_ratio_witness"])
             low_ratio = float(item["low_ratio_witness"])
-            finite = int(item["finite_output_samples"])
-            nonzero_input = int(item["nonzero_input_samples"])
-            nonzero_output = int(item["nonzero_output_samples"])
+            finite = exact_int(item["finite_output_samples"], "finite output sample count")
+            nonzero_input = exact_int(item["nonzero_input_samples"], "nonzero input sample count")
+            nonzero_output = exact_int(item["nonzero_output_samples"], "nonzero output sample count")
         except (KeyError, TypeError, ValueError):
             return False
         if key in seen or key[0] < 0 or key[0] >= width or key[1] not in ("left", "right"):
@@ -310,6 +327,8 @@ def activity_valid(row: dict[str, Any], width: int) -> bool:
             or low_count <= 0
             or not math.isfinite(high_ratio)
             or not math.isfinite(low_ratio)
+            or high_ratio < 0.0
+            or low_ratio < 0.0
             or high_ratio <= HIGH_RATIO_LIMIT
             or low_ratio >= LOW_RATIO_LIMIT
             or finite != expected_samples
@@ -331,10 +350,21 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
         raise RunnerError(f"{phase} must emit exactly two width rows, got {len(rows)}")
     seen: set[int] = set()
     for row in rows:
-        if row.get("schema_version") != 1 or row.get("issue") != ISSUE or row.get("record") != "gate_active":
+        if (
+            type(row.get("schema_version")) is not int
+            or row.get("schema_version") != 1
+            or type(row.get("issue")) is not int
+            or row.get("issue") != ISSUE
+            or row.get("record") != "gate_active"
+        ):
             raise RunnerError(f"{phase} has the wrong issue/schema record")
         if row.get("phase") != phase:
             raise RunnerError(f"{phase} row has mismatched phase")
+        expected_round = None if phase in ("preflight", "warmup") else int(phase)
+        if row.get("round") != expected_round or (
+            expected_round is not None and type(row.get("round")) is not int
+        ):
+            raise RunnerError(f"{phase} row has the wrong round identity")
         missing_metadata = row.get("missing_metadata")
         if missing_metadata != []:
             raise RunnerError(f"{phase} row has missing metadata: {missing_metadata!r}")
@@ -343,13 +373,14 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
             if row.get(key) in (None, ""):
                 raise RunnerError(f"{phase} row has empty metadata field: {key}")
         try:
-            width = int(row["width"])
-            blocks = int(row["blocks"])
-            frames = int(row["frames"])
-            channels = int(row["channels"])
-            lane_samples = int(row["lane_samples"])
-            timed_calls = int(row["timed_call_count"])
-        except (KeyError, TypeError, ValueError) as error:
+            sample_rate = exact_int(row["sample_rate_hz"], "sample_rate_hz")
+            width = exact_int(row["width"], "width")
+            blocks = exact_int(row["blocks"], "blocks")
+            frames = exact_int(row["frames"], "frames")
+            channels = exact_int(row["channels"], "channels")
+            lane_samples = exact_int(row["lane_samples"], "lane_samples")
+            timed_calls = exact_int(row["timed_call_count"], "timed_call_count")
+        except (KeyError, TypeError, ValueError, RunnerError) as error:
             raise RunnerError(f"{phase} has incomplete normalization fields") from error
         if width not in (SCALAR_WIDTH, BANK_WIDTH) or width in seen:
             raise RunnerError(f"{phase} has duplicate or unsupported width")
@@ -359,6 +390,7 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
             raise RunnerError(f"{phase} width {width} has the wrong backend")
         if (
             blocks != expected_blocks
+            or sample_rate != SAMPLE_RATE
             or frames != FRAMES
             or channels != CHANNELS
             or lane_samples != blocks * frames * channels * width
@@ -370,28 +402,34 @@ def validate_subject_rows(rows: list[dict[str, Any]], phase: str) -> None:
         reports = row.get("actual_report_counts")
         if not isinstance(reports, list) or len(reports) != width:
             raise RunnerError(f"{phase} width {width} lacks one report per lane")
+        report_names = (
+            "sanitized_main_samples",
+            "sanitized_sidechain_samples",
+            "invalid_spans",
+            "nonfinite_left_blocks",
+            "nonfinite_right_blocks",
+        )
         for report in reports:
-            if not isinstance(report, dict) or any(report.get(name) != 0 for name in (
-                "sanitized_main_samples",
-                "sanitized_sidechain_samples",
-                "invalid_spans",
-                "nonfinite_left_blocks",
-                "nonfinite_right_blocks",
-            )):
+            if not isinstance(report, dict) or any(
+                type(report.get(name)) is not int or report.get(name) != 0 for name in report_names
+            ):
                 raise RunnerError(f"{phase} width {width} has missing/nonzero report evidence")
         elapsed = row.get("process_elapsed_ns")
         if phase in ("preflight", "warmup"):
             if elapsed is not None:
                 raise RunnerError(f"{phase} width {width} masquerades as measured")
         else:
-            if not isinstance(elapsed, dict) or int(elapsed.get("observations", -1)) != blocks:
+            if not isinstance(elapsed, dict):
                 raise RunnerError(f"{phase} width {width} lacks one elapsed observation per block")
             try:
-                if int(elapsed["sum_ns"]) <= 0 or any(float(elapsed[name]) <= 0.0 for name in (
-                    "min_ns", "p50_ns", "p95_ns", "p99_ns", "p999_ns", "max_ns"
-                )):
+                observations = exact_int(elapsed["observations"], "elapsed observations")
+                elapsed_values = [
+                    exact_int(elapsed[name], f"elapsed {name}")
+                    for name in ("sum_ns", "min_ns", "p50_ns", "p95_ns", "p99_ns", "p999_ns", "max_ns")
+                ]
+                if observations != blocks or any(value <= 0 for value in elapsed_values):
                     raise RunnerError(f"{phase} width {width} has invalid elapsed time")
-            except (KeyError, TypeError, ValueError) as error:
+            except (KeyError, TypeError, ValueError, RunnerError) as error:
                 raise RunnerError(f"{phase} width {width} has malformed elapsed time") from error
     if seen != {SCALAR_WIDTH, BANK_WIDTH}:
         raise RunnerError(f"{phase} did not emit scalar and W8 rows")
