@@ -12,6 +12,8 @@ At committed113e7a1d2e545fa05d0bb1f92c7b923d2fa76ca7, Terra reused the same buil
 
 ## Root note
 
+Independent Sol attempt1 PASS accepts implementation113e7a1d2e545fa05d0bb1f92c7b923d2fa76ca7; later2b46fda3 changes only this record. The reviewer independently replayed the packed public headless smoke, recomputed source/packed artifact hashes and metadata removals, proved lock dependencies unchanged and normalized the six workflow substitutions back to the exact prior workflow blob. Registry0.2.3 returned an unambiguous E404 at2026-09-11T19:23:33Z. The full review is `/data/sparse-pcm-launch/tooling/engine-753/review-attempt1.md`. No second attempt is needed. PR754 runs required qualification; this PASS does not claim a registry release. After required checks, exact-main qualification/publication/provenance verification and upstream final evidence remain mandatory before closing753.
+
 App issue #187 proved that registry `@misofm/engine@0.2.2` delays a bypassed compressor by 20 ms (960 samples at 48 kHz; 882 at 44.1 kHz), even with lookahead set to zero. Engine issue #737 already fixed that defect and passed review; no new compressor Rust work belongs here. Publish one SDK built from a fresh synchronized current `main`, so the app can adopt the corrected public artifact in a separate bounded slice.
 
 ## Authority, baseline, and smallest closable slice
