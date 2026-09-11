@@ -5,9 +5,10 @@
 
 mod support;
 
+use dsp_reference::ReferenceLr4Crossover;
 use effect_contract::{
     BankWidth, EffectPrepareError, EffectQuality, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, ResetKind,
+    PrepareEffectBankRequest, ResetKind, StatePayloadInput,
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 use support::{
@@ -54,6 +55,19 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         assert_eq!(metadata.scratch_bytes, 0);
         let total = metadata.state_sizes.total().expect("total");
         assert_eq!(total, 2 * u64::from(bytes));
+        let old_bytes = match rate {
+            44_100 => 7_256,
+            48_000 => 7_880,
+            88_200 => 14_312,
+            96_000 => 15_560,
+            _ => unreachable!(),
+        };
+        let old_left = vec![0u8; old_bytes];
+        let old_right = vec![0u8; old_bytes];
+        assert!(
+            StatePayloadInput::new(&[], &old_left, &old_right, metadata.state_sizes).is_err(),
+            "retired rate-dependent payload must not enter the compact codec at {rate} Hz"
+        );
         let mut below = request(&initial);
         below.sample_rate = rate;
         below.limits.maximum_total_state_bytes = total - 1;
@@ -163,10 +177,13 @@ fn unity_gain_output_is_the_causal_lr4_sum() {
             128,
         );
     }
-    let mut reference = support::oracle::ActiveLr4::new(48_000.0, 1_000.0);
+    let mut reference = ReferenceLr4Crossover::new(48_000.0, 1_000.0).expect("reference");
     let expected = input
         .iter()
-        .map(|sample| reference.process(*sample))
+        .map(|sample| {
+            let (low, high) = reference.process_sample(f64::from(*sample));
+            (low + high) as f32
+        })
         .collect::<Vec<_>>();
     let mut worst = 0.0f32;
     for index in 0..8_192 {

@@ -444,3 +444,24 @@ exercised; it is not active-oracle evidence. Independent reference preservation
 and the additional frozen causal/resource/reset cases still require review and
 completion. This is a recovery/throughput checkpoint, not a product verdict.
 No benchmark, target/artifact, SDK or descendant gate PASS is claimed here.
+
+
+## Preserved public correction finding — 2026-09-11
+
+Astra medium found the preceding green adaptation insufficient: restore the
+original independent LR4 reference and coefficient-changing automation cases,
+make populated-state checks discriminate dynamic words, and restore real
+scalar/bank interchange coverage removed with obsolete ring-specific fixtures.
+Luna xhigh restored those checks, added bank different-crossover/default-reset
+comparison, actual scalar-to-bank/bank-to-scalar continuation and historical
+raw-payload rejection, and corrected measured automation input.
+
+This checkpoint builds but has one candidly RED test: identity6PASS/1FAIL.
+Restored partition_invariance differs at partition1/frame8, bits3191355994 vs
+3191355989 (5ULP). No assertion was weakened or replaced to hide it.
+Raw logs: /tmp/issue739-luna-public-correction-{identity,partition}.log.
+Product and no_alloc_render rerun PASS at the corrected source (receipt
+/tmp/issue739-gates/public-correction-product-alloc.json).
+Astra medium is resolving this against the frozen retained segment-cache law
+and explicit absence of a stronger arbitrary time-constant-ramp partition
+guarantee. No final attempt verdict or product PASS is claimed.

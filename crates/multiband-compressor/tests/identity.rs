@@ -60,9 +60,14 @@ fn assert_populated(label: &str, channels: &[Vec<f32>], states: &[(Vec<u8>, Vec<
 }
 
 fn state_populated(section: &[u8]) -> bool {
-    section.chunks_exact(4).any(|word| {
+    let word_populated = |word: &[u8]| {
         let bits = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
         bits != 0 && bits != 0x8000_0000
+    };
+    [1..3, 43..47].into_iter().any(|range| {
+        section[range.start * 4..range.end * 4]
+            .chunks_exact(4)
+            .any(word_populated)
     })
 }
 
@@ -644,6 +649,159 @@ fn restored_programs_continue_across_scalar_and_bank() {
     }
 }
 
+/// State payloads keep their meaning when moving in either direction between the scalar and bank
+/// implementations. The continuation probes use nonzero filter and gain history after restore.
+#[test]
+fn scalar_and_bank_state_interchange_continues() {
+    let values = transition_values(3, 0);
+    let mut scalar = MultibandCompressorFactory
+        .prepare(request_with(
+            &values,
+            LinkMode::Maximum,
+            FRAMES as u32,
+            false,
+        ))
+        .expect("scalar donor");
+    let sizes = scalar.metadata().state_sizes;
+    let mut prefix_left = support::signal(RESTORE_PREFIX, 0x1357_0001);
+    let mut prefix_right = support::signal(RESTORE_PREFIX, 0x1357_0002);
+    process_scalar_frames(&mut *scalar, &mut prefix_left, &mut prefix_right, 0);
+    let scalar_saved = snapshot(scalar.as_ref());
+
+    let requests = (0..4)
+        .map(|_| request_with(&values, LinkMode::Maximum, FRAMES as u32, false))
+        .collect::<Vec<_>>();
+    let mut bank = support::bank(BankWidth::Four, &requests);
+    let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, 4, 0x2468_0001);
+    process_bank_frames(
+        bank.as_mut(),
+        BankWidth::Four,
+        &mut warm_left,
+        &mut warm_right,
+        0,
+    );
+    bank.restore_track_state_payload(
+        0,
+        1,
+        StatePayloadInput::new(&scalar_saved.0, &scalar_saved.1, &scalar_saved.2, sizes)
+            .expect("scalar-to-bank payload"),
+    )
+    .expect("scalar-to-bank restore");
+
+    let (mut scalar_tail_left, mut scalar_tail_right) = bank_signal(RESTORE_TAIL, 1, 0x2468_1001);
+    process_scalar_frames(
+        &mut *scalar,
+        &mut scalar_tail_left,
+        &mut scalar_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    let (mut bank_tail_left, mut bank_tail_right) = bank_signal(RESTORE_TAIL, 4, 0x2468_1001);
+    process_bank_frames(
+        bank.as_mut(),
+        BankWidth::Four,
+        &mut bank_tail_left,
+        &mut bank_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    assert!(scalar_tail_left.iter().any(|sample| *sample != 0.0));
+    for frame in 0..RESTORE_TAIL {
+        assert_eq!(
+            bank_tail_left[frame * 4].to_bits(),
+            scalar_tail_left[frame].to_bits(),
+            "scalar-to-bank left frame={frame}"
+        );
+        assert_eq!(
+            bank_tail_right[frame * 4].to_bits(),
+            scalar_tail_right[frame].to_bits(),
+            "scalar-to-bank right frame={frame}"
+        );
+    }
+
+    let mut bank_donor = support::bank(BankWidth::Four, &requests);
+    let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, 4, 0x9753_0001);
+    process_bank_frames(
+        bank_donor.as_mut(),
+        BankWidth::Four,
+        &mut donor_left,
+        &mut donor_right,
+        0,
+    );
+    let bank_saved = snapshot_track(bank_donor.as_ref(), 0, sizes);
+    let mut scalar_receiver = MultibandCompressorFactory
+        .prepare(request_with(
+            &values,
+            LinkMode::Maximum,
+            FRAMES as u32,
+            false,
+        ))
+        .expect("scalar receiver");
+    let mut receiver_left = support::signal(RESTORE_PREFIX, 0x8642_0001);
+    let mut receiver_right = support::signal(RESTORE_PREFIX, 0x8642_0002);
+    process_scalar_frames(
+        scalar_receiver.as_mut(),
+        &mut receiver_left,
+        &mut receiver_right,
+        0,
+    );
+    restore(&mut *scalar_receiver, 1, &bank_saved, sizes).expect("bank-to-scalar restore");
+    let (mut bank_expected_left, mut bank_expected_right) =
+        bank_signal(RESTORE_TAIL, 4, 0x9753_1001);
+    process_bank_frames(
+        bank_donor.as_mut(),
+        BankWidth::Four,
+        &mut bank_expected_left,
+        &mut bank_expected_right,
+        RESTORE_PREFIX as u64,
+    );
+    let (mut scalar_tail_left, mut scalar_tail_right) = bank_signal(RESTORE_TAIL, 1, 0x9753_1001);
+    process_scalar_frames(
+        scalar_receiver.as_mut(),
+        &mut scalar_tail_left,
+        &mut scalar_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    assert!(scalar_tail_left.iter().any(|sample| *sample != 0.0));
+    for frame in 0..RESTORE_TAIL {
+        assert_eq!(
+            scalar_tail_left[frame].to_bits(),
+            bank_expected_left[frame * 4].to_bits(),
+            "bank-to-scalar left frame={frame}"
+        );
+        assert_eq!(
+            scalar_tail_right[frame].to_bits(),
+            bank_expected_right[frame * 4].to_bits(),
+            "bank-to-scalar right frame={frame}"
+        );
+    }
+}
+
+/// Full reset restores prepared coefficients for lanes with different crossover frequencies.
+#[test]
+fn bank_full_reset_restores_different_crossover_defaults() {
+    let mut sets = (0..4).map(|track| varied_values(track)).collect::<Vec<_>>();
+    for (track, values) in sets.iter_mut().enumerate() {
+        values[0].value = 700.0 + track as f32 * 300.0;
+        values[1].value = 900.0 + track as f32 * 300.0;
+    }
+    let requests = sets
+        .iter()
+        .map(|values| request_with(values, LinkMode::DualMono, FRAMES as u32, false))
+        .collect::<Vec<_>>();
+    let mut bank = support::bank(BankWidth::Four, &requests);
+    let sizes = bank.metadata().program_key.state_sizes;
+    let (mut left, mut right) = bank_signal(RESTORE_PREFIX, 4, 0xCAFE_0001);
+    process_bank_frames(bank.as_mut(), BankWidth::Four, &mut left, &mut right, 0);
+    bank.reset(ResetKind::FullToDefaults);
+    let fresh = support::bank(BankWidth::Four, &requests);
+    for track in 0..4 {
+        assert_eq!(
+            snapshot_track(bank.as_ref(), track, sizes),
+            snapshot_track(fresh.as_ref(), track, sizes),
+            "different-crossover full reset track={track}"
+        );
+    }
+}
+
 /// E4. Splitting a block anywhere leaves the output and the state bit-identical.
 ///
 /// Automation points land on samples 0 and 3584, which are block starts in every partition, and
@@ -659,12 +817,12 @@ fn partition_invariance() {
     let spans = [
         point(1, ParameterChannel::Left, 0, -30.0),
         point(1, ParameterChannel::Right, 0, -30.0),
+        point(2, ParameterChannel::Left, 0, 8.0),
         point(5, ParameterChannel::Left, 0, 3.0),
-        point(10, ParameterChannel::Right, 0, -2.0),
     ];
     let later = [
-        point(1, ParameterChannel::Left, 3_584, -22.0),
-        point(10, ParameterChannel::Right, 3_584, -12.0),
+        point(3, ParameterChannel::Left, 3_584, 25.0),
+        point(6, ParameterChannel::Right, 3_584, -12.0),
     ];
     let reference = {
         let mut effect = MultibandCompressorFactory

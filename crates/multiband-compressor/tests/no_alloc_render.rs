@@ -15,8 +15,8 @@ use std::alloc::{GlobalAlloc, System};
 use std::hint::black_box;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel, ResetKind,
-    StatePayloadInput, StatePayloadOutput,
+    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
+    PreparedAutomationSpan, ResetKind, StatePayloadInput, StatePayloadOutput,
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{new_sections, point, process, request_with, varied_values};
@@ -130,9 +130,9 @@ fn the_scalar_render_path_allocates_nothing() {
     let sizes = effect.metadata().state_sizes;
     let mut left = support::signal(128, 0x0BAD_C0DE);
     let mut right = support::signal(128, 0x0BAD_BEEF);
-    let spans = [point(1, ParameterChannel::Left, 0, -30.0)];
+    let spans = [point(1, ParameterChannel::Left, 128, -30.0)];
     // Warm the allocator's own lazy state outside the measured region.
-    process(effect.as_mut(), &mut left, &mut right, 0, &spans, 128);
+    process(effect.as_mut(), &mut left, &mut right, 0, &[], 128);
     let mut sections = new_sections(sizes);
 
     let counted = events(|| {
@@ -179,33 +179,37 @@ fn the_bank_render_path_allocates_nothing() {
             let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
             let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
             let offsets = vec![0u32; lanes + 1];
+            let automation = [point(1, ParameterChannel::Left, 128, -30.0)];
+            let mut automation_offsets = vec![0u32; lanes + 1];
+            automation_offsets[1..].fill(1);
             let mut sections = new_sections(sizes);
             let run = |bank: &mut dyn effect_contract::PreparedNativeEffectBank,
                        left: &mut [f32],
                        right: &mut [f32],
-                       first: u64| {
+                       first: u64,
+                       spans: &[PreparedAutomationSpan],
+                       offsets: &[u32]| {
                 bank.process_bank(
                     EffectBankProcessBlock::new(
-                        left,
-                        right,
-                        None,
-                        128,
-                        width,
-                        first,
-                        &[],
-                        &offsets,
-                        128,
+                        left, right, None, 128, width, first, spans, offsets, 128,
                     )
                     .expect("bank block"),
                 );
             };
-            run(bank.as_mut(), &mut left, &mut right, 0);
+            run(bank.as_mut(), &mut left, &mut right, 0, &[], &offsets);
 
             let counted = events(|| {
-                run(bank.as_mut(), &mut left, &mut right, 128);
+                run(
+                    bank.as_mut(),
+                    &mut left,
+                    &mut right,
+                    128,
+                    &automation,
+                    &automation_offsets,
+                );
                 bank.reset(ResetKind::DiscontinuityKeepParameters);
                 bank.reset(ResetKind::FullToDefaults);
-                run(bank.as_mut(), &mut left, &mut right, 256);
+                run(bank.as_mut(), &mut left, &mut right, 256, &[], &offsets);
                 bank.snapshot_track_state_payload(
                     1,
                     StatePayloadOutput::new(

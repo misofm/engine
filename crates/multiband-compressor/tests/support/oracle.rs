@@ -155,6 +155,10 @@ impl ActiveBands {
             self.high_attack,
             self.high_release,
         );
-        ((low * low_gain + high * high_gain) as f32, low_state, high_state)
+        (
+            (low * low_gain + high * high_gain) as f32,
+            low_state,
+            high_state,
+        )
     }
 }
