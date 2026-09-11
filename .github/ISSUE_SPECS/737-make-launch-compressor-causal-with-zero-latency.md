@@ -214,3 +214,15 @@ old-compressor descriptor-bound envelope, mixed delayed-path graph alignment, fi
 Sol review, corpus/artifact qualification and CPU evidence remain pending. Earlier
 7117b5f2 coverage of all-rate impulses, raw malformed payload hooks, future-suffix
 independence and retained mono-state differences remains in place.
+
+
+## Causal scalar corpus qualification
+
+Sol XHIGH independently approved the mechanically causal corpus at 7117b5f2,
+reproduced all four scalar-derived digests, and verified W4/W8 equality, finite
+non-vacuous cases, and the unchanged independent f64 oracle bound. Root applies
+those four approved scalar pins; no SIMD failure supplies a replacement pin.
+The intentional new sound/time indices explain the change from historical captures.
+Root derivation: `/tmp/issue737-corpus-candidate`; independent review and raw
+commands: `/home/bl/issue737-sol-attempt1-checkpoint-review/BOUNDED_REVIEW.md`.
+Real scalar-Wasm/simd128 execution remains a separate required confirmation.
