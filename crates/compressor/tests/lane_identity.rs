@@ -42,8 +42,9 @@ fn track_values(
 
 /// A bank renders each lane exactly as the scalar instance for that track does.
 ///
-/// Red mutations (MUTATIONS.md rows 1 and 12), both proven: make `gather_detector` use `delay[0]`
-/// for every lane, and make the `design_lane` scatter write lane 0 for every lane.
+/// Red mutations (MUTATIONS.md row 12 and the causal replacement for row 1), both proven: use
+/// lane 0's current detector/input for every lane, or make the `design_lane` scatter write lane 0
+/// for every lane.
 #[test]
 fn bank_matches_scalar_per_lane_bits() {
     let Some((_, width)) = native_bank_width() else {

@@ -122,8 +122,8 @@ struct Case {
 }
 
 /// Red mutation: in any one implementation, drop a word from the comparison (for example, stop
-/// comparing a whole term such as the compressor's ramps or `delay`) -> that effect's asymmetric row fails while
-/// every other row stays green, so the failure names the effect and the word.
+/// comparing a whole term such as the compressor's ramps) -> that effect's asymmetric row fails
+/// while every other row stays green, so the failure names the effect and the word.
 #[test]
 fn each_launch_effect_sees_its_own_designed_words_disagree() {
     let registry = launch_native_effect_registry().expect("launch registry");
@@ -152,17 +152,6 @@ fn each_launch_effect_sees_its_own_designed_words_disagree() {
             parameter_index: 0,
             left: -18.0,
             right: -6.0,
-        },
-        // `lookahead`, index 7: the one compressor parameter that is **not** ramped
-        // (`apply_automation` refuses `parameter_index >= RAMP_COUNT`), so it reaches the kernel
-        // only through `delay[lane]` and `lookahead_ms[lane]`. It is the case that proves those
-        // two words are compared rather than covered by the ramp comparison.
-        Case {
-            effect: "miso.compressor",
-            prelude: &[],
-            parameter_index: 7,
-            left: 0.0,
-            right: 5.0,
         },
         // `ceiling`, index 0: retargets the limit ramp, which is one of the four per-lane words.
         Case {

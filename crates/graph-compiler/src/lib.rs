@@ -5247,7 +5247,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change() {
+    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_with_zero_pdc() {
         let model = accepted_compressor_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
         let session = compile_session(
@@ -5283,7 +5283,7 @@ mod tests {
             effects
                 .entries
                 .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(960))
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
@@ -5403,6 +5403,7 @@ mod tests {
             .unwrap_or_else(|failure| panic!("compressor scalar bind: {}", failure.code));
         let frames = envelope.quantum.0 as usize;
         let mut rendered_nonzero = false;
+        let mut first_block_nonzero = false;
         for block in 0..16_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
             let mut scalar_pcm = vec![0.0_f32; frames * 2];
@@ -5442,10 +5443,17 @@ mod tests {
                 "retained compressor bank and scalar fallback render the same PCM"
             );
             rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
+            if block == 0 {
+                first_block_nonzero = bank_pcm.iter().any(|sample| *sample != 0.0);
+            }
         }
         assert!(
             rendered_nonzero,
-            "the fixed-delay compressor path rendered after its latency"
+            "the causal compressor path rendered audio"
+        );
+        assert!(
+            first_block_nonzero,
+            "the zero-latency compressor renders the current first block"
         );
 
         let mut bypass_model = model.clone();
@@ -5471,7 +5479,7 @@ mod tests {
             bypass_effects
                 .entries
                 .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(960))
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
             dispatch: host_dispatch(),
@@ -5494,9 +5502,9 @@ mod tests {
     /// The bar is class A. Banking changes lane *grouping*, not per-lane arithmetic:
     /// `PreparedCompressorBank<L>` runs the same coefficient and detector update per lane that the
     /// scalar instance runs, so a single differing bit would be a defect in the bank kernel or in
-    /// the gather/scatter, never something to re-pin around. This renders sixteen blocks -- well
-    /// past the compressor's 960-sample lookahead latency, so the comparison is over live
-    /// compressed audio with retained detector state, not over a latency pad of zeros.
+    /// the gather/scatter, never something to re-pin around. This renders sixteen blocks so the
+    /// comparison covers live compressed audio with retained detector state, including the first
+    /// causal block rather than a latency pad of zeros.
     #[test]
     fn dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path() {
         let model = accepted_dynamic_rack_compressor_fixture();
@@ -5555,7 +5563,7 @@ mod tests {
         assert_pcm_bits_equal(&banked, &scalar, "dynamic-rack compressor bank vs per node");
         assert!(
             banked.iter().flatten().any(|sample| *sample != 0.0),
-            "sixteen blocks must clear the compressor's lookahead latency"
+            "sixteen blocks must retain non-silent causal compressor output"
         );
         assert!(
             banked[15]
@@ -5968,8 +5976,7 @@ mod tests {
     ///    literal, so the extra dynamic banks scale both sides of it -- there is no re-pin here.
     #[test]
     fn console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically() {
-        // Past the compressor's 960-sample lookahead (8 blocks of 128), so the comparison is over
-        // live compressed audio rather than over a latency pad of zeros.
+        // The causal compressor has no latency pad; the first block is already live audio.
         const BLOCKS: u64 = 12;
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         assert_eq!(model.tracks.len(), 64);

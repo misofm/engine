@@ -187,3 +187,30 @@ catalog; generated ABI/provenance are byte-identical. The existing TypeScript
 negative test now explains that lookahead is absent. Candidate derivation and
 semantic comparison are preserved at `/tmp/issue737-metadata-candidate`. This
 updates current metadata only; historical evidence remains unchanged.
+
+
+## Attempt 1 integration checkpoint
+
+The internal test now proves serialized state agreement at W1/W4/W8. Native session
+preparation explicitly rejects stable compressor parameter ID 8. Existing graph
+compressor fixtures now assert zero prepared latency and live first-block bank/scalar
+identity; affected symmetry, control and observation tests pass. Current mutation
+documentation identifies retired ring/staging evidence. Required adaptation of
+`crates/host-core/tests/scalar_point_endpoint.rs` is within scope alongside the
+previously named production endpoint path.
+
+Preserved commands at `/home/bl/issue737-luna-attempt1-downstream-receipts` record:
+compressor lib 1 test; native session 5; symmetry 2; observation identity 3; descriptor
+qualification 6; generic envelope 1; host scalar 10 plus resource subprocesses; host
+observation 10 with 1 ignored; focused graph 1; strict Clippy for affected crates.
+All final commands exit zero. Test adaptation failures and their corrections remain
+candidly recorded in that handoff.
+
+The opaque-parameter-handle rejection test is generic control evidence, NOT stable
+compressor ID 8 evidence; root caught and removed that incorrect claim before this
+checkpoint. Likewise the existing generic descriptor envelope test is not credited
+as an actual old-compressor envelope test. Stable-ID control rejection, an actual
+old-compressor descriptor-bound envelope, mixed delayed-path graph alignment, final
+Sol review, corpus/artifact qualification and CPU evidence remain pending. Earlier
+7117b5f2 coverage of all-rate impulses, raw malformed payload hooks, future-suffix
+independence and retained mono-state differences remains in place.

@@ -1145,3 +1145,91 @@ fn offsets_are_ordered(offsets: &[u32], spans: usize) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod width_state_tests {
+    use super::{Channel, Detector, Lane, Simd4, Simd8, kernel, state};
+    use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
+    use effect_contract::LinkMode;
+
+    const FRAMES: usize = 128;
+    const SAMPLE_RATE: u32 = 48_000;
+
+    fn defaults() -> [[f32; PARAMETER_COUNT]; MAX_WIDTH] {
+        let values = core::array::from_fn(|index| PARAMETER_SPECS[index].default);
+        [values; MAX_WIDTH]
+    }
+
+    fn serialized<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; state::STATE_HEADER_WORDS * 4];
+        state::write_channel(&mut bytes, channel, lane);
+        bytes
+    }
+
+    fn state_matches_scalar<L: Lane>() {
+        let defaults = defaults();
+        let mut wide_left = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut wide_right = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut input_left = vec![0.0_f32; FRAMES * L::WIDTH];
+        let mut input_right = vec![0.0_f32; FRAMES * L::WIDTH];
+        for frame in 0..FRAMES {
+            for lane in 0..L::WIDTH {
+                let slot = frame * L::WIDTH + lane;
+                input_left[slot] = ((frame * 3 + lane * 5) % 23) as f32 / 23.0;
+                input_right[slot] = -(((frame * 7 + lane * 2) % 19) as f32) / 19.0;
+            }
+        }
+        let mut left = input_left.clone();
+        let mut right = input_right.clone();
+        kernel::process_block::<L>(
+            &mut left,
+            &mut right,
+            Detector::Main,
+            FRAMES,
+            LinkMode::DualMono,
+            false,
+            SAMPLE_RATE,
+            (&mut wide_left, &mut wide_right),
+        );
+
+        for lane in 0..L::WIDTH {
+            let mut scalar_left = Channel::<f32>::new(&defaults, SAMPLE_RATE);
+            let mut scalar_right = Channel::<f32>::new(&defaults, SAMPLE_RATE);
+            let mut scalar_input_left = vec![0.0_f32; FRAMES];
+            let mut scalar_input_right = vec![0.0_f32; FRAMES];
+            for frame in 0..FRAMES {
+                scalar_input_left[frame] = input_left[frame * L::WIDTH + lane];
+                scalar_input_right[frame] = input_right[frame * L::WIDTH + lane];
+            }
+            kernel::process_block::<f32>(
+                &mut scalar_input_left,
+                &mut scalar_input_right,
+                Detector::Main,
+                FRAMES,
+                LinkMode::DualMono,
+                false,
+                SAMPLE_RATE,
+                (&mut scalar_left, &mut scalar_right),
+            );
+            assert_eq!(
+                serialized(&wide_left, lane),
+                serialized(&scalar_left, 0),
+                "left serialized state differs at lane {lane} for width {}",
+                L::WIDTH
+            );
+            assert_eq!(
+                serialized(&wide_right, lane),
+                serialized(&scalar_right, 0),
+                "right serialized state differs at lane {lane} for width {}",
+                L::WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn serialized_state_is_width_invariant_at_w1_w4_w8() {
+        state_matches_scalar::<f32>();
+        state_matches_scalar::<Simd4>();
+        state_matches_scalar::<Simd8>();
+    }
+}

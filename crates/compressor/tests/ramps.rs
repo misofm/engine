@@ -273,14 +273,13 @@ fn a_finished_ramp_equals_a_fresh_preparation() {
 const BANK_FRAMES: usize = 128;
 /// Long enough that the comparison has audio to compare.
 ///
-/// Measured rather than assumed, and the same trap `tests/silent_fixed_point.rs` records: the
-/// prepared latency in front of the output is around nine hundred samples, so a run of six blocks
-/// renders exact `+0.0` throughout and every arm of every comparison agrees on nothing at all.
+/// The run is long enough to include non-silent causal output, so every arm of the comparison has
+/// rendered samples to compare.
 const BANK_BLOCKS: usize = 20;
 /// The block the moving Point is delivered on.
 ///
-/// Past the delay line, so the ramp's effect is inside the rendered output rather than still in
-/// flight when the run ends, and past every lane's transient.
+/// Late enough that the ramp's effect is inside the rendered output rather than hidden by the
+/// initial transient.
 const RAMP_BLOCK: usize = 12;
 /// The lane the Point addresses. Not lane 0, so a kernel that scattered to lane 0 would be caught.
 const RAMP_LANE: usize = 1;
@@ -441,7 +440,7 @@ fn an_idle_lane_is_untouched_by_a_neighbours_ramp() {
     );
     assert!(
         quiet.iter().any(|lane| lane.iter().any(|bits| *bits != 0)),
-        "the run is entirely inside the delay line: this comparison saw only silence"
+        "the run is entirely silent: this comparison saw no rendered content"
     );
     assert_ne!(
         one[RAMP_LANE], quiet[RAMP_LANE],

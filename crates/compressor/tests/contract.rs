@@ -1,10 +1,9 @@
-//! E13 — the contract fixtures, unchanged from V1.
+//! E13 — the current causal compressor contract.
 //!
-//! Every assertion here was already true before #88 and must still be true after it (master plan
-//! section 8.2: a re-landing job does not move a contract fixture). The bank-fallback test is the
-//! one that changed shape: it named `Backend::Simd8` / `Aarch64Neon` as "the backend
-//! that is not available here", and D4 revision 4 removed runtime dispatch, so the unavailable
-//! backend is now simply "a bank width this build was not compiled for".
+//! Descriptor, resource, zero-latency, causal sample-zero, bank-fallback, link, sidechain and
+//! malformed-block behavior are asserted here. The contract intentionally changes the former
+//! lookahead payload and parameter menu under issue #737; root-owned current fixture pins move with
+//! that amended descriptor.
 
 mod support;
 
@@ -23,8 +22,8 @@ use support::{
 
 /// Descriptor rows, latency, payload sizes, scratch and the resource envelope are frozen.
 ///
-/// Red mutation: `scratch_fixed_bytes: 0` (the F10 change #95 owns) or `STATE_HEADER_WORDS = 26`
-/// (83c's two-word header) — RED here, which is the point: neither may be smuggled in by #88.
+/// Red mutation: `scratch_fixed_bytes: 0` or `STATE_HEADER_WORDS = 26` — RED here, which is the
+/// point: the causal resource envelope and exact 22-word channel payload are both contract data.
 #[test]
 fn descriptor_rows_and_resource_envelope_are_frozen() {
     validate_descriptor(&COMPRESSOR_DESCRIPTOR).expect("descriptor");
