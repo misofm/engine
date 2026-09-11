@@ -102,3 +102,24 @@ parity verified. Evidence: /tmp/issue176-xhigh-cc11fea3/review.md.
 Root merges the two accepted histories for one tooling delivery. No shipped
 engine/SDK source or artifact pin changed. Combined exact-head review, required
 PR/main qualification and synchronized closure remain pending.
+
+## PR qualification failure and bounded attempt 2
+
+PR730 qualification34566763819 failed after the graph realtime trace and all
+lifecycle/zero-violation assertions passed: the exact audit report hash was
+c1baf7d5a6b598310c991844cdafa7896967041dd7e451cfea94d78312f3e929,
+while scripts/trace-builtins-graph-audit.sh still expected
+7a960a01270a67a430ee2db03d189f71b36f762f6b30ea555e16afbb42c917b0.
+Astra XHIGH records attempt1 delivery FAIL. Its independent reconstruction of
+the exact1006-byte report matches CI; changing only accepted_manifest_sha256
+back to ddb4b201 reproduces the old pin byte-for-byte. No audio, counter or
+lifecycle field changed. Failed log: /tmp/tooling285-176-pr-ci-failure.log.
+
+Amend #176's exact paths only to include scripts/trace-builtins-graph-audit.sh.
+Attempt2 updates that directly dependent report checksum, preserving all trace,
+jq and exact-hash gates. This is related manifest provenance, not permission
+for broad historical seal repair. Derivation/source/old-new byte proof must be
+retained and independently rechecked against the final source. No timed
+benchmark, fixture/runtime change, new issue or blind CI rerun. #285 source
+PASS remains earned. Root checkpoints the coherent correction before renewed
+required PR/main qualification.
