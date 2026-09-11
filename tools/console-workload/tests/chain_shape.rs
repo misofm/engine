@@ -916,14 +916,14 @@ fn the_collapse_fires_on_every_mono_cohort_and_no_other() {
 /// # The red mutation, and it is per field
 ///
 /// Delete any one line of any `copy_state_from` -- the compressor's recursive gain state, the
-/// limiter's `box_sum`, the EQ's `identity`, the input chain's second integrator -- and this test
-/// fails while every other test in the tree stays green. That is the whole reason it exists: a
-/// partial copy is invisible to a run that never disengages, and every other gate here is such a run.
+/// limiter's `box_sum`, the EQ's `identity`, or the input chain's second integrator -- and this
+/// transition oracle checks the resulting retained-state restoration. The compressor's recursive
+/// word is also covered by the local `mono-collapse` gate, so this test is not its sole coverage.
 #[test]
 fn a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders() {
     // Long enough that each effect has carried its retained state through the collapsed run before
-    // the transition, so stale state is a difference the delay path carries out rather than one the
-    // transition block hides.
+    // the transition, so the comparison observes state surviving the transition rather than a state
+    // difference hidden by the transition block.
     const SWITCH: u64 = BLOCKS / 2;
 
     let mut mixed =
@@ -1532,16 +1532,16 @@ fn a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders() {
 ///
 /// # Why all three effects, and why the EQ is in the list
 ///
-/// The failure is proportional to declared latency, so the three slots of the strip fail for
-/// different lengths and the EQ, at zero latency, does not fail at all. Running all three is what
-/// distinguishes "the collapse is wrong about dry signal" from "one effect is wrong": with the
-/// defect present the limiter diverges in its retained state and the compressor in its own, while
-/// the EQ stays green. A single-effect test would have read as an effect bug.
+/// The limiter's declared latency gives the shunt a retained delayed path; the compressor and EQ
+/// controls are both zero-latency, so their arms stay green. Running all three distinguishes the
+/// limiter's latency-bearing state from a generic collapse issue: the limiter is discriminatory,
+/// while the compressor and EQ are controls.
 ///
 /// Red mutation: `ConsoleEffectBankStage::process_inner::<true>` captures `block.right` -- the
-/// ungathered resident scratch -- instead of `block.left`. The limiter and compressor arms fail on
-/// the blocks following the bypass; the EQ arm stays green, which is the shape that names the
-/// cause.
+/// ungathered resident scratch -- instead of `block.left`. In exact mutation 2498, with arms
+/// ordered compressor, EQ, limiter, the compressor and EQ arms pass while the limiter fails on
+/// blocks 32-35, which identifies the latency-bearing shunt as the cause.
+///
 #[test]
 fn a_bypass_engaged_after_a_collapsed_run_renders_the_dual_bits() {
     const CONTROL: PlanConfig = PlanConfig {

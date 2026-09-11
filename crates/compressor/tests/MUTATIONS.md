@@ -17,6 +17,11 @@ replacements are the live `lane_identity`, `partition`, `nonfinite`, `mono_colla
 `silent_fixed_point`, and `causality` tests. The remaining rows in the original tables retain the
 status recorded when their current production behavior was tested.
 
+The current causal-compressor signed-zero regression in `silent_fixed_point` is an equivalence
+check, not a gate for the shared predicate: Sol's sign-mask mutation of `block_is_positive_zero`
+stayed GREEN in the compressor, while the corresponding EQ test remains the discriminatory gate.
+The historical red-mutation records below remain preserved as evidence.
+
 Reproduce one row with:
 
 ```
@@ -71,7 +76,7 @@ to `origin/main` on this branch.
 | `static_curve` | E1: Giannoulis, Massberg and Reiss equation 4 against an `f64` transcription over a 3x4x3x737 grid — worst deviation **4.578e-6 dB**, gate 1e-4; knee continuity at both edges; the hard-knee threshold sample exact |
 | `oracle` | E5: two configurations against the independent `f64` `ReferencePeakCompressor` — worst **4.694e-7** and **1.192e-7**, gate 2e-5 |
 | `lane_identity` | E2: a bound bank against `W` scalar instances with per-track parameters — output bits, per-track payload bytes; plus the corpus at `W = 1`, 4 and 8 word for word |
-| `partition` | E3: 4,096 frames in blocks of {1, 7, 64, 128, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
+| `partition` | E3: 4,096 frames in blocks of {1, 7, 63, 64, 65, 127, 128, 129, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
 | `cross_target` | E4: pinned SHA-256 over the four-case corpus at all three widths, plus finiteness and non-vacuity; the same corpus is replayed under wasmtime by `tools/wasm-gates` |
 | `identity` | E8: bypass, `mix == 0`, `mix == 1`, `G == 0 && makeup == +0`, the `Average` link's exact level, and that every identity keeps the state warm |
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |

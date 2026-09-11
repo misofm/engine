@@ -224,17 +224,17 @@ fn silence_does_not_skip_the_following_tone() {
     );
 }
 
-/// The **input** side of the signed-zero rule, at the compressor (#163 phase 4, adversarial pass).
+/// Signed-zero input regression for the causal compressor fast path (#163 phase 4).
 ///
-/// Same gap as `parametric-eq`'s pin of the same name, guarding a different kernel:
-/// masking the sign bit in `block_is_positive_zero` makes a `-0.0` block count as silence, and a
-/// claim earned on `+0.0` then engages on it. Every release test stayed green under that mutation
-/// before this test existed.
+/// This existing test compares fast and forced-slow rendering of a `-0.0` block, making it a
+/// useful signed-zero equivalence regression for the causal kernel. It does not independently
+/// discriminate the shared strict sign-mask predicate: Sol's exact mutation of
+/// `block_is_positive_zero` stayed GREEN here.
 ///
-/// The compressor's exposure is its current-sample arithmetic. A `-0.0` block must stay distinct
-/// from a `+0.0` block when the fast path decides whether it may skip processing.
+/// The discriminatory strict-predicate gate is the corresponding `parametric-eq` test; this
+/// compressor test remains a fast/forced-slow equivalence check.
 ///
-/// Red under the sign-masked mutation; green on the strict predicate.
+/// The test name and code remain unchanged.
 #[test]
 fn a_negative_zero_input_block_is_not_treated_as_silence() {
     let Some((_, width)) = native_bank_width() else {

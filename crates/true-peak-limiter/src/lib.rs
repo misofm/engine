@@ -4837,7 +4837,7 @@ mod tests {
     /// Every word of one core's state, as bits: both cursors, then both channels' whole arenas.
     ///
     /// Comparing *this* between the two arms, and not only the rendered samples, is what makes the
-    /// fast path's phase advances load-bearing. Comparing this state between the two arms, and
+    /// fast path's cursor and phase advances load-bearing. Comparing this state between the two arms, and
     /// not only rendered samples, proves that the skipped block leaves every retained word at the
     /// same bits; `phase` is included for that reason. The state proof is independent of the
     /// rendered sample comparison.
