@@ -124,7 +124,8 @@ pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 ///
 /// A whole prepared causal gate graph per case, over 1 024 frames of eight independent lanes:
 /// current-sample linked detection, `log2_lane` into the branchless hysteretic transition, the
-/// downward-expansion curve, the single-rounding `fma` one-pole with its D7 `flush`, `exp2_lane`
+/// downward-expansion curve, the unfused/two-rounding `rate * (target - G) + G` mul+add one-pole
+/// with its D7 `flush`, `exp2_lane`
 /// and identity select. One case per link mode, one of gated bursts that drives both one-pole
 /// rates and the hold, one of subnormal input, and one with a D11 word ramp in flight across a
 /// block boundary.

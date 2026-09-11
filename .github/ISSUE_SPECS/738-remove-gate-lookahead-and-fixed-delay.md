@@ -237,3 +237,17 @@ realtime/workspace policies and strict gate/reference documentation all pass.
 
 Final focused test repair, debug/release replay, strict Clippy, singular Sol
 verdict and exact PR/main qualification remain before delivery.
+
+
+## Final source execution checkpoint
+
+At abe07a9490f321152074e42dfcf4b86f8184ae5f, locked gate/reference debug
+all-target tests pass70, gate release all-target tests pass42, and affected
+seven-package strict Clippy passes. Earlier affected descendant all-target tests
+pass283 with4ignored. The final hold/reset/fault discriminator repair passes
+contract20/state7/descriptor8 and is documented in
+`/tmp/issue738-luna-final-test-repair.md`. Sol found no remaining production or
+execution blocker, but withheld the singular verdict for a bounded prose fix:
+remove two inaccurate single-rounding descriptions and mark historical mutation
+row12 superseded after#163. This correction changes no arithmetic, pins or artifact
+behavior. Final review and required PR/main CI remain.

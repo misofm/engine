@@ -86,7 +86,7 @@ says otherwise. Every row below was applied, run, recorded and reverted in one s
 | 9 | the boundary check scans only the gain words, not the output block | `src/lib.rs` | `state` | RED |
 | 10 | the boundary check scans only the output block, not the gain words | `src/lib.rs` | `--lib` | RED |
 | 11 | the detector tap is one sample early (`N - L - 1`) | `src/lib.rs` | `contract` | RED |
-| 12 | the one-pole rounds twice instead of fusing (D3) | `src/kernel.rs` | `determinism` | RED |
+| 12 | the one-pole rounds twice instead of fusing (D3) — superseded/historical after #163 | `src/kernel.rs` | `determinism` | RED |
 | 13 | the D7 `flush` is removed from the one recursive word | `src/kernel.rs` | `state` | RED |
 | 14 | the render path allocates one `Vec` per block | `src/lib.rs` | audit bin | RED |
 | 15 | the opening comparison becomes strict: `level_db.gt(threshold)` instead of `.ge(...)` | `src/kernel.rs` | `contract` | RED |

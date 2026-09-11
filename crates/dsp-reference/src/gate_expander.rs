@@ -157,8 +157,8 @@ struct ChannelState {
 
 /// Renders a whole signal through the `f64` transcription of the gate/expander.
 ///
-/// A full f64 transcription of the causal gain computer: current-sample detector, single-rounding
-/// `G + b * (C - G)` one-pole and the `1e-20` flush band. Hold counters are integer samples, so
+/// A full f64 transcription of the causal gain computer: current-sample detector, the algebraic
+/// `G + b * (C - G)` one-pole recurrence and the `1e-20` flush band. Hold counters are integer samples, so
 /// nothing about the production kernel's layout can leak into the oracle.
 ///
 /// Added latency is zero. Parameters are static for the whole render: ramps belong to the control
