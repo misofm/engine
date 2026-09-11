@@ -93,3 +93,11 @@ and target used. Evidence: `/tmp/issue162-xhigh-qemy_v30/attempt2-review.md` and
 final-cap-attempt2 receipts. Root defers artifact qualification for a coherent
 joint delivery with #221 after #220's required delivery, while source remains
 frozen. Required artifact/PR/main gates and synchronized closure remain pending.
+
+## Joint delivery checkpoint — 2026-09-11
+
+#220 prerequisite is delivered/closed at mainc476f5b4 with PR/main gates PASS.
+#221 received independent attempt2 SOURCE PASS at13c974cf and is now combined
+with this frozen49f83155 history for one root-owned artifact qualification.
+Compiler source/evidence is unchanged; artifact, required PR/main qualification
+and upstream closure remain pending. Active slots are #221/#162.
