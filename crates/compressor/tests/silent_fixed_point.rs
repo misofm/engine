@@ -31,13 +31,8 @@ const FRAMES: usize = 128;
 /// moving well into the silent stretch and has ample room to finish inside it.
 const RELEASE_MS: f32 = 50.0;
 const SILENT_BLOCKS: usize = 160;
-/// Enough trailing tone blocks for the tone to clear the lookahead delay line.
-///
-/// Measured rather than assumed: a fresh bank at the descriptor defaults renders exact `+0.0` for
-/// its first **seven** blocks and only becomes nonzero on block 7, so the delay in front of the
-/// output is around 896 frames rather than the 240 the 5 ms default lookahead suggests. Four
-/// trailing blocks left the comparison with nothing but silence to compare, which is precisely
-/// what `the_trailing_tone_is_actually_rendered` caught.
+/// Enough trailing tone blocks to prove that the live path resumes after the silent stretch.
+/// Four trailing blocks are sufficient to give the comparison a non-silent region to inspect.
 const TRAILING_TONE_BLOCKS: usize = 12;
 /// Deliberately **above** the tone's level, so the detector rests at an exact `0.0` dB reduction.
 ///
@@ -142,19 +137,9 @@ fn render_with(
 
 /// **A bank allowed to skip settled silence renders exactly the bank that is never allowed to.**
 ///
-/// Red mutations this holds against: dropping the `block_is_positive_zero` input test, and
-/// dropping `rings_are_positive_zero`. The `recursive_bits` term is *not* exercised here, because
-/// this arm's tone is under the threshold and the detector therefore rests at an exact `0.0` dB
-/// the whole way through — `a_detector_still_releasing_through_the_silence_is_never_frozen` is the
-/// test that makes that term load-bearing.
-///
-/// The cursor advance in the fast path is deliberately **not** claimed to be covered by any red
-/// mutation, and removing it passes every test in this file. That is honest rather than
-/// convenient: once both rings are entirely `+0.0`, every read out of them returns `+0.0` from any
-/// cursor position, so the cursor's value is genuinely unobservable for as long as the claim
-/// holds. It is advanced anyway so that the skipped block leaves the state *bit-identical* to the
-/// block that ran, rather than merely observationally equivalent to it — a weaker invariant would
-/// have to be re-proved every time this kernel's ring handling changed.
+/// Red mutations this holds against: dropping the `block_is_positive_zero` input test and allowing
+/// the fast path to skip a non-settled recursive word. The recursive-word term is exercised by
+/// `a_detector_still_releasing_through_the_silence_is_never_frozen`.
 #[test]
 fn a_settled_silent_bank_renders_exactly_the_never_fast_path() {
     let Some((_, width)) = native_bank_width() else {
@@ -221,19 +206,12 @@ fn a_detector_still_releasing_through_the_silence_is_never_frozen() {
     );
 }
 
-/// Isolates the **lookahead-ring** leg: silence shorter than the delay line must not let the fast
-/// path skip over tone that is still inside it.
+/// A short silent stretch must not let the fast path skip the next non-silent block.
 ///
-/// The minimum 5 ms release settles the detector within about two blocks, so by the third silent
-/// block the recursive word is at its fixed point — while the ~896-frame delay line still holds
-/// seven blocks of the tone that has not reached the output yet. That is the one window where the
-/// recursive word says "settled" and the rings say "not yet", and `rings_are_positive_zero` is
-/// what keeps the fast path out of it. Without that term the cursor jumps over the tone still in
-/// the line and it is never rendered.
-///
-/// Red mutation: remove `self.left.rings_are_positive_zero() && self.right...` from the claim.
+/// This keeps the current-sample causal path covered at the boundary where the fixed-point
+/// optimization is allowed to resume.
 #[test]
-fn silence_shorter_than_the_lookahead_line_still_drains_it() {
+fn silence_does_not_skip_the_following_tone() {
     let Some((_, width)) = native_bank_width() else {
         return;
     };
@@ -242,24 +220,21 @@ fn silence_shorter_than_the_lookahead_line_still_drains_it() {
     let forced_slow = render_with(lanes, true, 5.0, 4, THRESHOLD_DB);
     assert_eq!(
         fast, forced_slow,
-        "the fast path skipped tone that was still inside the lookahead line"
+        "the fast path skipped the following non-silent causal block"
     );
 }
 
-/// The **input** side of the signed-zero rule, at the compressor (#163 phase 4, adversarial pass).
+/// Signed-zero input regression for the causal compressor fast path (#163 phase 4).
 ///
-/// Same gap as `parametric-eq`'s pin of the same name, guarding a different kernel:
-/// masking the sign bit in `block_is_positive_zero` makes a `-0.0` block count as silence, and a
-/// claim earned on `+0.0` then engages on it. Every release test stayed green under that mutation
-/// before this test existed.
+/// This existing test compares fast and forced-slow rendering of a `-0.0` block, making it a
+/// useful signed-zero equivalence regression for the causal kernel. It does not independently
+/// discriminate the shared strict sign-mask predicate: Sol's exact mutation of
+/// `block_is_positive_zero` stayed GREEN here.
 ///
-/// The compressor's exposure is its delay line rather than its arithmetic. A `-0.0` block that the
-/// kernel actually renders is *written into the lookahead ring*, and it emerges at the output
-/// about seven blocks later; a fast path that skipped the block never writes it, so the sample
-/// that should have emerged is a different bit pattern. The trailing run is therefore long enough
-/// for the line to drain, which is what gives the divergence somewhere to appear.
+/// The discriminatory strict-predicate gate is the corresponding `parametric-eq` test; this
+/// compressor test remains a fast/forced-slow equivalence check.
 ///
-/// Red under the sign-masked mutation; green on the strict predicate.
+/// The test name and code remain unchanged.
 #[test]
 fn a_negative_zero_input_block_is_not_treated_as_silence() {
     let Some((_, width)) = native_bank_width() else {
@@ -274,7 +249,7 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
         let full_offsets: Vec<u32> = (0..=lanes).map(|t| t as u32).collect();
         let empty_offsets = vec![0_u32; lanes + 1];
 
-        // Settle past the lookahead line, one `-0.0` block, then long enough for it to emerge.
+        // Settle first, then render one `-0.0` block and a trailing run.
         const SETTLE: usize = 40;
         const TOTAL: usize = SETTLE + 16;
         let mut bits = Vec::new();
@@ -327,7 +302,6 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
     let slow = run(lanes, width, true);
     assert_eq!(
         fast, slow,
-        "a -0.0 input block was treated as silence and skipped, so it never entered the lookahead \
-         line and the sample that should have emerged from it differs"
+        "a -0.0 input block was treated as silence and skipped"
     );
 }

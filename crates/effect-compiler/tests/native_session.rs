@@ -4,7 +4,10 @@ use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::*;
-use session::{CompileCaps, compile_session, parse_session_json};
+use session::{
+    CompileCaps, EffectParam, ParameterChannel, ParameterUnit as SessionParameterUnit,
+    compile_session, parse_session_json,
+};
 
 const EFFECT_ID: EffectId = match EffectId::new("parametric-eq") {
     Ok(v) => v,
@@ -261,4 +264,38 @@ fn ten_thousand_session_parameter_mutations_reject_transactionally_without_panic
             "effect.parameter.domain"
         );
     }
+}
+
+#[test]
+fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("causal compressor fixture");
+    model.tracks[0].dynamic.effects[0].params.push(EffectParam {
+        parameter_id: 8,
+        channel: ParameterChannel::Both,
+        unit: SessionParameterUnit::Milliseconds,
+        value: 5.0,
+    });
+    let compiled = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("session model remains structurally compilable");
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
+        Ok(_) => panic!("retired parameter must prevent prepared publication"),
+        Err(diagnostics) => diagnostics,
+    };
+    assert_eq!(diagnostics.0.len(), 1);
+    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
+    assert!(diagnostics.0[0].path.contains("comp0"));
 }

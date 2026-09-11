@@ -75,7 +75,7 @@ track.faderDb(-6, { lane: "left" });
 const compressor = track.effect("simd1", 0, "miso.compressor");
 compressor.parameter("threshold", -18, { channel: "both" });
 compressor.observe("Gain Reduction", true, 4);
-// @ts-expect-error lookahead is prepared-only and cannot be a live edit
+// @ts-expect-error lookahead is absent from the causal launch compressor
 compressor.parameter("lookahead", 1);
 // @ts-expect-error a delay parameter is not a compressor parameter
 compressor.parameter("delay time", 20);

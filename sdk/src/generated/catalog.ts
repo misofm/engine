@@ -800,43 +800,6 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
-        },
-        {
-          "id": 8,
-          "name": "lookahead",
-          "displayUnit": "ms",
-          "unit": 3,
-          "unitName": "milliseconds",
-          "domain": 1,
-          "domainName": "continuous",
-          "minimum": 0,
-          "maximum": 20,
-          "default": 5,
-          "mapping": 1,
-          "mappingName": "linear",
-          "automationRate": 3,
-          "automationRateName": "none",
-          "channelPolicy": 2,
-          "channelPolicyName": "perLane",
-          "smoothing": 1,
-          "smoothingName": "none",
-          "smoothingSamples": 0,
-          "readable": true,
-          "automatable": false,
-          "liveUpdatable": false,
-          "enumChoices": [],
-          "step": {
-            "unit": "absolute",
-            "size": "0.1",
-            "precision": 1,
-            "ladder": {
-              "xs": 1,
-              "sm": 3,
-              "md": 5,
-              "lg": 10,
-              "xl": 30
-            }
-          }
         }
       ],
       "ports": [

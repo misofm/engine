@@ -2104,11 +2104,11 @@ struct LimiterCore<L: Lane> {
     report: NonFiniteReport,
     /// Issue #182 S2: the previous block proved this instance is at a silent fixed point.
     ///
-    /// Earned only by observation in [`process_block`](Self::process_block), never assumed. The
-    /// design is the compressor's `silent_fixed_point` (#163 phase 4 item 1) at a kernel whose rest
-    /// state is not all zeros: two of this crate's three rings rest at exactly `1.0`, not `+0.0`,
-    /// and the argument transfers because what it needs is that the rings rest **uniform**, so that
-    /// a read from any cursor position returns the value a slow path would have read.
+    /// Earned only by observation in [`process_block`](Self::process_block), never assumed. This
+    /// kernel's rest state is not all zeros: two of this crate's three retained windows rest at
+    /// exactly `1.0`, not `+0.0`, and the argument transfers because what it needs is that the
+    /// windows rest **uniform**, so a read from any phase returns the value a slow path would have
+    /// read. The fixed point is a property of this limiter's state, including its phase.
     silent_fixed_point: bool,
     /// The bypass flag in force when the claim above was earned. Bypass selects a different arm of
     /// the output `select`, so a claim earned on one side of it says nothing about the other.
@@ -2218,7 +2218,7 @@ impl<L: Lane> LimiterCore<L> {
             // and stores the `+0.0` it just read out of the main ring.
             //
             // Only the cursors and the van Herk phase actually move, so only they are advanced.
-            // As in the compressor's cursor note, this makes the skipped block leave the instance
+            // This makes the skipped block leave the instance
             // **bit-identical** to the block that ran, rather than merely observationally
             // equivalent to it: the weaker invariant would have to be re-proved every time the ring
             // handling changed, and `snapshot_track` would expose the difference immediately.
@@ -4771,18 +4771,18 @@ mod tests {
     // ---------------------------------------------------------------------------------------
     // Issue #182 S2: the earned silence fixed point.
     //
-    // The family is the compressor's (`compressor/tests/silent_fixed_point.rs`) at a
-    // kernel whose rest state is not all zeros. Two of the three rings rest at exactly `1.0` rather
-    // than `+0.0`, and the argument transfers unchanged because what it needs is that a resting
-    // ring is **uniform**: a read from any cursor position then returns the value a slow path would
-    // have read, so a block that writes only the resting value back leaves it bit-identical
-    // whatever the cursor did.
+    // This limiter's rest state is not all zeros: two of its three retained windows rest at exactly
+    // `1.0` rather than `+0.0`, and the argument transfers because what it needs is that resting
+    // storage is **uniform**. A read from any phase then returns the value a slow path would have
+    // read, so a block that writes only the resting value back leaves it bit-identical at every
+    // phase.
     //
-    // This crate is also the one where the fixed point is *exactly* reachable, which the compressor
-    // records as the precondition for engaging at all and does not have: `gain_reduction_db`
-    // approaches `0` dB geometrically, whereas the box terms here live on the `2^-14` grid with
-    // `BOX_GRID * R` below `2^24` at every launch rate, so the running sum arrives at exactly `Wb`,
-    // and the D7 flush terminates the release at exactly `+0.0` rather than near it.
+    // The fixed point is also exactly reachable here.
+    // The compressor's `gain_reduction_db` envelope approaches `0` dB geometrically; this limiter's
+    // box terms live on the `2^-14` grid with `BOX_GRID * R` below `2^24` at every launch rate,
+    // so the running sum arrives exactly at `Wb`, and the D7 flush terminates the release at
+    // exactly `+0.0` rather than near it. The resulting proof is independent of the phase at which
+    // the block begins.
     // ---------------------------------------------------------------------------------------
 
     /// One block of signal, or a block filled with `quiet` — an exact `+0.0` or an exact `-0.0`.
@@ -4837,10 +4837,10 @@ mod tests {
     /// Every word of one core's state, as bits: both cursors, then both channels' whole arenas.
     ///
     /// Comparing *this* between the two arms, and not only the rendered samples, is what makes the
-    /// fast path's cursor and phase advances load-bearing. The compressor's version of this test
-    /// records honestly that deleting its cursor advance passes every test in its file, because a
-    /// ring of exact `+0.0` reads the same from every position; reading the state back directly
-    /// closes that gap rather than restating it. `phase` is in the list for the same reason.
+    /// fast path's cursor and phase advances load-bearing. Comparing this state between the two arms, and
+    /// not only rendered samples, proves that the skipped block leaves every retained word at the
+    /// same bits; `phase` is included for that reason. The state proof is independent of the
+    /// rendered sample comparison.
     fn state_bits<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
         let mut words = vec![core.cursors.main, core.cursors.ring];
         for channel in [&core.left, &core.right] {
@@ -5139,8 +5139,8 @@ mod tests {
     /// Issue #182 S2, the headline gate, at all three widths. The tone is well under the guarded
     /// ceiling (`limit = 10^(-7/20) = 0.447` against an amplitude of `0.05`), so `r = 1` at every
     /// frame and the recursive word never leaves `+0.0`. That is deliberate, and it is the same
-    /// choice the compressor's file explains at length: it isolates the *rings* as the thing that
-    /// has to drain, and it makes the fixed point reachable inside a test-sized run.
+    /// choice this limiter's tests make explicit: they isolate the retained windows as the state
+    /// that has to drain, and they make the fixed point reachable inside a test-sized run.
     /// `a_limiter_still_releasing_through_the_silence_is_never_frozen` is the arm that makes the
     /// recursive word's own leg load-bearing.
     ///
@@ -5539,9 +5539,9 @@ mod tests {
     /// not moved, and the caller's block is still exactly `+0.0` — so nothing but the withdrawal
     /// stands between the claim and a skipped block that drops the restored signal on the floor.
     ///
-    /// It is the same window `silence_shorter_than_the_lookahead_line_still_drains_it` opens at the
-    /// compressor, reached from the other side: there the rings fill because the *signal* has not
-    /// drained, here because a *restore* refilled them.
+    /// A restore refills the limiter's retained windows from the other side: withdrawal then
+    /// invalidates the fixed-point claim before the next block can be skipped, even when the signal
+    /// itself is quiet.
     ///
     /// Red mutation: delete `self.silent_fixed_point = false;` from `LimiterCore::restore_track`.
     #[test]

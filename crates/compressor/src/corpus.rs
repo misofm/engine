@@ -26,33 +26,25 @@
 //!
 //! The four cases together reach every branch of the kernel that a rendered block can reach: the
 //! three link laws, a hard and two soft knees, an upward and a downward ratio, the three identity
-//! selects (`bypass` is not a corpus case because it is the input unchanged), a lookahead of zero
-//! and two non-zero taps, and — in the last case — the ramping body, its per-frame redesign and
-//! the exponential that designs a ballistic coefficient.
+//! selects (`bypass` is not a corpus case because it is the input unchanged), and — in the last
+//! case — the ramping body, its per-frame redesign and the exponential that designs a ballistic
+//! coefficient.
 
 use effect_contract::LinkMode;
 use lane::Lane;
 
 use crate::design::{MAX_WIDTH, PARAMETER_COUNT, SMOOTHING_SAMPLES};
-use crate::kernel::{Channel, Detector, Staged, process_block};
+use crate::kernel::{Channel, Detector, process_block};
 
 /// Independent single-track signals in a case. A multiple of the widest backend.
 pub const LANES: usize = 8;
 
-/// Frames rendered per track. The first [`RING_LENGTH`] − 1 are the latency's leading zeros.
+/// Frames rendered per track.
 pub const FRAMES: usize = 384;
 
 /// Block partition the corpus renders with. Not a multiple of [`FRAMES`], deliberately: the last
 /// block is short, so a kernel that behaved differently on a partial block would move the digest.
 pub const BLOCK: usize = 100;
-
-/// Ring length `B = N + 1` used by the corpus.
-///
-/// Not a launch quality's `N = Fs/50`: at 48 kHz that is 960 frames of pure latency before a
-/// single output sample is non-zero, which would make the corpus fifteen times longer for no extra
-/// coverage. The ring arithmetic under test — the wrap, the `w + 1` read and the per-lane
-/// `w - D` tap — is `B`-independent, and `tests/partition.rs` exercises the production `B`.
-pub const RING_LENGTH: usize = 65;
 
 /// Sample rate the ballistic coefficients are designed at.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -71,22 +63,20 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     "dual_mono_ramping",
 ];
 
-/// The eight tracks, in table order: threshold, ratio, knee, attack, release, makeup, mix,
-/// lookahead. Frozen; every value is inside its descriptor domain.
+/// The eight tracks, in table order: threshold, ratio, knee, attack, release, makeup, mix.
 ///
 /// Track 0 is a hard knee, track 1 a wide one; track 2 has ratio 1 (no compression) and non-zero
 /// makeup, so it exercises the `G == 0 && makeup != 0` path that is *not* an identity; track 3 has
-/// `mix == 0` and track 7 `mix == 1`, the two identity selects; tracks 4 to 6 sweep the lookahead
-/// tap from zero to the ring's limit.
+/// `mix == 0` and track 7 `mix == 1`, the two identity selects.
 const TRACKS: [[f32; PARAMETER_COUNT]; LANES] = [
-    [-18.0, 4.0, 0.0, 10.0, 100.0, 0.0, 1.0, 0.0],
-    [-24.0, 8.0, 24.0, 1.0, 50.0, 3.0, 0.75, 0.5],
-    [-6.0, 1.0, 6.0, 5.0, 200.0, -6.0, 0.5, 0.25],
-    [-40.0, 20.0, 12.0, 0.1, 5.0, 12.0, 0.0, 1.0],
-    [0.0, 2.0, 6.0, 50.0, 1000.0, -24.0, 0.25, 0.0],
-    [-80.0, 1.5, 3.0, 20.0, 5000.0, 24.0, 0.9, 0.75],
-    [-12.0, 12.0, 18.0, 0.5, 20.0, -3.0, 0.6, 1.0],
-    [-30.0, 6.0, 0.0, 2.0, 300.0, 6.0, 1.0, 0.125],
+    [-18.0, 4.0, 0.0, 10.0, 100.0, 0.0, 1.0],
+    [-24.0, 8.0, 24.0, 1.0, 50.0, 3.0, 0.75],
+    [-6.0, 1.0, 6.0, 5.0, 200.0, -6.0, 0.5],
+    [-40.0, 20.0, 12.0, 0.1, 5.0, 12.0, 0.0],
+    [0.0, 2.0, 6.0, 50.0, 1000.0, -24.0, 0.25],
+    [-80.0, 1.5, 3.0, 20.0, 5000.0, 24.0, 0.9],
+    [-12.0, 12.0, 18.0, 0.5, 20.0, -3.0, 0.6],
+    [-30.0, 6.0, 0.0, 2.0, 300.0, 6.0, 1.0],
 ];
 
 /// The automation applied by case 3, as `(parameter index, left value, right value)`.
@@ -177,9 +167,8 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         for (lane, slot) in defaults.iter_mut().take(width).enumerate() {
             *slot = TRACKS[base + lane];
         }
-        let mut left_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
-        let mut right_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
-        let mut staged = Staged::<L>::new();
+        let mut left_channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
+        let mut right_channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
 
         let inputs: Vec<([f32; FRAMES], [f32; FRAMES])> = (0..width)
             .map(|lane| lane_input(base + lane, case))
@@ -217,7 +206,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 false,
                 SAMPLE_RATE,
                 (&mut left_channel, &mut right_channel),
-                &mut staged,
             );
             for step in 0..frames {
                 for lane in 0..width {
@@ -238,29 +226,30 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
 /// scalar `Lane` oracle is allowed when the property being pinned is identity). A mismatch is
 /// never repaired by re-pinning from the run that failed: it means a target, a width or an
 /// operation order stopped agreeing with the oracle, which is what this gate exists to catch.
+// Issue #737: deliberately re-derived from the independently reviewed causal scalar corpus.
 pub const C1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     // dual_mono_static
     [
-        0x09, 0xea, 0x0f, 0x4c, 0xeb, 0xa2, 0xc2, 0x7c, 0xef, 0x16, 0x59, 0x2c, 0x4b, 0x91, 0x73,
-        0xa4, 0x3b, 0x45, 0x71, 0x48, 0xef, 0xb2, 0xf1, 0x2c, 0xeb, 0x89, 0x94, 0x69, 0xf8, 0x65,
-        0x03, 0x6e,
+        0x27, 0xa0, 0x82, 0x9d, 0x1f, 0x26, 0xbf, 0x50, 0xe5, 0x3d, 0x73, 0x9e, 0xc2, 0x9b, 0xc0,
+        0x24, 0xf9, 0x76, 0x20, 0xa1, 0x21, 0x2c, 0x02, 0xb8, 0x4f, 0xc5, 0xe7, 0x61, 0xd9, 0x93,
+        0x5c, 0x48,
     ],
     // maximum_link
     [
-        0xa9, 0xa5, 0x51, 0x95, 0x64, 0xa9, 0x15, 0xcc, 0x03, 0xde, 0x07, 0x0c, 0xc2, 0x0c, 0x07,
-        0x6e, 0x18, 0x93, 0x31, 0xfe, 0x3f, 0x18, 0x71, 0xfd, 0xa3, 0x14, 0x87, 0x21, 0x74, 0x2d,
-        0xa4, 0x4b,
+        0x7d, 0xdf, 0x4b, 0xb4, 0x2d, 0x1e, 0x8f, 0xcc, 0xa6, 0x73, 0x39, 0x4f, 0x21, 0xdb, 0x7f,
+        0x81, 0xd2, 0xf0, 0xc0, 0xb3, 0xe4, 0x02, 0xc3, 0xf2, 0xb2, 0x84, 0x08, 0x3a, 0xeb, 0x48,
+        0x78, 0x13,
     ],
     // average_link
     [
-        0x21, 0xba, 0xfc, 0x37, 0x3b, 0x2c, 0x88, 0x8c, 0x2c, 0x54, 0x66, 0x00, 0xd6, 0x35, 0xae,
-        0x44, 0xb9, 0xec, 0xd5, 0xaa, 0xb8, 0xec, 0xc9, 0xbd, 0xdb, 0x4a, 0x35, 0xa4, 0xd9, 0xce,
-        0x56, 0x9b,
+        0x39, 0xfe, 0x53, 0xed, 0x7c, 0xea, 0x7e, 0x60, 0xdb, 0xce, 0x3f, 0xf1, 0x1b, 0xee, 0x03,
+        0x98, 0x01, 0xa9, 0x7a, 0xad, 0xc3, 0x7c, 0x38, 0x78, 0xe5, 0xc3, 0xd4, 0x9c, 0x6b, 0x1f,
+        0x64, 0x07,
     ],
     // dual_mono_ramping
     [
-        0xf2, 0xe9, 0x87, 0x32, 0x39, 0x05, 0x09, 0x23, 0x23, 0x59, 0x23, 0x8c, 0x3f, 0x03, 0x79,
-        0x97, 0x10, 0xfa, 0x73, 0x84, 0x1e, 0xf2, 0xbe, 0x17, 0x60, 0x1d, 0x70, 0x90, 0xc1, 0x01,
-        0xf4, 0xe4,
+        0xb0, 0xbf, 0x75, 0xab, 0xf8, 0x79, 0x56, 0x96, 0x98, 0x7c, 0x08, 0xcb, 0x72, 0x61, 0x9d,
+        0xc9, 0x08, 0x01, 0xbd, 0x6c, 0xde, 0x41, 0x3a, 0xd4, 0x26, 0x36, 0xe4, 0x28, 0xf8, 0xf2,
+        0x86, 0x6d,
     ],
 ];

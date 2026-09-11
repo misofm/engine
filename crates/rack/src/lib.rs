@@ -2196,9 +2196,9 @@ impl BankChain {
     /// dual on every block, collapsed or not, and its two channels are already whatever the strip
     /// asked for.
     ///
-    /// This is a one-off of a few hundred kilobytes -- the compressor's two rings and the limiter's
-    /// four, per cohort -- on the block that stops collapsing, and it happens at most once per
-    /// chain per plan.
+    /// This is a one-off bounded copy of the prefix state per cohort on the block that stops
+    /// collapsing, and it happens at most once per chain per plan. The amount follows each
+    /// stage's prepared state rather than a compressor-specific ring layout.
     fn disengage_collapse(&mut self) {
         for slot in &mut self.slots[..self.collapse_prefix] {
             slot.stage.desymmetrize();

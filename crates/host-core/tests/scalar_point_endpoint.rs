@@ -434,7 +434,6 @@ fn asymmetric_effect() -> Box<dyn PreparedNativeEffect> {
         (80.0, 300.0),
         (-3.0, 4.0),
         (0.25, 0.75),
-        (10.0, 15.0),
     ];
     let values: Vec<_> = pairs
         .iter()
@@ -719,7 +718,7 @@ fn pcm_case(records: &[AutomationRecord], splits: &[(usize, &[PreparedAutomation
             .zip(&unchanged_left)
             .chain(actual_right.iter().zip(&unchanged_right))
             .any(|(&actual, &unchanged)| actual.to_bits() != unchanged.to_bits()),
-        "warmed Point render matched the no-event PCM after compressor lookahead"
+        "warmed Point render matched the no-event PCM for the causal compressor"
     );
     assert_eq!(no_event_report, ProcessReport::default());
     for (index, channel) in [ParameterChannel::Left, ParameterChannel::Right]
