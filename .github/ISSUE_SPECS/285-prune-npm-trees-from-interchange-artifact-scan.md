@@ -26,3 +26,13 @@ qualification; these tooling-only slices should not require a new shipped pin.
 check-effect-interchange-qualification.sh's 'generated artifact exists under a source path' scan prunes only ./target, so any node_modules containing a .wasm (playwright-core's webp_codec.wasm) turns it red. Cost two agents a sweep run each (#272, #278). Fix: prune node_modules/ (any depth) in the scan; self-test row proving a planted wasm under src/ still reds.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## Astra LOW attempt 1 focused checkpoint
+
+Only the scan and existing policy harness changed. Actual node_modules directories
+are pruned at any depth; root target exclusion and traversal-status refusal remain.
+Root/nested npm Wasm and root-target acceptance, plus src/module.wasm,
+src/node_modules.wasm and nested src/target/module.wasm rejection controls passed.
+Shell syntax, real-tree baseline and full policy harness exited0. The harness
+includes synthetic benchmark108/fake-launch lifecycle controls, not timed work.
+Receipts: /tmp/issue285-attempt1 (actual argv/env/source/exit/logs). Independent
+review and required PR/main qualification remain pending.
