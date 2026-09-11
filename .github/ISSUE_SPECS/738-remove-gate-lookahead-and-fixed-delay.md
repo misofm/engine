@@ -134,3 +134,14 @@ were assigned to this tranche; independent post-checkpoint review must confirm
 that surviving causal/state/hold/fault coverage is discriminatory. Actual stable-ID
 session/control, old descriptor-bound state, graph/PDC, metadata/pins, realtime/
 Wasm/browser and final CI remain. This is not a final attempt verdict.
+
+
+## Current SDK metadata checkpoint
+
+The actual Rust metadata export differs semantically only by removal of gate
+parameter ID8. Root updates the current SDK asset/catalog and adds a typed
+negative check for the retired gate lookahead name. All other metadata fields
+remain identical; generated ABI/provenance and ABI-layout asset are byte-identical.
+`check-sdk-generated.sh` and `check-sdk-types.sh` pass. External export/delta
+are in `/tmp/issue738-metadata`, gate receipts in `/tmp/issue738-gates`.
+No synthetic metadata self-test fixture or historical artifact is resealed.

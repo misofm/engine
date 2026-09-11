@@ -72,6 +72,10 @@ track.faderDb(-6, { channel: "left", smoothingSamples: 32 });
 // @ts-expect-error no untyped option bag is accepted
 track.faderDb(-6, { lane: "left" });
 
+const gate = track.effect("simd1", 0, "miso.gate-expander");
+// @ts-expect-error lookahead is absent from the causal launch gate
+gate.parameter("lookahead", 1);
+
 const compressor = track.effect("simd1", 0, "miso.compressor");
 compressor.parameter("threshold", -18, { channel: "both" });
 compressor.observe("Gain Reduction", true, 4);
