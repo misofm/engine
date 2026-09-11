@@ -1597,6 +1597,39 @@ pub struct BankChain {
     transitions: [u64; 3],
 }
 
+/// Owned chain masks validated before graph bindings transfer their processors. The constructor
+/// consumes this configuration as its only active/fold source; it cannot arm an existing chain.
+pub struct PreparedFoldConfiguration {
+    width: BankWidth,
+    active: Box<[bool]>,
+    fold: Box<[bool]>,
+}
+
+impl PreparedFoldConfiguration {
+    pub fn new(
+        width: BankWidth,
+        active: Box<[bool]>,
+        fold: Box<[bool]>,
+    ) -> Result<Self, RackError> {
+        let lanes = width.lanes() as usize;
+        if active.len() != lanes
+            || !active.iter().any(|lane| *lane)
+            || fold.len() != lanes
+            || fold
+                .iter()
+                .zip(active.iter())
+                .any(|(fold, active)| *fold && !*active)
+        {
+            return Err(RackError::Shape);
+        }
+        Ok(Self {
+            width,
+            active,
+            fold,
+        })
+    }
+}
+
 impl BankChain {
     /// Validates the whole shape once, off the render thread: `active` and every slot mask have
     /// exactly `lanes` entries, a slot may only be active on an active lane, and at least one lane
@@ -1666,6 +1699,21 @@ impl BankChain {
             collapses: 0,
             transitions: [0; 3],
         })
+    }
+
+    /// Construct from masks validated before processor ownership transfer. Ordinary scratch and
+    /// slot checks remain those of `new`; installing the configuration introduces no fold error.
+    pub fn new_with_prepared_fold(
+        scratch: AoSoaScratch,
+        configuration: PreparedFoldConfiguration,
+        slots: Vec<BankSlot>,
+    ) -> Result<Self, RackError> {
+        if scratch.width() != configuration.width {
+            return Err(RackError::WidthMismatch);
+        }
+        let mut chain = Self::new(scratch, configuration.active, slots)?;
+        chain.install_fold(configuration.fold);
+        Ok(chain)
     }
 
     /// How many leading slots a collapsed block of this chain would run one-plane, or `0`.
@@ -1896,16 +1944,20 @@ impl BankChain {
         {
             return Err(RackError::Shape);
         }
+        self.install_fold(lanes);
+        Ok(())
+    }
+
+    fn install_fold(&mut self, lanes: Box<[bool]>) {
         if !lanes.iter().any(|lane| *lane) {
             self.fold = Box::default();
-            return Ok(());
+            return;
         }
         if self.staging_left.len() != self.scratch.left.len() {
             self.staging_left = vec![0.0; self.scratch.left.len()].into_boxed_slice();
             self.staging_right = vec![0.0; self.scratch.right.len()].into_boxed_slice();
         }
         self.fold = lanes;
-        Ok(())
     }
 
     /// Lanes whose scatter this chain folds; empty when it folds none. Evidence only.
@@ -2691,6 +2743,93 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_fold_configuration_preserves_masks_and_constructor_checks() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![true; lanes - 1].into_boxed_slice(),
+                    vec![false; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![true; lanes].into_boxed_slice(),
+                    vec![false; lanes - 1].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    vec![false; lanes].into_boxed_slice(),
+                    vec![false; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            let mut active = vec![true; lanes];
+            active[lanes - 1] = false;
+            assert!(matches!(
+                PreparedFoldConfiguration::new(
+                    width,
+                    active.clone().into_boxed_slice(),
+                    vec![true; lanes].into_boxed_slice()
+                ),
+                Err(RackError::Shape)
+            ));
+            for fold in [vec![false; lanes], active.clone()] {
+                let configuration = PreparedFoldConfiguration::new(
+                    width,
+                    active.clone().into_boxed_slice(),
+                    fold.clone().into_boxed_slice(),
+                )
+                .expect("configuration");
+                let chain = BankChain::new_with_prepared_fold(
+                    AoSoaScratch::new(width, 16).expect("scratch"),
+                    configuration,
+                    Vec::new(),
+                )
+                .expect("chain");
+                assert_eq!(&*chain.active, active);
+                assert_eq!(
+                    chain.fold_lanes(),
+                    if fold.iter().any(|lane| *lane) {
+                        &fold[..]
+                    } else {
+                        &[]
+                    }
+                );
+                if fold.iter().any(|lane| *lane) {
+                    assert_eq!(chain.staging_left.len(), chain.scratch.left.len());
+                    assert_eq!(chain.staging_right.len(), chain.scratch.right.len());
+                }
+            }
+            let configuration = PreparedFoldConfiguration::new(
+                width,
+                active.clone().into_boxed_slice(),
+                active.into_boxed_slice(),
+            )
+            .expect("configuration");
+            let other = if width == BankWidth::Four {
+                BankWidth::Eight
+            } else {
+                BankWidth::Four
+            };
+            assert!(matches!(
+                BankChain::new_with_prepared_fold(
+                    AoSoaScratch::new(other, 16).expect("scratch"),
+                    configuration,
+                    Vec::new()
+                ),
+                Err(RackError::WidthMismatch)
+            ));
+        }
+    }
 
     #[test]
     fn resident_output_lane_checks_shape_and_preserves_final_planes_after_collapse() {
@@ -4456,6 +4595,113 @@ mod tests {
         }
         fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
             self.0.fold_plane(lane, left, right);
+        }
+    }
+
+    /// The new constructor and the existing arming path render identical words for both bank
+    /// widths, including active holes, prefix subsets, full/partial staging and disarmed masks.
+    #[test]
+    fn prepared_fold_constructor_preserves_pcm_and_disarm() {
+        const FRAMES: u32 = 13;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for shape in 0..3 {
+                let mut active = vec![true; lanes];
+                if shape == 1 {
+                    active[lanes - 1] = false;
+                }
+                if shape == 2 {
+                    active[1] = false;
+                }
+                for subset in 0..3 {
+                    let fold: Vec<bool> = active
+                        .iter()
+                        .enumerate()
+                        .map(|(lane, active)| {
+                            *active
+                                && match subset {
+                                    0 => false,
+                                    1 => lane < 2,
+                                    _ => true,
+                                }
+                        })
+                        .collect();
+                    let scratch = || AoSoaScratch::new(width, FRAMES).expect("scratch");
+                    let slots = || vec![slot(active.clone(), Box::new(ScaleByLane))];
+                    let mut old =
+                        BankChain::new(scratch(), active.clone().into_boxed_slice(), slots())
+                            .expect("old");
+                    old.arm_fold(fold.clone().into_boxed_slice())
+                        .expect("old arm");
+                    let configuration = PreparedFoldConfiguration::new(
+                        width,
+                        active.clone().into_boxed_slice(),
+                        fold.into_boxed_slice(),
+                    )
+                    .expect("configuration");
+                    let mut new =
+                        BankChain::new_with_prepared_fold(scratch(), configuration, slots())
+                            .expect("new");
+                    assert_eq!(old.active, new.active);
+                    assert_eq!(old.fold_lanes(), new.fold_lanes());
+                    assert_eq!(old.staging_left.len(), new.staging_left.len());
+                    let provider = || PlanesWithFold {
+                        planes: Planes {
+                            left: (0..lanes)
+                                .map(|lane| {
+                                    (0..FRAMES)
+                                        .map(|frame| (lane as f32 + 0.125) * (frame as f32 - 2.0))
+                                        .collect()
+                                })
+                                .collect(),
+                            right: (0..lanes)
+                                .map(|lane| {
+                                    (0..FRAMES)
+                                        .map(|frame| (lane as f32 - 0.75) * (frame as f32 + 1.0))
+                                        .collect()
+                                })
+                                .collect(),
+                        },
+                        gains: (0..lanes).map(|lane| lane as f32 + 0.5).collect(),
+                        bus_left: vec![0.0; FRAMES as usize],
+                        bus_right: vec![0.0; FRAMES as usize],
+                        taken: Vec::new(),
+                        trace: Vec::new(),
+                        cohorts: Vec::new(),
+                    };
+                    for disarmed in [false, true] {
+                        if disarmed {
+                            old.arm_fold(vec![false; lanes].into_boxed_slice())
+                                .expect("disarm old");
+                            new.arm_fold(vec![false; lanes].into_boxed_slice())
+                                .expect("disarm new");
+                        }
+                        let mut expected = provider();
+                        let mut actual = provider();
+                        old.run(&mut expected, FRAMES, 0).expect("old run");
+                        new.run(&mut actual, FRAMES, 0).expect("new run");
+                        let words = |provider: &PlanesWithFold| {
+                            provider
+                                .planes
+                                .left
+                                .iter()
+                                .chain(&provider.planes.right)
+                                .flat_map(|plane| plane.iter())
+                                .chain(&provider.bus_left)
+                                .chain(&provider.bus_right)
+                                .map(|word| word.to_bits())
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(
+                            words(&expected),
+                            words(&actual),
+                            "{width:?}/{shape}/{subset}/{disarmed}"
+                        );
+                        assert_eq!(expected.trace, actual.trace);
+                        assert_eq!(expected.taken, actual.taken);
+                    }
+                }
+            }
         }
     }
 

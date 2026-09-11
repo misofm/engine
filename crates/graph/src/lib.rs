@@ -1377,6 +1377,11 @@ impl PreparedGraphPlan {
         let Some(program) = self.lowered() else {
             return Err((self, bindings, source_set, "graph.scheduler.layout"));
         };
+        let planning =
+            match runtime::preflight_sequential(&self, &program, &bindings, source_set.as_ref()) {
+                Ok(planning) => planning,
+                Err(code) => return Err((self, bindings, source_set, code)),
+            };
         let envelope = self.envelope;
         let plan_id = self.plan_id;
         let mut plan = self;
@@ -1385,8 +1390,14 @@ impl PreparedGraphPlan {
             observers.append(&mut bindings.observers);
             observers
         };
-        let executor =
-            GraphExecutor::new(plan, &program, bindings.nodes, observers, source_set.take());
+        let executor = GraphExecutor::new(
+            plan,
+            &program,
+            bindings.nodes,
+            observers,
+            source_set.take(),
+            planning,
+        );
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
@@ -1794,6 +1805,7 @@ impl GraphExecutor {
         bindings: Vec<GraphNodeBinding>,
         observers: Vec<GraphNodeObserverBinding>,
         source_set: Option<GraphPreparedSourceSet>,
+        planning: runtime::SequentialPlan,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
         let source_inputs: BTreeSet<_> = source_set
@@ -1838,7 +1850,7 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames);
+        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames, planning);
         Self {
             runtime,
             output,
@@ -2817,6 +2829,247 @@ mod tests {
             },
             observer_order,
         )
+    }
+
+    /// One admitted four-lane fold, retaining both plan-owned and caller-owned observers on
+    /// inputs. Observing the last bank slot would decline the fold and make fault tests vacuous.
+    fn route_fold_recovery_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, Arc<AtomicU64>) {
+        let (mut plan, mut bindings, observations) = four_track_builtin_plan(221, true, false);
+        let output = plan.sequential_schedule.pop().expect("output");
+        let routes: Vec<_> = (0..4)
+            .map(|lane| GraphNodeId::Route {
+                route_id: StableGraphId::parse(&format!("route{lane}")).expect("route"),
+            })
+            .collect();
+        let mut destinations = Vec::new();
+        for edge in &mut plan.spec.edges {
+            if let GraphEdgeId::RouteSource { route_id } = &edge.id {
+                let route = GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                };
+                edge.destination.node = route.clone();
+                destinations.push(GraphEdge {
+                    id: GraphEdgeId::RouteDestination {
+                        route_id: route_id.clone(),
+                    },
+                    source: GraphPortId {
+                        node: route,
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: output.clone(),
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: "$".into(),
+                });
+            }
+        }
+        plan.spec.edges.extend(destinations);
+        plan.spec.edges.sort_by(|a, b| a.id.cmp(&b.id));
+        plan.spec
+            .nodes
+            .extend(routes.iter().cloned().map(|id| GraphNode {
+                id,
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            }));
+        plan.spec.nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        plan.sequential_schedule.extend(routes.iter().cloned());
+        plan.sequential_schedule.push(output.clone());
+        plan.dependency_levels.pop();
+        plan.dependency_levels.push(DependencyLevel {
+            level: 2,
+            nodes: routes.clone(),
+        });
+        plan.dependency_levels.push(DependencyLevel {
+            level: 3,
+            nodes: vec![output],
+        });
+        plan.routes = routes
+            .into_iter()
+            .map(|node| PreparedRoute {
+                node,
+                transform: RouteTransform {
+                    gain: 1.0,
+                    ll: 1.0,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+            })
+            .collect();
+        for observer in &mut bindings.observers {
+            if let GraphNodeId::TrackStage { stage, .. } = &mut observer.node {
+                *stage = TrackStage::Input;
+            }
+        }
+        plan.observers.extend(bindings.observers.drain(..2));
+        (plan, bindings, observations)
+    }
+
+    struct RecoverySource {
+        sample: u64,
+        begins: Arc<AtomicU64>,
+        copies: Arc<AtomicU64>,
+        drops: Arc<AtomicU64>,
+    }
+    impl Drop for RecoverySource {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl GraphPreparedSourceSetDriver for RecoverySource {
+        fn claim_count(&self) -> usize {
+            1
+        }
+        fn begin_block(&mut self, first_sample: u64, _frames: u32) -> Result<(), RenderError> {
+            self.sample = first_sample;
+            self.begins.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn copy_track_input(
+            &mut self,
+            claim: usize,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            assert_eq!(claim, 0);
+            self.copies.fetch_add(1, Ordering::SeqCst);
+            left.fill((self.sample + 1) as f32);
+            right.fill(-((self.sample + 1) as f32));
+            Ok(())
+        }
+    }
+
+    /// Raw installation faults pass through the real public bind boundary. All metadata and
+    /// original owners are returned, with the one-shot fault removed for a successful retry.
+    #[test]
+    fn route_fold_preflight_returns_original_owners_and_sources_for_retry() {
+        use runtime::FoldFault;
+        let faults = [
+            (FoldFault::MissingRun, "graph.route_fold.mapping"),
+            (FoldFault::MissingUnit, "graph.route_fold.mapping"),
+            (FoldFault::WrongUnit, "graph.route_fold.mapping"),
+            (FoldFault::UnbankedRun, "graph.route_fold.bank"),
+            (FoldFault::MissingBank, "graph.route_fold.bank"),
+            (FoldFault::OversizedMask, "graph.route_fold.mask"),
+            (FoldFault::InactiveLane, "graph.route_fold.mask"),
+            (FoldFault::ActiveWidth, "graph.route_fold.mask"),
+            (FoldFault::MissingMaster, "graph.route_fold.master"),
+            (FoldFault::BankedMaster, "graph.route_fold.master"),
+            (FoldFault::WrongMaster, "graph.route_fold.master"),
+        ];
+        let addresses = |plan: &PreparedGraphPlan, bindings: &GraphRuntimeBindings| {
+            let mut owners = vec![
+                plan.spec.nodes.as_ptr() as usize,
+                plan.routes.as_ptr() as usize,
+            ];
+            owners.extend(
+                plan.builtin_banks
+                    .iter()
+                    .map(|bank| core::ptr::from_ref(&*bank.processor).cast::<()>() as usize),
+            );
+            owners.extend(
+                bindings
+                    .nodes
+                    .iter()
+                    .filter_map(|binding| binding.processor.as_ref())
+                    .map(|processor| core::ptr::from_ref(&**processor).cast::<()>() as usize),
+            );
+            owners.extend(
+                plan.observers
+                    .iter()
+                    .chain(bindings.observers.iter())
+                    .map(|binding| core::ptr::from_ref(&*binding.observer).cast::<()>() as usize),
+            );
+            owners
+        };
+        for with_source in [false, true] {
+            for (fault, expected) in faults {
+                let (plan, mut bindings, observations) = route_fold_recovery_plan();
+                let begins = Arc::new(AtomicU64::new(0));
+                let copies = Arc::new(AtomicU64::new(0));
+                let drops = Arc::new(AtomicU64::new(0));
+                let source = with_source.then(|| {
+                    let input = bindings.nodes.remove(0).node;
+                    GraphPreparedSourceSet::new(
+                        plan.envelope,
+                        vec![GraphSourceInputClaim { node: input }],
+                        GraphSourceSetResourceReport {
+                            pcm_payload_already_charged_bytes: 0,
+                            overhead_bytes: 0,
+                            total_engine_owned_bytes: 0,
+                            largest_allocation_bytes: 0,
+                        },
+                        Box::new(RecoverySource {
+                            sample: 0,
+                            begins: Arc::clone(&begins),
+                            copies: Arc::clone(&copies),
+                            drops: Arc::clone(&drops),
+                        }),
+                    )
+                });
+                let before = addresses(&plan, &bindings);
+                runtime::inject_fold_fault(fault);
+                let (returned, bindings, source) = match source {
+                    Some(source) => {
+                        let address = core::ptr::from_ref(&*source.driver).cast::<()>() as usize;
+                        let failure = match plan.bind_with_source_set(bindings, source) {
+                            Ok(_) => panic!("accepted {fault:?}"),
+                            Err(failure) => failure,
+                        };
+                        assert_eq!(failure.code, expected, "{fault:?}");
+                        assert_eq!(
+                            core::ptr::from_ref(&*failure.source_set.driver).cast::<()>() as usize,
+                            address
+                        );
+                        (*failure.plan, failure.bindings, Some(failure.source_set))
+                    }
+                    None => {
+                        let failure = match plan.bind(bindings) {
+                            Ok(_) => panic!("accepted {fault:?}"),
+                            Err(failure) => failure,
+                        };
+                        assert_eq!(failure.code, expected, "{fault:?}");
+                        (*failure.plan, failure.bindings, None)
+                    }
+                };
+                assert_eq!(
+                    addresses(&returned, &bindings),
+                    before,
+                    "{fault:?}: original owners"
+                );
+                assert_eq!(observations.load(Ordering::SeqCst), 0);
+                assert_eq!(begins.load(Ordering::SeqCst), 0);
+                assert_eq!(copies.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                let retry = match source {
+                    Some(source) => returned
+                        .bind_with_source_set(bindings, source)
+                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code)),
+                    None => returned
+                        .bind(bindings)
+                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code)),
+                };
+                assert_eq!(retry.bank_route_folds(), 4);
+                assert_eq!(
+                    render_three_blocks(retry).0.map(f32::to_bits),
+                    [10.0_f32, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
+                );
+                assert_eq!(observations.load(Ordering::SeqCst), 12);
+                assert_eq!(
+                    begins.load(Ordering::SeqCst),
+                    if with_source { 3 } else { 0 }
+                );
+                assert_eq!(
+                    copies.load(Ordering::SeqCst),
+                    if with_source { 3 } else { 0 }
+                );
+                assert_eq!(drops.load(Ordering::SeqCst), u64::from(with_source));
+            }
+        }
     }
 
     fn render_three_blocks(mut plan: PreparedRenderPlan) -> ([f32; 6], [u64; 2]) {

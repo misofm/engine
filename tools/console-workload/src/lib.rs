@@ -881,12 +881,7 @@ impl SessionRuntime {
             let nodes = graph
                 .required_bindings
                 .iter()
-                .map(|node| {
-                    GraphNodeBinding::new(
-                        node.clone(),
-                        source_binding(node, silent, &source, &mappings),
-                    )
-                })
+                .map(|node| source_binding(node, silent, &source, &mappings))
                 .collect();
             let plan = graph
                 .bind(GraphRuntimeBindings {
@@ -912,12 +907,7 @@ impl SessionRuntime {
             let envelope = artifact.envelope();
             let nodes = artifact
                 .external_binding_nodes()
-                .map(|node| {
-                    GraphNodeBinding::new(
-                        node.clone(),
-                        source_binding(node, silent, &source, &mappings),
-                    )
-                })
+                .map(|node| source_binding(node, silent, &source, &mappings))
                 .collect();
             // `observers` stays empty on purpose: it is the *external* observer slot. A meter
             // observer is compiler-owned and is appended to this vector by the sealed builtins
@@ -1489,17 +1479,6 @@ impl GraphRuntimeProcessor for FrozenGraphSource {
     }
 }
 
-struct GraphIdentity;
-
-impl GraphRuntimeProcessor for GraphIdentity {
-    fn process(
-        &mut self,
-        _block: GraphBindingBlock<'_>,
-    ) -> Result<(), engine::realtime::RenderError> {
-        Ok(())
-    }
-}
-
 /// Every track's declared `(left_source_channel, right_source_channel)`, in model order.
 ///
 /// Read from the compiled model rather than assumed, because it is the field the mono fixture
@@ -1524,7 +1503,7 @@ fn source_binding(
     silent: bool,
     source: &SourceSignal,
     mappings: &[(usize, usize)],
-) -> Box<dyn GraphRuntimeProcessor> {
+) -> GraphNodeBinding {
     if let GraphNodeId::TrackStage {
         track_id,
         stage: TrackStage::Input,
@@ -1542,8 +1521,11 @@ fn source_binding(
             .get(track)
             .copied()
             .unwrap_or_else(|| panic!("the model must declare a source mapping for track {track}"));
-        Box::new(FrozenGraphSource::from_block(&block, mapping))
+        GraphNodeBinding::new(
+            node.clone(),
+            Box::new(FrozenGraphSource::from_block(&block, mapping)),
+        )
     } else {
-        Box::new(GraphIdentity)
+        GraphNodeBinding::identity(node.clone())
     }
 }
