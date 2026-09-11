@@ -115,3 +115,22 @@ Raw before/candidate/canonical and delta are in `/tmp/issue738-fixture`, validat
 receipt in `/tmp/issue738-gates/canonical-fixture.*`. Synthetic metadata parser
 fixtures are not live registry mirrors and do not require blanket resealing.
 Current generated metadata remains root-owned and pending qualification.
+
+
+## Attempt 1 focused test checkpoint
+
+Luna XHIGH's focused tranche passes contract12, oracle3, identity4, state7,
+conformance1 and gate library3 tests; the DSP-reference library passes25. The
+independent oracle reports worst deviation `3.267e-4 dB` within the unchanged
+0.02dB bound. Core/audit checks, formatting and diff checks pass. Root's existing
+step-vocabulary policy also passes. Full receipts are in
+`/tmp/issue738-luna-tranche2.md` and `/tmp/issue738-luna-tranche2-logs/`.
+
+The six-case non-vacuity test passes. The sealed deterministic test intentionally
+still fails at the old first scalar pin; no candidate pin is accepted yet.
+Current-reference/docs/audit setup are updated, with historical mutation transcripts
+preserved and labeled archived. Initial scaffold weaknesses from Sol's core review
+were assigned to this tranche; independent post-checkpoint review must confirm
+that surviving causal/state/hold/fault coverage is discriminatory. Actual stable-ID
+session/control, old descriptor-bound state, graph/PDC, metadata/pins, realtime/
+Wasm/browser and final CI remain. This is not a final attempt verdict.

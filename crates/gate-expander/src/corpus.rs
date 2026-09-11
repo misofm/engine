@@ -20,7 +20,7 @@
 //! current-sample detector, transition, curve, both one-pole rates and identity select.
 //! No case produces a NaN: master plan D5 excludes NaN payloads because wasm canonicalises them.
 
-use crate::kernel::{gate_block, GateArgs, GateCoef, GateRamp, GateState, MAX_WIDTH, RAMP_COUNT};
+use crate::kernel::{GateArgs, GateCoef, GateRamp, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
 use lane::Lane;
 
 /// Independent single-lane signals in every case; a multiple of the widest backend.

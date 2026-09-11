@@ -6,9 +6,9 @@
 //! `strace` brackets: nothing between `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` and `..._RT_END` may be a
 //! syscall.
 //!
-//! Zero allocation is the claim under audit. The gate allocates exactly two `Box<[f32]>` rings per
-//! instance at preparation (four when a sidechain is connected) and nothing afterwards; the
-//! boundary check, the lane recovery and the parameter smoothing all work in place.
+//! Zero allocation is the claim under audit. Preparation owns fixed control state only; the causal
+//! render path has no audio-history allocation and nothing is allocated afterwards. The boundary
+//! check, lane recovery and parameter smoothing all work in place.
 
 use bench_support::alloc as bench_alloc;
 use effect_contract::{

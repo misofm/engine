@@ -105,9 +105,9 @@ pub struct ReferenceGateTrace {
     pub phase_left: Vec<ReferenceGatePhase>,
     /// Right hysteresis phase after the transition of that sample.
     pub phase_right: Vec<ReferenceGatePhase>,
-    /// Left delayed dry sample, the identity output.
+    /// Left current-sample dry word, the identity output.
     pub dry_left: Vec<f64>,
-    /// Right delayed dry sample, the identity output.
+    /// Right current-sample dry word, the identity output.
     pub dry_right: Vec<f64>,
 }
 
@@ -161,8 +161,8 @@ struct ChannelState {
 /// `G + b * (C - G)` one-pole and the `1e-20` flush band. Hold counters are integer samples, so
 /// nothing about the production kernel's layout can leak into the oracle.
 ///
-/// The fixed latency is `sample_rate / 100`, as the descriptor's qualities pin it. Parameters are
-/// static for the whole render: ramps belong to the control plane and are not modelled.
+/// Added latency is zero. Parameters are static for the whole render: ramps belong to the control
+/// plane and are not modelled.
 ///
 /// # Errors
 ///
@@ -408,7 +408,6 @@ mod tests {
             ratio: 4.0,
             range_db: 48.0,
         };
-        let rate = 48_000_u32;
         let amplitude = 10.0_f64.powf(-40.0 / 20.0);
         // Zero hold, so the gate is closed by the time the trigger arrives.
         let mut left = vec![0.0_f64; 8];
@@ -425,8 +424,7 @@ mod tests {
         )
         .expect("reference render");
         assert_eq!(
-            trace.level_db_left[4],
-            -40.0,
+            trace.level_db_left[4], -40.0,
             "the trigger sample sits exactly on the threshold"
         );
         assert_eq!(trace.phase_left[3], ReferenceGatePhase::Closed);

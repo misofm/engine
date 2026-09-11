@@ -5,7 +5,7 @@
 //! `Lane` keeps the scalar, four-lane and eight-lane paths on one arithmetic body.
 
 use effect_runtime::envelope::HysteresisState;
-use lane::{flush, Lane};
+use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Smoothed parameters: threshold, ratio, range and hysteresis, in descriptor order.

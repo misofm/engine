@@ -122,12 +122,12 @@ pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 
 /// Cases delegated to [`gate_expander::corpus`] (issue #89), replayed under wasm.
 ///
-/// A whole prepared gate graph per case, over 1 024 frames of eight independent lanes: the
-/// per-lane lookahead gather out of a power-of-two ring, `log2_lane` into the branchless
-/// hysteretic transition, the downward-expansion curve, the single-rounding `fma` one-pole with
-/// its D7 `flush`, `exp2_lane` and the identity select. One case per link mode, one of gated
-/// bursts that drives both one-pole rates and the hold, one of subnormal input, and one with a
-/// D11 word ramp in flight across a block boundary.
+/// A whole prepared causal gate graph per case, over 1 024 frames of eight independent lanes:
+/// current-sample linked detection, `log2_lane` into the branchless hysteretic transition, the
+/// downward-expansion curve, the single-rounding `fma` one-pole with its D7 `flush`, `exp2_lane`
+/// and identity select. One case per link mode, one of gated bursts that drives both one-pole
+/// rates and the hold, one of subnormal input, and one with a D11 word ramp in flight across a
+/// block boundary.
 pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 
 /// Cases delegated to [`builtins::corpus`] (issue #85), replayed under wasm.

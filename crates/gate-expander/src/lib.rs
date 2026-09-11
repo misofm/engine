@@ -44,7 +44,7 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4, Simd8};
 
-use kernel::{gate_block, GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT};
+use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
 
 const PARAMETER_COUNT: usize = 7;
 
@@ -474,15 +474,15 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Some(())
     }
 
-    /// Clears one lane of one channel back to its prepared defaults: rings, gain, phase, hold and
-    /// resting ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7
-    /// recovery action for a lane whose block failed the boundary check.
+    /// Clears one lane of one channel back to its prepared defaults: gain, phase, hold and resting
+    /// ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7 recovery
+    /// action for a lane whose block failed the boundary check.
     fn reset_lane_full(&mut self, channel: usize, lane: usize) {
         let _ = self.seed_lane(channel, lane);
     }
 
-    /// `ResetKind::DiscontinuityKeepParameters` for one lane: history goes, the smoothed values
-    /// snap to their targets and the unsmoothed times are kept.
+    /// `ResetKind::DiscontinuityKeepParameters` for one lane: recursive state clears, smoothed
+    /// values snap to their targets and unsmoothed times are kept.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
         let hold = lane_get(self.coef[channel].hold_samples, lane);
         lane_set(&mut self.state[channel].gain_db, lane, 0.0);
@@ -620,16 +620,14 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         frames: usize,
     ) {
         let (state_left, state_right) = self.state.split_at_mut(1);
-        gate_block::<L, CONNECTED, RAMPING>(
-            GateArgs {
-                left,
-                right,
-                sidechain,
-                frames,
-                coef: (&self.coef[0], &self.coef[1]),
-                state: (&mut state_left[0], &mut state_right[0]),
-            },
-        );
+        gate_block::<L, CONNECTED, RAMPING>(GateArgs {
+            left,
+            right,
+            sidechain,
+            frames,
+            coef: (&self.coef[0], &self.coef[1]),
+            state: (&mut state_left[0], &mut state_right[0]),
+        });
     }
 
     /// The D7 boundary check, once per block per channel, and the lane-local recovery.
@@ -1113,7 +1111,7 @@ mod tests {
     }
 
     fn values(threshold: f32) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
-        let defaults = [threshold, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0, 10.0];
+        let defaults = [threshold, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0];
         core::array::from_fn(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
             channel: if index % 2 == 0 {
