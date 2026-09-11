@@ -16,6 +16,18 @@ fn one_track_session(quantum: u32) -> String {
     canonical_session_json(&model).expect("canonical one-track session")
 }
 
+fn one_track_compressor_session(quantum: u32) -> String {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("accepted compressor fixture");
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 4;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    canonical_session_json(&model).expect("canonical compressor session")
+}
+
 /// The browser fixture's identity session, re-shaped for one test.
 ///
 /// Identity end to end: no polarity, trim, HPF or LPF, no effects in any rack, unity fader, and a
@@ -45,6 +57,42 @@ fn boot_options(quantum: u32) -> WebBootOptions {
         require_quantum_frames: quantum,
         ..WebBootOptions::explicit_defaults()
     }
+}
+
+fn compressor_console_host(quantum: u32) -> AudioWorkletEngineHost {
+    let document = one_track_compressor_session(quantum);
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: quantum,
+            console_command_queue_records: 4,
+            ..boot_options(quantum)
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "compressor boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+fn feed_compressor_block(host: &mut AudioWorkletEngineHost, quantum: u32, block: u64) {
+    let plane = vec![0.25_f32; quantum as usize];
+    let planes: [&[f32]; 2] = [&plane, &plane];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            block * u64::from(quantum),
+            48_000,
+            &planes,
+            quantum,
+            false,
+        ),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
 }
 
 fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
@@ -1608,6 +1656,78 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
         native, expected.simd128_command_timeline,
         "the shipped simd128 artifact renders this command timeline to the same bits as native"
     );
+}
+
+#[test]
+fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
+    const QUANTUM: u32 = 128;
+    let mut baseline = compressor_console_host(QUANTUM);
+    let mut candidate = compressor_console_host(QUANTUM);
+
+    feed_compressor_block(&mut baseline, QUANTUM, 0);
+    feed_compressor_block(&mut candidate, QUANTUM, 0);
+    let session_before = candidate
+        .ready
+        .as_ref()
+        .expect("ready compressor session")
+        .session
+        .canonical_json()
+        .to_owned();
+    let resources_before = *candidate.resources();
+    let tracks_before = candidate.console_tracks().to_vec();
+    let sources_before = candidate.session_source_count();
+
+    // The retired compressor address is rejected while a valid makeup-gain update shares the
+    // same staged batch. The first-pass validator must therefore admit neither record.
+    stage_command(
+        &mut candidate,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        8,
+        0,
+        [12.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut candidate,
+        1,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        6,
+        0,
+        [12.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(candidate.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        candidate.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(candidate.command_report().rejected_index, 0);
+    assert_eq!(candidate.command_report().admitted, 0);
+    assert_eq!(
+        candidate
+            .ready
+            .as_ref()
+            .expect("ready compressor session")
+            .session
+            .canonical_json(),
+        session_before
+    );
+    assert_eq!(*candidate.resources(), resources_before);
+    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.session_source_count(), sources_before);
+
+    // A valid same-batch update would change makeup gain. Identical next-block PCM proves that
+    // the valid record was not admitted behind the rejected retired address.
+    feed_compressor_block(&mut baseline, QUANTUM, 1);
+    feed_compressor_block(&mut candidate, QUANTUM, 1);
+    assert_eq!(candidate.output_pcm(), baseline.output_pcm());
 }
 
 /// A three-field reader for `expected.json`, so the test needs no JSON dependency.

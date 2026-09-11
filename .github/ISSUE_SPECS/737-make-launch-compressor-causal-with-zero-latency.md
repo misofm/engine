@@ -239,3 +239,42 @@ The actual old-compressor envelope test remains in the already scoped effect-pac
 qualification tests, and mixed delayed-path alignment remains in graph-compiler's
 existing integration test module. These three tests close specific frozen gates;
 no new framework or broader host redesign is authorized.
+
+
+## Attempt 1 final integration tests
+
+Three focused integration tests pass (one each), with strict affected-crate Clippy:
+real compressor stable ID 8 rejects atomically at the actual web command boundary,
+including a valid makeup command in the rejected batch and unchanged next-block PCM;
+a structurally valid envelope under the reconstructed predecessor descriptor rejects
+under the new descriptor identity; and nine causal compressors alongside the real
+486-sample limiter retain exact route compensation and bypass latency at 48 kHz.
+The envelope test proves binding/structure, not semantic validity of opaque old DSP
+payload bytes. Scalar/bank raw-payload rejection is covered separately.
+Exact commands, source and outputs: `/home/bl/issue737-luna-final-integration-receipts`.
+This closes the three named implementation gaps; final adversarial acceptance and
+artifact/CI delivery are still pending.
+
+## Target and CPU qualification
+
+The reviewed production compressor/corpus passes the existing G5 execution on native,
+scalar Wasm and simd128 Wasm: each leg has 141 cases and 355 comparisons, zero
+mismatches. Existing limiter detector-residency checks also pass. Evidence:
+`/tmp/issue737-wasm-gates`. Browser artifact probe builds successfully; pin/artifact
+qualification is still pending.
+
+The sole approved descriptive CPU invocation at source `60aa3894` passed independent
+Sol XHIGH review. On AMD EPYC 7313P with Rust 1.97.1 release AVX2+FMA, scalar rounds
+are 18.902336/18.927247 ns per lane-sample (4838.998047/4845.375244 ns per block);
+W8 rounds are 2.427490/2.433482 (4971.500244/4983.770996 ns per block). All lane/channel
+activity checks and process reports pass. One warmup and two measured rounds per arm
+ran exactly once; no rerun is allowed. Clock overhead is included; no old-baseline,
+speedup, floor, cycle, capacity or new numerical-budget claim is made. Raw data:
+`/tmp/issue737-cpu-measurement`; independent verdict:
+`/home/bl/issue737-sol-attempt1-cpu-recorder-review/CPU_QUALIFICATION_PASS.md`.
+The example checkpoint is separately pushed and will be integrated before delivery.
+
+Listening status verified on GitHub: #046 is CLOSED as superseded by #088; its
+listening handoff belongs to OPEN #026 release qualification. Changed causal attack
+behavior still awaits matched-loudness blinded listening there. Objective reference,
+transient and causality tests are not human listening evidence.

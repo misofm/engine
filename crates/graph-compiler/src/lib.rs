@@ -5492,6 +5492,128 @@ mod tests {
         assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
     }
 
+    #[test]
+    fn mixed_causal_compressor_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
+        let mut model = accepted_compressor_graph_fixture();
+        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
+        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed compressor/limiter fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, caps)
+            .expect("prepared mixed effects");
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "compressor")
+                .count(),
+            9
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .count(),
+            1
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "compressor")
+                .all(|entry| entry.metadata.latency == LatencySamples(0))
+        );
+        assert!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "true-peak-limiter")
+                .all(|entry| entry.metadata.latency == LatencySamples(486))
+        );
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_017,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| {
+            panic!("mixed compressor/limiter graph: {:?}", failure.diagnostics)
+        });
+        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert!(
+            artifact
+                .graph
+                .inserted_delays
+                .iter()
+                .any(|delay| { delay.samples == LatencySamples(486) })
+        );
+        for route in &artifact.graph.route_timings {
+            let route_id = route.route_id.as_str();
+            if route_id == "eq9-main" {
+                assert_eq!(route.source_arrival, LatencySamples(486));
+                assert_eq!(route.compensation_delay, LatencySamples(0));
+                assert_eq!(route.destination_arrival, LatencySamples(486));
+            } else if route_id.ends_with("-main") {
+                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
+                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
+                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+            }
+        }
+
+        // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency compressor
+        // paths remain aligned with the real delayed processor and the output latency is stable.
+        let mut bypass_model = model;
+        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("mixed bypass fixture");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+            .expect("prepared mixed bypass effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_018,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(
+            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            "bypassing the delayed limiter preserves PDC route timing"
+        );
+        assert_eq!(
+            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            "bypassing the delayed limiter preserves its compensation"
+        );
+    }
+
     /// Phase 1b: a native effect carrying the homogeneous-bank kernel contract banks in the
     /// **dynamic** rack, and every rendered sample is bit-identical to the per-node path.
     ///
