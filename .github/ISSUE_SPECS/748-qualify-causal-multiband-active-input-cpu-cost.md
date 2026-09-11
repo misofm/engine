@@ -139,3 +139,85 @@ Reported focused Rust tests6, Python runner tests, strict Clippy, fmt/diff and
 bench-policy check/self-test PASS. Retained real preflight records validate.
 No warmup/measured multiband phase ran. Root checkpoints before clean release
 preflight and Astra review; this remains pre-measurement evidence only.
+
+## Sole measurement — 2026-09-11
+
+Root invoked the runner exactly once after Astra medium preflight clearance,
+against clean source `71d3d3b08487489f41d3080560eed46bd38466d7` and binary SHA256
+`412da50ad9766da63802428167dd75a58fdee6ef38c6ec301608a4ef0482b4e9`.
+The run completed exit 0 / PASS with warmup 8192 and rounds 1/2 each 32768
+blocks per width, scalar then W8, at 48000 Hz / 128 frames.
+
+| Round | Width | Lane-samples | Sum process ns | ns/lane-sample | Effective Hz | Derived cycles/lane-sample |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 8388608 | 189615234 | 22.603897333 | 3716510893.400664 | 84.007630672 |
+| 1 | 8 | 67108864 | 322078213 | 4.799339369 | 3716510893.400664 | 17.836797046 |
+| 2 | 1 | 8388608 | 190929445 | 22.760563493 | 3716846946.621451 | 84.597530922 |
+| 2 | 8 | 67108864 | 321926671 | 4.797081217 | 3716846946.621451 | 17.830016675 |
+
+Counter evidence, preserved separately per phase:
+
+| Phase | Counted cycles | task-clock ms | Effective Hz | Drift vs warmup |
+| --- | --- | --- | --- | --- |
+| warmup | 1067030666 | 287.22 | 3715029127.498085 | 0.000000% |
+| 1 | 4298070518 | 1156.48 | 3716510893.400664 | 0.039886% |
+| 2 | 4263557964 | 1147.09 | 3716846946.621451 | 0.048931% |
+
+Every measured lane/channel/band has exactly 512 high and 512 quiet witnesses.
+All actual fault counters are zero and finite output counts are exact.
+
+| Width | Band | Worst high maximum dB | Worst quiet minimum dB |
+| --- | --- | --- | --- |
+| 1 | low | -13.362556458 | -0.000000585 |
+| 1 | high | -13.380646706 | -0.000000552 |
+| 8 | low | -12.899791718 | -0.000000585 |
+| 8 | high | -13.283019066 | -0.000000565 |
+
+Both rounds retain the same deterministic input digest per width:
+
+- W1: `b94ce61e57e64b11af596755bc519618a7c85d5d7924d519ae882e966527c7da`.
+
+- W8: `7972d8d32115d44273f6d33d424423cdca27608d12e2127980221dfff8c3d399`.
+
+Both measured clock drift values satisfy the frozen 3% ceiling. Cycles are
+wall-render-time conversions using phase-wide hardware-counter-derived clock,
+not direct per-process PMU counts or isolated floor evidence. Small-call timer
+and dispatch overhead and phase-wide clock estimation remain limitations.
+No speedup, floor, capacity, optimization target or listening claim follows.
+
+Host: AMD EPYC 7313P, CPU/core 15, sibling 31, schedutil, allowed CPUs 0–31;
+Rust 1.97.1 / LLVM 22.1.6, x86_64-unknown-linux-gnu release, compile-time AVX2/FMA.
+Root's agents/builds were paused and no competing compiler was seen before
+launch. The host remains shared and SMT enabled; no system setting changed.
+The explicit external wrapper uses existing `sudo -n /usr/bin/perf "$@"`;
+perf and the subject run through that privilege with metadata forwarded inside
+the argv. Perf 6.8.12 `/usr/bin/perf` SHA256
+2d0953085bf720a25efbe24f853e97d27b1f12f18a398255ff82cbafde254dad;
+wrapper SHA256 aad0cd627c7f09430ff3578b007aeda0c17c752df50f2d7dd986be6ceaf443ba.
+Ordinary perf remained denied; no implicit fallback or policy change occurred.
+
+Raw evidence is outside the disposable worktree at
+`/tmp/issue748-measurement-71d3d3b08487489f41d3080560eed46bd38466d7`:
+per-phase stdout/stderr/CSV/argv/exit, launch/final manifests, raw and accepted
+JSONL and final status. Transcript `/tmp/issue748-sole-run.log`; file hashes
+`/tmp/issue748-measurement-sha256.json`; clean release preflight
+`/tmp/.issue748-multiband-active-preflight-070nonzi`; prelaunch host/process facts
+`/tmp/issue748-root-before-sole-run.json`. These paths are machine-local, not
+represented as durable attachments; substantive results are preserved above.
+
+`accepted.jsonl` SHA256 `81754e4c6fb439131908b55d01390bc1fd4ae8bef907ecc90ea6e20c38c586d9`.
+
+`launch-manifest.final.json` SHA256 `6cf4affd365e0c59fa440d5e1e31ef4148128f551fa84b9a27d041ad84476ddc`.
+
+`status.json` SHA256 `4737252befa7d369110960a0859ec3963301838f8b749719048dc816b49c68fa`.
+
+## Attempt 2 — Astra medium PASS
+
+Astra independently verified all four measured rows, raw persistence, phase
+ordering, provenance, counters, input digests/counts, both-band activity, actual
+zero report counters and normalization. Final coherent verdict
+`/tmp/issue748-astra-a2-verdict.md`: PASS. No reviewer workload rerun occurred.
+Attempt 1 remains FAIL before timing. The sole multiband measurement allowance
+is consumed; no rerun is needed or authorized. Substantive measurements and
+limits are preserved above. Required PR/main qualification and GitHub closure
+remain delivery steps; no floor, speedup or human-listening claim is added.
