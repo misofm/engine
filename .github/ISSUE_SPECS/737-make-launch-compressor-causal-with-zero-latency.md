@@ -313,3 +313,28 @@ yet completed. Artifact qualification additionally found retired ID 8 in the cur
 transition and independently qualified current native/Wasm PCM and resource pins.
 The observed boot refusal and raw oracle diagnostics are preserved in
 `/tmp/issue737-artifact`, not hidden as an artifact PASS.
+
+
+## Browser observation fixture qualification
+
+Root removed the one explicit compressor ID 8 row from the current browser observation
+fixture; independent Rust canonical validation proves all other decoded fields identical.
+Sol XHIGH independently approved its new native/Wasm observation PCM identity
+`4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5`.
+Exactly two current expected-JSON digest fields change. Observed/unobserved native and
+simd128 PCM agree, with tap/activity invariants intact; every other oracle field, PCM
+pin and resource value remains unchanged. The native test passes 1/1 after sealing,
+and the browser/native resource-parity gate passes.
+
+Evidence: `/tmp/issue737-browser-fixture` and independent
+`/home/bl/issue737-sol-attempt1-checkpoint-review/BROWSER_OBSERVATION_PIN_APPROVAL.md`.
+The first native command's unqualified exact filter ran zero tests and receives no
+credit; the corrected fully qualified test supplies the actual derivation and PASS.
+This planned causal sound change does not reseal historical numbered evidence.
+
+The existing 100,000-block compressor realtime audit also passes: active scalar/W8,
+periodic automation, destruction off render, and zero allocations, frees, locks, logs,
+I/O and syscall counters. Existing trace validation independently finds one marked
+interval and zero syscall violations (`/tmp/issue737-realtime`). Workspace/realtime/
+lane/audit-leak/artifact-leak/unfused policies, formatting, canonical console fixtures
+and generated SDK checks pass (`/tmp/issue737-policy-gates`).
