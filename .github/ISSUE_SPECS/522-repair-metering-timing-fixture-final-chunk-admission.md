@@ -1,5 +1,27 @@
 # Repair metering timing fixture final-chunk admission
 
+## Approved execution scope — 2026-09-11
+
+Astra XHIGH approves the minimum slice at base `e51011a7`. Astra LOW implements;
+Astra XHIGH reviews the source and freezes the fixture/validator before timing.
+Only `hosts/host-web/src/tests.rs` and this spec are implementation paths.
+Share finite-source feeding between the timing caller and a two-block non-timed
+probe; derive the boundary marker from `block + 1 == source_blocks`. Preserve
+unrelated `feed_and_render` callers. Reject an early marker, accept an ordinary
+chunk and render to drain the ring, reject an unmarked final chunk, then accept
+and render the correctly marked final chunk on the same host. Run that probe
+from a focused regression and the existing preflight before timed helpers.
+
+Keep all frozen workload constants, serializer/persistence, output overwrite
+refusal and payload/window comparisons. Root checkpoints exact green paths and
+pushes promptly. No timed workload until independent freeze of pushed source,
+exact command/environment/output and validator. Exactly one new invocation with
+one warmup per five modes and two measured rounds; no retries or tuning. If that
+runner fails, preserve evidence and stop/rescope under the tighter tooling rule.
+No production changes, new framework, compiler captures or artifact repinning.
+Reviewed-head PR/main CI, upstream evidence, verified closure and clean worktree
+removal remain required. At most two active issues (#213 and #522).
+
 ## Problem and evidence
 
 The sole descriptive timing invocation for #519/#520 at frozen `11cb3c2e` failed during poll-mode warmup before measured rounds. `timed_poll_mode` prepares exactly 8192 quanta of source content, but its shared `feed_and_render` helper submits every chunk with `end_of_region=false`. The final chunk ends exactly at the prepared region boundary, so `crates/host-core/src/source.rs:169` correctly returns `EndOfRegionMismatch`; the test fails at `hosts/host-web/src/tests.rs:1748` with result 1 instead of 0.
