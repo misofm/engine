@@ -200,3 +200,18 @@ finds one render interval and zero violations. Receipts are
 `/tmp/issue738-gates/realtime-audit-corrected.*` and
 `/tmp/issue738-gates/realtime-trace-corrected.*`. The initial preparation failure
 remains preserved. No timed benchmark ran and no CPU improvement is claimed.
+
+
+## Current browser artifact candidate
+
+Root's clean probe and ordinary pinned build at e39ab5cb reproduce Wasm
+`3206cfa7657f420c21dcd17bc0963ccd3de38bd7bfa657e8d6a5054c8b9a79fc`.
+Current metadata is `03736495d38fdd04012b39315431b14c1dcd5cf8d22ee81ecbc7b3f75e978fc8`
+and matches the SDK asset byte-for-byte; the ABI and three JS/type companions
+remain unchanged. Artifacts/hashes are external in `/tmp/issue738-artifact`;
+probe/build receipts are in `/tmp/issue738-gates`. Browser qualification remains
+pending. Descendant all-target tests (effect compiler/package, graph compiler and
+host-web) pass. Sol permits scalar corpus derivation after the repaired oracle
+and width/nonvacuity checks, while three focused test-strengthening items and
+one fixture Clippy correction remain before final review. No production defect
+has been found in this review checkpoint.
