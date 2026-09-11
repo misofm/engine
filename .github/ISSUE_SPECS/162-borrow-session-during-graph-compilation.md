@@ -80,3 +80,16 @@ locked strict all-target/all-feature Clippy and focused ownership test passed.
 Evidence: `/tmp/engine-162-attempt2/manifest.json`. No production/API/dependency
 change beyond original borrowing patch. Independent follow-up verdict pending;
 prepared external final-plan-cap ownership control remains unrun.
+
+## Independent Astra XHIGH attempt 2 source PASS
+
+Reviewed d4906302381953efe8ce85dd3e0a9658c0b6f193: production borrowing patch
+unchanged, direct test calls fix Clippy without lint suppression or API changes.
+Retained86 debug and86 release-unwind test passes. Independent final-plan-cap
+control (maximum_plan_bytes=1) reaches the final check after bank preparation,
+returns original session/effect/builtin ownership with exact diagnostic, then
+retries with equal canonical graph and four nonzero PCM blocks. Separate copy
+and target used. Evidence: `/tmp/issue162-xhigh-qemy_v30/attempt2-review.md` and
+final-cap-attempt2 receipts. Root defers artifact qualification for a coherent
+joint delivery with #221 after #220's required delivery, while source remains
+frozen. Required artifact/PR/main gates and synchronized closure remain pending.
