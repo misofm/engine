@@ -802,16 +802,43 @@ fn bank_full_reset_restores_different_crossover_defaults() {
     }
 }
 
-/// E4. Splitting a block anywhere leaves the output and the state bit-identical.
-///
-/// Automation points land on samples 0 and 3584, which are block starts in every partition, and
-/// the ramps they start are what the segment splitter has to get right: a 64-sample ramp that
-/// straddles a partition boundary must still snap on exactly its own last sample.
-///
-/// Red mutation: drop the `- 1` from `segment_length`, so a ramp's snap happens inside a
-/// vectorised run instead of at a segment boundary.
+fn ramp_words(state: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Vec<u32> {
+    state
+        .1
+        .chunks_exact(4)
+        .enumerate()
+        .filter_map(|(word, bytes)| {
+            (3..43)
+                .contains(&word)
+                .then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        })
+        .chain(
+            state
+                .2
+                .chunks_exact(4)
+                .enumerate()
+                .filter_map(|(word, bytes)| {
+                    (3..43)
+                        .contains(&word)
+                        .then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                }),
+        )
+        .collect()
+}
+
+fn filter_words(state: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Vec<u32> {
+    [state.1.as_slice(), state.2.as_slice()]
+        .into_iter()
+        .flat_map(|section| section.chunks_exact(4).skip(43).take(4))
+        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect()
+}
+
+/// Causal coefficient-changing automation keeps its ramp records and crossover state independent
+/// of caller partitioning. The segment-start coefficient cache remains the frozen update law, so
+/// this fixture intentionally compares those records rather than gain histories.
 #[test]
-fn partition_invariance() {
+fn partition_control_trajectory_preserves_ramp_positions() {
     const TOTAL: usize = 4_096;
     let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
     let spans = [
@@ -824,6 +851,73 @@ fn partition_invariance() {
         point(3, ParameterChannel::Left, 3_584, 25.0),
         point(6, ParameterChannel::Right, 3_584, -12.0),
     ];
+    let mut reference_ramps = None;
+    let mut reference_filters = None;
+    for partition in [1usize, 7, 64, 128, 512] {
+        let mut effect = MultibandCompressorFactory
+            .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
+            .expect("scalar");
+        let mut left = support::signal(TOTAL, 0xFEED_0001);
+        let mut right = support::signal(TOTAL, 0xFEED_0002);
+        let mut position = 0;
+        let mut checkpoints = Vec::new();
+        while position < TOTAL {
+            let frames = core::cmp::min(partition, TOTAL - position);
+            let block_spans: &[PreparedAutomationSpan] = match position {
+                0 => &spans,
+                3_584 => &later,
+                _ => &[],
+            };
+            process(
+                effect.as_mut(),
+                &mut left[position..position + frames],
+                &mut right[position..position + frames],
+                position as u64,
+                block_spans,
+                512,
+            );
+            position += frames;
+            if partition == 1 && matches!(position, 8 | 63 | 64 | 3_584 | 3_585 | 3_648) {
+                checkpoints.push((position, snapshot(effect.as_ref())));
+            }
+        }
+        assert!(left.iter().any(|sample| *sample != 0.0));
+        assert!(right.iter().any(|sample| *sample != 0.0));
+        let state = snapshot(effect.as_ref());
+        if let Some(reference) = &reference_ramps {
+            assert_eq!(
+                &ramp_words(&state),
+                reference,
+                "partition={partition} ramp records"
+            );
+        } else {
+            reference_ramps = Some(ramp_words(&state));
+            reference_filters = Some(filter_words(&state));
+        }
+        assert_eq!(filter_words(&state), reference_filters.clone().unwrap());
+        if partition == 1 {
+            for (position, state) in checkpoints {
+                let ramps = ramp_words(&state);
+                assert!(ramps.iter().any(|word| *word != 0));
+                if position == 64 || position == 3_648 {
+                    assert!(ramps.chunks_exact(4).all(|ramp| ramp[3] == 0));
+                }
+            }
+        }
+    }
+}
+
+/// E4. Threshold and makeup automation leaves full PCM and state bit-identical at every partition.
+#[test]
+fn partition_invariance() {
+    const TOTAL: usize = 4_096;
+    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
+    let spans = [
+        point(1, ParameterChannel::Left, 0, -30.0),
+        point(1, ParameterChannel::Right, 0, -30.0),
+        point(5, ParameterChannel::Left, 0, 3.0),
+    ];
+    let later = [point(6, ParameterChannel::Right, 3_584, -12.0)];
     let reference = {
         let mut effect = MultibandCompressorFactory
             .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
@@ -875,6 +969,8 @@ fn partition_invariance() {
             );
             position += frames;
         }
+        assert!(left.iter().any(|sample| *sample != 0.0));
+        assert!(right.iter().any(|sample| *sample != 0.0));
         for frame in 0..TOTAL {
             assert_eq!(
                 left[frame].to_bits(),

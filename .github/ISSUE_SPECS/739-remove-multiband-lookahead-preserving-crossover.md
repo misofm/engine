@@ -491,3 +491,14 @@ Scalar-Wasm build PASS; artifact/browser/full-product qualification is pending.
 The external Wasm witness independently rejects the preserved old artifact
 on actual first-sample0 versus causal0.4155027946733788, not setup failure.
 Synthetic validator fixtures and primitive corpus digests remain unchanged.
+
+
+## Partition correction checkpoint — 2026-09-11
+
+Luna xhigh implemented the recorded ruling: original ratio/attack automation
+retains exact ramp/filter state comparisons with in-flight/endpoints; the
+threshold/makeup subset retains full PCM/state bitwise partition equality
+at1/7/64/128/512. Identity suite8PASS/0FAIL, captured in
+/tmp/issue739-luna-partition-ruling-identity.log. No production arithmetic or
+numerical tolerance changed. Active dynamics oracle and final product-resource
+cases remain the next bounded tranche before descendants/final qualification.
