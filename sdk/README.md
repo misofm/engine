@@ -225,7 +225,15 @@ at most that source ring's capacity. Shared source runways remain available whil
 fill gradually, avoiding a first-callback burst proportional to every queued source quantum.
 
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
-It resolves the browser session map once, then submits the same whole-batch edits over MessagePort.
+Set `policy.console.commandQueueRecords` to a positive capacity when calling `createEngine` to
+attach controls. Omitting it, passing an empty console policy, or setting it to zero keeps audio-only
+boot valid; `engine.console()` then returns a rejected Promise with an actionable `MisoUsageError`
+before requesting the session map or sending commands. The captured boot policy controls attachment;
+changing the caller's policy object later cannot attach or detach a console.
+
+With controls attached, it resolves the browser session map once, then submits the same whole-batch
+edits over MessagePort. At the raw host boundary, `unsupportedKind` also means no console was attached;
+check the boot console capacity before interpreting it as an unrecognized command kind.
 All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;
 the browser and headless acknowledgements carry the same generated result/reason names and exact
 `appliedAtSample`.

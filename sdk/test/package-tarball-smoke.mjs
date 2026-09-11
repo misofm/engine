@@ -249,6 +249,28 @@ const sibling = await imported["./headless"].createOfflineEngine(
   builtDocument.replace('"session_id": "tarball.boot"', '"session_id": "tarball.sibling"'),
 );
 try {
+  const controls = engine.console();
+  await assert.rejects(controls.submit(controls.edit.track("track").faderDb(-6)), error =>
+    error.name === "MisoUsageError" && error.message.includes("no console attached") &&
+    error.message.includes("console.commandQueueRecords"));
+  const browser = await imported["./browser"].createEngine({
+    document: builtDocument,
+    scratchBoot: async () => engine.shape(),
+    createContext: () => ({ sampleRate: 48000, state: "running",
+      audioWorklet: { async addModule() {} }, async close() {} }),
+    createHost: async () => ({
+      async sessionMap() { assert.fail("no-console access must not request sessionMap"); },
+      async command() { assert.fail("no-console access must not send commands"); },
+      async dispose() {},
+    }),
+  });
+  try {
+    let pending;
+    assert.doesNotThrow(() => { pending = browser.console(); });
+    assert.ok(pending instanceof Promise);
+    await assert.rejects(pending, error => error.name === "MisoUsageError" &&
+      error.message.includes("policy.console.commandQueueRecords"));
+  } finally { await browser.close(); }
   assert.equal(engine.asset.sha256?.length, 64);
   assert.equal(engine.asset, sibling.asset, "default engines share one verified compilation");
   assert.equal(engine.shape().sampleRateHz, 48_000);

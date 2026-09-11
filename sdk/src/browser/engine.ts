@@ -112,7 +112,7 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readonly shape: SessionShape;
   readonly context: Context;
   readonly host: MisoAudioWorkletHost;
-  /** Resolve the compiled session map once and bind the shared semantic console. */
+  /** Bind the semantic console once; rejects with MisoUsageError when no console was attached. */
   console(): Promise<EngineConsole>;
   /** Dispose the worklet host, then close its context. Safe to call more than once. */
   close(): Promise<void>;
@@ -239,7 +239,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       context,
       host,
       console: () => {
-        semanticConsole ??= createBrowserConsole(host);
+        semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
+          ? Promise.reject(new MisoUsageError(
+            "this engine booted with no console attached; set policy.console.commandQueueRecords",
+          ))
+          : createBrowserConsole(host);
         return semanticConsole;
       },
       close: () => {
