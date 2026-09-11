@@ -1939,6 +1939,7 @@ name = "session-validator"
 version = "0.1.0"
 dependencies = [
  "builtins-compiler",
+ "effect-compiler",
  "host-web",
  "serde_json",
  "session",

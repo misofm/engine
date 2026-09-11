@@ -1,4 +1,4 @@
-//! Read-only session authoring gate: run every session pipeline stage over one JSON document and
+//! Read-only session authoring gate: check the session authoring pipeline over one JSON document and
 //! report the engine's own typed diagnostics, stage by stage.
 //!
 //! # Why a separate tool
@@ -6,7 +6,7 @@
 //! `docs/SESSION_SCHEMA_V1.md` is normative but dense, and the stage that rejects a hand-authored
 //! session is exactly the information an author needs: a JSON typo, a schema violation, a resource
 //! cap and a builtins preparation failure are four different repairs. The engine already produces
-//! stable typed diagnostics for all four; nothing exposed them at a command line. This tool is that
+//! stable typed diagnostics for these failures; nothing exposed them at a command line. This tool is that
 //! command line and nothing more -- it reads one file, prepares nothing that outlives the process,
 //! writes no artifact, and never renders audio.
 //!
@@ -24,7 +24,10 @@
 //!    comparisons, and canonical normalization into a non-publishable [`CompiledSession`].
 //! 4. `prepare-builtins` -- [`prepare_session_builtins`]: off-render preparation of the input
 //!    builtins, fader/mute and 2x2 matrix stages. It is the cheapest evidence that the declared
-//!    session is preparable and not merely well-formed.
+//!    builtins are preparable and not merely well-formed.
+//! 5. `prepare-effects` -- [`prepare_native_session_effects`] with the launch native registry.
+//!
+//! PASS does not certify graph/PDC compilation, source availability, or host resource budgets.
 //!
 //! Stages 1 and 2 are one function call, because the parser validates the model it just decoded.
 //! They are still reported separately, and correctly: `json.syntax` is produced only by the grammar
@@ -34,7 +37,7 @@
 //!
 //! # Caps
 //!
-//! Both cap structures are set to their maxima. A validator that imposed a host's budget would
+//! All cap structures are set to their maxima. A validator that imposed a host's budget would
 //! reject documents that are perfectly legal sessions. Queue, ring, and aggregate memory budgets
 //! are host policy rather than session-document fields, so this authoring tool validates the model
 //! and its checked arithmetic without choosing a deployment budget.
@@ -42,24 +45,29 @@
 use std::{fmt::Write as _, process::ExitCode};
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use effect_compiler::{
+    EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
+};
 use session::{
     CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, compile_session,
     parse_session_json,
 };
 
-/// The four pipeline stages, in execution order.
-pub const STAGE_NAMES: [&str; 4] = [
+/// The five pipeline stages, in execution order.
+pub const STAGE_NAMES: [&str; 5] = [
     "json-grammar",
     "typed-model",
     "compile-session",
     "prepare-builtins",
+    "prepare-effects",
 ];
 
-const STAGE_SUMMARIES: [&str; 4] = [
+const STAGE_SUMMARIES: [&str; 5] = [
     "JSON grammar (json-syntax)",
     "strict V1 schema decode and validation",
     "resource preflight, caps, canonical normalization",
     "off-render builtins preparation",
+    "off-render launch native effect preparation",
 ];
 
 /// How one stage ended.
@@ -144,7 +152,7 @@ pub struct ValidationReport {
 }
 
 impl ValidationReport {
-    /// The four stage outcomes, in execution order.
+    /// The five stage outcomes, in execution order.
     #[must_use]
     pub fn stages(&self) -> &[StageOutcome] {
         &self.stages
@@ -324,6 +332,52 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
         return skipped_tail(stages, 4);
     }
     stages.push(stage(3, StageStatus::Pass, Vec::new()));
+
+    let registry = match launch_native_effect_registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            stages.push(stage(
+                4,
+                StageStatus::Fail,
+                vec![StageDiagnostic {
+                    code: "effect.registry.unavailable".to_owned(),
+                    path: "$".to_owned(),
+                    line: None,
+                    column: None,
+                    message: "launch native registry construction failed".to_owned(),
+                }],
+            ));
+            return skipped_tail(stages, 5);
+        }
+    };
+    if let Err(set) = prepare_native_session_effects(
+        &compiled,
+        &registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: u32::MAX,
+        },
+    ) {
+        let mut diagnostics = set.0;
+        diagnostics.sort();
+        stages.push(stage(
+            4,
+            StageStatus::Fail,
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| StageDiagnostic {
+                    code: diagnostic.code.to_owned(),
+                    path: diagnostic.path,
+                    line: None,
+                    column: None,
+                    message: String::new(),
+                })
+                .collect(),
+        ));
+        return skipped_tail(stages, 5);
+    }
+    stages.push(stage(4, StageStatus::Pass, Vec::new()));
 
     let canonical = compiled.canonical_json().to_owned();
     ValidationReport {
