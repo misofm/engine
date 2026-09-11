@@ -150,3 +150,71 @@ release build PASS. Actual dirty-tree release preflight was untimed and PASS at
 `/tmp/.issue746-preflight-whx04vo9`, with timed_subject_invocations0.
 Root will recapture preflight against this clean committed correction, then
 request Astra clearance before the still-unused sole measurement invocation.
+
+## Sole measurement — 2026-09-11
+
+Root invoked the runner exactly once after Astra medium preflight clearance,
+against clean source `ce75a69bebe5fb6a1aa55d0c6f1a1c9ea7f05a77` and binary SHA256
+`1b49e4212da773bdebd81cfc648328eb5600913d7791039140b6396b36846c25`.
+The run completed exit0/PASS with exactly warmup8192 and rounds1/2 each32768
+blocks per width, scalar thenW8, at48000Hz/128frames. All actual per-block
+fault reports were zero; all lane/channel opening and closing witnesses passed.
+
+| Round | Width | Lane-samples | Sum process ns | ns/lane-sample | Effective Hz | Derived cycles/lane-sample |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 8388608 | 139377744 | 16.615121841 | 3713018730.405424 | 61.692258605 |
+| 1 | 8 | 67108864 | 151567259 | 2.258528158 | 3713018730.405424 | 8.385957354 |
+| 2 | 1 | 8388608 | 139480212 | 16.627336979 | 3710584628.522630 | 61.697141007 |
+| 2 | 8 | 67108864 | 152223020 | 2.268299758 | 3710584628.522630 | 8.416718217 |
+
+Counter evidence, preserved separately per phase:
+
+| Phase | Counted cycles | task-clock ms | Effective Hz | Drift vs warmup |
+| --- | --- | --- | --- | --- |
+| warmup | 357982293 | 96.44 | 3711969027.374534 | 0.000000% |
+| 1 | 1385661460 | 373.19 | 3713018730.405424 | 0.028279% |
+| 2 | 1390430272 | 374.72 | 3710584628.522630 | 0.037296% |
+
+Both measured drift values satisfy the frozen3% ceiling. These cycles are
+wall-render-time conversions using phase-wide hardware-counter-derived clock,
+not direct per-process PMU counts or isolated floor evidence. Timer/dispatch
+cost and phase-wide clock estimation remain limitations. No speedup, capacity,
+class-A floor, optimization target or listening claim follows.
+
+Host: AMD EPYC7313P, CPU/core15, sibling31, schedutil, allowedCPUs0–31;
+Rust1.97.1/LLVM22.1.6, x86_64-unknown-linux-gnu release, compile-time AVX2/FMA.
+Host remains shared and sibling enabled. Root paused its own builds/agents and
+waited for an unrelated compiler to finish before invocation; no system setting
+changed. Explicit `/tmp/engine-active-perf-wrapper` uses existing `sudo -n
+/usr/bin/perf "$@"`; perf and child use that privilege, metadata is explicitly
+forwarded inside the command. Perf6.8.12 `/usr/bin/perf` SHA256
+2d0953085bf720a25efbe24f853e97d27b1f12f18a398255ff82cbafde254dad;
+wrapper SHA256aad0cd627c7f09430ff3578b007aeda0c17c752df50f2d7dd986be6ceaf443ba.
+Ordinary perf was denied; no implicit fallback or policy change occurred.
+
+Raw evidence is machine-local outside the disposable worktree at
+`/tmp/issue746-measurement-ce75a69bebe5fb6a1aa55d0c6f1a1c9ea7f05a77`:
+per-phase stdout/stderr/CSV/argv/exit, launch/final manifests, raw and accepted
+JSONL and final status. Transcript `/tmp/issue746-sole-run.log`; all file hashes
+`/tmp/issue746-measurement-sha256.json`; actual clean preflight
+`/tmp/.issue746-preflight-5_27jd6x`; prelaunch host/process records
+`/tmp/issue746-root-host-preparation.json` and
+`/tmp/issue746-root-final-before-sole-run.json`. These local paths are disclosed
+rather than represented as durable attachments; substantive values are above.
+
+`accepted.jsonl` SHA256 `14193694483227ba3b42efe03fe2313e2f1471d0dfbcc9b9adcb574e9f312b5c`.
+
+`launch-manifest.final.json` SHA256 `fe380608f83a7e56c5fca183e50c29d46768208eca0b15a05bfdb153a199cb2d`.
+
+`status.json` SHA256 `7cbf1fb06a4cf0e93266a13101f0433c6de09741f14ed481e9425401dbbfbdb3`.
+
+## Attempt 2 — Astra medium PASS
+
+Astra independently verified all four measured rows, raw phase evidence,
+artifact identities, per-lane/channel activity, actual zero report counts,
+phase ordering, clock drift and independently recomputed normalization.
+Final verdict `/tmp/issue746-astra-a2-verdict.md`: PASS for the scoped
+active-input descriptive qualification. Attempt1 remains FAIL before timing.
+The sole measurement allowance is now consumed; no rerun is needed or permitted
+under this record. Required PR/main qualification and GitHub closure remain
+pending delivery steps; no listening or floor claim is added.
