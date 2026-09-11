@@ -121,3 +121,13 @@ static, resource/native parity, hermetic host, SDK type/headless/package,
 three-browser matrix and generated-matrix gates passed. Actual command/source,
 exit/log and six-file hashes: `/tmp/issue387-artifact-y1odl9dw`.
 No timing claim. Required PR/full-workspace CI and post-main PASS remain.
+
+## Joint delivery scope
+
+Root integrates the independently accepted #387 parser and #211 validator
+changes for one delivery PR. Product paths are disjoint; #211 changes only the
+validator's dependency edge, tests and authoring guidance, not shipped artifact
+source. Preserve both histories and evidence; no new product change is authorized.
+Verify validator behavior against the corrected parser on this combined tree,
+then independent exact-head review and required PR/full-workspace/main CI.
+Both issues remain open until qualification and upstream synchronization finish.

@@ -62,3 +62,13 @@ refusal, diagnostic ordering, exit status and canonical suppression. Shared
 registry/preparer, caps, earlier-stage skips and sealed fixture bytes verified.
 Evidence: `/tmp/issue211-verification-attempt2/verdict.md` and control receipts.
 Required PR/main qualification and upstream synchronized closure remain.
+
+## Joint delivery scope
+
+Root integrates the independently accepted #387 parser and #211 validator
+changes for one delivery PR. Product paths are disjoint; #211 changes only the
+validator's dependency edge, tests and authoring guidance, not shipped artifact
+source. Preserve both histories and evidence; no new product change is authorized.
+Verify validator behavior against the corrected parser on this combined tree,
+then independent exact-head review and required PR/full-workspace/main CI.
+Both issues remain open until qualification and upstream synchronization finish.
