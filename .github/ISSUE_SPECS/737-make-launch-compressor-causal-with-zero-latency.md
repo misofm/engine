@@ -121,8 +121,10 @@ Luna XHIGH implemented the causal Lane-generic core, seven-parameter descriptor,
 zero-latency quality rows, 22-word per-channel codec, and direct independent f64
 reference. Audio/detector histories, cursors and staged storage/processing are
 removed. Eight source/reference/oracle-support paths form this compiling checkpoint.
-Luna reports locked compressor/dsp-reference checks, compressor lib tests and
-integration-test compilation PASS; the focused independent oracle passes with
+Locked compressor/dsp-reference checks and the lib test command passed; the
+integration-test compilation exits 101 on stale retired-contract tests (the initial
+Luna summary incorrectly reported zero; inspected receipts correct that claim).
+The focused independent oracle passes with
 worst deviations 5.737e-7 and 2.980e-7, below the unchanged 2e-5 bound.
 
 This is NOT full implementation/review PASS: old contract tests still fail on
@@ -131,3 +133,22 @@ pins, descendants, fixtures, compatibility gates and CPU example remain pending.
 No artifact pin or timing run is authorized by this checkpoint. Sol XHIGH review
 follows the completed contract/evidence tranche. The CPU amendment above is
 Astra XHIGH approved and applies after this root checkpoint.
+
+## Attempt 1 current-fixture checkpoint
+
+Root removed parameter ID 8 only from compressor instances in seven current session
+fixtures and passed each through the current Rust canonical writer/native preparation.
+The changed compressor counts are 8/8/1/1/64/64/64. All other model fields compare
+identically, except six legacy decimal spellings normalized by the canonical writer
+from 1.8499999999999999 to 1.85 with identical prepared f32 bits. Field formatting is
+canonicalized; this accounts for the larger standing-console textual diff. The
+intended-placement and mono derivation scripts independently reproduce their new
+fixture bytes exactly. Historical numbered evidence is untouched.
+
+Fixture receipts: `/tmp/issue737-fixture-transition-final`; core build/oracle and
+preserved stale-test failures: `/home/bl/issue737-luna-attempt1-core-receipts`.
+Initial root fixture preflight used a hyphenated binary filename and then a too-strict
+Python f64 spelling comparison; both failed before qualification credit and were
+corrected to the actual `session_validator` binary and explicit unchanged f32 proof.
+Current corpus/descriptor/artifact pins and descendant expectations remain pending.
+CPU qualification follows the approved bounded example amendment, not a console run.
