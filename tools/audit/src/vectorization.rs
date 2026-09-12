@@ -17,6 +17,7 @@ use lane::kernels::{SvfCoef, SvfState, gain_block, sum2_block, svf_block};
 
 const DEFAULT_ALLOWLIST: &str = "tools/audit/vectorization-allowlist.tsv";
 const PROBE_FRAMES: usize = 32;
+const PROBE_MODULE: &str = module_path!();
 
 #[derive(Clone, Debug)]
 struct Rule {
@@ -212,31 +213,69 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
     Ok(rules)
 }
 
-fn symbol_bodies(disassembly: &str, symbols: &[&str]) -> BTreeMap<String, String> {
-    let mut bodies: BTreeMap<String, String> = BTreeMap::new();
-    let mut active: Option<String> = None;
+fn symbol_bodies(disassembly: &str, symbols: &[&str]) -> BTreeMap<String, Vec<String>> {
+    let mut bodies: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut active: Option<(String, usize)> = None;
     for line in disassembly.lines() {
         let trimmed = line.trim();
-        if trimmed.ends_with(">:") && trimmed.contains('<') {
+        if let Some(header_symbol) = symbol_header(trimmed) {
             active = symbols
                 .iter()
-                .find(|symbol| trimmed.contains(**symbol))
-                .map(|symbol| (*symbol).to_owned());
-            if let Some(symbol) = &active {
-                bodies.entry(symbol.clone()).or_default();
-            }
+                .find(|symbol| probe_header_matches(header_symbol, symbol))
+                .map(|symbol| {
+                    let symbol = (*symbol).to_owned();
+                    let symbol_bodies = bodies.entry(symbol.clone()).or_default();
+                    symbol_bodies.push(String::new());
+                    (symbol, symbol_bodies.len() - 1)
+                });
             continue;
         }
-        if let Some(symbol) = &active {
-            let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-            bodies
-                .entry(symbol.clone())
-                .or_default()
-                .push_str(&normalized);
-            bodies.entry(symbol.clone()).or_default().push('\n');
+        if let Some((symbol, body_index)) = &active {
+            if let Some(symbol_bodies) = bodies.get_mut(symbol) {
+                let body = &mut symbol_bodies[*body_index];
+                let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+                body.push_str(&normalized);
+                body.push('\n');
+            }
         }
     }
     bodies
+}
+
+/// Extract the complete symbol from the disassembler's `address <symbol>:` header envelope.
+/// Looking at the envelope first keeps a probe name in an operand or jump-target annotation from
+/// becoming an owning header. The first `<` is the envelope opener; demangled generic paths may
+/// contain additional angle brackets after it.
+fn symbol_header(line: &str) -> Option<&str> {
+    let without_closer = line.strip_suffix(">:")?;
+    let opener = without_closer.find('<')?;
+    if without_closer[..opener].trim().is_empty() {
+        return None;
+    }
+    let symbol = &without_closer[opener + 1..];
+    (!symbol.is_empty()).then_some(symbol)
+}
+
+/// The checked-in allowlist stores short probe names, while a demangled disassembly header
+/// carries the complete path. Both GNU and LLVM demanglers normally print
+/// `audit::vectorization::probe_*`; a Rust disambiguator may be retained by a toolchain as the
+/// narrowly defined `::h` plus sixteen lowercase hexadecimal digits. No other suffix is accepted.
+fn probe_header_matches(header_symbol: &str, symbol: &str) -> bool {
+    let expected = format!("{PROBE_MODULE}::{symbol}");
+    header_symbol == expected
+        || header_symbol
+            .strip_prefix(&expected)
+            .is_some_and(valid_rust_disambiguator)
+}
+
+fn valid_rust_disambiguator(suffix: &str) -> bool {
+    let Some(hash) = suffix.strip_prefix("::h") else {
+        return false;
+    };
+    hash.len() == 16
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn certify(disassembly: &str, rules: &[Rule]) -> Vec<String> {
@@ -261,12 +300,24 @@ fn certify(disassembly: &str, rules: &[Rule]) -> Vec<String> {
         .collect();
     let bodies = symbol_bodies(disassembly, &symbols);
     for rule in active_rules {
-        let Some(body) = bodies.get(&rule.symbol) else {
-            failures.push(format!(
-                "{} / {}: probe symbol is absent from the artifact",
-                rule.family, rule.symbol
-            ));
-            continue;
+        let body = match bodies.get(&rule.symbol).map(Vec::as_slice) {
+            None | Some([]) => {
+                failures.push(format!(
+                    "{} / {}: probe symbol is absent from the artifact",
+                    rule.family, rule.symbol
+                ));
+                continue;
+            }
+            Some([body]) => body,
+            Some(bodies) => {
+                failures.push(format!(
+                    "{} / {}: probe symbol has ambiguous disassembly bodies (found {})",
+                    rule.family,
+                    rule.symbol,
+                    bodies.len()
+                ));
+                continue;
+            }
         };
         for alternatives in &rule.required {
             if !alternatives.iter().any(|token| body.contains(token)) {
@@ -468,7 +519,7 @@ mod tests {
     fn synthetic_bodies(body: &str) -> String {
         ACTIVE_REGISTRY
             .iter()
-            .map(|symbol| format!("0000 <audit::vectorization::{symbol}>:\n  {body}\n"))
+            .map(|symbol| format!("0000 <{PROBE_MODULE}::{symbol}>:\n  {body}\n"))
             .collect()
     }
 
@@ -596,5 +647,124 @@ mod tests {
                 .iter()
                 .any(|failure| failure.contains("registry mismatch"))
         );
+    }
+
+    #[test]
+    fn near_name_impostor_does_not_satisfy_probe() {
+        for impostor in [
+            format!("{PROBE_MODULE}::probe_gain_simd8_impostor"),
+            format!("{PROBE_MODULE}::probe_gain_simd80"),
+            "unrelated::probe_gain_simd8".to_owned(),
+        ] {
+            let exact_header = format!("{PROBE_MODULE}::probe_gain_simd8");
+            let disassembly = synthetic_bodies("vector-op").replace(&exact_header, &impostor);
+            let failures = certify(&disassembly, &active_rules());
+            assert!(
+                failures.iter().any(|failure| {
+                    failure.contains("probe_gain_simd8")
+                        && failure.contains("probe symbol is absent from the artifact")
+                }),
+                "expected the exact gain probe to be absent for {impostor}, got {failures:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_probe_bodies_are_ambiguous_before_requirements_are_checked() {
+        let mut rules = active_rules();
+        let svf = rules
+            .iter_mut()
+            .find(|rule| rule.symbol == "probe_svf_simd8")
+            .expect("active rules include the SVF probe");
+        svf.required = vec![vec!["vmulps".to_owned()], vec!["vaddps".to_owned()]];
+
+        let mut disassembly = synthetic_bodies("vector-op");
+        let original = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n  vector-op\n");
+        let repeated = format!(
+            "0000 <{PROBE_MODULE}::probe_svf_simd8>:\n  vmulps %ymm0, %ymm1, %ymm2\n0010 <{PROBE_MODULE}::probe_svf_simd8>:\n  vaddps %ymm0, %ymm1, %ymm2\n"
+        );
+        assert!(disassembly.contains(&original));
+        disassembly = disassembly.replace(&original, &repeated);
+
+        let failures = certify(&disassembly, &rules);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("ambiguous") && failure.contains("probe_svf_simd8")),
+            "expected repeated SVF bodies to be rejected as ambiguous, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn independently_valid_repeated_probe_bodies_are_ambiguous() {
+        let mut disassembly = synthetic_bodies("vector-op");
+        let original = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n  vector-op\n");
+        let repeated = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n",)
+            + "  vmulps %ymm0, %ymm1, %ymm2 vaddps %ymm0, %ymm1, %ymm2\n"
+            + &format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n")
+            + "  vmulps %ymm0, %ymm1, %ymm2 vaddps %ymm0, %ymm1, %ymm2\n";
+        assert!(disassembly.contains(&original));
+        disassembly = disassembly.replace(&original, &repeated);
+
+        let failures = certify(&disassembly, &active_rules());
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("ambiguous") && failure.contains("probe_svf_simd8")),
+            "expected independently valid repeated SVF bodies to be rejected, got {failures:?}"
+        );
+        assert!(
+            !failures.iter().any(|failure| {
+                failure.contains("probe_svf_simd8") && failure.contains("missing vector family")
+            }),
+            "ambiguity must be diagnosed before body requirements, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn exact_probe_path_and_body_boundaries_are_preserved() {
+        let gain_header = format!("0000 <{PROBE_MODULE}::probe_gain_simd8>:");
+        let unrelated_header = "0010 <unrelated::probe_gain_simd8>:\n";
+        let disassembly = synthetic_bodies("vector-op").replace(
+            &gain_header,
+            &(gain_header.clone() + "\n  vector-op\n" + unrelated_header + "  scalar-op\n"),
+        );
+        let failures = certify(&disassembly, &active_rules());
+        assert!(
+            failures.is_empty(),
+            "an unrelated header must terminate the exact body without contaminating it, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn probe_bodies_remain_green_when_listing_order_changes() {
+        let body = |symbol: &str| format!("0000 <{PROBE_MODULE}::{symbol}>:\n  vector-op\n");
+        let disassembly = ACTIVE_REGISTRY
+            .iter()
+            .rev()
+            .map(|symbol| body(symbol))
+            .collect::<String>();
+        assert!(certify(&disassembly, &active_rules()).is_empty());
+    }
+
+    #[test]
+    fn rust_disambiguator_suffix_is_narrowly_supported() {
+        let exact_header = format!("{PROBE_MODULE}::probe_gain_simd8");
+        let with_suffix = format!("{exact_header}::h0123456789abcdef");
+        let disassembly = synthetic_bodies("vector-op").replace(&exact_header, &with_suffix);
+        assert!(certify(&disassembly, &active_rules()).is_empty());
+
+        for invalid_suffix in ["::h0123456789ABCDEf", "::h0123456789abcdef0", "::hash"] {
+            let invalid = format!("{exact_header}{invalid_suffix}");
+            let disassembly = synthetic_bodies("vector-op").replace(&exact_header, &invalid);
+            let failures = certify(&disassembly, &active_rules());
+            assert!(
+                failures.iter().any(|failure| {
+                    failure.contains("probe_gain_simd8")
+                        && failure.contains("probe symbol is absent from the artifact")
+                }),
+                "invalid Rust disambiguator {invalid_suffix} must not identify the probe, got {failures:?}"
+            );
+        }
     }
 }

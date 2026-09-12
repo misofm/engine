@@ -12,6 +12,15 @@ The explicit registry is `vectorization-allowlist.tsv`:
 - every row forbids call instructions (`call`/`callq`) inside the named probe bodies, matched on
   the exact mnemonic token rather than as a substring, so a helper call emitted into a kernel body
   fails the report instead of passing silently.
+- probe ownership is based on the complete demangled header path (`audit::vectorization::probe_*`),
+  with only the Rust disambiguator suffix `::h` plus sixteen lowercase hexadecimal digits
+  accepted as an optional decoration. A similarly named or unrelated-path header is absent, and
+  repeated exact headers are ambiguous; their bodies are kept separate and never combined.
+
+On the release artifact used for the #758 qualification, LLVM `llvm-objdump` 18.1.3 and GNU
+`objdump` 2.42 both emitted the three headers with the exact `audit::vectorization::probe_*`
+spelling and no retained suffix. The ordinary report passed with either disassembler against the
+same artifact; the focused tests retain coverage for the narrowly supported Rust disambiguator.
 
 Native AArch64 (`aarch64-neon`) is unsupported; no claim (owner ruling 2026-09-04, #378): the three
 `aarch64-neon` rows are retired from the registry. See the deferred-defect register in
