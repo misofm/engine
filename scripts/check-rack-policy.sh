@@ -25,7 +25,7 @@ if ! compiler_dependencies="$(dependencies "$compiler_manifest")"; then fail 'ra
 [[ "$compiler_dependencies" == $'effect-contract\nengine\nrack' ]] || fail 'rack compiler dependency boundary changed'
 
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh, which scans the whole
-# {crates,hosts,tools,sidecars} tree -- rack/rack-compiler included -- rather than five copies
+# {crates,hosts,tools} tree -- rack/rack-compiler included -- rather than five copies
 # of the same regex over five different root lists.
 GATE_FAILURE_PREFIX='rack policy failure' gate_scan_forbidden 'rack source has unsafe code' \
     '\bunsafe\b' '*.rs' crates/rack crates/rack-compiler || exit 1

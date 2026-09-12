@@ -71,7 +71,7 @@ def main() -> int:
         roots = rule["roots"]
         if (
             not isinstance(roots, list)
-            or len(roots) != 4
+            or len(roots) != 3
             or any(not isinstance(root, str) or not root for root in roots)
         ):
             return fail(f"rule {index + 1} has invalid roots")

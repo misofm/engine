@@ -43,9 +43,9 @@ decode_rule_field() {
 rule_index=0
 while IFS= read -r record; do
     separator_count="${record//[^|]/}"
-    [[ ${#separator_count} == 11 ]] || fail "lane source rule loader output is invalid"
+    [[ ${#separator_count} == 10 ]] || fail "lane source rule loader output is invalid"
     IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
-        root1_encoded root2_encoded root3_encoded root4_encoded exclude_description_encoded \
+        root1_encoded root2_encoded root3_encoded exclude_description_encoded \
         exclude_regex_encoded failure_encoded extra <<<"$record"
     [[ -n "$kind" && -z "$extra" ]] || fail "lane source rule loader output is invalid"
     [[ "$kind" == RULE ]] || fail "lane source rule loader output is invalid"
@@ -58,14 +58,13 @@ while IFS= read -r record; do
         "$(decode_rule_field "$root1_encoded")"
         "$(decode_rule_field "$root2_encoded")"
         "$(decode_rule_field "$root3_encoded")"
-        "$(decode_rule_field "$root4_encoded")"
     )
     exclude_description="$(decode_rule_field "$exclude_description_encoded")"
     exclude_regex="$(decode_rule_field "$exclude_regex_encoded")"
     failure_diagnostic="$(decode_rule_field "$failure_encoded")"
     [[ -n "$id" && -n "$scan_description" && -n "$pattern" && -n "$glob" && -n "$failure_diagnostic" ]] ||
         fail "lane source rule loader output is invalid"
-    [[ -n "${roots[0]}" && -n "${roots[1]}" && -n "${roots[2]}" && -n "${roots[3]}" ]] ||
+    [[ -n "${roots[0]}" && -n "${roots[1]}" && -n "${roots[2]}" ]] ||
         fail "lane source rule loader output is invalid"
     case "$rule_index:$id" in
         1:fusion|2:relaxed|3:architecture|4:detection) ;;
@@ -158,12 +157,9 @@ done
 # by naming convention alone (`wide | miso-engine-*`); the prefix-strip rename retired that
 # convention (docs/rulings/prefix-strip-inventory.md), so this now checks against the real list
 # of workspace crate names instead of a pattern that can no longer tell the two apart.
-# Process substitution (`< <(find ...)`), not a plain pipe: under `pipefail`, a plain
-# `find ... | while ...` reports find's own exit status (2 when one of the roots, e.g. a
-# hermetic fixture's absent sidecars/, does not exist) as the whole pipeline's status, which
-# would trip `set -e` even though the while loop itself completed and produced correct output
-# from the roots that do exist.
-workspace_manifests="$(gate_find_collect 'workspace manifest discovery' crates hosts tools sidecars -name Cargo.toml -type f)" || exit $?
+# The gate helper keeps a missing scan root as a loud traversal failure rather than an apparently
+# clean result from the roots that do exist.
+workspace_manifests="$(gate_find_collect 'workspace manifest discovery' crates hosts tools -name Cargo.toml -type f)" || exit $?
 workspace_crate_names=''
 while IFS= read -r crate_manifest; do
     [[ -z "$crate_manifest" ]] && continue

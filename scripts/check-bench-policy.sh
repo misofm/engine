@@ -147,11 +147,11 @@ forbidden_under_tools() {
 support=tools/bench-support
 [[ -d "$support" ]] || fail "missing the shared harness: $support"
 
-for required_root in crates hosts sidecars; do
+for required_root in crates hosts; do
     [[ -d "$required_root" ]] || fail "missing required root: $required_root"
 done
 
-if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then find_status=0; else find_status=$?; fi
+if find crates hosts -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then find_status=0; else find_status=$?; fi
 ((find_status == 0)) || fail "manifest discovery failed with status $find_status; output: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/find.err")"
 if LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
 ((sort_status == 0)) || fail "manifest sort failed with status $sort_status; output: $(captured "$scratch/manifests.sorted"); input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
@@ -288,8 +288,8 @@ done
 # allocation gate real. `run_effect_conformance` can only observe an allocation inside an armed
 # render scope if the *test binary* that calls it installs the audited counting allocator; the
 # harness refuses to run with `harness.allocator_not_installed` when it is missing, so the edge is
-# load-bearing rather than convenient. `hosts/` and `sidecars/` keep the absolute ban in both
-# sections: a host adapter and a sidecar are each the artifact that ships.
+# load-bearing rather than convenient. `hosts/` keeps the absolute ban: a host adapter is an
+# artifact that ships.
 while IFS= read -r manifest; do
     if awk -v file="$manifest" '
         /^\[/ { section = $0 }

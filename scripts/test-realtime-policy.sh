@@ -26,8 +26,7 @@ create_fixture() {
         "$root/tools/bench-support/src" \
         "$root/tools/audit/src" \
         "$root/tools/native-pcm-runner/src" \
-        "$root/tools/bench/src" \
-        "$root/sidecars"
+        "$root/tools/bench/src"
     # The marked file set mirrors the real tree after #371 (RT-16/IO-14) and #664's complete
     # LocalRing removal: twelve files and forty-one regions across crates/ and hosts/, so the floors in the gate and the discovery
     # walk are exercised against the same shape the gate sees on main. Column-zero markers and
@@ -433,7 +432,7 @@ set -u
 joined="$*"
 hit=0
 case "$INJECT_MODE:$TOOL_NAME" in
-  unsafe-scan:rg) [[ "$joined" == *unsafe*crates*hosts*tools*sidecars* && "$joined" != '-v '* ]] && hit=1 ;;
+  unsafe-scan:rg) [[ "$joined" == *unsafe*crates*hosts*tools* && "$joined" != '-v '* ]] && hit=1 ;;
   unsafe-filter:rg) [[ "$1" == '-v' ]] && hit=1 ;;
   marker-discovery:rg) [[ "$joined" == *'-l REALTIME_POLICY_BEGIN'* ]] && hit=1 ;;
   begin-count:rg) [[ "$joined" == *'-c REALTIME_POLICY_BEGIN'*runtime.rs* ]] && hit=1 ;;

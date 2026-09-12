@@ -14,8 +14,7 @@ create_valid_fixture() {
         "$fixture_root/crates/math" \
         "$fixture_root/fuzz" \
         "$fixture_root/hosts/binary/src" \
-        "$fixture_root/tools" \
-        "$fixture_root/sidecars"
+        "$fixture_root/tools"
 
     cp "$script_directory/../LICENSE" "$fixture_root/LICENSE"
     printf '%s\n' 'Miso Engine' >"$fixture_root/NOTICE"
@@ -242,12 +241,12 @@ allow_approved_isa_pin() {
     bash "$policy_script" "$root" >/dev/null
 }
 
-# sidecars/<name> is no longer special-cased: it is subject to exactly the same bare-name,
-# directory-equals-package-name and sysroot-collision rules as crates/hosts/tools.
-allow_sidecar_valid() {
+# A package under hosts/<name> is subject to exactly the same bare-name, directory-equals-package-
+# name and sysroot-collision rules as packages under crates/ and tools/.
+allow_host_valid() {
     local root="$1"
     create_valid_fixture "$root"
-    mkdir -p "$root/sidecars/example/src"
+    mkdir -p "$root/hosts/example/src"
     printf '%s\n' \
         '[package]' \
         'name = "example"' \
@@ -258,14 +257,14 @@ allow_sidecar_valid() {
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/example/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/example/src/lib.rs"
+        >"$root/hosts/example/Cargo.toml"
+    printf '//! fixture\n' >"$root/hosts/example/src/lib.rs"
     bash "$policy_script" "$root" >/dev/null
 }
 
-mutate_sidecar_package_prefix() {
+mutate_host_package_prefix() {
     local root="$1"
-    mkdir -p "$root/sidecars/example/src"
+    mkdir -p "$root/hosts/example/src"
     printf '%s\n' \
         '[package]' \
         'name = "miso-engine-example"' \
@@ -276,16 +275,16 @@ mutate_sidecar_package_prefix() {
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/example/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/example/src/lib.rs"
+        >"$root/hosts/example/Cargo.toml"
+    printf '//! fixture\n' >"$root/hosts/example/src/lib.rs"
 }
 
 # The directory-equals-package-name rule applies regardless of nesting depth: a manifest two
-# directories under sidecars/ whose package name does not match its own directory basename must
-# still fail, exactly as it would under crates/hosts/tools.
-mutate_sidecar_nested_directory_mismatch() {
+# directories under hosts/ whose package name does not match its own directory basename must still
+# fail, exactly as it would under crates/ or tools/.
+mutate_host_nested_directory_mismatch() {
     local root="$1"
-    mkdir -p "$root/sidecars/vendor/anything/src"
+    mkdir -p "$root/hosts/vendor/anything/src"
     printf '%s\n' \
         '[package]' \
         'name = "vendored-thing"' \
@@ -296,8 +295,8 @@ mutate_sidecar_nested_directory_mismatch() {
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/vendor/anything/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/vendor/anything/src/lib.rs"
+        >"$root/hosts/vendor/anything/Cargo.toml"
+    printf '//! fixture\n' >"$root/hosts/vendor/anything/src/lib.rs"
 }
 
 # `core`, and the rest of the Rust sysroot/prelude names, must never be a package name: `core`
@@ -322,7 +321,7 @@ mutate_sysroot_collision() {
 # Issue #356/#359: the delivery-codec boundary folded from check-delivery-codec-boundary.py.
 mutate_retired_manifest_package_name() {
     local root="$1"
-    mkdir -p "$root/sidecars/flac-decoder/src"
+    mkdir -p "$root/crates/flac-decoder/src"
     printf '%s\n' \
         '[package]' \
         'name = "flac-decoder"' \
@@ -333,8 +332,8 @@ mutate_retired_manifest_package_name() {
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/flac-decoder/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
+        >"$root/crates/flac-decoder/Cargo.toml"
+    printf '//! fixture\n' >"$root/crates/flac-decoder/src/lib.rs"
 }
 
 mutate_retired_stub_directory() {
@@ -361,7 +360,7 @@ mutate_retired_lockfile_identity() {
 
 # S8: the forbidden-name scan must reach every Cargo.toml in the tree, not just the six
 # hard-coded roots the prior scan_forbidden call used -- a nested manifest under sdk/ (outside
-# crates/hosts/tools/sidecars/fuzz) must still fail.
+# crates/hosts/tools/fuzz) must still fail.
 mutate_nested_manifest_dependency() {
     local root="$1"
     mkdir -p "$root/sdk/native"
@@ -477,8 +476,8 @@ expect_failure extra-isa-feature mutate_extra_isa_feature
 expect_failure root-target-spill mutate_root_target_spill
 expect_failure root-rustc-info mutate_root_rustc_info
 expect_failure root-cachedir-tag mutate_root_cachedir_tag
-expect_failure sidecar-package-prefix mutate_sidecar_package_prefix
-expect_failure sidecar-nested-directory-mismatch mutate_sidecar_nested_directory_mismatch
+expect_failure host-package-prefix mutate_host_package_prefix
+expect_failure host-nested-directory-mismatch mutate_host_nested_directory_mismatch
 expect_failure sysroot-collision mutate_sysroot_collision
 expect_failure prelude-collision mutate_prelude_collision
 expect_failure retired-manifest-package-name mutate_retired_manifest_package_name
@@ -523,18 +522,9 @@ expect_failure workspace-license mutate_workspace_license
 expect_failure package-license-inheritance mutate_package_license_inheritance
 expect_failure npm-license mutate_npm_license
 
-# `rg` exits 2 (not 1) when a search root does not exist, and `if rg ...; then fail; fi` reads
-# both 1 and 2 as "no violation". A fixture whose sidecars/ directory is removed after creation
-# must still fail loudly (naming the missing root), not pass as if the scan had run clean.
-mutate_missing_sidecars_root() {
-    local root="$1"
-    rm -rf -- "$root/sidecars"
-}
-
-expect_failure missing-sidecars-root mutate_missing_sidecars_root
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
-allow_sidecar_valid "$scratch_root/sidecar-valid"
+allow_host_valid "$scratch_root/host-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 
 # Issue #404's finite producer table. Each row names one external stage and injects exit 73 after
@@ -627,8 +617,8 @@ fault_cases=(
  'npm-lock-find-empty|find|-name package-lock.json|1|empty|find npm-locks failed'
  'npm-lock-sort|sort|npm-locks.out|1|complete|sort npm locks failed'
  'npm-lock-sort-empty|sort|npm-locks.out|1|empty|sort npm locks failed'
- 'cargo-find-empty|find|crates hosts tools sidecars|1|empty|find cargo-manifests failed'
- 'cargo-find-complete|find|crates hosts tools sidecars|1|complete|find cargo-manifests failed'
+ 'cargo-find-empty|find|crates hosts tools|1|empty|find cargo-manifests failed'
+ 'cargo-find-complete|find|crates hosts tools|1|complete|find cargo-manifests failed'
  'cargo-sort|sort|cargo-manifests.out|1|complete|sort Cargo manifests failed'
  'cargo-sort-empty|sort|cargo-manifests.out|1|empty|sort Cargo manifests failed'
  'retired-find|find|-name flac-decoder|1|empty|retired-directory discovery failed'
@@ -703,7 +693,7 @@ bash "$policy_script" "$empty_root" >/dev/null
 mutate_empty_bin_name() { sed -i '/^\[\[bin\]\]$/,$ s/name = "binary"/name = ""/' "$1/hosts/binary/Cargo.toml"; }
 expect_failure_with_message empty-bin-name 'bin name must be binary' mutate_empty_bin_name
 
-for required_root in crates hosts tools sidecars; do
+for required_root in crates hosts tools; do
     missing="$scratch_root/missing-${required_root//\//-}"
     create_valid_fixture "$missing"
     if [[ "$required_root" == crates ]]; then
@@ -711,7 +701,7 @@ for required_root in crates hosts tools sidecars; do
         # missing crates/ cannot get past that earlier contract. Inject find's real missing-root
         # outcome after the valid prelude to exercise the otherwise unreachable discovery branch.
         shim="$scratch_root/shim-missing-crates"
-        make_fault_shim "$shim" find 'crates hosts tools sidecars' 1 empty missing-crates
+        make_fault_shim "$shim" find 'crates hosts tools' 1 empty missing-crates
         output="$(WORKSPACE_FAULT_STATE="$shim/state" PATH="$shim:$PATH" bash "$policy_script" "$missing" 2>&1)" && rc=0 || rc=$?
     else
         rm -rf -- "$missing/$required_root"
@@ -841,7 +831,7 @@ rg -qF ': # MUTANT swallow selected population failure' "$population_mutant" || 
 }
 policy_script="$population_mutant"
 set +e
-assert_fault_rejected mutant-population find 'crates hosts tools sidecars' 1 complete 'find cargo-manifests failed'
+assert_fault_rejected mutant-population find 'crates hosts tools' 1 complete 'find cargo-manifests failed'
 mutant_status=$?
 set -e
 [[ "$mutant_status" == 97 ]] || { printf 'population mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
