@@ -157,3 +157,13 @@ requires the query to allocate/free zero heap bytes, while forbidding a static c
 functional implementation is checkpoint-ready; this allocator conflict requires root scope review
 before any further implementation edit. No broad gates, benchmarks, or Wasm checks ran in this
 attempt.
+
+## Adopted attempt-1 discovery amendment: immutable configuration preparation
+
+Astra xhigh source review and root approve a two-phase API within the existing allowed paths. This supersedes the original single-call preparation API and its claim that preparation itself allocates nothing. The compiling failed-gate checkpoint `beab7326` remains evidence; this is an implementation discovery correction before attempt 1's adversarial verdict, not a new attempt or a weakened query gate.
+
+Add `EqResponseConfiguration::prepare(PrepareEffectRequest) -> Result<Self, EqResponseError>`. It calls the existing complete `expected_prepared_metadata` validator and prepares owner-local coefficient words off render. It privately owns sample rate, bypass, enable flags, and eight rounded coefficient sets in fixed-size storage, borrowing no source parameter slice and exposing no mutation. Preparation may allocate transiently through existing descriptor validation; the observed 15 allocations are descriptive evidence, not a pinned count. No effect instance is allocated or processed.
+
+Change `EqResponseRequest.configuration` to `&EqResponseConfiguration`. `query_response_into` validates grid, shapes and budgets before writes and evaluates those immutable words with zero allocations/frees, including its first invocation and refused query inputs. All configuration correlation, requested-versus-applied timing, floor/composition, bypass/enable, numerical and buffer guarantees remain. No effect-contract changes, duplicate validator, static/lazy cache or dependencies are authorized.
+
+Move invalid preparation/domain/channel/order/rate tests to the constructor. Prove it retains full existing request validation and the exact four-launch-rate guard. Prove mutation of the original caller parameter slice after construction cannot change responses. Measure query allocation immediately after preparation with no warm-up query; include refused grid/shape/budget calls. Remaining original oracle/PCM/state/portability and review gates are unchanged.
