@@ -122,3 +122,38 @@ Record which checks actually ran and their outcomes. Native render already uses 
 ## Checkpoints, review, and delivery
 
 Luna makes one coherent implementation pass, runs focused tests, reports exact changed paths and candid results, then pauses for root's local commit/push audit before further edits. Astra medium adversarially reviews against this body, especially rounded-word correctness, oracle independence, floor composition, identity/bypass semantics, validation, no mutable-render access, and absence of parent-completion overclaim. Root records one PASS/FAIL verdict per attempt, updates the local/GitHub decision record, and closes this child only after evidence is upstream and GitHub state is verified. Parent #763 remains open.
+
+## Attempt 1 implementation evidence — Luna
+
+Implementation paths changed in this attempt: `crates/parametric-eq/src/lib.rs`,
+`crates/parametric-eq/src/response.rs`, and `crates/parametric-eq/tests/response.rs`.
+
+The focused functional response suite passed with exit 0:
+
+```
+cargo test --locked -p parametric-eq --test response
+```
+
+Observed result: 4 passed, 0 failed. The suite covers production-query comparison against the
+independent realized-word oracle across all six section families and four launch rates, asymmetric
+cascade multiplication, disabled sections, total-only and optional section outputs, bypass identity,
+grid/shape/configuration refusal with unchanged sentinels, an opaque ID above 2^53 and `u64::MAX`,
+and prepared-effect state immutability. `cargo check --locked -p parametric-eq` also passed with exit
+0 after implementation debugging. The terminal evidence summaries are preserved outside the
+repository at `/tmp/miso-engine-763-response-functional.log` and
+`/tmp/miso-engine-763-response-allocation.log`.
+
+The required allocation gate failed with exit 101:
+
+```
+cargo test --locked -p parametric-eq --test response response_query_allocates_nothing_after_caller_setup -- --exact --nocapture
+```
+
+After a warm-up query, the measured call reported 15 allocations, 15 frees, and 1,752 requested
+bytes. The allocations originate in the required `expected_prepared_metadata` path, whose shared
+`validate_descriptor` implementation constructs `BTreeSet`/`BTreeMap` validation state on every
+call. This is a contract conflict: #764 requires validation through that function and also
+requires the query to allocate/free zero heap bytes, while forbidding a static cache. The focused
+functional implementation is checkpoint-ready; this allocator conflict requires root scope review
+before any further implementation edit. No broad gates, benchmarks, or Wasm checks ran in this
+attempt.

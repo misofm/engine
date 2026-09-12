@@ -57,6 +57,13 @@ use lane::kernels::{
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
+mod response;
+
+pub use response::{
+    EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest, EqResponseSummary,
+    query_response_into,
+};
+
 /// Fixed cascade length in V1.
 pub const EQ_SECTION_COUNT: usize = 4;
 
