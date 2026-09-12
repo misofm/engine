@@ -70,4 +70,16 @@ mod tests {
         };
         assert!(compile_session(&session, caps()).is_err());
     }
+
+    #[test]
+    #[ignore = "json-syntax 0.12.5 empty-object CodeMap defect; prepared patch tracked at https://github.com/misofm/engine/issues/391; rerun on dependency updates"]
+    fn json_syntax_empty_object_code_map_regression() {
+        use json_syntax::Parse as _;
+
+        let (_value, code_map) =
+            json_syntax::Value::parse_str(r#"{"a":{},"b":1}"#).expect("JSON parses");
+
+        assert_eq!(code_map[3].volume, 1);
+        assert_eq!((code_map[3].span.start(), code_map[3].span.end()), (5, 7));
+    }
 }
