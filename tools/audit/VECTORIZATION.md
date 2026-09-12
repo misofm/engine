@@ -12,9 +12,11 @@ The explicit registry is `vectorization-allowlist.tsv`:
 - every row forbids call instructions (`call`/`callq`) inside the named probe bodies, matched on
   the exact mnemonic token rather than as a substring, so a helper call emitted into a kernel body
   fails the report instead of passing silently.
-- probe ownership is based on the complete demangled header path (`audit::vectorization::probe_*`),
-  with only the Rust disambiguator suffix `::h` plus sixteen lowercase hexadecimal digits
-  accepted as an optional decoration. A similarly named or unrelated-path header is absent, and
+- probe ownership is based on the complete demangled path (`audit::vectorization::probe_*`) in an
+  actual disassembler header: a nonempty hexadecimal address token, whitespace, and the outer
+  `<symbol>:` envelope. Prose and instruction-annotation prefixes do not create or terminate
+  ownership. Only the Rust disambiguator suffix `::h` plus sixteen lowercase hexadecimal digits
+  is accepted as optional decoration. A similarly named or unrelated-path header is absent, and
   repeated exact headers are ambiguous; their bodies are kept separate and never combined.
 
 On the release artifact used for the #758 qualification, LLVM `llvm-objdump` 18.1.3 and GNU

@@ -89,6 +89,21 @@ printf '%s\n' \
 chmod +x "$near_name_objdump"
 expect_red near-name-impostor "$allowlist" "$near_name_objdump" "probe symbol is absent"
 
+invalid_header_objdump="$scratch_root/invalid-header-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''
+        /^[[:space:]]*[[:xdigit:]]+[[:space:]]+<audit::vectorization::probe_gain_simd8>:/ {
+            sub(/^[[:space:]]*[[:xdigit:]]+[[:space:]]+/, "Disassembly of section ")
+        }
+        { print }
+    '\''' \
+    >"$invalid_header_objdump"
+chmod +x "$invalid_header_objdump"
+expect_red invalid-symbol-header "$allowlist" "$invalid_header_objdump" "probe symbol is absent"
+
 split_objdump="$scratch_root/split-svf-objdump"
 printf '%s\n' \
     '#!/usr/bin/env bash' \

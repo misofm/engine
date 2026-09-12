@@ -244,12 +244,20 @@ fn symbol_bodies(disassembly: &str, symbols: &[&str]) -> BTreeMap<String, Vec<St
 
 /// Extract the complete symbol from the disassembler's `address <symbol>:` header envelope.
 /// Looking at the envelope first keeps a probe name in an operand or jump-target annotation from
-/// becoming an owning header. The first `<` is the envelope opener; demangled generic paths may
-/// contain additional angle brackets after it.
+/// becoming an owning header. The address must be a nonempty hexadecimal token followed by
+/// whitespace immediately before the outer `<`; demangled generic paths may contain additional
+/// angle brackets after that opener.
 fn symbol_header(line: &str) -> Option<&str> {
     let without_closer = line.strip_suffix(">:")?;
     let opener = without_closer.find('<')?;
-    if without_closer[..opener].trim().is_empty() {
+    let address_and_space = &without_closer[..opener];
+    let address =
+        address_and_space.trim_end_matches(|character: char| character.is_ascii_whitespace());
+    if address.len() == address_and_space.len()
+        || address.is_empty()
+        || address.bytes().any(|byte| byte.is_ascii_whitespace())
+        || !address.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return None;
     }
     let symbol = &without_closer[opener + 1..];
@@ -654,6 +662,7 @@ mod tests {
         for impostor in [
             format!("{PROBE_MODULE}::probe_gain_simd8_impostor"),
             format!("{PROBE_MODULE}::probe_gain_simd80"),
+            format!("impostor::{PROBE_MODULE}::probe_gain_simd8"),
             "unrelated::probe_gain_simd8".to_owned(),
         ] {
             let exact_header = format!("{PROBE_MODULE}::probe_gain_simd8");
@@ -667,6 +676,48 @@ mod tests {
                 "expected the exact gain probe to be absent for {impostor}, got {failures:?}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_prose_and_instruction_prefixes_do_not_own_probe_body() {
+        let exact_header = format!("{PROBE_MODULE}::probe_gain_simd8");
+        for prefix in [
+            "Disassembly of section",
+            "instruction annotation",
+            "0000:",
+            "call 0x1000",
+        ] {
+            let malformed = format!("{prefix} <{exact_header}>:\n  vector-op\n");
+            let disassembly = synthetic_bodies("vector-op").replace(
+                &format!("0000 <{exact_header}>:\n  vector-op\n"),
+                &malformed,
+            );
+            let failures = certify(&disassembly, &active_rules());
+            assert!(
+                failures.iter().any(|failure| {
+                    failure.contains("probe_gain_simd8")
+                        && failure.contains("probe symbol is absent from the artifact")
+                }),
+                "expected malformed header prefix {prefix:?} to leave the gain probe absent, got {failures:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_instruction_annotations_do_not_terminate_probe_body() {
+        let exact_header = format!("{PROBE_MODULE}::probe_gain_simd8");
+        let annotation = format!("  0000: e8 00 00 00 00 call 0x1000 <{exact_header}+0x10>\n");
+        let annotation_header_lookalike =
+            format!("  0000: e8 00 00 00 00 call 0x1000 <{exact_header}>:\n");
+        let original = format!("0000 <{exact_header}>:\n  vector-op\n");
+        let replacement = format!(
+            "0000 <{exact_header}>:\n{annotation}{annotation_header_lookalike}  vector-op\n"
+        );
+        let disassembly = synthetic_bodies("vector-op").replace(&original, &replacement);
+        assert!(
+            certify(&disassembly, &active_rules()).is_empty(),
+            "an ordinary instruction annotation must remain inside the owning body"
+        );
     }
 
     #[test]
@@ -697,16 +748,30 @@ mod tests {
 
     #[test]
     fn independently_valid_repeated_probe_bodies_are_ambiguous() {
+        let mut rules = active_rules();
+        let svf = rules
+            .iter_mut()
+            .find(|rule| rule.symbol == "probe_svf_simd8")
+            .expect("active rules include the SVF probe");
+        svf.required = vec![vec!["vmulps".to_owned()], vec!["vaddps".to_owned()]];
+
         let mut disassembly = synthetic_bodies("vector-op");
         let original = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n  vector-op\n");
-        let repeated = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n",)
-            + "  vmulps %ymm0, %ymm1, %ymm2 vaddps %ymm0, %ymm1, %ymm2\n"
-            + &format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n")
-            + "  vmulps %ymm0, %ymm1, %ymm2 vaddps %ymm0, %ymm1, %ymm2\n";
+        let valid_body = "  vmulps %ymm0, %ymm1, %ymm2\n  vaddps %ymm0, %ymm1, %ymm2\n";
+        let single = format!("0000 <{PROBE_MODULE}::probe_svf_simd8>:\n{valid_body}");
+        let single_disassembly = disassembly.replace(&original, &single);
+        assert!(
+            certify(&single_disassembly, &rules).is_empty(),
+            "one SVF body containing both required families must be valid"
+        );
+
+        let repeated = format!(
+            "0000 <{PROBE_MODULE}::probe_svf_simd8>:\n{valid_body}0000 <{PROBE_MODULE}::probe_svf_simd8>:\n{valid_body}"
+        );
         assert!(disassembly.contains(&original));
         disassembly = disassembly.replace(&original, &repeated);
 
-        let failures = certify(&disassembly, &active_rules());
+        let failures = certify(&disassembly, &rules);
         assert!(
             failures
                 .iter()
@@ -725,9 +790,15 @@ mod tests {
     fn exact_probe_path_and_body_boundaries_are_preserved() {
         let gain_header = format!("0000 <{PROBE_MODULE}::probe_gain_simd8>:");
         let unrelated_header = "0010 <unrelated::probe_gain_simd8>:\n";
+        let unsupported_header = format!("0020 <{PROBE_MODULE}::probe_gain_simd8::unsupported>:\n");
         let disassembly = synthetic_bodies("vector-op").replace(
             &gain_header,
-            &(gain_header.clone() + "\n  vector-op\n" + unrelated_header + "  scalar-op\n"),
+            &(gain_header.clone()
+                + "\n  vector-op\n"
+                + unrelated_header
+                + "  scalar-op\n"
+                + &unsupported_header
+                + "  scalar-op\n"),
         );
         let failures = certify(&disassembly, &active_rules());
         assert!(
