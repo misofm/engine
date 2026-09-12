@@ -91,3 +91,11 @@ Follow-up to #387 (option 3, which that issue asked for **in addition to** the p
 | Class | N/A (control plane) |
 
 Not scheduled before launch except item 1 (the upstream PR costs nothing in-tree).
+
+## Attempt 1 implementation checkpoint
+
+Luna max completed the bounded engine sentinel and upstream patch, then paused. Upstream local commit `64446eeb74b715dc49c6cbb78682404d8705dc18` on base `d77cc66527968b1fa36ceed2c0d050da9a14608e` adds the one missing end_fragment call and three CodeMap regression cases. Baseline focused tests failed on the intended zero volume/empty spans; corrected focused, full default and no-default-feature tests pass. Cargo check and Clippy exit successfully with pre-existing number.rs warnings. Whole-repository fmt check reports unrelated baseline differences; the two touched files pass direct rustfmt. No unrelated formatting or dependency changes were made.
+
+Engine explicit ignored sentinel runs exactly one test and fails at volume 0 versus 1 (exit 101), proving the current registry pin remains defective. Normal locked session tests and package formatting pass with the sentinel ignored. Production guard, dependency manifests/lock and existing grammar tests are unchanged. Logs are `/tmp/issue391-attempt1-*`; prepared diff SHA-256 is `8c00065ac479c8d85fc49a03c3b6cdca564f933a6a7701d8b84c3ab5225c4536`.
+
+No upstream PR has been submitted. Upstream contribution rules require human submission; root will preserve a reviewed patch and PR text. The decision is explicitly no git patch, no dependency bump and no guard removal. Astra medium verification is pending. #391 remains open until its upstream submission deliverable exists, even if the engine sentinel ships.
