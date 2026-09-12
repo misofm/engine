@@ -52,6 +52,79 @@ expect_red() {
     fi
 }
 
+expect_green() {
+    local name="$1"
+    local disassembler="${2:-$objdump}"
+    local output="$scratch_root/$name.json"
+    if ! "$binary" vectorization --artifact "$binary" --allowlist "$allowlist" \
+        --objdump "$disassembler" >"$output" 2>&1; then
+        printf 'native vectorization green control unexpectedly failed: %s\n' "$name" >&2
+        sed -n '1,20p' "$output" >&2
+        exit 1
+    fi
+    rg -q '"status":"pass"' "$output" || {
+        printf 'native vectorization green control produced no pass report: %s\n' "$name" >&2
+        sed -n '1,20p' "$output" >&2
+        exit 1
+    }
+}
+
+identity_objdump="$scratch_root/identity-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@"' \
+    >"$identity_objdump"
+chmod +x "$identity_objdump"
+expect_green unmodified-wrapper "$identity_objdump"
+
+near_name_objdump="$scratch_root/near-name-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''{ if ($0 ~ /<audit::vectorization::probe_gain_simd8>:/) sub(/probe_gain_simd8>:/, "probe_gain_simd8_impostor>:"); print }'\''' \
+    >"$near_name_objdump"
+chmod +x "$near_name_objdump"
+expect_red near-name-impostor "$allowlist" "$near_name_objdump" "probe symbol is absent"
+
+invalid_header_objdump="$scratch_root/invalid-header-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''
+        /^[[:space:]]*[[:xdigit:]]+[[:space:]]+<audit::vectorization::probe_gain_simd8>:/ {
+            sub(/^[[:space:]]*[[:xdigit:]]+[[:space:]]+/, "Disassembly of section ")
+        }
+        { print }
+    '\''' \
+    >"$invalid_header_objdump"
+chmod +x "$invalid_header_objdump"
+expect_red invalid-symbol-header "$allowlist" "$invalid_header_objdump" "probe symbol is absent"
+
+split_objdump="$scratch_root/split-svf-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''
+        /<audit::vectorization::probe_svf_simd8>:/ {
+            print
+            print "  0: vmulps %ymm0, %ymm1, %ymm2"
+            print
+            print "  0: vaddps %ymm0, %ymm1, %ymm2"
+            in_svf = 1
+            next
+        }
+        in_svf && $0 ~ /^[[:space:]]*[[:xdigit:]]+[[:space:]]+<.*>:/ { in_svf = 0 }
+        !in_svf { print }
+    '\'' ' \
+    >"$split_objdump"
+chmod +x "$split_objdump"
+expect_red split-svf-body "$allowlist" "$split_objdump" "ambiguous disassembly bodies"
+
 missing_family="$scratch_root/missing-family.tsv"
 sed 's/vmulps,%ymm/definitely_missing_vector_opcode,%ymm/' "$allowlist" >"$missing_family"
 expect_red missing-vector-family "$missing_family"
