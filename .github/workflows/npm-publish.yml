@@ -220,6 +220,8 @@ jobs:
 
       - name: Re-smoke and checksum the exact prior-qualified archive
         if: inputs.mode != 'qualify'
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -230,7 +232,9 @@ jobs:
           mkdir -p "$unpack"
           tar -xzf "$archive" -C "$unpack"
           node sdk/test/package-tarball-smoke.mjs "$unpack/package"
-          npm publish --dry-run --ignore-scripts "$archive"
+          if [[ "$MODE" == publish ]]; then
+            npm publish --dry-run --ignore-scripts "$archive"
+          fi
           node - target/npm-publish/evidence/tarball-evidence.json "$archive" <<'NODE'
           const fs = require("node:fs");
           const crypto = require("node:crypto");
