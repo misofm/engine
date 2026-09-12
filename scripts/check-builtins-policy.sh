@@ -23,7 +23,7 @@ unsafe_matches="$(gate_scan_collect 'builtins unsafe scan' 'unsafe' '' "${paths[
 unsafe_matches="$(gate_filter_exclude 'builtins unsafe allowlist' '^crates/builtins-compiler/tests/allocation_tracker.rs:' "$unsafe_matches")" || exit 1
 [[ -z "$unsafe_matches" ]] || { printf '%s\n' "$unsafe_matches" >&2; exit 1; }
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12), which scans the
-# whole {crates,hosts,tools,sidecars} tree rather than one of five copies of the same check.
+# whole {crates,hosts,tools} tree rather than one of five copies of the same check.
 gate_scan_required 'workspace builtins declaration is missing' 'builtins' '' Cargo.toml crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml >/dev/null
 gate_scan_required 'builtins compiler declarations are missing' 'builtins' '' crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml >/dev/null
 

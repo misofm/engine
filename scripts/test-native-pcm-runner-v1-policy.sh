@@ -10,7 +10,7 @@ copy_case() {
     case_root="$temp/$1"
     mkdir -p "$case_root/tools" "$case_root/fixtures/native-pcm-runner" \
         "$case_root/fixtures/session/v1" "$case_root/scripts" "$case_root/crates/fake/src" \
-        "$case_root/hosts" "$case_root/sidecars"
+        "$case_root/hosts"
     cp -R "$root/tools/native-pcm-runner" "$case_root/tools/"
     cp -R "$root/fixtures/native-pcm-runner/v1" "$case_root/fixtures/native-pcm-runner/"
     cp "$root/fixtures/session/v1/parametric-eq-nine-track.json" "$case_root/fixtures/session/v1/"
@@ -56,7 +56,7 @@ if "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" v1 >/dev/null 2>
 fi
 
 # Required roots are a checked population: each may be empty, but a missing root is an error.
-for required_root in crates hosts sidecars; do
+for required_root in crates hosts; do
     copy_case "missing-$required_root"
     rm -rf -- "$case_root/$required_root"
     output="$($case_root/scripts/check-native-pcm-runner.sh "$case_root" v1 2>&1)" && status=0 || status=$?

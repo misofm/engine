@@ -137,3 +137,9 @@ It fails **loudly** under `set -e`, so it is a trip-wire rather than a silent fa
 - #306 — gate scripts reading `rg` exit 2 as "no violation". Same family: gates that pass because they looked at nothing.
 - Two smaller residuals from the same review, not worth their own issues: eleven of the twelve gates extended in #305 degrade *silently* on a missing scan root rather than loudly like `check-workspace-policy.sh`'s `scan_forbidden` does; and `check-flac-decoder.sh:16` is the one place #305 added a `sidecars` root to a bare `if rg …; then`, verified unreachable in practice because the gate dies earlier at rc=101 when the workspace member is absent.
 
+
+## Attempt 1 implementation evidence
+
+Luna max completed and paused the approved scripts/config/fixture retirement. All scoped production checks, mutation suites, unfused self-test and normal stem-store hermetic check passed. The initial lane missing-hosts fixture used rmdir on a populated directory and failed before its intended assertion; changing that fixture to remove its populated host root made the suite pass. Both results are retained in `/tmp/issue307-attempt1.nu32TO` (initial `test-lane.status=1`, correction `test-lane-correction.status=0`; all other command status files are zero). This is one coherent implementation attempt, not an adversarial retry.
+
+Root independently checked changed shell syntax, Node syntax, Python AST, whitespace and physical directory absence before checkpoint. The implementer's initial tracked-root inventory used the unstaged index and therefore still listed the pending README deletion; the committed-tree inventory is checked at checkpoint. No Rust, Cargo, dependency, workflow, SDK or artifact file changed. Astra medium adversarial verdict is pending; no delivery PASS or closure is claimed.

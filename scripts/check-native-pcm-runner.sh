@@ -30,8 +30,8 @@ check_native_pcm_runner_v1() {
     if rg -v 'miso_engine_v1_compile_session' "$scan_tmp/bypass-source" >"$scan_tmp/bypass" 2>"$scan_tmp/bypass.err"; then bypass_filter_status=0; else bypass_filter_status=$?; fi
     [[ "$bypass_filter_status" == 0 || "$bypass_filter_status" == 1 ]] || fail "Rust product bypass exclusion failed (rg status $bypass_filter_status): $(<"$scan_tmp/bypass.err")"
     [[ ! -s "$scan_tmp/bypass" ]] || { cat "$scan_tmp/bypass" >&2; fail 'Rust product bypass is reachable from the tool'; }
-    for required_root in crates hosts tools sidecars; do [[ -d "$required_root" ]] || fail "native runner reachability root is missing: $required_root"; done
-    if rg -n 'native-pcm-runner|native_pcm_runner' crates hosts tools sidecars --glob Cargo.toml --glob '*.rs' >"$scan_tmp/reachable" 2>"$scan_tmp/reachable.err"; then source_status=0; else source_status=$?; fi
+    for required_root in crates hosts tools; do [[ -d "$required_root" ]] || fail "native runner reachability root is missing: $required_root"; done
+    if rg -n 'native-pcm-runner|native_pcm_runner' crates hosts tools --glob Cargo.toml --glob '*.rs' >"$scan_tmp/reachable" 2>"$scan_tmp/reachable.err"; then source_status=0; else source_status=$?; fi
     [[ "$source_status" == 0 || "$source_status" == 1 ]] || fail "native runner reachability scan failed (rg status $source_status): $(<"$scan_tmp/reachable.err")"
     if rg -v '^tools/native-pcm-runner/' "$scan_tmp/reachable" >"$scan_tmp/owned"; then own_status=0; else own_status=$?; fi
     [[ "$own_status" == 0 || "$own_status" == 1 ]] || fail "native runner ownership filter failed (rg status $own_status): $(<"$scan_tmp/owned")"

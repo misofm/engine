@@ -139,7 +139,7 @@ while IFS= read -r npm_lock; do
     esac
 done <"$sorted_npm_locks"
 
-checked_find cargo-manifests crates hosts tools sidecars -name Cargo.toml -type f
+checked_find cargo-manifests crates hosts tools -name Cargo.toml -type f
 [[ -s "$CHECKED_FIND_OUT" ]] || fail 'Cargo manifest discovery returned an empty workspace'
 capture cargo-manifests-sort sort "$CHECKED_FIND_OUT"
 (( CAPTURE_STATUS == 0 )) || execution_failure 'sort Cargo manifests' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
@@ -154,7 +154,7 @@ while IFS= read -r manifest; do
     required_search "package-license-$RANDOM" "$manifest must inherit the Apache-2.0 workspace license" -x 'license\.workspace = true' "$manifest"
 
     # The retired prefix has no root-specific exemption: package and directory names are the
-    # same short identity everywhere in the four package roots.
+    # same short identity everywhere in the three package roots.
     [[ "$package_name" != miso-engine-* && "$package_name" != miso_engine_* ]] || fail "$manifest package name must not carry the retired miso-engine- prefix"
     [[ "$package_directory" == "$package_name" ]] || fail "$manifest directory ($package_directory) must equal its package name ($package_name)"
     # These names shadow Rust sysroot/prelude crates through Cargo's --extern binding.
@@ -176,7 +176,7 @@ done <"$sorted_cargo_manifests"
 
 scan_forbidden "hardware ISA Cargo features are forbidden" \
     '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' Cargo.toml \
-    crates hosts tools sidecars
+    crates hosts tools
 
 # S8: every tracked (or freshly added, untracked-but-not-ignored) path in the tree, used below to
 # find every Cargo.toml regardless of location -- not the prior six hard-coded roots, which missed
@@ -273,21 +273,21 @@ scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfi
 
 scan_forbidden "compiled track-capacity identifiers are forbidden" \
     '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' '*.rs' \
-    crates hosts tools sidecars
+    crates hosts tools
 
 # #313 owner ruling: this is the first prelaunch engine identity. Internal names are unversioned,
 # and a boundary that genuinely needs a generation is V1. Build the expression in fragments so
 # this policy file does not contain the forbidden spellings it scans for.
 prelaunch_later_generation_pattern='(miso_engine_'v'2|MISO_ENGINE_'V'2|miso-engine-'v'2|ENGINE_'V'2|Engine 'V'2|boot[- ]'v'2|Boot 'v'2|schema-'v'2|@miso/engine-'v'2)'
 scan_forbidden "prelaunch live-product identities must not claim a later generation" \
-    "$prelaunch_later_generation_pattern" '*' crates hosts tools sidecars
+    "$prelaunch_later_generation_pattern" '*' crates hosts tools
 
 # Implementation class names are private even when their containing script is shipped. Only the
 # registered processor token is boundary identity; an internal JavaScript class is born
 # unversioned under #215's rule.
 versioned_worklet_implementation_pattern='class[[:space:]]+MisoEngine'V'[0-9]+AudioWorkletProcessor'
 scan_forbidden "AudioWorklet processor implementation classes must be unversioned" \
-    "$versioned_worklet_implementation_pattern" '*.js' crates hosts tools sidecars
+    "$versioned_worklet_implementation_pattern" '*.js' crates hosts tools
 
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime

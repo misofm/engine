@@ -42,7 +42,7 @@ if [[ -n "$publication_matches" ]]; then
   fail 'publication, I/O, threading, synchronization, or logging leaked into graph path'
 fi
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
-# {crates,hosts,tools,sidecars} tree, graph/graph-compiler included, rather than one of five
+# {crates,hosts,tools} tree, graph/graph-compiler included, rather than one of five
 # copies of the same regex over five different root lists.
 # Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (issue 100
 # tests the block-boundary hand-over inside `engine`), but nothing that ships may.

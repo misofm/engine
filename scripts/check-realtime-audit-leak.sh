@@ -3,10 +3,8 @@
 # thread-local depth guard consulted by the counting allocator) into `engine`. It exists
 # for the audit tools and for test builds only. This gate proves the feature cannot reach a
 # shippable artifact: the production dependency graph (dev edges excluded, every target) of every
-# crates/, hosts/ and sidecars/ package must resolve without it. tools/ packages are exempt --
-# enabling the instrumentation is their job, and they are never linked into an artifact. sidecars/
-# is scanned the same as crates/ and hosts/: a sidecar ships, so its production graph must resolve
-# without the feature too.
+# Every crates/ and hosts/ package must resolve without it. tools/ packages are exempt -- enabling
+# the instrumentation is their job, and they are never linked into an artifact.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,11 +20,11 @@ fail() {
 
 captured() { local path=$1; [[ -s "$path" ]] && printf '%s' "$(<"$path")" || printf '<empty>'; }
 
-for required_root in crates hosts sidecars; do
+for required_root in crates hosts; do
     [[ -d "$required_root" ]] || fail "missing required root: $required_root"
 done
 
-if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then
+if find crates hosts -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then
     find_status=0
 else
     find_status=$?

@@ -11,7 +11,7 @@ new_case() {
     case_root="$scratch/$1"
     mkdir -p "$case_root/scripts"
     cp -R "$root/tools" "$case_root/"
-    mkdir -p "$case_root/crates/fixture" "$case_root/hosts/fixture" "$case_root/sidecars/fixture"
+    mkdir -p "$case_root/crates/fixture" "$case_root/hosts/fixture"
     printf '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n' \
         >"$case_root/crates/fixture/Cargo.toml"
     printf '[package]\nname = "later-fixture"\nversion = "0.1.0"\nedition = "2021"\n' \
@@ -60,7 +60,7 @@ new_case shared-subject-missing-delegation
 sed -i '/HostToolchainFacts::gather()/d' "$case_root/tools/bench/src/conformance.rs"
 expect_failure shared-subject-missing-delegation
 
-for required_root in crates hosts sidecars; do
+for required_root in crates hosts; do
     new_case "missing-$required_root"
     rm -rf "$case_root/$required_root"
     output="$(check 2>&1)" && status=0 || status=$?
@@ -69,8 +69,8 @@ for required_root in crates hosts sidecars; do
 done
 
 new_case empty-manifest-population
-rm -rf "$case_root/crates" "$case_root/hosts" "$case_root/sidecars"
-mkdir -p "$case_root/crates" "$case_root/hosts" "$case_root/sidecars"
+rm -rf "$case_root/crates" "$case_root/hosts"
+mkdir -p "$case_root/crates" "$case_root/hosts"
 output="$(check 2>&1)" && status=0 || status=$?
 ((status != 0)) || { echo 'bench policy empty manifest population escaped' >&2; exit 1; }
 [[ "$output" == *'manifest discovery produced no packages'* ]] || { printf 'bench policy wrong empty-population diagnostic: %s\n' "$output" >&2; exit 1; }
