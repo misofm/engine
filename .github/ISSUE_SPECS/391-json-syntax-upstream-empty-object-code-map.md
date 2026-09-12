@@ -99,3 +99,11 @@ Luna max completed the bounded engine sentinel and upstream patch, then paused. 
 Engine explicit ignored sentinel runs exactly one test and fails at volume 0 versus 1 (exit 101), proving the current registry pin remains defective. Normal locked session tests and package formatting pass with the sentinel ignored. Production guard, dependency manifests/lock and existing grammar tests are unchanged. Logs are `/tmp/issue391-attempt1-*`; prepared diff SHA-256 is `8c00065ac479c8d85fc49a03c3b6cdca564f933a6a7701d8b84c3ab5225c4536`.
 
 No upstream PR has been submitted. Upstream contribution rules require human submission; root will preserve a reviewed patch and PR text. The decision is explicitly no git patch, no dependency bump and no guard removal. Astra medium verification is pending. #391 remains open until its upstream submission deliverable exists, even if the engine sentinel ships.
+
+## Attempt 1 adversarial verdict: implementation PASS
+
+Astra medium PASS for engine `e01dd6167dcf2e1cf354a9194d65ac8ab9c80ebd` and upstream `64446eeb74b715dc49c6cbb78682404d8705dc18`. Independent upstream red reproduction failed exactly the three new cases; corrected focused cases passed. Independent engine sentinel ran exactly one test and failed on the intended 0-versus-1 assertion. The earlier implementation log's private-field compile failure is not counted as red evidence; its corrected assertion run is. Baseline exports independently confirmed identical pre-existing upstream check/Clippy warnings and whole-tree formatting differences; touched files pass formatting. Production engine and dependency bytes are unchanged.
+
+Integration confirmation: reviewed engine content is unchanged at `2d3345a71c3ba4286a64294a2b291e78c33c7527`, which incorporates main `96415c2f`; only independent #755 files were added. This remains the same successful attempt.
+
+The reviewed human submission packet is preserved at `/home/bl/misofm/engine-upstream-contributions/issue391/`, including standalone patch, accurate PR body, verdict, baseline/final logs and validation lockfile (not part of the patch). Upstream main and issue/PR history were rechecked after review: no duplicate fix, main still d77cc665. No upstream writes or submission have occurred. Engine delivery is partial completion only; #391 stays OPEN pending human submission required by upstream contribution rules.
