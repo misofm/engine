@@ -15,8 +15,7 @@ create_valid_fixture() {
         "$root/crates/engine/src" \
         "$root/crates/compressor/src" \
         "$root/hosts/host-web/src" \
-        "$root/tools/audit/src" \
-        "$root/sidecars"
+        "$root/tools/audit/src"
 
     printf '%s\n' \
         'pub use wide::f32x8 as Simd8;' \
@@ -168,6 +167,8 @@ expect_loader_failure duplicate-or-wrong-order 'wrong or duplicate id' \
     'sed -i "0,/id = '\''fusion'\''/s//id = '\''relaxed'\''/" "$policy"'
 expect_loader_failure empty-root 'invalid roots' \
     'sed -i "0,/^roots =/s|^roots =.*|roots = [\"\"]|" "$policy"'
+expect_loader_failure wrong-root-count 'invalid roots' \
+    'sed -i "0,/^roots =/s|^roots =.*|roots = ['"'"'crates'"'"', '"'"'hosts'"'"', '"'"'tools'"'"', '"'"'extra'"'"']|" "$policy"'
 expect_loader_failure invalid-regex 'invalid exclude_regex' \
     'sed -i "0,/^exclude_regex =/s|^exclude_regex =.*|exclude_regex = '\''['\''|" "$policy"'
 
@@ -269,18 +270,17 @@ sed -i '/LANE-OP-OK(mul_add)/a\        // one\n        // two\n        // three'
 bash "$policy_script" "$four_line_root" >/dev/null
 expect_failure marker-five-lines-before-call \
     'sed -i "/LANE-OP-OK(mul_add)/a\\        // one\\n        // two\\n        // three\\n        // four" "$root/crates/lane/src/scalar.rs"'
-expect_failure missing-required-sidecars 'rmdir "$root/sidecars"'
+expect_failure missing-required-hosts 'rm -rf "$root/hosts"'
 expect_failure empty-required-lane-source 'rm -f "$root/crates/lane/src/"*.rs'
 expect_failure empty-workspace-name-aggregate \
     'rm -f "$root/crates/lane/Cargo.toml" "$root/crates/engine/Cargo.toml"'
 
 expect_failure fusion-outside-lane \
     'printf "%s\n" "let y = a.mul_add(b, c);" >>"$root/crates/compressor/src/lib.rs"'
-# sidecars/ is scanned the same as crates/, hosts/ and tools/ (scripts/check-lane-policy.sh:52) --
-# fused arithmetic there is the
-# same D3 violation as anywhere else.
-expect_failure fusion-in-a-sidecar \
-    'mkdir -p "$root/sidecars/probe-decoder/src"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/sidecars/probe-decoder/src/lib.rs"'
+# hosts/ is scanned the same as crates/ and tools/ (scripts/check-lane-policy.sh:52) -- fused
+# arithmetic there is the same D3 violation as anywhere else.
+expect_failure fusion-in-a-host \
+    'mkdir -p "$root/hosts/probe-decoder/src"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/hosts/probe-decoder/src/lib.rs"'
 expect_failure wide-outside-lane \
     'printf "%s\n" "use wide::f32x4;" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure arch-outside-softfma \
@@ -371,7 +371,7 @@ expect_tool_error() {
 set -u
 joined="$*"; hit=0
 case "$INJECT_MODE:$TOOL_NAME" in
- fusion-scan:rg) [[ "$joined" == *mul_add*crates*hosts*tools*sidecars* ]] && hit=1 ;;
+ fusion-scan:rg) [[ "$joined" == *mul_add*crates*hosts*tools* ]] && hit=1 ;;
  fusion-filter:rg) [[ "$1" == -v && "$joined" == *crates/lane/tests* ]] && hit=1 ;;
  relaxed-scan:rg) [[ "$joined" == *f32x4_relaxed* ]] && hit=1 ;;
  architecture-scan:rg) [[ "$joined" == *'arch::'*crates* ]] && hit=1 ;;
@@ -381,7 +381,7 @@ case "$INJECT_MODE:$TOOL_NAME" in
  pin:rg) [[ "$joined" == *'-nF wide = {'* ]] && hit=1 ;;
  membership:rg) [[ "$joined" == *'-nx -- engine'* ]] && hit=1 ;;
  lane-find:find) [[ "$joined" == 'crates/lane/src '* ]] && hit=1 ;;
- manifest-find:find) [[ "$joined" == 'crates hosts tools sidecars '* ]] && hit=1 ;;
+ manifest-find:find) [[ "$joined" == 'crates hosts tools '* ]] && hit=1 ;;
  lane-sort:sort) hit=1 ;;
  marker-awk:awk) [[ "$joined" == *fifth*scalar.rs* ]] && hit=1 ;;
  version-wide:awk) [[ "$joined" == *package=wide* && "$joined" != *dependencies* ]] && hit=1 ;;

@@ -12,7 +12,7 @@ expected_contract=$'engine\nlane\nmath'
 expected_compiler=$'compressor\ndelay\neffect-contract\neffect-package\nengine\ngate-expander\nlane\nmultiband-compressor\nparametric-eq\nsession\nsoft-clip\ntransient-shaper\ntrue-peak-limiter'
 [[ "$(dependencies crates/effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 gate_scan_forbidden 'core/session reverse dependency' 'effect-(contract|compiler)' '' crates/{engine,session}/Cargo.toml || exit 1
-if package_references="$(gate_scan_collect 'effect-package reference scan' 'effect_package|effect-package' '' crates hosts tools fuzz sidecars)"; then :; else exit 1; fi
+if package_references="$(gate_scan_collect 'effect-package reference scan' 'effect_package|effect-package' '' crates hosts tools fuzz)"; then :; else exit 1; fi
 for filter in '^crates/effect-package/' '^crates/effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' '/tests/MUTATIONS[.]md:' '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' '^tools/bench/(Cargo.toml|src/effect_interchange[.]rs):'; do
     package_references="$(gate_filter_exclude 'effect-package allowlist' "$filter" "$package_references")" || exit 1
 done

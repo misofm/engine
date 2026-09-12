@@ -19,7 +19,7 @@ fi
 # string -- a hardcoded list here would just be a new instance of the same staleness hazard.
 workspace_crate_dir() {
     local crate="$1" candidate matches=''
-    for candidate in crates hosts tools sidecars; do
+    for candidate in crates hosts tools; do
         [[ -d "$candidate/$crate" ]] && matches+="$candidate/$crate"$'\n'
     done
     matches="${matches%$'\n'}"
@@ -29,7 +29,7 @@ workspace_crate_dir() {
 
 workspace_lib_names() {
     local manifests manifest found rc names=''
-    manifests="$(gate_find_collect 'workspace library manifest discovery' crates hosts tools sidecars -name Cargo.toml -type f)" || return $?
+    manifests="$(gate_find_collect 'workspace library manifest discovery' crates hosts tools -name Cargo.toml -type f)" || return $?
     [[ -n "$manifests" ]] || { gate_fail 'workspace library manifest discovery returned no manifests'; return 1; }
     manifests="$(gate_sort_lines 'workspace library manifest discovery' "$manifests")" || return $?
     while IFS= read -r manifest; do
@@ -167,13 +167,13 @@ for production in "${production_crates[@]}"; do
     fi
 done
 # Captured rather than gated directly on rg's own exit code: `rg` exits 2 (not just the usual
-# 0/1) when a search root does not exist, e.g. a hermetic fixture with no sidecars/, and a bare
-# `if rg ...; then` reads that the same as "no match" instead of "the scan could not run".
-[[ -d hosts && -d sidecars ]] || { printf 'conformance boundary failure: required hosts/sidecars roots missing\n' >&2; exit 1; }
-harness_matches="$(gate_scan_collect 'hosts/sidecars harness scan' '\b(dsp-reference|dsp_reference|conformance)\b' '' hosts sidecars)" || exit $?
+# 0/1) when a search root does not exist, and a bare `if rg ...; then` reads that the same as
+# "no match" instead of "the scan could not run".
+[[ -d hosts ]] || { printf 'conformance boundary failure: required hosts root missing\n' >&2; exit 1; }
+harness_matches="$(gate_scan_collect 'hosts harness scan' '\b(dsp-reference|dsp_reference|conformance)\b' '' hosts)" || exit $?
 if [[ -n "$harness_matches" ]]; then
     printf '%s\n' "$harness_matches" >&2
-    printf 'conformance boundary failure: hosts/sidecars must not depend on harness crates\n' >&2
+    printf 'conformance boundary failure: hosts must not depend on harness crates\n' >&2
     exit 1
 fi
 

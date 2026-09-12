@@ -52,7 +52,7 @@ unfused_seal_self_test() {
         local tree
         tree="$(mktemp -d "$scratch_root/fixture-XXXXXX")"
 
-        mkdir -p "$tree/crates/lane/src" "$tree/tools/audit/src" "$tree/hosts" "$tree/sidecars"
+        mkdir -p "$tree/crates/lane/src" "$tree/tools/audit/src" "$tree/hosts"
 
         cat >"$tree/crates/lane/src/wide_impl.rs" <<'EOF'
     //! One `Lane` body for both `wide` widths. `mul_add` is never forwarded.
@@ -274,7 +274,7 @@ sed -i '0,/UNFUSED-SEAL-EXEMPT/{/UNFUSED-SEAL-EXEMPT/{N;s|.*\n.*|    let d1 = a.
 expect_success marker-on-call "$tree"
 
 tree=$(create_fixture)
-rm -rf "$tree/sidecars"
+rm -rf "$tree/hosts"
 expect_failure required-root-missing "$tree"
 
 tree=$(create_fixture)
@@ -283,7 +283,7 @@ expect_failure required-retired-source-missing "$tree"
 
 # Bounded semantic controls for the frozen grammar and population rules.
 tree=$(create_fixture)
-mkdir -p "$tree/sidecars/empty"
+mkdir -p "$tree/hosts/empty"
 cat >>"$tree/hosts/prose.rs" <<'EOF'
 //! `mul_add(` and `_mm256_fmadd_ps(` are vocabulary in prose only.
 EOF
@@ -630,7 +630,7 @@ if [[ "$rc" != 0 ]]; then
     fail "exemption registry sort failed (sort status $rc)"
 fi
 
-if candidates_raw="$(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs')"; then rc=0; else rc=$?; fi
+if candidates_raw="$(rg -l -e "$call_pattern" crates hosts tools --glob '*.rs')"; then rc=0; else rc=$?; fi
 case "$rc" in
     0|1) ;;
     *) printf '%s\n' "$candidates_raw" >&2; fail "candidate discovery errored (rg status $rc)" ;;

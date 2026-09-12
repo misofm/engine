@@ -149,7 +149,7 @@ reported zeros would leave every re-engage assertion in the tree passing vacuous
 ## Issue #371 — the root-agnostic marked-region scan (RT-16 / IO-14)
 
 The gate's discovery set changed from one directory (`crates/engine/src/realtime`) to every file
-carrying a `REALTIME_POLICY_BEGIN` marker under `crates hosts tools sidecars`, and the
+carrying a `REALTIME_POLICY_BEGIN` marker under `crates hosts tools`, and the
 `>= 4` region floor became a floor on both the marked-region count (42) and the marked-file count
 (12). Rows 371-1 and 371-2 were applied to the working tree itself, the gate run, and the mutation
 reverted in the same session; rows 371-3 to 371-6 live in `scripts/test-realtime-policy.sh` (each

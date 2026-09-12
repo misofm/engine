@@ -57,7 +57,7 @@ expect_failure_with_path() {
 
 new_fixture() {
     copy="$scratch_root/$1"
-    mkdir -p "$copy/scripts" "$copy/crates/fixture/src" "$copy/hosts/later/src" "$copy/sidecars"
+    mkdir -p "$copy/scripts" "$copy/crates/fixture/src" "$copy/hosts/later/src"
     cp "$root/scripts/check-realtime-audit-leak.sh" "$copy/scripts/"
     printf '[workspace]\nmembers = ["crates/fixture", "hosts/later"]\nresolver = "2"\n' >"$copy/Cargo.toml"
     printf '# frozen offline fixture\nversion = 3\n\n[[package]]\nname = "fixture"\nversion = "0.1.0"\n\n[[package]]\nname = "later-fixture"\nversion = "0.1.0"\n' >"$copy/Cargo.lock"
@@ -89,7 +89,7 @@ if ! run_gate >/dev/null 2>&1; then
 fi
 
 # Required roots and the aggregate discovery population are explicit production inputs.
-for required_root in crates hosts sidecars; do
+for required_root in crates hosts; do
     new_fixture "missing-$required_root"
     rm -rf "$copy/$required_root"
     output="$(run_gate 2>&1)" && status=0 || status=$?
