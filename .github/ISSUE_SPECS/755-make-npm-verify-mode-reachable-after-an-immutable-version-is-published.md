@@ -80,3 +80,9 @@ Deliver the smallest workflow correction that makes future verify-only recovery 
 ## Limits
 
 One implementation attempt and one Sol verdict. If a bounded hermetic mode discriminator cannot be added without creating a release framework, stop and rebrief rather than expanding scope. No SDK version bump, artifact rebuild, DSP/app/adapter change, npm publication, tag change, or reinterpretation of issue #753 evidence belongs here.
+
+## Attempt 1 implementation evidence
+
+Luna max completed one coherent attempt and paused. The release workflow changes only the shared step MODE environment and publish-only dry-run guard; qualification adds one invocation of the focused hermetic test. The test executes extracted shell/Node validators with controlled npm/package boundaries and covers all three mode selections, publish counts/order, both required red mutations, malformed workflow shapes, checksum failures, existing/ambiguous publication refusal, no retry after ambiguous publication, bounded registry mismatch, and provenance negatives. No public registry operation, SDK build or release dispatch was performed.
+
+Focused test, trust-list test, routing checker/mutations, shell syntax, YAML syntax and strict workflow invariant/path checks passed. Logs are `/tmp/issue755-attempt1-*-final.log`; the focused log retains an earlier unsupported single-line run-block fixture failure before its corrected successful runs. The pinned release workflow and qualify-only pack block were checked unchanged apart from the authorized guard. Astra medium's sole verdict remains pending.
