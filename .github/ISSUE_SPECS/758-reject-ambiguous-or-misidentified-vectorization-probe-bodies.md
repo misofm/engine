@@ -82,3 +82,7 @@ Final review is `/tmp/issue758-astra-verdict-attempt2.md`, independent output `/
 ## Delivery CI block and separately scoped successor #762
 
 PR #761 qualification run 34701531963 failed Clippy at vectorization.rs:233 because its nested if-let blocks must collapse into a let chain. Captured log: `/tmp/issue758-ci-clippy-failure.log`. The prior semantic PASS remains recorded, but delivery is blocked. #758's two-attempt limit is not extended: #762 owns only the syntax-equivalent lint correction, actual full-workspace Clippy, existing focused tests and one new Astra verdict. No lint suppression or gate weakening is permitted. Prior disassembler evidence remains attached to its named attempt-2 artifact, not relabeled as a new-head run. Both issues remain open until updated-head CI and delivery pass.
+
+## CI successor #762 verified
+
+The single syntax-equivalent let-chain correction is upstream at `490772b6b80f01cbf2a05f815132105c87a0b250`. Astra medium's sole #762 verdict is PASS; the actual full-workspace Clippy command and all 14 focused tests pass. #758's semantic behavior and its prior artifact evidence are unchanged. PR #761 must still pass qualification at its final updated head before either issue closes.
