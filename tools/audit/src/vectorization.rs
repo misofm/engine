@@ -230,13 +230,13 @@ fn symbol_bodies(disassembly: &str, symbols: &[&str]) -> BTreeMap<String, Vec<St
                 });
             continue;
         }
-        if let Some((symbol, body_index)) = &active {
-            if let Some(symbol_bodies) = bodies.get_mut(symbol) {
-                let body = &mut symbol_bodies[*body_index];
-                let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-                body.push_str(&normalized);
-                body.push('\n');
-            }
+        if let Some((symbol, body_index)) = &active
+            && let Some(symbol_bodies) = bodies.get_mut(symbol)
+        {
+            let body = &mut symbol_bodies[*body_index];
+            let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+            body.push_str(&normalized);
+            body.push('\n');
         }
     }
     bodies
