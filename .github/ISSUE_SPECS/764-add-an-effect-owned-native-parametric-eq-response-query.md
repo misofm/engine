@@ -1,0 +1,124 @@
+# Add an effect-owned native parametric EQ response query
+
+Parent: #763, Engine-owned analysis. Baseline: `77cbde0a3dc90e5ffb385e0bf39ac87a8f2e218c`.
+
+## Product outcome and smallest closable slice
+
+A native Rust caller can ask the parametric-EQ effect for the stationary total and optional individual-section magnitude responses of an explicitly supplied valid configuration, independently for L/R, into caller-owned buffers. The effect computes the response from its actual rounded production coefficient words. The caller no longer implements the EQ transfer function.
+
+This child is an independently useful native library capability. It does not close #763. Input HPF/LPF, engine composition, generated discovery, browser/headless SDK APIs, applied-target snapshots, subscriptions, spectrum, transports, and joining are required subsequent children of #763. The first complete browser/headless response preview remains a required milestone; do not describe this native child as that milestone.
+
+Scope approval: Astra (`gpt-6-astra`, xhigh), source inspection on 2026-09-12. User-directed workflow supersedes the default role names: Luna (`gpt-5.6-luna`, max) implements each coherent attempt; Astra (`gpt-6-astra`, medium) supplies its one adversarial verdict. Maximum five attempts; no hidden retries. Root checkpoints and delivers.
+
+## Current facts and owned paths
+
+- `crates/parametric-eq/src/lib.rs`: `design_svf` designs the actual six `f32` words; `BandTarget::words` implements disabled-section identity; `band_targets` reads the descriptor-ordered validated parameter list. `expected_prepared_metadata` validates the same `PrepareEffectRequest` used by the effect factory.
+- `crates/lane/src/kernels.rs::svf_step` and its output mix define the realized recurrence. The response evaluator must not alter them.
+- `crates/parametric-eq/tests/analytic.rs` already compares the rounded realization against independent `dsp-reference` state-space/cookbook oracles, with 0.005 dB tolerance above -120 dB. Reuse this corpus and test-only oracle, without promoting oracle implementation into production.
+- `crates/parametric-eq/tests/support/mod.rs` already supplies valid requests, asymmetric parameter edits, snapshots, impulses, and DFT helpers.
+
+Allowed implementation paths: new `crates/parametric-eq/src/response.rs`, its module/export declarations in `crates/parametric-eq/src/lib.rs`, new `crates/parametric-eq/tests/response.rs`, proportionate additions to existing test support if necessary, and this issue's spec/evidence. A short Rust API example may be placed in `crates/parametric-eq/examples/response.rs` if useful. Do not change audible DSP, generic effect descriptors, render traits, state layouts, frozen ABI/export sets, or dependencies. No new crate is needed. Additional boundaries require root scope review before edits.
+
+## Frozen semantics and proposed public API
+
+Keep internal Rust names unversioned. Use the crate's existing `PrepareEffectRequest` instead of inventing another parameter schema or accepted-domain table. The new function accepts an ordinary valid preparation request but does not allocate/instantiate/process a prepared effect. Its preparation resource fields retain the normal request validation semantics and are documented as such; a later host adapter can construct them from its admitted resources.
+
+Suggested API (equivalent spellings are allowed if the decisions below remain exact):
+
+```rust
+pub struct EqResponseRequest<'a> {
+    pub configuration_id: u64,
+    pub configuration: PrepareEffectRequest<'a>,
+    pub frequencies_hz: &'a [f32],
+    pub maximum_points: usize,
+}
+
+pub struct EqResponseOutput<'a> {
+    pub total_left_db: &'a mut [f32],
+    pub total_right_db: &'a mut [f32],
+    pub sections_left_db: Option<&'a mut [f32]>,
+    pub sections_right_db: Option<&'a mut [f32]>,
+}
+
+pub enum EqResponseMode { RequestedConfiguration }
+
+pub struct EqResponseSummary {
+    pub configuration_id: u64,
+    pub mode: EqResponseMode,
+    pub sample_rate_hz: u32,
+    pub points: usize,
+    pub floor_db: f32,
+    pub bypass: bool,
+    pub enabled_left: [bool; EQ_SECTION_COUNT],
+    pub enabled_right: [bool; EQ_SECTION_COUNT],
+}
+
+pub enum EqResponseError {
+    Configuration(EffectPrepareError),
+    InvalidFrequencyGrid,
+    Capacity,
+    OutputShape,
+    Numerical,
+}
+
+pub fn query_response_into(
+    request: EqResponseRequest<'_>,
+    output: EqResponseOutput<'_>,
+) -> Result<EqResponseSummary, EqResponseError>;
+```
+
+1. `RequestedConfiguration` means the stationary response of the supplied configuration after its words have settled. It is not a read of current render state and has no applied/captured sample. No audible timestamp, render clock identity, subscription, or plan identity is fabricated. `configuration_id` is an opaque caller-assigned correlation token, echoed exactly as `u64`, not an engine attestation or a content digest. Callers assign a new token when changing configuration; test a value beyond 2^53. The eventual session-bound target API is separate.
+2. Validate the request through `expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, ...)` and reuse `band_targets`/`BandTarget::words` to preserve production coefficient and enable semantics. Rust child-module privacy permits this without exposing private targets or broad refactoring. Preserve launch rates exactly 44.1/48/88.2/96 kHz, all accepted parameter domains, strict initial-value ordering/channel validation, and zero normalization. Invalid disabled parameters are still subject to the ordinary descriptor/request validator; disabling a section is not permission to accept NaN.
+3. This native low-level query accepts an explicit frequency grid. The high-level engine grid generator and returned axis are owned by the later SDK/discovery child; do not place any EQ math in that adapter. Here the result uses precisely the supplied frequencies, in the supplied order. Require at least one finite point, strictly increasing when multiple points are supplied, and `0 <= f <= Fs/2`; DC and Nyquist are supported endpoints. Reject above-Nyquist, NaN/infinity, negative, duplicate, and descending grids.
+4. `maximum_points` is a caller-supplied resource bound, never a compiled track/point ceiling. Require `0 < len <= maximum_points`; check arithmetic before `4*len`. Total buffers must have exactly `len` words. Each optional section buffer, independently selected for L or R, must have exactly `4*len` words in section-major order (`section * len + point`). Reject malformed inputs/output shapes before publishing a valid result; no partial valid result may escape. Prefer preserving all caller buffers on any refusal; if numerical failures need a bounded preflight pass to guarantee this, document that simple choice rather than adding a cache/allocator.
+5. Magnitude is `20 log10(|H|)` in dB relative to unit amplitude, with a fixed declared -120 dB floor. Use adequate `f64` intermediate precision and `math` crate transcendentals, with a final `f32` output cast. Every success word is finite. A true zero/null maps to the floor. Underflow below the floor maps to the floor; invalid/nonfinite intermediate arithmetic is a typed failure, not a believable flat curve. Do not clamp above-floor discrepancies to hide them.
+6. Disabled bands contribute exact identity (0 dB). Optional individual curves report the enabled/bypassed-independent section configuration: effect-wide bypass changes the total to exact 0 dB because EQ latency is zero, while the individual-section curves remain available as the configured sections. The summary exposes bypass and each section enable, so consumers cannot confuse these meanings. This distinction is frozen by tests and docs.
+7. Form total magnitude from the *unfloored* section responses (complex multiplication, power product, or additive unfloored log magnitude), then apply the total floor once. Summing individually floored public curves is incorrect when a deep null is followed by gain.
+8. The function is control/worker-plane only. It receives configuration values and buffers, never a mutable/live prepared effect. Retained memory does not grow with session duration, no static cache is introduced, and there is no render-side call. Query itself should allocate/free zero heap bytes using fixed section/word scratch and caller outputs. Work is explicitly O(points * 2 * 4), with optional bounded validation/preflight overhead.
+
+## Algorithm, numerical limits, and evidence authority
+
+Derive the evaluator independently from the production recurrence. For prior states `(s1,s2)` and input `x`, with each word promoted from its exact `f32` value:
+
+```
+v3 = x - s2
+v1 = (1-c1)*s1 + a2*v3
+v2 = s2 + a2*s1 + a3*v3
+s1' = (1-2*c1)*s1 - 2*a2*s2 + 2*a2*x
+s2' = 2*a2*s1 + (1-2*a3)*s2 + 2*a3*x
+y = m0*x + m1*v1 + m2*v2
+```
+
+Thus `A=[[1-2c1,-2a2],[2a2,1-2a3]]`, `B=[2a2,2a3]`, `C=[m1*(1-c1)+m2*a2, -m1*a2+m2*(1-a3)]`, and `D=m0+m1*a2+m2*a3`. Evaluate `H(z)=D+C(zI-A)^(-1)B` at `z=exp(j*2*pi*f/Fs)`, or an independently derived algebraically equivalent stable numerator/denominator. Handle identity words explicitly: their transfer is one even where the unreduced state-space inverse is singular at DC. Explain numerical conditioning at low frequencies and endpoints in code/docs.
+
+This describes the linear stationary realized recurrence of rounded words, not every per-operation `f32` rounding or the denormal-flush nonlinearity of a very quiet rendered sample. Actual PCM comparison therefore uses the existing finite-window tolerances and meaningful above-floor signals; it must not falsely claim bit-exact frequency-domain equivalence to all render inputs. A ramp is time-varying; this query does not call its target the exact transfer over the ramp.
+
+Primary method background: Andrew Simper, *Linear Trapezoidal Integrated State Variable Filter with Low Noise Optimisation*, https://cytomic.com/files/dsp/SvfLinearTrapOptimised2.pdf. The source recurrence is the implementation authority. The independent `dsp-reference` oracle remains a dev dependency only and remains unchanged. This observation-only addition changes no audio latency, DSP tail, parameter smoothing, NaN recovery, or denormal behavior. Listening is unnecessary when unchanged audio/state is objectively shown. Descriptive benchmark work belongs to the integrated #763 transport/resource child; this child makes no speed claim or timed benchmark.
+
+## Discriminating acceptance gates
+
+- Compare the production response query against the independent realized-word oracle using all six families, both gain signs, low/high frequency and high-Q corners, all four launch rates, DC/Nyquist, and the existing 1,488-row corpus with representative probes. Above the -120 dB reference floor, total/section error must stay within 0.005 dB; floors/nulls must be finite and correct. Keep existing frozen full-grid tests and thresholds intact. The new test must call production `query_response_into`; merely rerunning the old oracle comparison is insufficient.
+- Query a four-section asymmetric L/R configuration, disabled sections, total-only, each one-sided optional-section choice, and bypass. Compare cascade results to multiplication of independent section responses. Include a deep-cut-plus-gain case that distinguishes flooring once from summing floored sections.
+- At each launch rate, compare a representative query to measured settled production output using existing impulse/DFT or settled sine helpers, at meaningful frequencies and the established 0.05 dB finite-window tolerance. Include distinct L/R and a nontrivial cascade. Avoid using the production response evaluator to create its own expected values.
+- Validate malformed/short/oversized/overflowing shapes, capacity zero and at/above limit, every invalid-grid category, invalid preparation/channel/order/sample-rate/domain cases, and unchanged output sentinels on refusals. Check opaque identity survives above 2^53 and max u64 without narrowing.
+- Serialize a real prepared effect state before and after queries during an in-flight coefficient ramp; query must leave every state/target/ramp word unchanged. Continue render alongside an otherwise identical instance that was not queried; output and final state must be bit-identical. Reuse existing state helpers; do not expose mutable internals for the test.
+- Use the existing `bench-support::alloc` instrumentation to show query allocations/frees are zero after caller input/output setup. Scope is this query, not an invented generic harness.
+
+Required local commands, once after the coherent attempt:
+
+```
+cargo test --locked -p parametric-eq --test response
+cargo test --locked -p parametric-eq --lib --tests
+cargo clippy --locked -p parametric-eq --all-targets -- -D warnings
+cargo fmt --all -- --check
+bash scripts/check-parametric-eq-render-contract.sh
+bash scripts/check-realtime-policy.sh
+CARGO_TARGET_DIR=target/issue-763-response-wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo check --locked --release --target wasm32-unknown-unknown -p parametric-eq
+CARGO_TARGET_DIR=target/issue-763-response-wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p parametric-eq
+```
+
+Record which checks actually ran and their outcomes. Native render already uses the compile-pinned AVX2/FMA configuration. Wasm checks establish build portability only; do not call them numerical execution parity. Runtime browser/Wasm parity is a required parent integration gate when this API becomes reachable there. No extra cross-target framework or timed workload is authorized here.
+
+## Checkpoints, review, and delivery
+
+Luna makes one coherent implementation pass, runs focused tests, reports exact changed paths and candid results, then pauses for root's local commit/push audit before further edits. Astra medium adversarially reviews against this body, especially rounded-word correctness, oracle independence, floor composition, identity/bypass semantics, validation, no mutable-render access, and absence of parent-completion overclaim. Root records one PASS/FAIL verdict per attempt, updates the local/GitHub decision record, and closes this child only after evidence is upstream and GitHub state is verified. Parent #763 remains open.
