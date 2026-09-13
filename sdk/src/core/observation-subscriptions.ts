@@ -726,6 +726,14 @@ export class ObservationSubscriptionOwner {
     if (disposed) this.#disposed = true;
   }
 
+  /** Invalidate only the spectrum lifetime after its analysis transport has failed. */
+  invalidateSpectrum(): void {
+    for (const state of this.#spectrumHandles.values()) state.closed = true;
+    this.#spectrumHandles.clear();
+    this.#spectrumJob = undefined;
+    this.#stopTimerIfIdle();
+  }
+
   /** @internal Whether a managed spectrum handle owns the prepared stream. */
   managedSpectrumActive(): boolean {
     return this.#spectrumHandles.size !== 0;
@@ -1205,6 +1213,7 @@ export class ObservationSubscriptionOwner {
       state.configuration = normalized.configuration;
       state.callback = normalized.callback;
       state.cursor = state.job.publicationSequence;
+      state.nativeMissedEpoch = state.job.metadata.captureEpoch;
       state.nativeMissedSeen = state.job.metadata.droppedCaptures;
       state.nextDeliveryAt = 0;
       this.#restartTimer();
@@ -1263,6 +1272,7 @@ export class ObservationSubscriptionOwner {
     const state: SpectrumHandleState = {
       id: this.#nextSpectrumHandle++, owner: this.#owner, epoch: this.#epoch,
       job, configuration, callback, cursor: job.publicationSequence,
+      nativeMissedEpoch: job.metadata.captureEpoch,
       nativeMissedSeen: job.metadata.droppedCaptures,
       nextDeliveryAt: 0, closed: false, closing: undefined, publicHandle: undefined,
     };
@@ -1501,10 +1511,19 @@ export class ObservationSubscriptionOwner {
     if (respectCadence && now < state.nextDeliveryAt) return undefined;
     if (job.publicationSequence <= state.cursor) return undefined;
     const skippedPublications = job.publicationSequence - state.cursor - 1n;
-    const nativeMissedWindows = job.metadata.droppedCaptures >= state.nativeMissedSeen
-      ? job.metadata.droppedCaptures - state.nativeMissedSeen : 0n;
+    let nativeMissedWindows = 0n;
+    if (job.metadata.captureEpoch > state.nativeMissedEpoch) {
+      state.nativeMissedEpoch = job.metadata.captureEpoch;
+      state.nativeMissedSeen = 0n;
+    }
+    if (job.metadata.captureEpoch === state.nativeMissedEpoch) {
+      nativeMissedWindows = job.metadata.droppedCaptures >= state.nativeMissedSeen
+        ? job.metadata.droppedCaptures - state.nativeMissedSeen : 0n;
+      if (job.metadata.droppedCaptures > state.nativeMissedSeen) {
+        state.nativeMissedSeen = job.metadata.droppedCaptures;
+      }
+    }
     state.cursor = job.publicationSequence;
-    state.nativeMissedSeen = job.metadata.droppedCaptures;
     if (respectCadence) state.nextDeliveryAt = now + state.configuration.cadenceMs;
     const notification = Object.freeze({
       handle: state.publicHandle,
@@ -1983,6 +2002,7 @@ interface SpectrumHandleState {
   configuration: SpectrumSubscriptionConfiguration;
   callback: ((notification: SpectrumSubscriptionNotification) => void) | undefined;
   cursor: bigint;
+  nativeMissedEpoch: bigint;
   nativeMissedSeen: bigint;
   nextDeliveryAt: number;
   closed: boolean;

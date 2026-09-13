@@ -166,7 +166,7 @@ function hostWithCapture(overrides = {}) {
   };
 }
 
-async function browserEngine(host, worker) {
+async function browserEngine(host, worker, extra = {}) {
   const createResponseWorker = typeof worker === "function" ? worker : () => worker;
   return createEngine({
     document: "opaque",
@@ -175,6 +175,7 @@ async function browserEngine(host, worker) {
     createContext: context,
     createHost: async () => host,
     createResponseWorker,
+    ...extra,
   });
 }
 
@@ -285,7 +286,43 @@ test("browser spectrum admission copies mutable query metadata before Worker dis
 test("browser spectrum invalidates a dead Worker and permits a fresh managed lifetime", async () => {
   let workerCount = 0;
   let sequence = 0n;
+  let residentArmed = false;
   const host = hostWithCapture({
+    async sessionMap() {
+      return { tracks: ["t"], sources: [], metersAttached: false };
+    },
+    async observationMap() {
+      return {
+        result: 0,
+        bindings: [{
+          trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
+          nativeEffectId: "miso.compressor", tapIds: [1],
+        }],
+      };
+    },
+    async readObservations({ selections }) {
+      return {
+        result: 0,
+        rows: selections.map((selection) => ({
+          ...selection,
+          status: residentArmed ? 3 : 2,
+          sampleRateHz: 48_000,
+          firstSample: residentArmed ? 0n : 0n,
+          endSample: residentArmed ? 128n : 0n,
+          sequence: residentArmed ? 1n : 0n,
+          blocks: residentArmed ? 1 : 0,
+          leftPresent: residentArmed ? 1 : 0,
+          rightPresent: residentArmed ? 1 : 0,
+          left: 1,
+          right: 2,
+        })),
+      };
+    },
+    async command({ commands }) {
+      residentArmed = commands.at(-1)?.kind === ABI_LAYOUT.constants.wireCommandKinds
+        .find((row) => row.name === "observeSubscribe")?.value;
+      return { result: 0, reason: 0, rejectedIndex: 0, admitted: commands.length, appliedAtSample: 0n };
+    },
     async startSpectrumStream() {
       return { result: 0, metadata: streamMetadata(1, sequence) };
     },
@@ -297,17 +334,27 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
       return { result: 0, metadata: streamMetadata(5, sequence) };
     },
   });
-  const engine = await browserEngine(host, () => new SpectrumWorker({ failStream: workerCount++ === 0 }));
+  const engine = await browserEngine(
+    host,
+    () => new SpectrumWorker({ failStream: workerCount++ === 0 }),
+    { policy: { console: { commandQueueRecords: 16, observationTaps: 1 } } },
+  );
   const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
   try {
+    const resident = await engine.subscribeObservations({
+      selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+      windowBlocks: 1,
+    });
     const failed = await engine.subscribeSpectrum(request);
     await assert.rejects(failed.pump(), /Worker failed|stale|closed/);
     await assert.rejects(failed.pump(), /stale|closed/);
+    assert.equal((await resident.pump()).available, true);
 
     const recovered = await engine.subscribeSpectrum(request);
     const notification = await recovered.pump();
     assert.equal(notification.available, true);
     await recovered.close();
+    await resident.close();
   } finally {
     await engine.close();
   }

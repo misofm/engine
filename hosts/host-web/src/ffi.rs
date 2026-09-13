@@ -791,9 +791,9 @@ fn stream_metadata_error(
     }
     if let Some(drops) = dropped_captures {
         staging.stream_metadata.dropped_captures = drops;
-    } else {
-        // Failed windows start a fresh native capture epoch; never carry the prior epoch's
-        // accumulated drops into that publication.
+    } else if status == SPECTRUM_STREAM_STATUS_FAILED && capture_epoch.is_some() {
+        // Failed windows start a fresh native capture epoch; ordinary pending/warming reads keep
+        // the current epoch's accumulated drops visible.
         staging.stream_metadata.dropped_captures = 0;
     }
     staging.stream_metadata.source_underrun = 0;
@@ -3935,6 +3935,15 @@ mod spectrum_ffi_tests {
                 dropped_captures: 12,
                 ..WebSpectrumStreamMetadata::default()
             };
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_PENDING,
+                RESULT_BACKPRESSURE,
+                None,
+                None,
+            );
+            assert_eq!(staging.stream_metadata.capture_epoch, 7);
+            assert_eq!(staging.stream_metadata.dropped_captures, 12);
             stream_metadata_error(
                 &mut staging,
                 SPECTRUM_STREAM_STATUS_FAILED,

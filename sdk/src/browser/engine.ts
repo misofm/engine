@@ -727,7 +727,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // transport seam before invalidating the managed lifetime.
           spectrumStreamPending = false;
           await Promise.resolve(host.stopSpectrumStream?.()).catch(() => undefined);
-          if (!closed) observationSubscriptions?.invalidate();
+          if (!closed) observationSubscriptions?.invalidateSpectrum();
           throw error;
         }
         spectrumStreamBuffer = analyzed.buffer;
@@ -744,7 +744,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         }
         if (!returned && readRequest !== undefined && !closed) {
           spectrumStreamActive = false;
-          observationSubscriptions?.invalidate();
+          observationSubscriptions?.invalidateSpectrum();
           void readRequest.then(() => Promise.resolve(host.stopSpectrumStream?.()), () => undefined).catch(() => undefined);
         }
         throw error;

@@ -262,6 +262,69 @@ test("managed spectrum capture limits refuse before native activation and leave 
   }
 });
 
+test("managed spectrum loss baselines stay monotonic within an epoch and reset on failure", async () => {
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (status, sequence, droppedCaptures, captureEpoch = 1n) => Object.freeze({
+    result: 0,
+    status,
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 2_048,
+    sourceUnderrun: false,
+    captureEpoch,
+    sequence: BigInt(sequence),
+    droppedCaptures,
+    windows: BigInt(sequence + 1),
+    capturedSample: BigInt(sequence * 2_048),
+    endSample: BigInt((sequence + 1) * 2_048),
+    analysisEpoch: 1n,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+  const result = (sequence) => ({
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    windowFrames: 2_048,
+    binCount: 1,
+    floorDb: -120,
+    frequenciesHz: new Float32Array([0]),
+    leftDb: new Float32Array([0]),
+    rightDb: new Float32Array([0]),
+    capturedSample: BigInt(sequence * 2_048),
+    endSample: BigInt((sequence + 1) * 2_048),
+    snapshotToken: BigInt(sequence + 1),
+    graphSourceUnderrun: false,
+    resultBytes: 37n,
+  });
+  const reads = [
+    { metadata: metadata("gap", 5, 1n), result: undefined },
+    { metadata: metadata("ready", 4, 0n), result: result(4) },
+    { metadata: metadata("ready", 6, 1n), result: result(6) },
+    { metadata: metadata("pending", 6, 0n), result: undefined },
+    { metadata: metadata("failed", 0, 0n, 2n), result: undefined },
+    { metadata: metadata("ready", 1, 1n, 2n), result: result(1) },
+  ];
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }),
+    readObservations: () => [],
+    console: () => { throw new Error("unused"); },
+    spectrumPrepared: () => prepared,
+    spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
+    spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
+    spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
+  }, undefined, undefined, {});
+  const subscription = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 })).handle;
+  const losses = [];
+  for (let index = 0; index < 6; index += 1) {
+    losses.push((await subscription.pump())?.nativeMissedWindows);
+  }
+  assert.deepEqual(losses, [1n, 0n, 0n, undefined, 0n, 1n]);
+  await subscription.close();
+});
+
 test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {
   const prepared = queryFor({ kind: "output", outputId: "out" });
   const metadata = (target = prepared.target, status = "warming") => Object.freeze({
