@@ -193,7 +193,7 @@ export class OfflineEngine {
   console(): EngineConsole {
     return new EngineConsole(this.sessionMap(), (edits) =>
       this.submitCommands(encodeLaneEdits(edits), edits.length),
-      (edits) => this.#observationSubscriptions?.beforeConsoleSubmit(edits));
+      (edits, managed) => this.#observationSubscriptions?.beforeConsoleSubmit(edits, managed));
   }
 
   nextAbsoluteSample(): bigint {

@@ -469,7 +469,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         ? Promise.reject(new MisoUsageError(
           "this engine booted with no console attached; set policy.console.commandQueueRecords",
         ))
-        : createBrowserConsole(host, (edits) => observationSubscriptions?.beforeConsoleSubmit(edits));
+        : createBrowserConsole(host, (edits, managed) =>
+          observationSubscriptions?.beforeConsoleSubmit(edits, managed));
       return semanticConsole;
     };
     const observationOwner = (): ObservationSubscriptionOwner => observationSubscriptions ??=

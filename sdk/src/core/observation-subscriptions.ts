@@ -147,6 +147,7 @@ interface HandleState {
   appliedAtSample: bigint;
   readonly cursor: Map<string, bigint>;
   readonly nativeMissedSeen: Map<string, bigint>;
+  nextDeliveryAt: number;
   closed: boolean;
   closing: Promise<void> | undefined;
   publicHandle: ObservationSubscriptionImpl | undefined;
@@ -181,22 +182,25 @@ function canonicalLimits(overrides: ObservationSubscriptionLimits | undefined): 
     }
     return requested;
   };
-  const limits = {
+  const subscriptionLimits = {
     maximumHandles: value("maximumHandles", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumHandles),
     maximumBindings: value("maximumBindings", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumBindings),
     maximumSelections: value("maximumSelections", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumSelections),
     maximumWindowBlocks: value("maximumWindowBlocks", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumWindowBlocks),
     maximumCadenceMs: value("maximumCadenceMs", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumCadenceMs),
   };
-  if (limits.maximumSelections > MAXIMUM_OBSERVATION_READS) {
+  if (subscriptionLimits.maximumSelections > MAXIMUM_OBSERVATION_READS) {
     throw new MisoUsageError(`maximumSelections cannot exceed ${MAXIMUM_OBSERVATION_READS}`);
   }
-  return Object.freeze(limits);
+  if (subscriptionLimits.maximumBindings > MAXIMUM_OBSERVATION_READS) {
+    throw new MisoUsageError(`maximumBindings cannot exceed ${MAXIMUM_OBSERVATION_READS}`);
+  }
+  return Object.freeze(subscriptionLimits);
 }
 
 function normalizedRequest(
   request: ObservationSubscriptionRequest,
-  limits: EffectiveLimits,
+  subscriptionLimits: EffectiveLimits,
 ): { readonly configuration: ObservationSubscriptionConfiguration; readonly callback: ((notification: ObservationSubscriptionNotification) => void) | undefined } {
   if (request === null || typeof request !== "object") {
     throw new MisoUsageError("observation subscription request must be an object");
@@ -204,23 +208,23 @@ function normalizedRequest(
   if (!Array.isArray(request.selections)) {
     throw new MisoUsageError("observation subscription selections must be an array");
   }
-  if (request.selections.length > limits.maximumSelections) {
-    throw new MisoUsageError(`observation subscription selections are capped at ${limits.maximumSelections}`);
+  if (request.selections.length > subscriptionLimits.maximumSelections) {
+    throw new MisoUsageError(`observation subscription selections are capped at ${subscriptionLimits.maximumSelections}`);
   }
   // `readObservations` also validates, but admission must happen before the console transaction.
   // Calling it here avoids reserving a binding for a malformed target.
   validateObservationSelections(request.selections);
   const selections = request.selections.map((selection) => cloneSelection(selection));
   if (!Number.isSafeInteger(request.windowBlocks)
-      || request.windowBlocks <= 0 || request.windowBlocks > limits.maximumWindowBlocks) {
+      || request.windowBlocks <= 0 || request.windowBlocks > subscriptionLimits.maximumWindowBlocks) {
     throw new MisoUsageError(
-      `observation windowBlocks must be an integer in 1..=${limits.maximumWindowBlocks}`,
+      `observation windowBlocks must be an integer in 1..=${subscriptionLimits.maximumWindowBlocks}`,
     );
   }
   const cadenceMs = request.cadenceMs ?? 100;
-  if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0 || cadenceMs > limits.maximumCadenceMs) {
+  if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0 || cadenceMs > subscriptionLimits.maximumCadenceMs) {
     throw new MisoUsageError(
-      `observation cadenceMs must be an integer in 1..=${limits.maximumCadenceMs}`,
+      `observation cadenceMs must be an integer in 1..=${subscriptionLimits.maximumCadenceMs}`,
     );
   }
   if (request.onUpdate !== undefined && typeof request.onUpdate !== "function") {
@@ -358,7 +362,7 @@ class ObservationSubscriptionImpl implements ObservationSubscription {
 /** One engine-local owner shared by all resident-observation handles. */
 export class ObservationSubscriptionOwner {
   readonly #transport: ObservationSubscriptionTransport;
-  readonly #limits: EffectiveLimits;
+  readonly #subscriptionLimits: EffectiveLimits;
   readonly #owner = nextOwner++;
   #epoch = 1n;
   #nextHandle = 1n;
@@ -367,34 +371,33 @@ export class ObservationSubscriptionOwner {
   #mutation: Promise<void> = Promise.resolve();
   #polling: Promise<void> | undefined;
   #mutationBusy = false;
-  #internalMutation = false;
   #timer: unknown;
   #timerCadence: number | undefined;
   #disposed = false;
 
   constructor(
     transport: ObservationSubscriptionTransport,
-    limits?: ObservationSubscriptionLimits,
+    subscriptionLimits?: ObservationSubscriptionLimits,
   ) {
     this.#transport = transport;
-    this.#limits = canonicalLimits(limits);
+    this.#subscriptionLimits = canonicalLimits(subscriptionLimits);
   }
 
   get bounds(): ObservationSubscriptionBounds {
     return Object.freeze({
-      ...this.#limits,
+      ...this.#subscriptionLimits,
       maximumReadSelections: MAXIMUM_OBSERVATION_READS,
       maximumCommandRecords: ABI_LAYOUT.constants.maximumCommandRecords,
     });
   }
 
   subscribe(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt> {
-    const normalized = normalizedRequest(request, this.#limits);
+    const normalized = normalizedRequest(request, this.#subscriptionLimits);
     return this.#enqueue(async () => {
       this.#assertOpen();
       const epoch = this.#epoch;
-      if (this.#handles.size >= this.#limits.maximumHandles) {
-        throw new MisoUsageError(`observation subscriptions are capped at ${this.#limits.maximumHandles}`);
+      if (this.#handles.size >= this.#subscriptionLimits.maximumHandles) {
+        throw new MisoUsageError(`observation subscriptions are capped at ${this.#subscriptionLimits.maximumHandles}`);
       }
       await this.#waitForPoll();
       const map = await this.#transport.observationMap();
@@ -408,15 +411,16 @@ export class ObservationSubscriptionOwner {
         throw new MisoUsageError("observation window conflicts with a managed subscriber");
       }
       const newEntries = this.#newEntries(entries);
-      if (this.#bindings.size + newEntries.length > this.#limits.maximumBindings) {
-        throw new MisoUsageError(`managed observation bindings are capped at ${this.#limits.maximumBindings}`);
+      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
+        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
       }
       const preflight = await this.#preflight(newEntries, epoch);
       this.#assertCommandSize(newEntries.length);
       const console = newEntries.length === 0 ? undefined : await this.#transport.console();
+      this.#assertEpoch(epoch);
       const edits = newEntries.map((entry) =>
         this.#edit(console!, entry, true, normalized.configuration.windowBlocks));
-      const report = await this.#submit(console, edits);
+      const report = await this.#submit(console, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       const state = this.#newHandle(normalized.configuration, entries, normalized.callback, appliedAtSample);
@@ -446,7 +450,7 @@ export class ObservationSubscriptionOwner {
   }
 
   update(state: HandleState, request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt> {
-    const normalized = normalizedRequest(request, this.#limits);
+    const normalized = normalizedRequest(request, this.#subscriptionLimits);
     return this.#enqueue(async () => {
       this.#assertHandle(state);
       const epoch = this.#epoch;
@@ -469,8 +473,8 @@ export class ObservationSubscriptionOwner {
         throw new MisoUsageError("observation window conflicts with a managed subscriber");
       }
       const newEntries = add.filter((entry) => !this.#bindings.has(entry.key));
-      if (this.#bindings.size + newEntries.length > this.#limits.maximumBindings) {
-        throw new MisoUsageError(`managed observation bindings are capped at ${this.#limits.maximumBindings}`);
+      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
+        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
       }
       const disarm = remove.filter((entry) => {
         const binding = this.#bindings.get(entry.key);
@@ -485,6 +489,7 @@ export class ObservationSubscriptionOwner {
       const console = disarm.length + newEntries.length === 0
         ? undefined
         : await this.#transport.console();
+      this.#assertEpoch(epoch);
       const edits: LaneEdit[] = [
         ...disarm.map((entry) => this.#edit(
           console!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
@@ -493,7 +498,7 @@ export class ObservationSubscriptionOwner {
           console!, entry, true, normalized.configuration.windowBlocks,
         )),
       ];
-      const report = await this.#submit(console, edits);
+      const report = await this.#submit(console, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
@@ -526,6 +531,7 @@ export class ObservationSubscriptionOwner {
       state.appliedAtSample = appliedAtSample;
       state.cursor.clear();
       state.nativeMissedSeen.clear();
+      state.nextDeliveryAt = 0;
       this.#restartTimer();
       return this.#receipt(state);
     });
@@ -535,7 +541,7 @@ export class ObservationSubscriptionOwner {
     return this.#enqueue(async () => {
       this.#assertHandle(state);
       const epoch = this.#epoch;
-      await this.#refresh(epoch);
+      await this.#poll();
       this.#assertEpoch(epoch);
       return this.#notify([state]);
     });
@@ -543,7 +549,7 @@ export class ObservationSubscriptionOwner {
 
   close(state: HandleState): Promise<void> {
     if (state.closing !== undefined) return state.closing;
-    state.closing = this.#enqueue(async () => {
+    const pending = this.#enqueue(async () => {
       if (state.closed) return;
       this.#assertHandle(state);
       const epoch = this.#epoch;
@@ -554,10 +560,11 @@ export class ObservationSubscriptionOwner {
       });
       this.#assertCommandSize(disarm.length);
       const console = disarm.length === 0 ? undefined : await this.#transport.console();
+      this.#assertEpoch(epoch);
       const edits = disarm.map((entry) => this.#edit(
         console!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
       ));
-      const report = await this.#submit(console, edits);
+      const report = await this.#submit(console, edits, epoch);
       this.#assertEpoch(epoch);
       if (report !== undefined && !report.ok) throw commandFailure("observation close was refused", report);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
@@ -569,7 +576,12 @@ export class ObservationSubscriptionOwner {
       state.closed = true;
       this.#stopTimerIfIdle();
     });
-    return state.closing;
+    const retryable = pending.catch((error: unknown) => {
+      if (state.closing === retryable) state.closing = undefined;
+      throw error;
+    });
+    state.closing = retryable;
+    return retryable;
   }
 
   readLatest(state: HandleState): readonly ObservationReadResult[] {
@@ -593,8 +605,8 @@ export class ObservationSubscriptionOwner {
   }
 
   /** Guard the public console's observation edits while this owner has managed bindings. */
-  beforeConsoleSubmit(edits: readonly LaneEdit[]): void {
-    if (this.#internalMutation) return;
+  beforeConsoleSubmit(edits: readonly LaneEdit[], managed = false): void {
+    if (managed) return;
     if (!this.#mutationBusy && this.#bindings.size === 0) return;
     if (edits.some((edit) => edit.kind === "observeSubscribe" || edit.kind === "observeUnsubscribe")) {
       throw new MisoUsageError("manual observation edits conflict with managed subscriptions");
@@ -617,6 +629,7 @@ export class ObservationSubscriptionOwner {
       appliedAtSample,
       cursor: new Map(),
       nativeMissedSeen: new Map(),
+      nextDeliveryAt: 0,
       closed: false,
       closing: undefined,
       publicHandle: undefined,
@@ -682,15 +695,20 @@ export class ObservationSubscriptionOwner {
       .observe(tapName(entry.binding, entry.selection.tapId) as never, armed, windowBlocks);
   }
 
-  async #submit(console: EngineConsole | undefined, edits: readonly LaneEdit[]): Promise<CommandReport | undefined> {
+  async #submit(
+    console: EngineConsole | undefined,
+    edits: readonly LaneEdit[],
+    epoch: bigint,
+  ): Promise<CommandReport | undefined> {
     if (edits.length === 0) return undefined;
-    this.#internalMutation = true;
+    this.#assertEpoch(epoch);
     let report: CommandReport;
-    try {
-      report = await console!.submit(...edits);
-    } finally {
-      this.#internalMutation = false;
-    }
+    const managedSubmit = (console as EngineConsole & {
+      readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
+    } | undefined)?.submitManaged;
+    report = managedSubmit === undefined
+      ? await console!.submit(...edits)
+      : await managedSubmit.call(console, ...edits);
     if (!report.ok) throw commandFailure("observation transaction was refused", report);
     return report;
   }
@@ -732,10 +750,7 @@ export class ObservationSubscriptionOwner {
   async #poll(): Promise<void> {
     if (this.#polling !== undefined) return this.#polling;
     const epoch = this.#epoch;
-    const work = this.#refresh(epoch).then(() => {
-      this.#assertEpoch(epoch);
-      this.#notify([...this.#handles.values()]);
-    });
+    const work = this.#refresh(epoch).then(() => { this.#assertEpoch(epoch); });
     const settled = work.finally(() => {
       if (this.#polling === settled) this.#polling = undefined;
     });
@@ -743,10 +758,15 @@ export class ObservationSubscriptionOwner {
     return settled;
   }
 
-  #notify(targets: readonly HandleState[]): ObservationSubscriptionNotification | undefined {
+  #notify(
+    targets: readonly HandleState[],
+    respectCadence = false,
+  ): ObservationSubscriptionNotification | undefined {
     let requested: ObservationSubscriptionNotification | undefined;
+    const now = Date.now();
     for (const state of targets) {
       if (state.closed || state.publicHandle === undefined) continue;
+      if (respectCadence && now < state.nextDeliveryAt) continue;
       let available = false;
       let nativeMissed = 0n;
       let skipped = 0n;
@@ -757,22 +777,23 @@ export class ObservationSubscriptionOwner {
         const sequence = row.window.sequence;
         const cursor = state.cursor.get(entry.key);
         const seenNative = state.nativeMissedSeen.get(entry.key) ?? 0n;
-        nativeMissed += binding.nativeMissed - seenNative;
-        state.nativeMissedSeen.set(entry.key, binding.nativeMissed);
         if (cursor === undefined) {
           state.cursor.set(entry.key, sequence);
+          state.nativeMissedSeen.set(entry.key, binding.nativeMissed);
           available = true;
           continue;
         }
         if (sequence > cursor) {
           const gap = sequence - cursor - 1n;
           const nativeDelta = binding.nativeMissed - seenNative;
+          nativeMissed += nativeDelta;
           skipped += gap > nativeDelta ? gap - nativeDelta : 0n;
           state.cursor.set(entry.key, sequence);
           available = true;
         }
       }
       if (!available) continue;
+      if (respectCadence) state.nextDeliveryAt = now + state.configuration.cadenceMs;
       const notification = Object.freeze({
         handle: state.publicHandle,
         owner: this.#owner,
@@ -794,7 +815,11 @@ export class ObservationSubscriptionOwner {
     if (this.#timer !== undefined && this.#timerCadence === cadence) return;
     this.#stopTimer();
     this.#timerCadence = cadence;
-    this.#timer = scheduler.setInterval(() => { void this.#poll().catch(() => undefined); }, cadence);
+    this.#timer = scheduler.setInterval(() => {
+      void this.#poll()
+        .then(() => this.#notify([...this.#handles.values()], true))
+        .catch(() => undefined);
+    }, cadence);
   }
 
   #restartTimer(): void { this.#startTimer(); }

@@ -5,6 +5,7 @@ import { before, describe, test } from "node:test";
 
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
@@ -50,6 +51,79 @@ function feed(engine, block) {
     }).ok, true);
   }
 }
+
+const FAKE_DESCRIPTOR = Object.freeze({
+  id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true,
+});
+
+function injectedOwner() {
+  let armed = false;
+  let sequence = 1n;
+  let timer;
+  let submitHook;
+  let readHook;
+  let consoleHook;
+  let submitCount = 0;
+  const map = {
+    bindings: [{
+      trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+      nativeEffectId: "miso.compressor", tapIds: [1],
+    }],
+  };
+  const console = {
+    edit: {
+      track: () => ({
+        effect: () => ({
+          observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }),
+        }),
+      }),
+    },
+    async submit(...edits) {
+      submitCount += 1;
+      if (submitHook) await submitHook();
+      armed = edits.at(-1)?.kind === "observeSubscribe";
+      return {
+        ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
+        admitted: edits.length, appliedAtSample: 0n,
+      };
+    },
+  };
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => map,
+    console: () => consoleHook === undefined ? console : consoleHook(),
+    readObservations: async (selections) => {
+      if (readHook) await readHook();
+      return selections.map((selection) => ({
+        ...selection,
+        nativeEffectId: "miso.compressor",
+        descriptor: FAKE_DESCRIPTOR,
+        sampleRateHz: 48_000,
+        status: armed ? "ready" : "unarmed",
+        ...(armed ? {
+          left: 1, right: 2,
+          window: { firstSample: 0n, endSample: 128n, sequence, blocks: 1 },
+        } : {}),
+      }));
+    },
+    scheduler: {
+      setInterval: (callback) => { timer = callback; return 1; },
+      clearInterval: () => { timer = undefined; },
+    },
+  });
+  return {
+    owner,
+    map,
+    console,
+    fire: () => timer?.(),
+    setSequence: (value) => { sequence = value; },
+    setSubmit: (hook) => { submitHook = hook; },
+    setRead: (hook) => { readHook = hook; },
+    setConsole: (hook) => { consoleHook = hook; },
+    submitCount: () => submitCount,
+  };
+}
+
+const injectedSelection = selection("comp");
 
 describe("issue 783 -- managed resident observation subscriptions", () => {
   test("shares bindings, preserves owned rows, guards manual edits, and closes last owner", async () => {
@@ -124,5 +198,91 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     } finally {
       engine.dispose();
     }
+  });
+
+  test("serializes internal edits and reads, honors cadence, and baselines joining loss", async () => {
+    const harness = injectedOwner();
+    let releaseSubmit;
+    harness.setSubmit(() => new Promise((resolve) => { releaseSubmit = resolve; }));
+    const pending = harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.throws(
+      () => harness.owner.beforeConsoleSubmit([{ kind: "observeUnsubscribe" }]),
+      /conflict/,
+    );
+    releaseSubmit();
+    await pending;
+
+    const overlapHarness = injectedOwner();
+    const overlap = (await overlapHarness.owner.subscribe({
+      selections: [injectedSelection], windowBlocks: 1,
+    })).handle;
+    const readReleases = [];
+    overlapHarness.setRead(() => new Promise((resolve) => { readReleases.push(resolve); }));
+    const pumping = overlap.pump();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    overlapHarness.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(readReleases.length, 1);
+    readReleases.forEach((resolve) => resolve());
+    await pumping;
+    await overlap.close();
+
+    const fastHarness = injectedOwner();
+    let fast = 0;
+    let slow = 0;
+    await fastHarness.owner.subscribe({
+      selections: [injectedSelection], windowBlocks: 1, cadenceMs: 10, onUpdate: () => { fast += 1; },
+    });
+    await fastHarness.owner.subscribe({
+      selections: [injectedSelection], windowBlocks: 1, cadenceMs: 1_000, onUpdate: () => { slow += 1; },
+    });
+    for (let index = 1; index <= 3; index += 1) {
+      fastHarness.setSequence(BigInt(index));
+      fastHarness.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(fast, 1);
+    assert.equal(slow, 1);
+
+    const lossHarness = injectedOwner();
+    const first = (await lossHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
+    await first.pump();
+    lossHarness.setSequence(10n);
+    await first.pump();
+    const joining = (await lossHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
+    const notification = await joining.pump();
+    assert.equal(notification.nativeMissedWindows, 0n);
+    await first.close();
+    await joining.close();
+
+    const epochHarness = injectedOwner();
+    let releaseConsole;
+    epochHarness.setConsole(() => new Promise((resolve) => { releaseConsole = resolve; }));
+    const stale = epochHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    epochHarness.owner.invalidate();
+    releaseConsole(epochHarness.console);
+    await assert.rejects(stale, /owner changed/);
+    assert.equal(epochHarness.submitCount(), 0);
+  });
+
+  test("retries a refused close and bounds the readable union before admission", async () => {
+    const harness = injectedOwner();
+    const sub = (await harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
+    harness.setSubmit(() => { throw new Error("temporary refusal"); });
+    await assert.rejects(() => sub.close(), /temporary refusal/);
+    harness.setSubmit(undefined);
+    await sub.close();
+    assert.equal(harness.submitCount(), 3);
+
+    assert.throws(
+      () => new ObservationSubscriptionOwner({
+        observationMap: () => harness.map,
+        readObservations: () => [],
+        console: () => harness.console,
+      }, { maximumBindings: 257 }),
+      /maximumBindings.*256/,
+    );
   });
 });
