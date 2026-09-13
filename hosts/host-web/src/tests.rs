@@ -634,9 +634,9 @@ fn empty_object_document_boots_to_a_diagnostic_not_a_trap() {
 #[test]
 fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     let mut document = one_track_session(128);
-    // Keep this specifically a parser-projection boundary after JSON's denser model changed the
-    // representative fixture ratio: insignificant trailing whitespace raises only parser input.
-    document.extend(core::iter::repeat_n(' ', 8_192));
+    // Keep this a parser-projection boundary above the fixed live-response staging allocation:
+    // insignificant trailing whitespace raises only parser input.
+    document.extend(core::iter::repeat_n(' ', 131_072));
     let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,

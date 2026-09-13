@@ -1051,6 +1051,13 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   const observationSelectionPointer = 18000;
   const observationResultPointer = 19000;
   const observationSelectionCapacity = 4;
+  // Issue #779: prewarmed fixed live-response request, identity and raw-snapshot staging. The
+  // fake refuses capture because it has no prepared graph, but it must expose the complete ABI so
+  // construction tests exercise the same prewarm path as the shipped Worklet.
+  const trackResponseRequestPointer = 20000;
+  const trackResponseTrackIdPointer = 20100;
+  const trackResponseSnapshotPointer = 22000;
+  const trackResponseSnapshotCapacity = 30000;
   calls.commands = [];
   calls.commandResult = 0;
   calls.meterLease = [];
@@ -1155,6 +1162,20 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
     miso_engine_web_v1_observation_read: () => 0,
     miso_engine_web_v1_observation_result_ptr: () => observationResultPointer,
     miso_engine_web_v1_observation_result_bytes: (_handle, count = 0) => count * 96,
+    miso_engine_web_v1_track_response_request_ptr: () => trackResponseRequestPointer,
+    miso_engine_web_v1_track_response_request_bytes: () => 48,
+    miso_engine_web_v1_track_response_track_id_ptr: () => trackResponseTrackIdPointer,
+    miso_engine_web_v1_track_response_track_id_capacity: () => 127,
+    miso_engine_web_v1_track_response_snapshot_ptr: () => trackResponseSnapshotPointer,
+    miso_engine_web_v1_track_response_snapshot_capacity: () => trackResponseSnapshotCapacity,
+    miso_engine_web_v1_track_response_snapshot_set_bytes: (bytes) => (
+      bytes >= 104 && bytes <= trackResponseSnapshotCapacity ? 0 : 1
+    ),
+    miso_engine_web_v1_track_response_capture: () => 7,
+    miso_engine_web_v1_track_response_analysis: () => 7,
+    miso_engine_web_v1_track_response_result_ptr: () => trackResponseSnapshotPointer,
+    miso_engine_web_v1_track_response_result_bytes: () => 0,
+    miso_engine_web_v1_track_response_close: () => 0,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;

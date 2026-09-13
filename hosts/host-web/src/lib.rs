@@ -36,6 +36,7 @@ use host_core::{
     compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
+use host_core::{ResponseSnapshotError, ResponseSnapshotSink};
 use session::CompileCaps;
 
 pub use host_core::EffectRack;
@@ -158,6 +159,110 @@ pub const RESPONSE_MAXIMUM_EFFECT_ID_BYTES: u32 = 127;
 pub const RESPONSE_MAXIMUM_PARAMETER_OVERRIDES: u32 = 256;
 #[allow(missing_docs)]
 pub const RESPONSE_MAXIMUM_RESULT_BYTES: u64 = 16 << 20;
+
+/// Maximum number of owners a bounded live response query may return.
+pub const LIVE_RESPONSE_MAXIMUM_OWNERS: usize = 256;
+/// Maximum bytes in one stable live-response identity.
+pub const LIVE_RESPONSE_MAXIMUM_ID_BYTES: usize = 127;
+/// Maximum points accepted by one live response query.
+pub const LIVE_RESPONSE_MAXIMUM_POINTS: usize = 4096;
+/// Fixed raw snapshot staging capacity, allocated before a browser caches Wasm views.
+pub const LIVE_RESPONSE_CAPTURE_BYTES: usize = 1 << 20;
+/// Live response result mode (`target`).
+pub const LIVE_RESPONSE_MODE_TARGET: u32 = 1;
+/// Live response result meaning (`eqFilterSubtotal`).
+pub const LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL: u32 = 1;
+
+/// Fixed request header for a live selected-track response query.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebLiveResponseRequest {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub track_id_bytes: u32,
+    pub grid: u32,
+    pub channels: u32,
+    pub points: u32,
+    pub minimum_hz: f32,
+    pub maximum_hz: f32,
+    pub maximum_result_bytes: u32,
+    pub reserved: [u32; 3],
+}
+
+/// Fixed live response owner record in the returned bounded payload.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebLiveResponseOwner {
+    pub track_id_offset: u32,
+    pub track_id_bytes: u32,
+    pub native_id_offset: u32,
+    pub native_id_bytes: u32,
+    pub stable_id_offset: u32,
+    pub stable_id_bytes: u32,
+    pub rack: u32,
+    pub slot: u32,
+    pub kind: u32,
+    pub bypassed: u32,
+    pub availability: u32,
+    pub left_offset: u32,
+    pub left_count: u32,
+    pub right_offset: u32,
+    pub right_count: u32,
+    pub reserved: [u32; 1],
+}
+
+/// Fixed copied section record in a raw live response snapshot payload.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebLiveResponseSection {
+    pub id: u32,
+    pub kind: u32,
+    pub enabled: u32,
+    pub word_count: u32,
+    pub words: [u32; 7],
+}
+
+/// Fixed result header followed by owner records, identity bytes and selected `f32` vectors.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebLiveResponseResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub mode: u32,
+    pub meaning: u32,
+    pub channels: u32,
+    pub points: u32,
+    pub owner_count: u32,
+    pub excluded_count: u32,
+    pub sample_rate_hz: u32,
+    pub reserved0: u32,
+    pub reserved1: u32,
+    pub captured_sample: u64,
+    pub snapshot_token: u64,
+    pub result_bytes: u64,
+    pub frequencies_offset: u32,
+    pub left_offset: u32,
+    pub right_offset: u32,
+    pub owners_offset: u32,
+    pub owner_record_bytes: u32,
+    pub section_record_bytes: u32,
+    pub reserved: [u32; 2],
+}
+
+/// Byte sizes of the live response fixed records.
+#[allow(missing_docs)]
+pub const LIVE_RESPONSE_REQUEST_BYTES: u32 = size_of::<WebLiveResponseRequest>() as u32;
+#[allow(missing_docs)]
+pub const LIVE_RESPONSE_OWNER_BYTES: u32 = size_of::<WebLiveResponseOwner>() as u32;
+#[allow(missing_docs)]
+pub const LIVE_RESPONSE_SECTION_BYTES: u32 = size_of::<WebLiveResponseSection>() as u32;
+#[allow(missing_docs)]
+pub const LIVE_RESPONSE_RESULT_BYTES: u32 = size_of::<WebLiveResponseResult>() as u32;
 
 /// Fixed request header for the analysis-only response adapter.
 #[allow(missing_docs)]
@@ -1457,6 +1562,24 @@ impl AudioWorkletEngineHost {
                 .iter()
                 .any(std::option::Option::is_some)
         })
+    }
+
+    /// Copy one selected track's response owners at the current completed render boundary.
+    ///
+    /// The prepared plan remains exclusively owned by this host. The caller supplies bounded
+    /// storage and may finish/evaluate the immutable copy after this method returns.
+    pub fn copy_response_snapshot(
+        &mut self,
+        track_id: &str,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<engine::realtime::ResponseSnapshotCapture, ResponseSnapshotError> {
+        if self.status.state != STATE_READY {
+            return Err(ResponseSnapshotError::Owner);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(ResponseSnapshotError::Owner);
+        };
+        ready.host.copy_response_snapshot(track_id, sink)
     }
 
     /// Read one bounded batch of selected resident observation taps.
@@ -3474,6 +3597,7 @@ fn project_buffers(
     let bridge_metadata = fixed_metadata
         .checked_add(plane_reference_bytes)
         .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
+        .and_then(|bytes| bytes.checked_add(crate::ffi::live_response_staging_retained_bytes()))
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3499,7 +3623,8 @@ fn project_buffers(
         .unwrap_or(0)
         .max(host_shell_bytes)
         .max(plane_reference_bytes)
-        .max(crate::ffi::observation_staging_largest_allocation_bytes());
+        .max(crate::ffi::observation_staging_largest_allocation_bytes())
+        .max(crate::ffi::live_response_staging_largest_allocation_bytes());
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;

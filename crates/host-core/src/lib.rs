@@ -112,6 +112,10 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use engine::LAUNCH_SAMPLE_RATES;
+pub use engine::realtime::{
+    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+};
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
     HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,

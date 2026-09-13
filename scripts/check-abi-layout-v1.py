@@ -149,6 +149,17 @@ EXPORTS = [
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_track_response_capture",
+    "miso_engine_web_v1_track_response_close",
+    "miso_engine_web_v1_track_response_request_bytes",
+    "miso_engine_web_v1_track_response_request_ptr",
+    "miso_engine_web_v1_track_response_result_bytes",
+    "miso_engine_web_v1_track_response_result_ptr",
+    "miso_engine_web_v1_track_response_snapshot_capacity",
+    "miso_engine_web_v1_track_response_snapshot_ptr",
+    "miso_engine_web_v1_track_response_snapshot_set_bytes",
+    "miso_engine_web_v1_track_response_track_id_capacity",
+    "miso_engine_web_v1_track_response_track_id_ptr",
 ]
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 # The dead two-phase lifecycle's vocabulary. Named so its return is a failure rather than a
@@ -166,6 +177,10 @@ STRUCTURES = {
     "responseRequest": 128,
     "responseParameter": 16,
     "responseResult": 112,
+    "liveResponseRequest": 48,
+    "liveResponseOwner": 64,
+    "liveResponseSection": 44,
+    "liveResponseResult": 104,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
@@ -198,6 +213,22 @@ RESPONSE_RESULT_FIELDS = [
     "sampleRateHz", "reserved0", "configurationId", "floorDb", "bypass", "enabledLeft",
     "enabledRight", "retainedBytes", "resultBytes", "frequenciesOffset", "totalLeftOffset",
     "totalRightOffset", "sectionsLeftOffset", "sectionsRightOffset", "reserved",
+]
+LIVE_RESPONSE_REQUEST_FIELDS = [
+    "structSize", "abiVersion", "trackIdBytes", "grid", "channels", "points", "minimumHz",
+    "maximumHz", "maximumResultBytes", "reserved",
+]
+LIVE_RESPONSE_OWNER_FIELDS = [
+    "trackIdOffset", "trackIdBytes", "nativeIdOffset", "nativeIdBytes", "stableIdOffset",
+    "stableIdBytes", "rack", "slot", "kind", "bypassed", "availability", "leftOffset",
+    "leftCount", "rightOffset", "rightCount", "reserved",
+]
+LIVE_RESPONSE_SECTION_FIELDS = ["id", "kind", "enabled", "wordCount", "words"]
+LIVE_RESPONSE_RESULT_FIELDS = [
+    "structSize", "abiVersion", "result", "mode", "meaning", "channels", "points", "ownerCount",
+    "excludedCount", "sampleRateHz", "reserved0", "reserved1", "capturedSample", "snapshotToken",
+    "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset", "ownersOffset",
+    "ownerRecordBytes", "sectionRecordBytes", "reserved",
 ]
 OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
@@ -328,6 +359,10 @@ def validate(document: object) -> None:
         ("responseRequest", RESPONSE_REQUEST_FIELDS),
         ("responseParameter", RESPONSE_PARAMETER_FIELDS),
         ("responseResult", RESPONSE_RESULT_FIELDS),
+        ("liveResponseRequest", LIVE_RESPONSE_REQUEST_FIELDS),
+        ("liveResponseOwner", LIVE_RESPONSE_OWNER_FIELDS),
+        ("liveResponseSection", LIVE_RESPONSE_SECTION_FIELDS),
+        ("liveResponseResult", LIVE_RESPONSE_RESULT_FIELDS),
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
@@ -347,7 +382,9 @@ def validate(document: object) -> None:
         "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
         "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
         "responseGrids", "responseChannels", "responseFields", "observationChannels",
-        "observationStatuses",
+        "observationStatuses", "liveResponseModes", "liveResponseMeanings",
+        "maximumLiveResponseOwners", "maximumLiveResponseIdBytes", "maximumLiveResponsePoints",
+        "liveResponseCaptureBytes",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -361,6 +398,8 @@ def validate(document: object) -> None:
     check_named(document, "responseGrids", RESPONSE_GRIDS)
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
     check_named(document, "responseFields", RESPONSE_FIELDS)
+    check_named(document, "liveResponseModes", [(1, "target")])
+    check_named(document, "liveResponseMeanings", [(1, "eqFilterSubtotal")])
     check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
     check_named(document, "observationStatuses", [(1, "pending"), (2, "unarmed"), (3, "ready")])
 
@@ -387,6 +426,10 @@ def validate(document: object) -> None:
         ("maximumResponseEffectIdBytes", 127),
         ("maximumResponseParameterOverrides", 256),
         ("maximumResponseResultBytes", 16 << 20),
+        ("maximumLiveResponseOwners", 256),
+        ("maximumLiveResponseIdBytes", 127),
+        ("maximumLiveResponsePoints", 4096),
+        ("liveResponseCaptureBytes", 1 << 20),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):
         require(constants[name] == expected,

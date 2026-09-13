@@ -1,4 +1,5 @@
 const RESULT_OK = 0;
+const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
@@ -76,6 +77,18 @@ const OBSERVATION_ROW_FIELDS = [
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
 const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];
+const TRACK_RESPONSE_REQUEST_FIELDS = [
+  "trackId", "grid", "channels", "points", "minimumHz", "maximumHz", "maximumResultBytes",
+];
+const TRACK_RESPONSE_REPLY_FIELDS = ["tag", "requestId", "result", "snapshot"];
+const LIVE_RESPONSE_CAPTURE_GRID_LINEAR = 1;
+const LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC = 2;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT = 1;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT = 2;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
+const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
+const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
+const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
 
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
@@ -363,6 +376,7 @@ class MisoAudioWorkletHost {
   #inFlightStatus = 0;
   #inFlightCommands = 0;
   #inFlightObservationReads = 0;
+  #inFlightTrackResponses = 0;
   #inFlightLease = new Set();
   #commandQueueRecords;
   #consoleMeterBlocks;
@@ -436,6 +450,8 @@ class MisoAudioWorkletHost {
       this.#inFlightCommands -= 1;
     } else if (pending.response === "observationRead") {
       this.#inFlightObservationReads -= 1;
+    } else if (pending.response === "trackResponse") {
+      this.#inFlightTrackResponses -= 1;
     } else if (pending.response === "lease" || pending.response === "sessionMap"
       || pending.response === "observationMap") {
       this.#inFlightLease.delete(pending.leaseKind);
@@ -534,6 +550,8 @@ class MisoAudioWorkletHost {
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
               ? ["tag", "requestId", "result", "rows"]
+              : pending.response === "trackResponse"
+                ? TRACK_RESPONSE_REPLY_FIELDS
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -548,6 +566,8 @@ class MisoAudioWorkletHost {
           ? "miso.observationmap.v1"
           : pending.response === "observationRead"
             ? "miso.observation.v1"
+            : pending.response === "trackResponse"
+              ? "miso.trackresponse.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -583,6 +603,14 @@ class MisoAudioWorkletHost {
       && (message.result === RESULT_OK || message.rows.length === 0)
       && message.rows.every(validObservationRow)
     );
+    const validTrackResponse = pending.response !== "trackResponse" || (
+      message.snapshot instanceof Uint8Array
+      && message.snapshot.buffer instanceof ArrayBuffer
+      && ((message.result === RESULT_OK
+        && message.snapshot.byteLength > 0
+        && message.snapshot.byteLength <= pending.trackResponseMaximumBytes)
+        || (message.result !== RESULT_OK && message.snapshot.byteLength === 0))
+    );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
       && validResult(message.lastResult) && message.backend === this.#numericBackend
@@ -594,7 +622,7 @@ class MisoAudioWorkletHost {
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validCommandAck || !validSessionMap
-        || !validObservationMap || !validObservationRead) {
+        || !validObservationMap || !validObservationRead || !validTrackResponse) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -616,6 +644,7 @@ class MisoAudioWorkletHost {
     this.#inFlightSeeks.clear();
     this.#inFlightStatus = 0;
     this.#inFlightObservationReads = 0;
+    this.#inFlightTrackResponses = 0;
     for (const pending of unsettled) pending.reject(error);
   }
 
@@ -632,6 +661,7 @@ class MisoAudioWorkletHost {
     // authority; this one only avoids paying a message round trip to be told so.
     if (response === "command") return this.#inFlightCommands >= this.#commandQueueRecords;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
+    if (response === "trackResponse") return this.#inFlightTrackResponses >= 1;
     if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       return this.#inFlightLease.has(sourceId);
     }
@@ -649,6 +679,8 @@ class MisoAudioWorkletHost {
       this.#inFlightCommands += 1;
     } else if (response === "observationRead") {
       this.#inFlightObservationReads += 1;
+    } else if (response === "trackResponse") {
+      this.#inFlightTrackResponses += 1;
     } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       this.#inFlightLease.add(sourceId);
     }
@@ -679,6 +711,7 @@ class MisoAudioWorkletHost {
         leaseKind: sourceId,
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
+        trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
         resolve,
         reject,
         response,
@@ -872,6 +905,39 @@ class MisoAudioWorkletHost {
       { tag: "miso.observation.v1", selections: request.selections },
       [],
       "observationRead",
+    );
+  }
+
+  /// Capture one immutable selected-track response snapshot for the analysis Worker.
+  ///
+  /// The Worklet performs only the owner copy and returns detached bytes. Grid evaluation stays
+  /// on the existing Rust analysis path, so this request never runs curve math in `process()` or
+  /// in the Worklet message handler.
+  captureTrackResponse(request) {
+    if (!hasExactFields(request, TRACK_RESPONSE_REQUEST_FIELDS)
+        || typeof request.trackId !== "string"
+        || request.trackId.length === 0
+        || request.trackId.length > LIVE_RESPONSE_MAXIMUM_ID_BYTES
+        || !Number.isInteger(request.grid)
+        || (request.grid !== LIVE_RESPONSE_CAPTURE_GRID_LINEAR
+          && request.grid !== LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC)
+        || !Number.isInteger(request.channels)
+        || (request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT
+          && request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT
+          && request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH)
+        || !Number.isInteger(request.points) || request.points < 2
+        || request.points > LIVE_RESPONSE_MAXIMUM_POINTS
+        || typeof request.minimumHz !== "number" || !Number.isFinite(request.minimumHz)
+        || typeof request.maximumHz !== "number" || !Number.isFinite(request.maximumHz)
+        || !Number.isInteger(request.maximumResultBytes)
+        || request.maximumResultBytes <= 0
+        || request.maximumResultBytes > LIVE_RESPONSE_MAXIMUM_BYTES) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.trackresponse.v1", ...request },
+      [],
+      "trackResponse",
     );
   }
 
