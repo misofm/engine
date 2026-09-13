@@ -134,7 +134,9 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered managed live response subscriptions:** #785 via PR #788, merged main 8b69aaf660408986d4f25f99acc82450009fe786. Astra medium attempt 1 PASS; required qualification 34756579779 PASS on final head f22910b03f48dd134542f951a157d0768aa1dbdd. Both SDKs share the managed owner/lifetime, admit bounded response jobs and suppress unchanged captured-state evaluation/publication. All 219 SDK tests, real three-browser and package gates pass. Issue #785 is CLOSED and verified.
 
-**Active:** #789 adds continuous managed spectrum capture for the existing one prepared target, native sample-clock hops and gap/loss semantics, Rust power smoothing and a reusable browser transfer buffer. Astra xhigh scope is frozen; Luna max implements, Astra medium verifies bugs only. Multiple targets, SAB and all remaining parent requirements stay attached.
+**Delivered continuous managed spectrum:** #789 and bounded accounting successor #791 via PR #792, merged main b34b39f256d5a264c43363b3aeb8ee502ce4c546. Required qualification 34764358890 PASS; 227 SDK tests, actual three-browser meter/EQ/spectrum alignment, realtime/resource and package gates pass. Native sample-clock hops, Rust power smoothing, reusable transfer credit and shared managed lifecycle are delivered for one prepared target. Both issues are CLOSED and verified.
+
+**Active:** #793 prepares multiple explicitly bounded targets and atomically switches one active managed stream without interrupting audio, enabling the app focused EQ panel. Astra xhigh briefs, Luna max implements, Astra medium verifies bugs only. Simultaneous jobs, SAB and all remaining parent requirements stay attached.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 
