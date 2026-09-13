@@ -130,7 +130,9 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered spectrum query:** #781 via PR #782, merged main 505fadf312693b2d257f8a3bb385a9cf0f80cb74. Astra medium PASS; required qualification 34753572899 PASS on final head a48120469edca90718a70cb4f1567fea4a62b190. Both SDKs expose bounded 2048-sample engine-captured spectra at all three required tap kinds, with one preparation-selected target per engine. All 211 SDK tests, actual three-browser, artifact/resource and package gates pass. Issue #781 is CLOSED.
 
-**Active:** #783 adds bounded managed resident-observation subscriptions through both SDKs, reusing #777 reads and existing atomic observe commands. Astra xhigh scope is frozen; Luna max implements, Astra medium verifies bugs only. Common response/spectrum lifecycle and all other parent obligations remain attached below.
+**Delivered managed resident subscriptions:** #783 via PR #784, merged main 6af7ff4b445264c924b2b8b01e1cd98b1c702bf2. Astra medium PASS; required qualification 34754869954 PASS on final head 7b96fe5f51f1103f780b6499b6dff3b34c585b3f. Both SDKs provide bounded subscribe/update/latest/pump/close, shared bindings, original owner spans, consumer cadence/loss accounting and last-close disarm. All 215 SDK tests, real three-browser and package gates pass. Issue #783 is CLOSED.
+
+**Active:** #785 adds managed live track-response subscriptions with captured-state suppression, reusing the accepted SDK lifetimes and #779 capture/evaluator. Astra xhigh scope is frozen; Luna max implements, Astra medium verifies bugs only. All remaining parent obligations stay attached below.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 
