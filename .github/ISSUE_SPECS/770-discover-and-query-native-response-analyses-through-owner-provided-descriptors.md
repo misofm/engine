@@ -212,3 +212,42 @@ Root authorizes attempt 2 for the three bounded findings, within the existing al
 Luna max corrected companion scope/bypass validation and mapped builtin preparation errors to the established diagnostic spellings. Adapter tests now exercise independent descriptor mutations/admission, successful source-mutation stability, mixed enable masks/views, bitwise output identity/one-sided modes, and common-interface refusal/accessor allocation behavior. Production changes are limited to the companion validator and builtin error translation; DSP arithmetic, dependencies, legacy descriptors and generated assets are unchanged.
 
 Focused results: effect-contract2, effect-compiler1, EQ13, builtins11 passed; targeted all-target Clippy, formatting, effect-runtime/builtins/realtime policies and diff checks exit0. Raw logs/exits: `/tmp/issue770-attempt2-{contract-final,compiler-final,eq-response-final,builtins-filter-final,clippy-3,fmt-check,effect-runtime-policy,builtins-policy,realtime-policy,diff-check}.{log,exit}`. Earlier debugging logs remain distinct. Source pauses for root checkpoint; broad changed-source gates and one Astra medium attempt-2 verdict remain pending.
+
+## Attempt 2 remaining gate evidence
+
+After checkpoint `a5db34217ff7f656765121463c7acd8247f65e1b`, every remaining changed-source gate exited
+0. Raw stdout/stderr and exit status are preserved outside the repository:
+
+- `cargo test --locked -p parametric-eq --test response --test conformance` — `/tmp/issue770-attempt2-gate-eq-conformance.log` and `.exit` (`0`)
+- `cargo test --locked -p builtins --test filter_response --test determinism` — `/tmp/issue770-attempt2-gate-builtins-determinism.log` and `.exit` (`0`)
+- `cargo test --locked -p effect-contract --lib --tests` — `/tmp/issue770-attempt2-gate-contract-full.log` and `.exit` (`0`)
+- `cargo check --locked --workspace --all-targets` — `/tmp/issue770-attempt2-gate-workspace-check.log` and `.exit` (`0`)
+- scalar Wasm check — `/tmp/issue770-attempt2-gate-wasm-scalar.log` and `.exit` (`0`)
+- SIMD Wasm check — `/tmp/issue770-attempt2-gate-wasm-simd.log` and `.exit` (`0`)
+
+No source, test, dependency, or build-input edits were made after the attempt-2 checkpoint.
+
+# Issue #770 attempt 2 adversarial review
+
+Verdict: **PASS — native source contract and evidence**.
+
+Reviewed frozen source: `a5db34217ff7f656765121463c7acd8247f65e1b` in `/tmp/miso-engine-770`. Reviewer: Astra, medium. This is the single coherent attempt-2 verdict. Reviewed the prior findings, complete bounded delta against `c864ffa263a84be627945ff7290446080a18b6a4`, companion validator tests, owner adapters and revised adapter assertions, plus supplied focused/broad gate evidence. Worktree was clean at initial inspection. No source edits, agents, GitHub actions, commits or repeated expensive gates were performed.
+
+## Findings resolved
+
+- The companion validator now admits only the two implemented total-scope/bypass combinations. The test builds independent mutations from a valid base for IDs/order, name and section bounds, floor, units/cost and contradictory pairings, checking both typed validation and registry rejection. The actual builtin declaration is also validated in its owner test. Registry/default factory behavior and legacy descriptor validation remain unchanged.
+- The builtin adapter now preserves all six existing `builtin.*` preparation spellings and the established fallback for unreachable render-only variants. Representative gain/cutoff/matrix failures assert exact strings; the EQ wrapper asserts the exact forwarded `effect.parameter.initial` code. No compiler dependency/refactor was introduced.
+- Both immutable adapters now receive successful queries before and after original caller inputs are mutated, with unchanged output bits and enabled views. Mixed asymmetric enable masks are checked explicitly at all four launch rates. Total and independent left/right optional-output modes compare bits against accepted direct APIs, including disabled identities; EQ bypass retains exact identity totals and configured section curves. Descriptor floor/scope/bypass metadata and view masks are asserted.
+- Grid/budget refusals retain both section buffers and check all sentinels; malformed right-section output is exercised. Metadata/configuration/retained-byte reads, the first trait-object refusal, and the first successful query are measured at zero allocations/frees/reallocations using the existing allocator. Both maximum u64 and `2^53+1` identities are asserted through the common interface.
+
+The correction changes only companion validation, builtin error translation, focused tests and issue records. No numerical evaluator, coefficient preparation, render/state ABI, legacy descriptor wire field, production dependency or generated asset changed. Existing resource checks remain before allocation and retain accurate fixed concrete payload accounting. Owner query delegation, borrowed immutable view lifetimes, absence of mutable DSP access, and nonprovider `None` semantics remain sound. No new source defect was found.
+
+## Gate evidence
+
+Directly read final focused logs/exits: companion contract 2, registry integration 1, EQ response 13 and builtin filter response 11 tests pass; final targeted all-target Clippy, formatting, three policies and diff-check exit zero. Preserved earlier development Clippy failures are distinct from the successful frozen result.
+
+Also directly read the completed attempt-2 broad exit files and terminal results: EQ conformance/response, builtin determinism/filter response, full effect-contract tests, workspace all-target check, and four-crate Wasm scalar/SIMD release checks all pass. Evidence is under `/tmp/issue770-attempt2-{contract-final,compiler-final,eq-response-final,builtins-filter-final,clippy-3,fmt-check,effect-runtime-policy,builtins-policy,realtime-policy,diff-check,gate-eq-conformance,gate-builtins-determinism,gate-contract-full,gate-workspace-check,gate-wasm-scalar,gate-wasm-simd}.{log,exit}`. These are supplied execution logs, not reviewer reruns. Wasm builds establish portability, not runtime response-query parity.
+
+## Delivery boundary
+
+This SOURCE PASS permits the separately scoped artifact qualification/delivery work. It does not claim artifact/required PR or main CI, merge, GitHub synchronization/closure or cleanup have completed. Parent #763 stays open; session binding, composition, generated metadata/SDK access, live analysis and integrated parity remain required successors.
