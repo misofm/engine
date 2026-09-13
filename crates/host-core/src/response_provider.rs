@@ -17,6 +17,7 @@ use effect_contract::{
     ResponseQuery, ResponseSummary, validate_response_analysis_descriptor,
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
+use math::{exp, log};
 use session::{EffectIdentity, StableId};
 
 /// One named response target in a compiled session.
@@ -317,11 +318,7 @@ impl PreparedSessionResponseCatalog {
         }
         if selections.iter().any(|selection| {
             let id_bytes = target_id_bytes(&selection.target).unwrap_or(usize::MAX);
-            let points_bytes = selection
-                .grid
-                .points()
-                .checked_mul(size_of::<f32>())
-                .unwrap_or(usize::MAX);
+            let points_bytes = selection.grid.points().saturating_mul(size_of::<f32>());
             id_bytes > limits.maximum_single_allocation_bytes
                 || points_bytes > limits.maximum_single_allocation_bytes
         }) {
@@ -379,8 +376,7 @@ impl PreparedSessionResponseCatalog {
                 .ok_or(SessionResponseError::Capacity)?;
             let remaining = limits
                 .maximum_retained_bytes
-                .checked_sub(known_before_owner)
-                .unwrap_or(0);
+                .saturating_sub(known_before_owner);
             let owner_limit = remaining.min(limits.maximum_single_allocation_bytes);
             let owner = prepare_owner(
                 &resolved,
@@ -669,16 +665,20 @@ fn prepare_owner(
 ) -> Result<Box<dyn PreparedResponseAnalysis>, SessionResponseError> {
     match resolved {
         ResolvedTarget::InputFilters { track, .. } => {
-            let parameters = requested_track_builtin_parameters(track, u32::MAX)
-                .map_err(|error| SessionResponseError::Owner(ResponseAnalysisError::Configuration(
-                    effect_contract::EffectPrepareError {
-                        code: builtin_error_code(error),
-                    },
-                )))?;
+            let parameters =
+                requested_track_builtin_parameters(track, u32::MAX).map_err(|error| {
+                    SessionResponseError::Owner(ResponseAnalysisError::Configuration(
+                        effect_contract::EffectPrepareError {
+                            code: builtin_error_code(error),
+                        },
+                    ))
+                })?;
             prepare_input_filter_response(sample_rate_hz, parameters, limits)
                 .map_err(SessionResponseError::Owner)
         }
-        ResolvedTarget::Effect { entry, response, .. } => response
+        ResolvedTarget::Effect {
+            entry, response, ..
+        } => response
             .prepare_response(entry.bank_preparation.request(), limits)
             .map_err(SessionResponseError::Owner),
     }
@@ -701,9 +701,7 @@ fn builtin_error_code(error: builtins::BuiltinParameterError) -> &'static str {
 }
 
 fn duplicate_selection(previous: &[SessionResponseSelection], target: &ResponseTarget) -> bool {
-    previous
-        .iter()
-        .any(|selection| selection.target == *target)
+    previous.iter().any(|selection| selection.target == *target)
 }
 
 fn target_id_bytes(target: &ResponseTarget) -> Result<usize, SessionResponseError> {
@@ -794,12 +792,14 @@ fn generate_grid(grid: ResponseFrequencyGrid) -> Result<Box<[f32]>, SessionRespo
         let t = index as f64 / denominator;
         let value = match grid {
             ResponseFrequencyGrid::Linear { .. } => {
-                f64::from(minimum_hz) + f64::from(maximum_hz - minimum_hz) * t
+                let minimum = f64::from(minimum_hz);
+                let maximum = f64::from(maximum_hz);
+                minimum + (maximum - minimum) * t
             }
             ResponseFrequencyGrid::Logarithmic { .. } => {
-                (f64::from(minimum_hz).ln()
-                    + (f64::from(maximum_hz).ln() - f64::from(minimum_hz).ln()) * t)
-                .exp()
+                let minimum = f64::from(minimum_hz);
+                let maximum = f64::from(maximum_hz);
+                exp(log(minimum) + (log(maximum) - log(minimum)) * t)
             }
         } as f32;
         frequencies.push(value);
@@ -841,7 +841,9 @@ fn own_id(value: &str) -> Result<String, SessionResponseError> {
 }
 
 enum OwnedTarget {
-    InputFilters { track_id: String },
+    InputFilters {
+        track_id: String,
+    },
     Effect {
         track_id: String,
         rack: EffectRack,

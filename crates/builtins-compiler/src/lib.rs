@@ -4613,14 +4613,11 @@ mod tests {
 
         let mut invalid = track.clone();
         let (session::MatrixOrPan::Pan {
-            smoothing_samples,
-            ..
+            smoothing_samples, ..
         }
         | session::MatrixOrPan::Matrix {
-            smoothing_samples,
-            ..
-        }) = &mut invalid.matrix_or_pan
-        ;
+            smoothing_samples, ..
+        }) = &mut invalid.matrix_or_pan;
         *smoothing_samples = 1;
         assert_eq!(
             requested_track_builtin_parameters(&invalid, 0),

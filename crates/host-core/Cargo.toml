@@ -22,6 +22,7 @@ effect-compiler.workspace = true
 effect-contract.workspace = true
 graph.workspace = true
 graph-compiler.workspace = true
+math.workspace = true
 # Issue #146: the canonical floating-point environment guard and the render-thread attestation.
 # The lane crate is already in every host's link graph; naming it here is what lets the facade own
 # the one started-session handle instead of each host re-deriving the pin.
