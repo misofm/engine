@@ -39,7 +39,6 @@ import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
-  TrackResponseSubscriptionOwner,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -450,7 +449,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumCleanup: Promise<void> | undefined;
     let closed = false;
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
-    let responseSubscriptions: TrackResponseSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
       if (reply.result !== constantValue("resultCodes", "ok")) {
@@ -499,11 +497,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         console: getConsole,
+        responseRead: readTrackResponse,
         scheduler: {
           setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
           clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
         },
-      }, options.observationSubscriptionLimits);
+      }, options.observationSubscriptionLimits, options.responseSubscriptionLimits);
     const cancelSpectrumCapture = (): Promise<void> => {
       try {
         return Promise.resolve(host.cancelSpectrum?.()).then(() => undefined, () => undefined);
@@ -601,14 +600,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       return read.result;
     };
-    const responseOwner = (): TrackResponseSubscriptionOwner => responseSubscriptions ??=
-      new TrackResponseSubscriptionOwner({
-        responseRead: readTrackResponse,
-        scheduler: {
-          setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
-          clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
-        },
-      }, options.responseSubscriptionLimits);
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       const prepared = preparedSpectrum;
@@ -767,7 +758,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       readObservations,
       subscribeObservations: (request: ObservationSubscriptionRequest) => observationOwner().subscribe(request)
         .then((receipt) => receipt.handle),
-      subscribeTrackResponse: (request: TrackResponseSubscriptionRequest) => responseOwner().subscribe(request)
+      subscribeTrackResponse: (request: TrackResponseSubscriptionRequest) => observationOwner().subscribeTrackResponse(request)
         .then((receipt) => receipt.handle),
       queryTrackResponse,
       querySpectrum,
@@ -775,7 +766,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       close: () => {
         closed = true;
         observationSubscriptions?.invalidate(true);
-        responseSubscriptions?.invalidate(true);
         closePromise ??= (async () => {
           try {
             if (trackResponsePromise !== undefined) {

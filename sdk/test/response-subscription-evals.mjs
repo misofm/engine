@@ -5,6 +5,7 @@ import { before, test } from "node:test";
 
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
@@ -80,4 +81,89 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
   } finally {
     if (engine.state() !== "disposed") engine.dispose();
   }
+});
+
+test("resident and response handles share one owner poll, timer, and epoch", async () => {
+  let timer;
+  let timerStarts = 0;
+  let releaseResponse;
+  let responseReads = 0;
+  let responseWords = [1];
+  const observationMap = {
+    bindings: [{
+      trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+      nativeEffectId: "miso.compressor", tapIds: [1],
+    }],
+  };
+  const observationConsole = {
+    edit: {
+      track: () => ({
+        effect: () => ({ observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }) }),
+      }),
+    },
+    async submit(...edits) {
+      return {
+        ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
+        admitted: edits.length, appliedAtSample: 0n,
+      };
+    },
+  };
+  const transport = {
+    observationMap: () => observationMap,
+    readObservations: (selections) => selections.map((selection) => ({
+      ...selection,
+      nativeEffectId: "miso.compressor",
+      descriptor: { id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true },
+      sampleRateHz: 48_000,
+      status: "unarmed",
+    })),
+    console: () => observationConsole,
+    responseRead: async (_request, previousState) => {
+      responseReads += 1;
+      if (previousState !== undefined) {
+        await new Promise((resolve) => { releaseResponse = resolve; });
+      }
+      return {
+        changed: previousState === undefined || previousState.words[0] !== responseWords[0],
+        state: { words: [...responseWords] },
+        ...(previousState === undefined || previousState.words[0] !== responseWords[0] ? {
+          result: {
+            trackId: "t", mode: "target", meaning: "eqFilterSubtotal", sampleRateHz: 48_000, floorDb: -120,
+            frequenciesHz: new Float32Array([20, 20_000]), leftDb: new Float32Array([-1, -2]),
+            rightDb: new Float32Array([-1, -2]), members: [], capturedSample: 0n, snapshotToken: BigInt(responseReads),
+            excludedMemberCount: 0, resultBytes: 200n,
+          },
+        } : {}),
+      };
+    },
+    scheduler: {
+      setInterval: (callback) => { timer = callback; timerStarts += 1; return 1; },
+      clearInterval: () => { timer = undefined; },
+    },
+  };
+  const owner = new ObservationSubscriptionOwner(transport, undefined, {
+    maximumCadenceMs: 10,
+    maximumCaptureAttempts: 2,
+  });
+  const resident = await owner.subscribe({
+    selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+    windowBlocks: 1,
+    cadenceMs: 10,
+  });
+  const response = await owner.subscribeTrackResponse({
+    trackId: "t", grid: { kind: "linear", points: 2, minimumHz: 20, maximumHz: 20_000 },
+    channels: "both", cadenceMs: 10,
+  });
+  assert.equal(resident.owner, response.owner);
+  assert.equal(resident.epoch, response.epoch);
+  assert.equal(timerStarts, 1);
+  const polling = response.handle.pump();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  timer();
+  assert.equal(responseReads, 2);
+  releaseResponse();
+  await polling;
+  owner.invalidate();
+  assert.throws(() => resident.handle.readLatest(), /stale|closed/);
+  await assert.rejects(() => response.handle.pump(), /stale|closed/);
 });

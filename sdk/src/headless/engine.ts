@@ -19,7 +19,6 @@ import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
-  TrackResponseSubscriptionOwner,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -103,7 +102,6 @@ export class OfflineEngine {
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
-  #responseSubscriptions: TrackResponseSubscriptionOwner | undefined;
 
   private constructor(
     asset: MisoEngineAsset,
@@ -183,7 +181,7 @@ export class OfflineEngine {
 
   /** Subscribe to one selected track response; values are refreshed by `pump()`. */
   subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription> {
-    return this.#responseOwner().subscribe(request).then((receipt) => receipt.handle);
+    return this.#observationOwner().subscribeTrackResponse(request).then((receipt) => receipt.handle);
   }
 
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
@@ -275,13 +273,11 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
-    this.#responseSubscriptions?.invalidate();
     this.#boundary.reboot(documentBytes(document), options);
   }
 
   dispose(): void {
     this.#observationSubscriptions?.invalidate(true);
-    this.#responseSubscriptions?.invalidate(true);
     this.#boundary.dispose();
   }
 
@@ -290,14 +286,9 @@ export class OfflineEngine {
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
       console: () => this.console(),
-    }, this.#observationLimits);
-  }
-
-  #responseOwner(): TrackResponseSubscriptionOwner {
-    return this.#responseSubscriptions ??= new TrackResponseSubscriptionOwner({
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
-    }, this.#responseLimits);
+    }, this.#observationLimits, this.#responseLimits);
   }
 }
 
