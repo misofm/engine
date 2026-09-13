@@ -32,6 +32,7 @@ import type {
   SpectrumCollection,
   SpectrumQuery,
   SpectrumResult,
+  SpectrumStreamSelection,
   SpectrumStreamRead,
   SpectrumStreamStart,
 } from "./spectrum.ts";
@@ -687,6 +688,55 @@ export class WasmBoundary {
       ok: result === constantValue("resultCodes", "ok"),
       result,
       code: resultName(result, "call"),
+    });
+  }
+
+  /** Atomically update the active collection entry and smoothing profile. */
+  selectSpectrumStream(query: SpectrumQuery, smoothingMs: number): SpectrumStreamSelection {
+    const collection = this.#spectrumCollection;
+    if (collection === undefined) {
+      return Object.freeze({
+        ok: false,
+        result: constantValue("resultCodes", "unsupported"),
+        code: "unsupported",
+      });
+    }
+    const selected = cloneSpectrumQuery(query);
+    const channels = spectrumChannelsRaw(selected.channels);
+    const targetKey = JSON.stringify(selected.target);
+    const requestedChannels = selected.channels ?? "both";
+    const prepared = collection.entries.some((entry) =>
+      JSON.stringify(entry.target) === targetKey
+      && (entry.channels ?? "both") === requestedChannels);
+    if (!prepared) {
+      return Object.freeze({
+        ok: false,
+        result: constantValue("resultCodes", "invalidArgument"),
+        code: "invalidArgument",
+      });
+    }
+    const id = new TextEncoder().encode(spectrumTargetId(selected.target));
+    const pointer = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_ptr());
+    const capacity = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_capacity());
+    if (pointer <= 0 || id.byteLength > capacity) {
+      throw new MisoEngineError("the engine returned insufficient spectrum selection staging", {
+        phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
+      });
+    }
+    new Uint8Array(this.#exports.memory.buffer, pointer, id.byteLength).set(id);
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_select(
+      this.#live(), spectrumTargetRaw(selected.target), channels, id.byteLength, smoothingMs,
+    ));
+    if (result !== constantValue("resultCodes", "ok")) {
+      return Object.freeze({ ok: false, result, code: resultName(result, "call") });
+    }
+    const metadata = this.#spectrumModule().streamMetadata(selected);
+    this.#spectrumActiveQuery = selected;
+    return Object.freeze({
+      ok: true,
+      result,
+      code: resultName(result, "call"),
+      metadata,
     });
   }
 

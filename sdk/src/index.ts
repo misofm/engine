@@ -25,6 +25,7 @@ export type {
   SpectrumResult,
   SpectrumStreamMetadata,
   SpectrumStreamRead,
+  SpectrumStreamSelection,
   SpectrumStreamStart,
   SpectrumStreamStatus,
   SpectrumTarget,

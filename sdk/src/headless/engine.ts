@@ -320,6 +320,8 @@ export class OfflineEngine {
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),
+      spectrumStreamSelect: (query, smoothingMs) =>
+        this.#boundary.selectSpectrumStream(query, smoothingMs),
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
       spectrumStart: (smoothingMs, query) => this.#boundary.startSpectrumStream(smoothingMs, query),

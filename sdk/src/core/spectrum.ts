@@ -107,6 +107,15 @@ export interface SpectrumStreamStart {
   readonly metadata: SpectrumStreamMetadata;
 }
 
+/** Result of an atomic managed-stream target/channel/smoothing update. */
+export interface SpectrumStreamSelection {
+  readonly ok: boolean;
+  readonly result: number;
+  readonly code: string;
+  /** Present only after a native selection commit; it is the host's copied profile. */
+  readonly metadata?: SpectrumStreamMetadata;
+}
+
 type SpectrumExport = (...args: number[]) => number | bigint;
 type SpectrumExports = Record<string, unknown> & { readonly memory: WebAssembly.Memory };
 type AbiField = Readonly<{ readonly name: string; readonly offset: number; readonly type?: string }>;

@@ -33,6 +33,7 @@ import type {
   SpectrumResult,
   SpectrumStreamMetadata,
   SpectrumStreamRead,
+  SpectrumStreamSelection,
   SpectrumStreamStart,
   SpectrumStreamStatus,
 } from "./spectrum.ts";
@@ -139,6 +140,11 @@ export interface ObservationSubscriptionTransport {
   readonly spectrumPreparedCollection?: () => SpectrumCollection | undefined;
   /** Atomically select one exact prepared collection entry without stopping its stream. */
   readonly spectrumSelect?: (query: SpectrumQuery) => MaybePromise<EngineCallResult>;
+  /** Atomically update an active collection entry, including its smoothing profile. */
+  readonly spectrumStreamSelect?: (
+    query: SpectrumQuery,
+    smoothingMs: number,
+  ) => MaybePromise<SpectrumStreamSelection>;
   readonly spectrumStart?: (smoothingMs: number, query: SpectrumQuery) => MaybePromise<SpectrumStreamStart>;
   readonly spectrumRead?: (query: SpectrumQuery) => MaybePromise<SpectrumStreamRead>;
   readonly spectrumStop?: () => MaybePromise<EngineCallResult | void>;
@@ -1198,20 +1204,20 @@ export class ObservationSubscriptionOwner {
         normalized.configuration.channels,
       );
       const selectionChanged = spectrumCaptureKey(current.query) !== spectrumCaptureKey(desiredQuery);
+      const smoothingChanged = normalized.configuration.smoothingMs !== current.smoothingMs;
       const collection = this.#transport.spectrumPreparedCollection?.();
-      if (selectionChanged && collection !== undefined) {
-        // The native collection selection is one transaction. Do not implement a target change
-        // as select + fallible stream restart: the active stream and its shared Worker stay alive.
-        // Smoothing is an analyzer configuration and is deliberately kept separate until the
-        // transport exposes an equally atomic configuration update.
-        if (normalized.configuration.smoothingMs !== current.smoothingMs) {
-          throw new MisoUsageError("a target switch cannot also change spectrum smoothing");
+      if (collection !== undefined && (selectionChanged || smoothingChanged)) {
+        // The native collection selection is one transaction. Do not implement a target or
+        // smoothing change as a stop + fallible start: the active stream and its shared Worker
+        // must remain owned by this handle throughout the update.
+        const spectrumStreamSelect = this.#transport.spectrumStreamSelect;
+        if (spectrumStreamSelect === undefined) {
+          throw new MisoUsageError("the spectrum transport cannot update a prepared collection entry");
         }
-        const spectrumSelect = this.#transport.spectrumSelect;
-        if (spectrumSelect === undefined) {
-          throw new MisoUsageError("the spectrum transport cannot select a prepared collection entry");
-        }
-        const selected = await spectrumSelect(desiredQuery);
+        const selected = await spectrumStreamSelect(
+          desiredQuery,
+          normalized.configuration.smoothingMs,
+        );
         this.#assertEpoch(epoch);
         if (!selected.ok) {
           throw new MisoEngineError("the engine refused the prepared spectrum selection", {
@@ -1220,26 +1226,40 @@ export class ObservationSubscriptionOwner {
             result: selected.result,
           });
         }
-        const metadata = cloneSpectrumStreamMetadata({
-          ...current.metadata,
-          status: "warming",
-          result: constantValue("resultCodes", "ok"),
-          target: desiredQuery.target,
-          channels: normalized.configuration.channels,
-          captureEpoch: 0n,
-          sequence: 0n,
-          droppedCaptures: 0n,
-          windows: 0n,
-          capturedSample: 0n,
-          endSample: 0n,
-          analysisEpoch: current.metadata.analysisEpoch + 1n,
-          historyStartSample: 0n,
-        });
+        const selectedMetadata = selected.metadata;
+        if (selectedMetadata === undefined) {
+          throw new MisoEngineError("the spectrum selection returned no committed metadata", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.status !== "warming" && selectedMetadata.status !== "pending") {
+          throw new MisoEngineError("the spectrum selection returned an invalid warming state", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.target !== undefined
+            && spectrumTargetKey(selectedMetadata.target) !== spectrumTargetKey(normalized.configuration.target)) {
+          throw new MisoEngineError("the spectrum selection returned the wrong target", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.channels !== undefined && selectedMetadata.channels !== normalized.configuration.channels) {
+          throw new MisoEngineError("the spectrum selection returned the wrong channels", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.smoothingMs !== normalized.configuration.smoothingMs) {
+          throw new MisoEngineError("the spectrum selection returned the wrong smoothing profile", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        const metadata = cloneSpectrumStreamMetadata(selectedMetadata);
         const replacement: SpectrumJobState = {
           ...current,
           id: this.#nextSpectrumJob++,
           key: desiredKey,
           query: Object.freeze({ ...desiredQuery }),
+          smoothingMs: normalized.configuration.smoothingMs,
           metadata,
           result: undefined,
           revision: current.revision + 1n,
