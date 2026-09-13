@@ -369,8 +369,7 @@ export class WasmBoundary {
   observationMap(): ObservationMap {
     const handle = this.#live();
     const count = Number(this.#exports.miso_engine_web_v1_observation_count(handle));
-    const maximum = ABI_LAYOUT.constants.maximumCommandRecords;
-    if (!Number.isSafeInteger(count) || count < 0 || count > maximum) {
+    if (!Number.isSafeInteger(count) || count < 0 || count > 0xffff_ffff) {
       throw new MisoEngineError("the engine returned an invalid observation binding count", {
         phase: "output",
         code: "abiMismatch",

@@ -6,6 +6,7 @@ import { before, describe, test } from "node:test";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { decodeObservationRows, enrichObservationMap } from "../src/core/observation.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
@@ -53,6 +54,39 @@ function feed(engine, block) {
 }
 
 describe("issue 777 -- selected resident observations", () => {
+  test("keeps wide window clocks exact and admits more owners than one read batch", () => {
+    const rawBindings = Array.from({ length: 257 }, (_unused, index) => ({
+      trackIndex: 0,
+      rack: 1,
+      effectIndex: index,
+      effectSlotId: index === 0 ? "comp" : `effect-${index}`,
+      nativeEffectId: "miso.compressor",
+      tapIds: [1],
+    }));
+    const map = enrichObservationMap(["t"], rawBindings);
+    assert.equal(map.bindings.length, 257);
+
+    const firstSample = 9_007_199_254_740_993n;
+    const row = {
+      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, channels: 3,
+      status: 3, sampleRateHz: 48_000, firstSample, endSample: firstSample + 128n,
+      sequence: 9_007_199_254_740_995n, blocks: 1,
+      leftPresent: 1, rightPresent: 1, left: 4.5, right: -2.25,
+    };
+    const [decoded] = decodeObservationRows(
+      map,
+      ["t"],
+      [selection("comp")],
+      [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, channels: 3 }],
+      [row],
+      48_000,
+    );
+    assert.ok(decoded.window);
+    assert.equal(decoded.window.firstSample, firstSample);
+    assert.equal(decoded.window.endSample, firstSample + 128n);
+    assert.equal(decoded.window.sequence, 9_007_199_254_740_995n);
+  });
+
   test("headless reads two effects, preserves exact windows, and suppresses a re-arm", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,

@@ -575,7 +575,6 @@ class MisoAudioWorkletHost {
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
-      && message.bindings.length <= MAXIMUM_OBSERVATION_READS
       && message.bindings.every(validObservationMapBinding)
     );
     const validObservationRead = pending.response !== "observationRead" || (

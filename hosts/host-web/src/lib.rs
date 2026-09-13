@@ -28,7 +28,7 @@ use effect_contract::{
     EffectControlRecord, ObservationCost, ObservationDescriptor, ParameterChannel,
     ParameterChannelPolicy, parameter_value_valid,
 };
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
     HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics,
@@ -289,9 +289,10 @@ pub enum ObservationReadChannels {
 }
 
 /// Availability of one selected observation at the time of a read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ObservationReadStatus {
     /// The tap is armed, but no complete window has been published yet.
+    #[default]
     Pending,
     /// The tap exists, but its current admitted subscription is disarmed.
     Unarmed,
@@ -450,6 +451,21 @@ pub struct ObservationReadResult {
     pub status: ObservationReadStatus,
     /// The untouched latest complete window, when one is available.
     pub window: Option<engine::realtime::ObservationWindow>,
+    /// Selected left value in the owner's declared native unit.
+    pub left: Option<f32>,
+    /// Selected right value in the owner's declared native unit.
+    pub right: Option<f32>,
+}
+
+/// Allocation-free selected-read values for the Wasm staging bridge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ObservationReadValues {
+    /// Availability at the read boundary.
+    pub status: ObservationReadStatus,
+    /// The host session's exact prepared rate.
+    pub sample_rate_hz: u32,
+    /// The untouched latest complete window, when one is available.
+    pub window: Option<ObservationWindow>,
     /// Selected left value in the owner's declared native unit.
     pub left: Option<f32>,
     /// Selected right value in the owner's declared native unit.
@@ -1480,6 +1496,7 @@ impl AudioWorkletEngineHost {
 
         let mut results = Vec::with_capacity(selections.len());
         for selection in selections {
+            let values = read_observation_values(ready, self.status.sample_rate_hz, selection)?;
             let (effect, tap_index) = resolve_observation(ready, selection)?;
             let handle = ready
                 .effect_observations
@@ -1491,42 +1508,6 @@ impl AudioWorkletEngineHost {
                 .observations
                 .get(tap_index)
                 .ok_or(ObservationReadError::InvalidSelection)?;
-            let armed = ready.observation_armed.get(effect).copied().unwrap_or(0)
-                & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
-            let window = (armed != 0)
-                .then(|| {
-                    let arm_sample = ready
-                        .observation_arm_samples
-                        .get(effect)
-                        .and_then(|samples| samples.get(tap_index))
-                        .copied()
-                        .unwrap_or(0);
-                    handle
-                        .readers
-                        .get(tap_index)
-                        .and_then(|reader| reader.read())
-                        .filter(|window| window.first_sample >= arm_sample)
-                })
-                .flatten();
-            let status = if armed == 0 {
-                ObservationReadStatus::Unarmed
-            } else if window.is_some() {
-                ObservationReadStatus::Ready
-            } else {
-                ObservationReadStatus::Pending
-            };
-            let (left, right) = match (status, window, selection.channels) {
-                (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Left) => {
-                    (Some(window.left), None)
-                }
-                (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Right) => {
-                    (None, Some(window.right))
-                }
-                (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Both) => {
-                    (Some(window.left), Some(window.right))
-                }
-                _ => (None, None),
-            };
             results.push(ObservationReadResult {
                 track_id: handle.track_id.clone(),
                 rack: selection.rack,
@@ -1534,11 +1515,11 @@ impl AudioWorkletEngineHost {
                 native_effect_id: handle.descriptor.id.as_str(),
                 descriptor: *tap,
                 channels: selection.channels,
-                sample_rate_hz: self.status.sample_rate_hz,
-                status,
-                window,
-                left,
-                right,
+                sample_rate_hz: values.sample_rate_hz,
+                status: values.status,
+                window: values.window,
+                left: values.left,
+                right: values.right,
             });
         }
         Ok(results)
@@ -1604,6 +1585,32 @@ impl AudioWorkletEngineHost {
             selections.push(observation_selection_for_address(ready, *address)?);
         }
         self.read_observations(&selections)
+    }
+
+    /// Fill a caller-owned numeric result slice without allocating on the Wasm boundary.
+    pub fn read_observation_addresses_into(
+        &self,
+        addresses: &[ObservationAddress],
+        output: &mut [ObservationReadValues],
+    ) -> Result<(), ObservationReadError> {
+        if addresses.len() > MAXIMUM_OBSERVATION_READS || output.len() < addresses.len() {
+            return Err(ObservationReadError::BufferTooSmall);
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(ObservationReadError::WrongState);
+        };
+        for (index, address) in addresses.iter().enumerate() {
+            let selection = observation_selection_for_address(ready, *address)?;
+            resolve_observation(ready, &selection)?;
+            if addresses[..index].contains(address) {
+                return Err(ObservationReadError::InvalidSelection);
+            }
+        }
+        for (index, address) in addresses.iter().enumerate() {
+            let selection = observation_selection_for_address(ready, *address)?;
+            output[index] = read_observation_values(ready, self.status.sample_rate_hz, &selection)?;
+        }
+        Ok(())
     }
 
     /// Number of complete meter windows folded since compilation.
@@ -3187,6 +3194,62 @@ fn resolve_observation(
     Ok((effect, tap_index))
 }
 
+fn read_observation_values(
+    ready: &ReadyOwnership,
+    sample_rate_hz: u32,
+    selection: &ObservationSelection<'_>,
+) -> Result<ObservationReadValues, ObservationReadError> {
+    let (effect, tap_index) = resolve_observation(ready, selection)?;
+    let handle = ready
+        .effect_observations
+        .get(effect)
+        .and_then(Option::as_ref)
+        .ok_or(ObservationReadError::Unsupported)?;
+    let armed = ready.observation_armed.get(effect).copied().unwrap_or(0)
+        & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
+    let window = (armed != 0)
+        .then(|| {
+            let arm_sample = ready
+                .observation_arm_samples
+                .get(effect)
+                .and_then(|samples| samples.get(tap_index))
+                .copied()
+                .unwrap_or(0);
+            handle
+                .readers
+                .get(tap_index)
+                .and_then(|reader| reader.read())
+                .filter(|window| window.first_sample >= arm_sample)
+        })
+        .flatten();
+    let status = if armed == 0 {
+        ObservationReadStatus::Unarmed
+    } else if window.is_some() {
+        ObservationReadStatus::Ready
+    } else {
+        ObservationReadStatus::Pending
+    };
+    let (left, right) = match (status, window, selection.channels) {
+        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Left) => {
+            (Some(window.left), None)
+        }
+        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Right) => {
+            (None, Some(window.right))
+        }
+        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Both) => {
+            (Some(window.left), Some(window.right))
+        }
+        _ => (None, None),
+    };
+    Ok(ObservationReadValues {
+        status,
+        sample_rate_hz,
+        window,
+        left,
+        right,
+    })
+}
+
 /// One published observation magnitude, as the **decibels of reduction** the frame carries.
 ///
 /// The tap declares what crosses the transport (`unit`) and what a consumer reads (`display_unit`,
@@ -3407,6 +3470,7 @@ fn project_buffers(
         .ok_or_else(arithmetic)?;
     let bridge_metadata = fixed_metadata
         .checked_add(plane_reference_bytes)
+        .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3427,7 +3491,8 @@ fn project_buffers(
         .max()
         .unwrap_or(0)
         .max(host_shell_bytes)
-        .max(plane_reference_bytes);
+        .max(plane_reference_bytes)
+        .max(crate::ffi::observation_staging_largest_allocation_bytes());
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;
@@ -3836,20 +3901,30 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let observation_arm_sample_largest = observation_arm_samples
         .iter()
-        .map(|samples| samples.len().saturating_mul(size_of::<u64>()))
-        .max()
-        .unwrap_or(0);
+        .try_fold(0_u64, |largest, samples| {
+            let bytes = u64::try_from(samples.len())
+                .ok()?
+                .checked_mul(size_of::<u64>() as u64)?;
+            Some(largest.max(bytes))
+        })
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let observation_arm_table_bytes = u64::from(total_effects)
+        .checked_mul(size_of::<Box<[u64]>>() as u64)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let observation_arm_largest = observation_arm_sample_largest.max(observation_arm_table_bytes);
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
-        .checked_add(observation_arm_sample_bytes)
+        .checked_add(observation_arm_table_bytes)
+        .and_then(|bytes| bytes.checked_add(observation_arm_sample_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_retained_bytes = report
         .bridge_retained_bytes
-        .checked_add(observation_arm_sample_bytes)
+        .checked_add(observation_arm_table_bytes)
+        .and_then(|bytes| bytes.checked_add(observation_arm_sample_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.largest_bridge_allocation_bytes = report
         .largest_bridge_allocation_bytes
-        .max(u64::try_from(observation_arm_sample_largest).unwrap_or(u64::MAX));
+        .max(observation_arm_largest);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);

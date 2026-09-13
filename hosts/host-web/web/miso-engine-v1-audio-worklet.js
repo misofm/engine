@@ -223,6 +223,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     this.backend = "simd128";
+    // The first observation staging query allocates its fixed control buffers. Force that one
+    // allocation before caching any views, so a lazy linear-memory growth cannot detach the
+    // status/PCM views that the render path keeps for the lifetime of this processor.
+    const observationStagingPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
+    if (!u32(observationStagingPointer) || observationStagingPointer === 0) return RESULT_INTERNAL;
     this.memoryBuffer = this.exports.memory.buffer;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
@@ -369,7 +374,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // allocates a reply row. The map is rebuilt at each boot so a reboot cannot retain an old
     // numeric owner address behind a stable SDK selection.
     const observationCount = this.exports.miso_engine_web_v1_observation_count(this.handle);
-    if (!u32(observationCount) || observationCount > MAXIMUM_OBSERVATION_READS) return false;
+    if (!u32(observationCount)) return false;
     const observationIdPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
     const observationIdCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
     if (!u32(observationIdPointer) || observationIdPointer === 0

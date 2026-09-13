@@ -19,7 +19,7 @@ use crate::{
     MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
     OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
     OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
-    ObservationAddress, ObservationReadChannels, ObservationReadError,
+    ObservationAddress, ObservationReadChannels, ObservationReadError, ObservationReadValues,
     RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
@@ -61,6 +61,8 @@ struct ResponseStaging {
 
 struct ObservationStaging {
     selections: Box<[WebObservationSelection]>,
+    addresses: Vec<ObservationAddress>,
+    rows: Box<[ObservationReadValues]>,
     results: Vec<WebObservationResult>,
     id: Box<[u8]>,
 }
@@ -70,14 +72,52 @@ impl ObservationStaging {
         Self {
             selections: vec![WebObservationSelection::default(); MAXIMUM_OBSERVATION_READS]
                 .into_boxed_slice(),
-            results: Vec::new(),
+            addresses: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
+            rows: vec![ObservationReadValues::default(); MAXIMUM_OBSERVATION_READS]
+                .into_boxed_slice(),
+            results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
             id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
         }
     }
 
     fn reset_results(&mut self) {
+        self.addresses.clear();
         self.results.clear();
     }
+}
+
+/// Heap payload retained by the fixed selected-observation staging area.
+pub(crate) const fn observation_staging_retained_bytes() -> u64 {
+    let count = MAXIMUM_OBSERVATION_READS as u64;
+    count * size_of::<WebObservationSelection>() as u64
+        + count * size_of::<ObservationAddress>() as u64
+        + count * size_of::<ObservationReadValues>() as u64
+        + count * size_of::<WebObservationResult>() as u64
+        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
+}
+
+/// Largest one allocation in the fixed selected-observation staging area.
+pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
+    let count = MAXIMUM_OBSERVATION_READS as u64;
+    let selections = count * size_of::<WebObservationSelection>() as u64;
+    let addresses = count * size_of::<ObservationAddress>() as u64;
+    let rows = count * size_of::<ObservationReadValues>() as u64;
+    let results = count * size_of::<WebObservationResult>() as u64;
+    let ids = RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+    let mut largest = selections;
+    if addresses > largest {
+        largest = addresses;
+    }
+    if rows > largest {
+        largest = rows;
+    }
+    if results > largest {
+        largest = results;
+    }
+    if ids > largest {
+        largest = ids;
+    }
+    largest
 }
 
 impl ResponseStaging {
@@ -1233,8 +1273,8 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
             Ok(count) if count <= MAXIMUM_OBSERVATION_READS => count,
             _ => return RESULT_BUFFER_TOO_SMALL,
         };
-        let mut addresses = Vec::with_capacity(count);
-        for selection in &staging.selections[..count] {
+        for index in 0..count {
+            let selection = staging.selections[index];
             if selection.struct_size != OBSERVATION_SELECTION_BYTES
                 || selection.abi_version != ABI_VERSION
                 || selection.reserved != 0
@@ -1249,7 +1289,7 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                 Ok(value) => value,
                 Err(result) => return result,
             };
-            addresses.push(ObservationAddress {
+            staging.addresses.push(ObservationAddress {
                 track_index: selection.track_index,
                 rack,
                 effect_index: selection.effect_index,
@@ -1257,19 +1297,28 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                 channels,
             });
         }
-        let read = with_host(
-            handle,
-            Err(ObservationReadError::InvalidSelection),
-            |host| host.read_observation_addresses(&addresses),
-        );
-        let rows = match read {
-            Ok(rows) => rows,
-            Err(error) => return observation_error_code(error),
+        let read = {
+            let ObservationStaging {
+                addresses, rows, ..
+            } = &mut *staging;
+            with_host(
+                handle,
+                Err(ObservationReadError::InvalidSelection),
+                |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
+            )
         };
-        staging.results.reserve(rows.len());
-        for (address, row) in addresses.iter().zip(rows) {
+        if let Err(error) = read {
+            return observation_error_code(error);
+        }
+        let ObservationStaging {
+            addresses,
+            rows,
+            results,
+            ..
+        } = &mut *staging;
+        for (address, row) in addresses.iter().zip(rows.iter()).take(count) {
             let Some(window) = row.window else {
-                staging.results.push(WebObservationResult {
+                results.push(WebObservationResult {
                     struct_size: OBSERVATION_RESULT_BYTES,
                     abi_version: ABI_VERSION,
                     status: observation_status_raw(row.status),
@@ -1283,7 +1332,7 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                 });
                 continue;
             };
-            staging.results.push(WebObservationResult {
+            results.push(WebObservationResult {
                 struct_size: OBSERVATION_RESULT_BYTES,
                 abi_version: ABI_VERSION,
                 status: observation_status_raw(row.status),
