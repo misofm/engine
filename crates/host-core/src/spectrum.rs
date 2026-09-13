@@ -7,7 +7,7 @@
 use core::num::NonZeroUsize;
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 
 use engine::realtime::{
@@ -31,6 +31,10 @@ const ARMED: u8 = 1;
 const CAPTURING: u8 = 2;
 const COMPLETE: u8 = 3;
 const INVALID: u8 = 4;
+const CONTINUOUS_WAITING: u8 = 0;
+const CONTINUOUS_CAPTURING: u8 = 1;
+const ONE_SHOT_MODE: u8 = 0;
+const CONTINUOUS_MODE: u8 = 1;
 
 /// Channels copied into and analyzed for one spectrum window.
 #[repr(u8)]
@@ -125,7 +129,7 @@ pub fn spectrum_capture_resources_for(target: &SpectrumTarget) -> SpectrumCaptur
 }
 
 fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureResources {
-    let queue = bounded_spsc_retained_payload::<SpectrumWindow>(
+    let queue = bounded_spsc_retained_payload::<SpectrumCapturedRecord>(
         NonZeroUsize::new(1).expect("one queue slot"),
     )
     .expect("fixed spectrum queue layout");
@@ -134,10 +138,13 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
         .total_bytes()
         .expect("fixed spectrum queue bytes fit usize");
     let state_bytes = core::mem::size_of::<SpectrumStateAllocation>();
+    let continuous_shared_bytes = core::mem::size_of::<SpectrumContinuousSharedAllocation>();
     let observer_binding_bytes = core::mem::size_of::<GraphNodeObserverBinding>();
     let observer_bytes = u64::try_from(observer_bytes).expect("observer bytes fit u64");
     let queue_bytes = u64::try_from(queue_bytes).expect("queue bytes fit u64");
     let state_bytes = u64::try_from(state_bytes).expect("state bytes fit u64");
+    let continuous_shared_bytes =
+        u64::try_from(continuous_shared_bytes).expect("continuous state bytes fit u64");
     let observer_binding_bytes =
         u64::try_from(observer_binding_bytes).expect("observer binding bytes fit u64");
     let id_bytes = u64::try_from(id_bytes).expect("target ID bytes fit u64");
@@ -146,6 +153,8 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
         retained_bytes: observer_bytes
             .checked_add(queue_bytes)
             .and_then(|value| value.checked_add(state_bytes))
+            .and_then(|value| value.checked_add(state_bytes))
+            .and_then(|value| value.checked_add(continuous_shared_bytes))
             .and_then(|value| value.checked_add(observer_binding_bytes))
             .and_then(|value| value.checked_add(target_ids))
             .expect("spectrum storage fits u64"),
@@ -154,6 +163,7 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
                 u64::try_from(queue.largest_allocation_bytes()).expect("queue allocation fits u64"),
             )
             .max(state_bytes)
+            .max(continuous_shared_bytes)
             .max(observer_binding_bytes)
             .max(id_bytes),
     }
@@ -205,19 +215,55 @@ impl SpectrumWindow {
     }
 }
 
+/// One bounded queue item shared by one-shot and continuous capture modes.
+///
+/// The one-shot projection ignores the stream fields. Keeping one queue item and one observer
+/// means continuous capture cannot introduce a second render-side storage path.
+#[derive(Clone, Copy, Debug)]
+struct SpectrumCapturedRecord {
+    window: SpectrumWindow,
+    stream_epoch: u64,
+    sequence: u64,
+    dropped_captures: u64,
+}
+
 /// Control-side ownership of one prepared graph observer.
 pub struct SpectrumCapture {
-    consumer: Consumer<SpectrumWindow>,
+    consumer: Consumer<SpectrumCapturedRecord>,
     state: Arc<AtomicU8>,
+    mode: Arc<AtomicU8>,
+    shared: Arc<SpectrumContinuousShared>,
+    seen_failures: u64,
+    seen_drops: u64,
     target: SpectrumTarget,
 }
 
 impl SpectrumCapture {
+    #[cfg(test)]
+    fn new_one_shot_for_test(
+        consumer: Consumer<SpectrumCapturedRecord>,
+        state: Arc<AtomicU8>,
+        target: SpectrumTarget,
+    ) -> Self {
+        Self {
+            consumer,
+            state,
+            mode: Arc::new(AtomicU8::new(ONE_SHOT_MODE)),
+            shared: SpectrumContinuousShared::new(),
+            seen_failures: 0,
+            seen_drops: 0,
+            target,
+        }
+    }
+
     /// Arm the capture for the next complete graph window.
     ///
     /// Arming is a control-side operation.  The first successfully observed block establishes
     /// the returned window's absolute start sample.
     pub fn arm(&self) -> Result<(), SpectrumCaptureError> {
+        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+            return Err(SpectrumCaptureError::Busy);
+        }
         self.state
             .compare_exchange(IDLE, ARMED, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| ())
@@ -227,16 +273,26 @@ impl SpectrumCapture {
     /// Cancel the current capture, discarding any completed window.
     pub fn cancel(&mut self) {
         while self.consumer.try_pop().is_ok() {}
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            self.shared.active.store(0, Ordering::Release);
+            self.shared
+                .phase
+                .store(CONTINUOUS_WAITING, Ordering::Release);
+            self.mode.store(ONE_SHOT_MODE, Ordering::Release);
+        }
         self.state.store(IDLE, Ordering::Release);
     }
 
     /// Try to take the completed window from its control-side queue.
     pub fn try_read(&mut self) -> Result<SpectrumWindow, SpectrumCaptureReadError> {
+        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+            return Err(SpectrumCaptureReadError::NotArmed);
+        }
         match self.state.load(Ordering::Acquire) {
             COMPLETE => match self.consumer.try_pop() {
-                Ok(window) => {
+                Ok(record) => {
                     self.state.store(IDLE, Ordering::Release);
-                    Ok(window)
+                    Ok(record.window)
                 }
                 Err(_) => Err(SpectrumCaptureReadError::Pending),
             },
@@ -250,6 +306,138 @@ impl SpectrumCapture {
             }
             IDLE => Err(SpectrumCaptureReadError::NotArmed),
             _ => Err(SpectrumCaptureReadError::Invalid),
+        }
+    }
+
+    /// Start scheduled windows for the prepared target.
+    pub fn start_continuous(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+            || self.state.load(Ordering::Acquire) != IDLE
+        {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        }
+        let cadence = SpectrumCadence::new(sample_rate_hz, quantum_frames)
+            .map_err(SpectrumContinuousCaptureError::Cadence)?;
+        if self
+            .shared
+            .active
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        }
+        let Some(epoch) = self.shared.epoch.load(Ordering::Acquire).checked_add(1) else {
+            self.shared.active.store(0, Ordering::Release);
+            return Err(SpectrumContinuousCaptureError::EpochOverflow);
+        };
+        self.shared.epoch.store(epoch, Ordering::Release);
+        self.shared
+            .sample_rate_hz
+            .store(u64::from(sample_rate_hz), Ordering::Release);
+        self.shared
+            .quantum_frames
+            .store(u64::from(quantum_frames), Ordering::Release);
+        self.shared
+            .hop_frames
+            .store(u64::from(cadence.hop_frames()), Ordering::Release);
+        self.shared
+            .phase
+            .store(CONTINUOUS_WAITING, Ordering::Release);
+        self.shared.failures.store(0, Ordering::Release);
+        self.shared.failure_epoch.store(epoch, Ordering::Release);
+        self.shared.drops.store(0, Ordering::Release);
+        self.shared.drop_epoch.store(epoch, Ordering::Release);
+        while self.consumer.try_pop().is_ok() {}
+        self.seen_failures = 0;
+        self.seen_drops = 0;
+        self.mode.store(CONTINUOUS_MODE, Ordering::Release);
+        Ok(cadence)
+    }
+
+    /// Stop scheduled windows and discard queued continuous results.
+    pub fn stop_continuous(&mut self) {
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            self.shared.active.store(0, Ordering::Release);
+            self.shared
+                .phase
+                .store(CONTINUOUS_WAITING, Ordering::Release);
+            self.mode.store(ONE_SHOT_MODE, Ordering::Release);
+            while self.consumer.try_pop().is_ok() {}
+            self.state.store(IDLE, Ordering::Release);
+            self.seen_failures = 0;
+            self.seen_drops = 0;
+        }
+    }
+
+    /// Return the active continuous profile, when this handle is running continuously.
+    #[must_use]
+    pub fn cadence(&self) -> Option<SpectrumCadence> {
+        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE {
+            return None;
+        }
+        Some(SpectrumCadence {
+            sample_rate_hz: u32::try_from(self.shared.sample_rate_hz.load(Ordering::Acquire))
+                .ok()?,
+            quantum_frames: u32::try_from(self.shared.quantum_frames.load(Ordering::Acquire))
+                .ok()?,
+            hop_frames: u32::try_from(self.shared.hop_frames.load(Ordering::Acquire)).ok()?,
+        })
+    }
+
+    /// Read one scheduled window and its stream-history metadata.
+    pub fn try_read_continuous(
+        &mut self,
+    ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE
+            || self.shared.active.load(Ordering::Acquire) == 0
+        {
+            return Err(SpectrumContinuousReadError::NotActive);
+        }
+        let failures = self.shared.failures.load(Ordering::Acquire);
+        if failures != self.seen_failures {
+            self.seen_failures = failures;
+            return Err(SpectrumContinuousReadError::Failed {
+                stream_epoch: self.shared.failure_epoch.load(Ordering::Acquire),
+            });
+        }
+        let drops = self.shared.drops.load(Ordering::Acquire);
+        if drops != self.seen_drops {
+            self.seen_drops = drops;
+            return Err(SpectrumContinuousReadError::Gap {
+                stream_epoch: self.shared.drop_epoch.load(Ordering::Acquire),
+                dropped_captures: drops,
+            });
+        }
+        match self.consumer.try_pop() {
+            Ok(record) => Ok(SpectrumContinuousWindow {
+                left: record.window.left,
+                right: record.window.right,
+                first_sample: record.window.first_sample,
+                channels: record.window.channels,
+                source_underrun: record.window.source_underrun,
+                stream_epoch: record.stream_epoch,
+                sequence: record.sequence,
+                dropped_captures: record.dropped_captures,
+            }),
+            Err(_) if self.shared.failures.load(Ordering::Acquire) != 0 => {
+                Err(SpectrumContinuousReadError::Failed {
+                    stream_epoch: self.shared.failure_epoch.load(Ordering::Acquire),
+                })
+            }
+            Err(_) if self.shared.drops.load(Ordering::Acquire) != 0 => {
+                Err(SpectrumContinuousReadError::Gap {
+                    stream_epoch: self.shared.drop_epoch.load(Ordering::Acquire),
+                    dropped_captures: self.shared.drops.load(Ordering::Acquire),
+                })
+            }
+            Err(_) if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WAITING => {
+                Err(SpectrumContinuousReadError::Warming)
+            }
+            Err(_) => Err(SpectrumContinuousReadError::Pending),
         }
     }
 
@@ -276,6 +464,205 @@ pub enum SpectrumCaptureReadError {
 pub enum SpectrumCaptureError {
     /// Another capture is armed or its completed result has not been consumed.
     Busy,
+}
+
+/// The checked, block-aligned profile for a continuous spectrum capture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpectrumCadence {
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    hop_frames: u32,
+}
+
+impl SpectrumCadence {
+    /// Derive the launch-supported hop from one prepared render shape.
+    pub fn new(sample_rate_hz: u32, quantum_frames: u32) -> Result<Self, SpectrumCadenceError> {
+        if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+            return Err(SpectrumCadenceError::UnsupportedRate);
+        }
+        if quantum_frames == 0 {
+            return Err(SpectrumCadenceError::ZeroQuantum);
+        }
+        let minimum_hop = (u64::from(sample_rate_hz) / 30).max(SPECTRUM_WINDOW_FRAMES as u64);
+        let quantum = u64::from(quantum_frames);
+        let quanta = minimum_hop
+            .checked_add(quantum - 1)
+            .ok_or(SpectrumCadenceError::HopOverflow)?
+            / quantum;
+        let hop_frames = quanta
+            .checked_mul(quantum)
+            .ok_or(SpectrumCadenceError::HopOverflow)?;
+        Ok(Self {
+            sample_rate_hz,
+            quantum_frames,
+            hop_frames: u32::try_from(hop_frames).map_err(|_| SpectrumCadenceError::HopOverflow)?,
+        })
+    }
+
+    /// Sample rate fixed at preparation.
+    #[must_use]
+    pub const fn sample_rate_hz(self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    /// Render quantum fixed at preparation.
+    #[must_use]
+    pub const fn quantum_frames(self) -> u32 {
+        self.quantum_frames
+    }
+
+    /// Non-overlapping hop between scheduled window starts.
+    #[must_use]
+    pub const fn hop_frames(self) -> u32 {
+        self.hop_frames
+    }
+}
+
+/// Refusal while deriving the fixed continuous capture profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumCadenceError {
+    /// The sample rate is outside the four launch-supported rates.
+    UnsupportedRate,
+    /// A zero quantum cannot align capture starts.
+    ZeroQuantum,
+    /// Checked hop arithmetic overflowed or did not fit the profile.
+    HopOverflow,
+}
+
+/// A completed scheduled window with its native stream history facts.
+#[derive(Clone, Copy, Debug)]
+pub struct SpectrumContinuousWindow {
+    /// Captured left plane; zero-filled when only right was requested.
+    pub left: [f32; SPECTRUM_WINDOW_FRAMES],
+    /// Captured right plane; zero-filled when only left was requested.
+    pub right: [f32; SPECTRUM_WINDOW_FRAMES],
+    /// Absolute sample at the beginning of this scheduled window.
+    pub first_sample: u64,
+    /// Channel planes actually copied into this window.
+    pub channels: SpectrumChannels,
+    /// Whether a source underrun occurred in the window's graph blocks.
+    pub source_underrun: bool,
+    /// Stream history epoch; discontinuities begin a new epoch.
+    pub stream_epoch: u64,
+    /// Zero-based scheduled-window sequence within the epoch.
+    pub sequence: u64,
+    /// Number of complete scheduled windows dropped by the full queue in this epoch.
+    pub dropped_captures: u64,
+}
+
+impl SpectrumContinuousWindow {
+    /// Exclusive absolute sample at the end of this 2048-frame window.
+    #[must_use]
+    pub fn end_sample(&self) -> Option<u64> {
+        self.first_sample
+            .checked_add(u64::try_from(SPECTRUM_WINDOW_FRAMES).ok()?)
+    }
+
+    /// Adapt the captured samples to the existing one-shot analyzer input.
+    #[must_use]
+    pub fn as_window(&self) -> SpectrumWindow {
+        SpectrumWindow {
+            left: self.left,
+            right: self.right,
+            first_sample: self.first_sample,
+            channels: self.channels,
+            source_underrun: self.source_underrun,
+        }
+    }
+}
+
+/// Status returned while a continuous result is unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumContinuousReadError {
+    /// The one prepared stream is stopped.
+    NotActive,
+    /// Activation succeeded but no valid observed block has started the epoch.
+    Warming,
+    /// The stream is active and no completed window is queued.
+    Pending,
+    /// One or more scheduled windows were lost to the bounded queue.
+    Gap {
+        /// Epoch in which the loss occurred.
+        stream_epoch: u64,
+        /// Cumulative number dropped in that epoch.
+        dropped_captures: u64,
+    },
+    /// A discontinuity, nonfinite input, or failed render reset history.
+    Failed {
+        /// New epoch after the failed history was discarded.
+        stream_epoch: u64,
+    },
+}
+
+/// Control-side continuous activation refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumContinuousCaptureError {
+    /// The prepared stream is already active.
+    Busy,
+    /// The requested sample rate or quantum cannot define a launch profile.
+    Cadence(SpectrumCadenceError),
+    /// A new stream epoch cannot be represented.
+    EpochOverflow,
+}
+
+struct SpectrumContinuousShared {
+    active: AtomicU8,
+    phase: AtomicU8,
+    epoch: AtomicU64,
+    failures: AtomicU64,
+    failure_epoch: AtomicU64,
+    drops: AtomicU64,
+    drop_epoch: AtomicU64,
+    sample_rate_hz: AtomicU64,
+    quantum_frames: AtomicU64,
+    hop_frames: AtomicU64,
+}
+
+impl SpectrumContinuousShared {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicU8::new(0),
+            phase: AtomicU8::new(CONTINUOUS_WAITING),
+            epoch: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+            failure_epoch: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+            drop_epoch: AtomicU64::new(0),
+            sample_rate_hz: AtomicU64::new(0),
+            quantum_frames: AtomicU64::new(0),
+            hop_frames: AtomicU64::new(0),
+        })
+    }
+}
+
+#[repr(C)]
+struct SpectrumContinuousSharedAllocation {
+    strong: std::sync::atomic::AtomicUsize,
+    weak: std::sync::atomic::AtomicUsize,
+    shared: SpectrumContinuousShared,
+}
+
+struct SpectrumOneShotState {
+    state: Arc<AtomicU8>,
+    filled: usize,
+    first_sample: u64,
+    next_sample: u64,
+    armed: bool,
+    source_underrun: bool,
+    completed_sample: Option<u64>,
+}
+
+struct SpectrumContinuousState {
+    shared: Arc<SpectrumContinuousShared>,
+    started_epoch: u64,
+    expected_block_sample: Option<u64>,
+    next_window_start: Option<u64>,
+    first_sample: u64,
+    filled: usize,
+    sequence: u64,
+    source_underrun: bool,
+    completed_sample: Option<u64>,
+    completed_sequence: Option<u64>,
 }
 
 /// Construct the graph binding and its separate control-side consumer.
@@ -305,24 +692,18 @@ pub(crate) fn prepare_capture(
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
     let state = Arc::new(AtomicU8::new(IDLE));
+    let mode = Arc::new(AtomicU8::new(ONE_SHOT_MODE));
+    let shared = SpectrumContinuousShared::new();
     let capture = SpectrumCapture {
         consumer,
         state: Arc::clone(&state),
+        mode: Arc::clone(&mode),
+        shared: Arc::clone(&shared),
+        seen_failures: 0,
+        seen_drops: 0,
         target: request.target.clone(),
     };
-    let observer = SpectrumCaptureObserver {
-        producer,
-        state,
-        left: [0.0; SPECTRUM_WINDOW_FRAMES],
-        right: [0.0; SPECTRUM_WINDOW_FRAMES],
-        channels: request.channels,
-        filled: 0,
-        first_sample: 0,
-        next_sample: 0,
-        armed: false,
-        source_underrun: false,
-        completed_sample: None,
-    };
+    let observer = SpectrumCaptureObserver::new(producer, state, mode, shared, request.channels);
     Ok((
         GraphNodeObserverBinding::new(node, SPECTRUM_OBSERVER_HANDLE, Box::new(observer)),
         capture,
@@ -330,95 +711,76 @@ pub(crate) fn prepare_capture(
 }
 
 struct SpectrumCaptureObserver {
-    producer: Producer<SpectrumWindow>,
-    state: Arc<AtomicU8>,
+    producer: Producer<SpectrumCapturedRecord>,
     left: [f32; SPECTRUM_WINDOW_FRAMES],
     right: [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
-    filled: usize,
-    first_sample: u64,
-    next_sample: u64,
-    armed: bool,
-    source_underrun: bool,
-    completed_sample: Option<u64>,
+    mode: Arc<AtomicU8>,
+    one_shot: SpectrumOneShotState,
+    continuous: SpectrumContinuousState,
+}
+
+struct SpectrumCaptureBuffers<'a> {
+    producer: &'a mut Producer<SpectrumCapturedRecord>,
+    left: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
+    right: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
+    channels: SpectrumChannels,
 }
 
 impl SpectrumCaptureObserver {
+    #[cfg(test)]
+    fn new_one_shot_for_test(
+        producer: Producer<SpectrumCapturedRecord>,
+        state: Arc<AtomicU8>,
+        channels: SpectrumChannels,
+    ) -> Self {
+        Self::new(
+            producer,
+            state,
+            Arc::new(AtomicU8::new(ONE_SHOT_MODE)),
+            SpectrumContinuousShared::new(),
+            channels,
+        )
+    }
+
+    fn new(
+        producer: Producer<SpectrumCapturedRecord>,
+        state: Arc<AtomicU8>,
+        mode: Arc<AtomicU8>,
+        shared: Arc<SpectrumContinuousShared>,
+        channels: SpectrumChannels,
+    ) -> Self {
+        Self {
+            producer,
+            left: [0.0; SPECTRUM_WINDOW_FRAMES],
+            right: [0.0; SPECTRUM_WINDOW_FRAMES],
+            channels,
+            mode,
+            one_shot: SpectrumOneShotState {
+                state,
+                filled: 0,
+                first_sample: 0,
+                next_sample: 0,
+                armed: false,
+                source_underrun: false,
+                completed_sample: None,
+            },
+            continuous: SpectrumContinuousState {
+                shared,
+                started_epoch: 0,
+                expected_block_sample: None,
+                next_window_start: None,
+                first_sample: 0,
+                filled: 0,
+                sequence: 0,
+                source_underrun: false,
+                completed_sample: None,
+                completed_sequence: None,
+            },
+        }
+    }
+
     // REALTIME_POLICY_BEGIN
-    fn begin_block(
-        &mut self,
-        first_sample: u64,
-        frames: usize,
-        validity: GraphObservationValidity,
-    ) -> Option<usize> {
-        let state = self.state.load(Ordering::Acquire);
-        if state == ARMED {
-            if self
-                .state
-                .compare_exchange(ARMED, CAPTURING, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                return None;
-            }
-            self.filled = 0;
-            self.first_sample = first_sample;
-            self.next_sample = first_sample;
-            self.armed = true;
-            self.source_underrun = validity.source_underrun;
-            self.completed_sample = None;
-        } else if state == CAPTURING {
-            if validity.source_generation_changed {
-                self.invalidate();
-                return None;
-            }
-            self.source_underrun |= validity.source_underrun;
-        }
-        if self.state.load(Ordering::Acquire) != CAPTURING || !self.armed {
-            return None;
-        }
-        if frames == 0 || first_sample != self.next_sample {
-            self.invalidate();
-            return None;
-        }
-        if first_sample
-            .checked_add(u64::try_from(frames).unwrap_or(0))
-            .is_none()
-        {
-            self.invalidate();
-            return None;
-        }
-        let remaining = SPECTRUM_WINDOW_FRAMES - self.filled;
-        Some(remaining.min(frames))
-            .filter(|count| *count > 0)
-            .or_else(|| {
-                self.invalidate();
-                None
-            })
-    }
-
-    fn finish_block(&mut self, first_sample: u64, count: usize) {
-        self.filled += count;
-        self.next_sample = first_sample
-            .checked_add(u64::try_from(count).unwrap_or(0))
-            .unwrap_or(first_sample);
-        if self.filled == SPECTRUM_WINDOW_FRAMES {
-            let window = SpectrumWindow {
-                left: self.left,
-                right: self.right,
-                first_sample: self.first_sample,
-                channels: self.channels,
-                source_underrun: self.source_underrun,
-            };
-            if self.producer.try_push(window).is_ok() {
-                self.completed_sample = Some(first_sample);
-                self.state.store(COMPLETE, Ordering::Release);
-            } else {
-                self.invalidate();
-            }
-            self.armed = false;
-        }
-    }
-
     fn capture(
         &mut self,
         left: &[f32],
@@ -426,99 +788,600 @@ impl SpectrumCaptureObserver {
         first_sample: u64,
         validity: GraphObservationValidity,
     ) {
-        if left.len() != right.len() {
-            if matches!(self.state.load(Ordering::Acquire), ARMED | CAPTURING) {
-                self.invalidate();
-            }
-            return;
-        }
-        let Some(count) = self.begin_block(first_sample, left.len(), validity) else {
-            return;
+        let mut buffers = SpectrumCaptureBuffers {
+            producer: &mut self.producer,
+            left: &mut self.left,
+            right: &mut self.right,
+            channels: self.channels,
         };
-        if self.channels.includes_left() && left[..count].iter().any(|value| !value.is_finite())
-            || self.channels.includes_right()
-                && right[..count].iter().any(|value| !value.is_finite())
-        {
-            self.invalidate();
-            return;
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            continuous_capture(
+                &mut self.continuous,
+                &mut buffers,
+                left,
+                right,
+                first_sample,
+                validity,
+            );
+        } else {
+            one_shot_capture(
+                &mut self.one_shot,
+                &mut buffers,
+                left,
+                right,
+                first_sample,
+                validity,
+            );
         }
-        if self.channels.includes_left() {
-            self.left[self.filled..self.filled + count].copy_from_slice(&left[..count]);
-        }
-        if self.channels.includes_right() {
-            self.right[self.filled..self.filled + count].copy_from_slice(&right[..count]);
-        }
-        self.finish_block(first_sample, count);
     }
 
     fn capture_resident(&mut self, block: GraphResidentObservationBlock<'_>) {
-        if self.state.load(Ordering::Acquire) != ARMED
-            && self.state.load(Ordering::Acquire) != CAPTURING
-        {
-            return;
+        let channels = self.channels;
+        let producer = &mut self.producer;
+        let storage_left = &mut self.left;
+        let storage_right = &mut self.right;
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            continuous_capture_resident(
+                &mut self.continuous,
+                producer,
+                storage_left,
+                storage_right,
+                channels,
+                block,
+            );
+        } else {
+            one_shot_capture_resident(
+                &mut self.one_shot,
+                producer,
+                storage_left,
+                storage_right,
+                channels,
+                block,
+            );
         }
-        let lanes = block.lane.width().lanes() as usize;
-        let lane = block.lane.lane();
-        let Some(frames) = usize::try_from(block.lane.frames()).ok() else {
-            self.invalidate();
-            return;
-        };
-        let Some(words) = frames.checked_mul(lanes) else {
-            self.invalidate();
-            return;
-        };
-        let Some(left) = block.lane.left().get(..words) else {
-            self.invalidate();
-            return;
-        };
-        let Some(right) = block.lane.right().get(..words) else {
-            self.invalidate();
-            return;
-        };
-        let Some(count) = self.begin_block(block.first_sample, frames, block.validity) else {
-            return;
-        };
-        for frame in 0..count {
-            let Some(index) = frame
-                .checked_mul(lanes)
-                .and_then(|value| value.checked_add(lane))
-            else {
-                self.invalidate();
-                return;
-            };
-            if self.channels.includes_left() {
-                let Some(value) = left.get(index).copied() else {
-                    self.invalidate();
-                    return;
-                };
-                if !value.is_finite() {
-                    self.invalidate();
-                    return;
-                }
-                self.left[self.filled + frame] = value;
-            }
-            if self.channels.includes_right() {
-                let Some(value) = right.get(index).copied() else {
-                    self.invalidate();
-                    return;
-                };
-                if !value.is_finite() {
-                    self.invalidate();
-                    return;
-                }
-                self.right[self.filled + frame] = value;
-            }
-        }
-        self.finish_block(block.first_sample, count);
     }
 
     fn invalidate(&mut self) {
-        if matches!(self.state.load(Ordering::Acquire), ARMED | CAPTURING) {
-            self.armed = false;
-            self.state.store(INVALID, Ordering::Release);
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            continuous_fail(&mut self.continuous);
+        } else {
+            one_shot_invalidate(&mut self.one_shot);
         }
     }
     // REALTIME_POLICY_END
+}
+
+fn one_shot_begin(
+    state: &mut SpectrumOneShotState,
+    first_sample: u64,
+    frames: usize,
+    validity: GraphObservationValidity,
+) -> Option<usize> {
+    let current = state.state.load(Ordering::Acquire);
+    if current == ARMED {
+        if state
+            .state
+            .compare_exchange(ARMED, CAPTURING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        state.filled = 0;
+        state.first_sample = first_sample;
+        state.next_sample = first_sample;
+        state.armed = true;
+        state.source_underrun = validity.source_underrun;
+        state.completed_sample = None;
+    } else if current == CAPTURING {
+        if validity.source_generation_changed {
+            one_shot_invalidate(state);
+            return None;
+        }
+        state.source_underrun |= validity.source_underrun;
+    }
+    if state.state.load(Ordering::Acquire) != CAPTURING || !state.armed {
+        return None;
+    }
+    if frames == 0 || first_sample != state.next_sample {
+        one_shot_invalidate(state);
+        return None;
+    }
+    if first_sample
+        .checked_add(u64::try_from(frames).unwrap_or(0))
+        .is_none()
+    {
+        one_shot_invalidate(state);
+        return None;
+    }
+    let remaining = SPECTRUM_WINDOW_FRAMES - state.filled;
+    Some(remaining.min(frames))
+        .filter(|count| *count > 0)
+        .or_else(|| {
+            one_shot_invalidate(state);
+            None
+        })
+}
+
+fn one_shot_finish(
+    state: &mut SpectrumOneShotState,
+    producer: &mut Producer<SpectrumCapturedRecord>,
+    left: &[f32; SPECTRUM_WINDOW_FRAMES],
+    right: &[f32; SPECTRUM_WINDOW_FRAMES],
+    channels: SpectrumChannels,
+    first_sample: u64,
+    count: usize,
+) {
+    state.filled += count;
+    state.next_sample = first_sample
+        .checked_add(u64::try_from(count).unwrap_or(0))
+        .unwrap_or(first_sample);
+    if state.filled == SPECTRUM_WINDOW_FRAMES {
+        let window = SpectrumWindow {
+            left: *left,
+            right: *right,
+            first_sample: state.first_sample,
+            channels,
+            source_underrun: state.source_underrun,
+        };
+        let record = SpectrumCapturedRecord {
+            window,
+            stream_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+        };
+        if producer.try_push(record).is_ok() {
+            state.completed_sample = Some(first_sample);
+            state.state.store(COMPLETE, Ordering::Release);
+        } else {
+            one_shot_invalidate(state);
+        }
+        state.armed = false;
+    }
+}
+
+fn one_shot_capture(
+    state: &mut SpectrumOneShotState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: &[f32],
+    right: &[f32],
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if left.len() != right.len() {
+        if matches!(state.state.load(Ordering::Acquire), ARMED | CAPTURING) {
+            one_shot_invalidate(state);
+        }
+        return;
+    }
+    let Some(count) = one_shot_begin(state, first_sample, left.len(), validity) else {
+        return;
+    };
+    if (buffers.channels.includes_left() && left[..count].iter().any(|value| !value.is_finite()))
+        || (buffers.channels.includes_right()
+            && right[..count].iter().any(|value| !value.is_finite()))
+    {
+        one_shot_invalidate(state);
+        return;
+    }
+    let destination = state.filled;
+    if buffers.channels.includes_left() {
+        buffers.left[destination..destination + count].copy_from_slice(&left[..count]);
+    }
+    if buffers.channels.includes_right() {
+        buffers.right[destination..destination + count].copy_from_slice(&right[..count]);
+    }
+    one_shot_finish(
+        state,
+        buffers.producer,
+        buffers.left,
+        buffers.right,
+        buffers.channels,
+        first_sample,
+        count,
+    );
+}
+
+fn one_shot_capture_resident(
+    state: &mut SpectrumOneShotState,
+    producer: &mut Producer<SpectrumCapturedRecord>,
+    storage_left: &mut [f32; SPECTRUM_WINDOW_FRAMES],
+    storage_right: &mut [f32; SPECTRUM_WINDOW_FRAMES],
+    channels: SpectrumChannels,
+    block: GraphResidentObservationBlock<'_>,
+) {
+    let current = state.state.load(Ordering::Acquire);
+    if current != ARMED && current != CAPTURING {
+        return;
+    }
+    let lanes = block.lane.width().lanes() as usize;
+    let lane = block.lane.lane();
+    let Some(frames) = usize::try_from(block.lane.frames()).ok() else {
+        one_shot_invalidate(state);
+        return;
+    };
+    let Some(words) = frames.checked_mul(lanes) else {
+        one_shot_invalidate(state);
+        return;
+    };
+    let Some(left) = block.lane.left().get(..words) else {
+        one_shot_invalidate(state);
+        return;
+    };
+    let Some(right) = block.lane.right().get(..words) else {
+        one_shot_invalidate(state);
+        return;
+    };
+    let Some(count) = one_shot_begin(state, block.first_sample, frames, block.validity) else {
+        return;
+    };
+    let destination = state.filled;
+    for frame in 0..count {
+        let Some(index) = frame
+            .checked_mul(lanes)
+            .and_then(|value| value.checked_add(lane))
+        else {
+            one_shot_invalidate(state);
+            return;
+        };
+        if channels.includes_left() {
+            let Some(value) = left.get(index).copied() else {
+                one_shot_invalidate(state);
+                return;
+            };
+            if !value.is_finite() {
+                one_shot_invalidate(state);
+                return;
+            }
+            storage_left[destination + frame] = value;
+        }
+        if channels.includes_right() {
+            let Some(value) = right.get(index).copied() else {
+                one_shot_invalidate(state);
+                return;
+            };
+            if !value.is_finite() {
+                one_shot_invalidate(state);
+                return;
+            }
+            storage_right[destination + frame] = value;
+        }
+    }
+    one_shot_finish(
+        state,
+        producer,
+        storage_left,
+        storage_right,
+        channels,
+        block.first_sample,
+        count,
+    );
+}
+
+fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
+    if matches!(state.state.load(Ordering::Acquire), ARMED | CAPTURING) {
+        state.armed = false;
+        state.state.store(INVALID, Ordering::Release);
+    }
+}
+
+fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState, failed_sample: u64) {
+    let current = state.state.load(Ordering::Acquire);
+    if matches!(current, ARMED | CAPTURING) {
+        one_shot_invalidate(state);
+    } else if current == COMPLETE && state.completed_sample == Some(failed_sample) {
+        state.armed = false;
+        state.state.store(INVALID, Ordering::Release);
+    }
+}
+
+fn continuous_begin(
+    state: &mut SpectrumContinuousState,
+    first_sample: u64,
+    frames: usize,
+    validity: GraphObservationValidity,
+) -> Option<usize> {
+    if state.shared.active.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    let epoch = state.shared.epoch.load(Ordering::Acquire);
+    if state.started_epoch != epoch {
+        state.started_epoch = epoch;
+        state.expected_block_sample = None;
+        state.next_window_start = None;
+        state.first_sample = 0;
+        state.filled = 0;
+        state.sequence = 0;
+        state.source_underrun = false;
+        state.completed_sample = None;
+        state.completed_sequence = None;
+    }
+    let Some(end_sample) = first_sample.checked_add(u64::try_from(frames).ok()?) else {
+        continuous_fail(state);
+        return None;
+    };
+    if frames == 0 || validity.source_generation_changed {
+        continuous_fail(state);
+        return None;
+    }
+    if state
+        .expected_block_sample
+        .is_some_and(|expected| expected != first_sample)
+    {
+        continuous_fail(state);
+        return None;
+    }
+    state.expected_block_sample = Some(end_sample);
+    let phase = state.shared.phase.load(Ordering::Acquire);
+    if phase == CONTINUOUS_CAPTURING {
+        state.source_underrun |= validity.source_underrun;
+        return Some((SPECTRUM_WINDOW_FRAMES - state.filled).min(frames));
+    }
+    let Some(window_start) = state.next_window_start else {
+        state.next_window_start = Some(first_sample);
+        state.first_sample = first_sample;
+        state.filled = 0;
+        state.source_underrun = validity.source_underrun;
+        state
+            .shared
+            .phase
+            .store(CONTINUOUS_CAPTURING, Ordering::Release);
+        return Some(SPECTRUM_WINDOW_FRAMES.min(frames));
+    };
+    if first_sample < window_start {
+        if phase == CONTINUOUS_WAITING {
+            return None;
+        }
+        continuous_fail(state);
+        return None;
+    }
+    if first_sample > window_start {
+        continuous_fail(state);
+        return None;
+    }
+    if phase != CONTINUOUS_CAPTURING {
+        state.first_sample = first_sample;
+        state.filled = 0;
+        state.source_underrun = validity.source_underrun;
+        state
+            .shared
+            .phase
+            .store(CONTINUOUS_CAPTURING, Ordering::Release);
+    } else {
+        state.source_underrun |= validity.source_underrun;
+    }
+    Some((SPECTRUM_WINDOW_FRAMES - state.filled).min(frames))
+}
+
+fn continuous_finish(
+    state: &mut SpectrumContinuousState,
+    producer: &mut Producer<SpectrumCapturedRecord>,
+    left: &[f32; SPECTRUM_WINDOW_FRAMES],
+    right: &[f32; SPECTRUM_WINDOW_FRAMES],
+    channels: SpectrumChannels,
+    first_sample: u64,
+    count: usize,
+) {
+    state.filled += count;
+    if state.filled != SPECTRUM_WINDOW_FRAMES {
+        return;
+    }
+    let stream_epoch = state.shared.epoch.load(Ordering::Acquire);
+    let sequence = state.sequence;
+    let record = SpectrumCapturedRecord {
+        window: SpectrumWindow {
+            left: *left,
+            right: *right,
+            first_sample: state.first_sample,
+            channels,
+            source_underrun: state.source_underrun,
+        },
+        stream_epoch,
+        sequence,
+        dropped_captures: state.shared.drops.load(Ordering::Acquire),
+    };
+    if producer.try_push(record).is_err() {
+        if state
+            .shared
+            .drops
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .is_err()
+        {
+            continuous_fail(state);
+            return;
+        }
+        state
+            .shared
+            .drop_epoch
+            .store(stream_epoch, Ordering::Release);
+    }
+    state.completed_sample = Some(first_sample);
+    state.completed_sequence = Some(sequence);
+    let Some(next_sequence) = sequence.checked_add(1) else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(hop_frames) = u32::try_from(state.shared.hop_frames.load(Ordering::Acquire)).ok()
+    else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(next_window_start) = state.first_sample.checked_add(u64::from(hop_frames)) else {
+        continuous_fail(state);
+        return;
+    };
+    state.sequence = next_sequence;
+    state.next_window_start = Some(next_window_start);
+    state.filled = 0;
+    state.source_underrun = false;
+    state
+        .shared
+        .phase
+        .store(CONTINUOUS_WAITING, Ordering::Release);
+}
+
+fn continuous_capture(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: &[f32],
+    right: &[f32],
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if left.len() != right.len() {
+        continuous_fail(state);
+        return;
+    }
+    let Some(count) = continuous_begin(state, first_sample, left.len(), validity) else {
+        return;
+    };
+    if (buffers.channels.includes_left() && left.iter().any(|value| !value.is_finite()))
+        || (buffers.channels.includes_right() && right.iter().any(|value| !value.is_finite()))
+    {
+        continuous_fail(state);
+        return;
+    }
+    if count == 0 {
+        return;
+    }
+    let destination = state.filled;
+    if buffers.channels.includes_left() {
+        buffers.left[destination..destination + count].copy_from_slice(&left[..count]);
+    }
+    if buffers.channels.includes_right() {
+        buffers.right[destination..destination + count].copy_from_slice(&right[..count]);
+    }
+    continuous_finish(
+        state,
+        buffers.producer,
+        buffers.left,
+        buffers.right,
+        buffers.channels,
+        first_sample,
+        count,
+    );
+}
+
+fn continuous_capture_resident(
+    state: &mut SpectrumContinuousState,
+    producer: &mut Producer<SpectrumCapturedRecord>,
+    storage_left: &mut [f32; SPECTRUM_WINDOW_FRAMES],
+    storage_right: &mut [f32; SPECTRUM_WINDOW_FRAMES],
+    channels: SpectrumChannels,
+    block: GraphResidentObservationBlock<'_>,
+) {
+    if state.shared.active.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let lanes = block.lane.width().lanes() as usize;
+    let lane = block.lane.lane();
+    let Some(frames) = usize::try_from(block.lane.frames()).ok() else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(words) = frames.checked_mul(lanes) else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(left) = block.lane.left().get(..words) else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(right) = block.lane.right().get(..words) else {
+        continuous_fail(state);
+        return;
+    };
+    let Some(count) = continuous_begin(state, block.first_sample, frames, block.validity) else {
+        return;
+    };
+    let destination = state.filled;
+    for frame in 0..frames {
+        let Some(index) = frame
+            .checked_mul(lanes)
+            .and_then(|value| value.checked_add(lane))
+        else {
+            continuous_fail(state);
+            return;
+        };
+        if channels.includes_left() {
+            let Some(value) = left.get(index).copied() else {
+                continuous_fail(state);
+                return;
+            };
+            if !value.is_finite() {
+                continuous_fail(state);
+                return;
+            }
+            if frame < count {
+                storage_left[destination + frame] = value;
+            }
+        }
+        if channels.includes_right() {
+            let Some(value) = right.get(index).copied() else {
+                continuous_fail(state);
+                return;
+            };
+            if !value.is_finite() {
+                continuous_fail(state);
+                return;
+            }
+            if frame < count {
+                storage_right[destination + frame] = value;
+            }
+        }
+    }
+    if count != 0 {
+        continuous_finish(
+            state,
+            producer,
+            storage_left,
+            storage_right,
+            channels,
+            block.first_sample,
+            count,
+        );
+    }
+}
+
+fn continuous_fail(state: &mut SpectrumContinuousState) {
+    if state.shared.active.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let current_epoch = state.shared.epoch.load(Ordering::Acquire);
+    let Some(next_epoch) = current_epoch.checked_add(1) else {
+        state.shared.active.store(0, Ordering::Release);
+        return;
+    };
+    state.shared.epoch.store(next_epoch, Ordering::Release);
+    if state
+        .shared
+        .failures
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_add(1)
+        })
+        .is_err()
+    {
+        state.shared.active.store(0, Ordering::Release);
+        return;
+    }
+    state
+        .shared
+        .failure_epoch
+        .store(next_epoch, Ordering::Release);
+    state.started_epoch = next_epoch;
+    state.expected_block_sample = None;
+    state.next_window_start = None;
+    state.first_sample = 0;
+    state.filled = 0;
+    state.sequence = 0;
+    state.source_underrun = false;
+    state.completed_sample = None;
+    state.completed_sequence = None;
+    state
+        .shared
+        .phase
+        .store(CONTINUOUS_WAITING, Ordering::Release);
 }
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
@@ -554,12 +1417,10 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
     }
 
     fn invalidate_after_failure(&mut self, failed_sample: u64) {
-        let state = self.state.load(Ordering::Acquire);
-        if matches!(state, ARMED | CAPTURING) {
-            self.invalidate();
-        } else if state == COMPLETE && self.completed_sample == Some(failed_sample) {
-            self.armed = false;
-            self.state.store(INVALID, Ordering::Release);
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            continuous_fail(&mut self.continuous);
+        } else {
+            one_shot_invalidate_after_failure(&mut self.one_shot, failed_sample);
         }
     }
 }
@@ -730,8 +1591,9 @@ pub enum SpectrumAnalysisError {
 mod tests {
     use super::{
         ARMED, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
-        SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCaptureObserver, SpectrumCaptureReadError,
-        SpectrumChannels, SpectrumTarget, SpectrumWindow,
+        SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCadence, SpectrumCapture,
+        SpectrumCaptureObserver, SpectrumCaptureReadError, SpectrumChannels,
+        SpectrumContinuousReadError, SpectrumTarget, SpectrumWindow,
     };
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
     use engine::realtime::{QueueGeneration, bounded_spsc};
@@ -745,6 +1607,34 @@ mod tests {
             channels: SpectrumChannels::Stereo,
             source_underrun: false,
         }
+    }
+
+    fn continuous_pair(channels: SpectrumChannels) -> (SpectrumCaptureObserver, SpectrumCapture) {
+        let (producer, consumer) = bounded_spsc(
+            core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            QueueGeneration(0x4353_5045),
+        )
+        .expect("capture queue");
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::IDLE));
+        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE));
+        let shared = super::SpectrumContinuousShared::new();
+        let observer = SpectrumCaptureObserver::new(
+            producer,
+            std::sync::Arc::clone(&state),
+            std::sync::Arc::clone(&mode),
+            std::sync::Arc::clone(&shared),
+            channels,
+        );
+        let capture = SpectrumCapture {
+            consumer,
+            state,
+            mode,
+            shared,
+            seen_failures: 0,
+            seen_drops: 0,
+            target: SpectrumTarget::Output("main-out".into()),
+        };
+        (observer, capture)
     }
 
     #[test]
@@ -919,19 +1809,11 @@ mod tests {
         )
         .expect("capture queue");
         let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
-        let mut observer = SpectrumCaptureObserver {
+        let mut observer = SpectrumCaptureObserver::new_one_shot_for_test(
             producer,
-            state: std::sync::Arc::clone(&state),
-            left: [0.0; SPECTRUM_WINDOW_FRAMES],
-            right: [0.0; SPECTRUM_WINDOW_FRAMES],
-            channels: SpectrumChannels::Left,
-            filled: 0,
-            first_sample: 0,
-            next_sample: 0,
-            armed: false,
-            source_underrun: false,
-            completed_sample: None,
-        };
+            std::sync::Arc::clone(&state),
+            SpectrumChannels::Left,
+        );
         let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
         let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
         let first_sample = (1_u64 << 53) + 123;
@@ -941,7 +1823,7 @@ mod tests {
             first_sample,
             super::GraphObservationValidity::CLEAR,
         );
-        let window = consumer.try_pop().expect("large-sample capture");
+        let window = consumer.try_pop().expect("large-sample capture").window;
         assert_eq!(window.first_sample, first_sample);
         assert_eq!(
             window.end_sample(),
@@ -962,19 +1844,11 @@ mod tests {
             )
             .expect("capture queue");
             let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
-            let observer = SpectrumCaptureObserver {
+            let observer = SpectrumCaptureObserver::new_one_shot_for_test(
                 producer,
-                state: std::sync::Arc::clone(&state),
-                left: [0.0; SPECTRUM_WINDOW_FRAMES],
-                right: [0.0; SPECTRUM_WINDOW_FRAMES],
-                channels: SpectrumChannels::Left,
-                filled: 0,
-                first_sample: 0,
-                next_sample: 0,
-                armed: false,
-                source_underrun: false,
-                completed_sample: None,
-            };
+                std::sync::Arc::clone(&state),
+                SpectrumChannels::Left,
+            );
             (observer, consumer, state)
         };
 
@@ -1007,18 +1881,18 @@ mod tests {
             );
         }
         let completing_sample = 2_048 + (SPECTRUM_WINDOW_FRAMES - BLOCK_FRAMES) as u64;
-        assert_eq!(current.completed_sample, Some(completing_sample));
+        assert_eq!(current.one_shot.completed_sample, Some(completing_sample));
         current.invalidate_after_failure(completing_sample);
         assert_eq!(
             state.load(std::sync::atomic::Ordering::Acquire),
             INVALID,
             "a failed block cannot publish its completed window"
         );
-        let mut capture = super::SpectrumCapture {
+        let mut capture = super::SpectrumCapture::new_one_shot_for_test(
             consumer,
             state,
-            target: SpectrumTarget::Output("main-out".into()),
-        };
+            SpectrumTarget::Output("main-out".into()),
+        );
         assert_eq!(
             capture
                 .try_read()
@@ -1028,6 +1902,177 @@ mod tests {
         capture
             .arm()
             .expect("draining the invalid result frees the slot");
+    }
+
+    #[test]
+    fn continuous_cadence_uses_checked_launch_profiles() {
+        let expected = [
+            (44_100, 2_048),
+            (48_000, 2_048),
+            (88_200, 2_944),
+            (96_000, 3_200),
+        ];
+        for (sample_rate_hz, hop_frames) in expected {
+            let cadence = SpectrumCadence::new(sample_rate_hz, 128).expect("launch cadence");
+            assert_eq!(cadence.hop_frames(), hop_frames);
+        }
+        assert_eq!(
+            SpectrumCadence::new(88_200, 192)
+                .expect("nondividing launch cadence")
+                .hop_frames(),
+            3_072
+        );
+        assert!(SpectrumCadence::new(192_000, 128).is_err());
+        assert!(SpectrumCadence::new(48_000, 0).is_err());
+    }
+
+    #[test]
+    fn one_prepared_capture_switches_between_one_shot_and_continuous_modes() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+        let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+        let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+        capture.arm().expect("one-shot arm");
+        observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        assert_eq!(capture.try_read().expect("one-shot result").first_sample, 0);
+
+        let cadence = capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        assert_eq!(cadence.hop_frames(), 2_048);
+        let block_left = [0.75_f32; 128];
+        let block_right = [-0.25_f32; 128];
+        for block in 0..16 {
+            observer.capture(
+                &block_left,
+                &block_right,
+                2_048 + block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let continuous = capture.try_read_continuous().expect("continuous result");
+        assert_eq!(continuous.first_sample, 2_048);
+        assert_eq!(continuous.stream_epoch, 1);
+        assert_eq!(continuous.sequence, 0);
+        assert_eq!(continuous.left[0], 0.75);
+        assert_eq!(continuous.right[0], -0.25);
+
+        capture.stop_continuous();
+        capture.arm().expect("one-shot arm after continuous stop");
+        observer.capture(&left, &right, 4_096, super::GraphObservationValidity::CLEAR);
+        assert_eq!(
+            capture
+                .try_read()
+                .expect("second one-shot result")
+                .first_sample,
+            4_096
+        );
+    }
+
+    #[test]
+    fn continuous_windows_follow_h_without_reads_and_report_queue_gaps() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        let left = [0.5_f32; 128];
+        let right = [0.0_f32; 128];
+        for block in 0..32 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("full queue reports gap"),
+            SpectrumContinuousReadError::Gap {
+                stream_epoch: 1,
+                dropped_captures: 1,
+            }
+        );
+        let first = capture.try_read_continuous().expect("first queued window");
+        assert_eq!(first.first_sample, 0);
+        assert_eq!(first.sequence, 0);
+        for block in 32..48 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let recovered = capture.try_read_continuous().expect("later window");
+        assert_eq!(recovered.first_sample, 4_096);
+        assert_eq!(recovered.sequence, 2);
+        assert_eq!(recovered.dropped_captures, 1);
+    }
+
+    #[test]
+    fn continuous_profile_skips_to_a_slower_hop_and_resets_after_discontinuity() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Right);
+        capture
+            .start_continuous(88_200, 128)
+            .expect("continuous activation");
+        let left = [0.0_f32; 128];
+        let right = [0.25_f32; 128];
+        for block in 0..16 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let first = capture.try_read_continuous().expect("first slower window");
+        assert_eq!(first.first_sample, 0);
+        for block in 16..23 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("waiting for slower hop"),
+            SpectrumContinuousReadError::Warming
+        );
+        observer.capture(&left, &right, 2_944, super::GraphObservationValidity::CLEAR);
+        for block in 24..39 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let second = capture.try_read_continuous().expect("second slower window");
+        assert_eq!(second.first_sample, 2_944);
+        assert_eq!(second.sequence, 1);
+
+        observer.capture(&left, &right, 5_000, super::GraphObservationValidity::CLEAR);
+        assert!(matches!(
+            capture.try_read_continuous(),
+            Err(SpectrumContinuousReadError::Failed { stream_epoch: 2 })
+        ));
+        observer.capture(&left, &right, 5_128, super::GraphObservationValidity::CLEAR);
+        for block in 1..16 {
+            observer.capture(
+                &left,
+                &right,
+                5_128 + block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let after_failure = capture.try_read_continuous().expect("new epoch window");
+        assert_eq!(after_failure.stream_epoch, 2);
+        assert_eq!(after_failure.sequence, 0);
+        assert_eq!(after_failure.first_sample, 5_128);
     }
 
     #[test]
