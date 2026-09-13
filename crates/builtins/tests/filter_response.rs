@@ -142,8 +142,12 @@ fn launch_rate_corpus_matches_independent_words_for_both_channels_and_sections()
         let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch maximum");
         let cases = [
             filters(0.0, 0.0, 0.0, 0.0),
+            filters(10.0, 0.0, 10.0, 0.0),
+            filters(0.0, 10.0, 0.0, 10.0),
             filters(100.0, 0.0, 1_000.0, 0.0),
             filters(0.0, 1_000.0, 0.0, maximum),
+            filters(8_000.0, 16_000.0, 12_000.0, 18_000.0),
+            filters(maximum, 0.0, 0.0, maximum),
             filters(100.0, maximum, 1_000.0, 8_000.0),
         ];
         for configuration in cases {
@@ -247,7 +251,7 @@ fn optional_buffers_and_filter_subtotal_ignore_excluded_fields() {
     let mut right_only = vec![f32::NAN; frequencies.len() * 2];
     let mut left_total = vec![f32::NAN; frequencies.len()];
     let mut right_total = vec![f32::NAN; frequencies.len()];
-    query_input_filter_response_into(
+    let left_summary = query_input_filter_response_into(
         InputFilterResponseRequest {
             configuration_id: u64::MAX,
             sample_rate_hz: rate,
@@ -263,8 +267,9 @@ fn optional_buffers_and_filter_subtotal_ignore_excluded_fields() {
         },
     )
     .expect("left-only section query");
+    assert_eq!(left_summary.configuration_id, u64::MAX);
     assert_eq!(left_only, sections_left);
-    query_input_filter_response_into(
+    let right_summary = query_input_filter_response_into(
         InputFilterResponseRequest {
             configuration_id: u64::MAX,
             sample_rate_hz: rate,
@@ -280,6 +285,7 @@ fn optional_buffers_and_filter_subtotal_ignore_excluded_fields() {
         },
     )
     .expect("right-only section query");
+    assert_eq!(right_summary.configuration_id, u64::MAX);
     assert_eq!(right_only, sections_right);
 
     let mut variant = base;
@@ -369,7 +375,13 @@ fn settled_pcm_impulse_matches_query_at_all_launch_rates() {
 
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
-    InvalidGrid,
+    InvalidEmptyGrid,
+    InvalidDuplicateGrid,
+    InvalidNanGrid,
+    InvalidInfinityGrid,
+    InvalidNegativeGrid,
+    InvalidAboveNyquistGrid,
+    InvalidDescendingGrid,
     ZeroBudget,
     OverBudget,
     LeftTotalShort,
@@ -386,8 +398,26 @@ enum Refusal {
 fn malformed_grids_shapes_and_budgets_are_atomic_and_allocation_free() {
     let configuration = filters(100.0, 4_000.0, 1_000.0, 8_000.0);
     let valid = [100.0_f32, 1_000.0];
+    // A safe `&[f32]` has an allocation whose byte length is at most `isize::MAX`; therefore
+    // `2 * frequencies_hz.len()` is far below `usize::MAX` for this two-section API. The
+    // production checked multiplication remains a defensive boundary for future callers, but
+    // reaching its overflow arm would require an invalid synthetic slice, so no unsafe fixture is
+    // appropriate here.
+    let empty: [f32; 0] = [];
+    let duplicate = [100.0_f32, 100.0];
+    let nan = [100.0_f32, f32::NAN];
+    let infinity = [100.0_f32, f32::INFINITY];
+    let negative = [-1.0_f32, 100.0];
+    let above_nyquist = [100.0_f32, 24_001.0];
+    let descending = [1_000.0_f32, 100.0];
     let cases = [
-        Refusal::InvalidGrid,
+        Refusal::InvalidEmptyGrid,
+        Refusal::InvalidDuplicateGrid,
+        Refusal::InvalidNanGrid,
+        Refusal::InvalidInfinityGrid,
+        Refusal::InvalidNegativeGrid,
+        Refusal::InvalidAboveNyquistGrid,
+        Refusal::InvalidDescendingGrid,
         Refusal::ZeroBudget,
         Refusal::OverBudget,
         Refusal::LeftTotalShort,
@@ -402,22 +432,34 @@ fn malformed_grids_shapes_and_budgets_are_atomic_and_allocation_free() {
     bench_alloc::assert_installed();
     bench_alloc::set_mode(bench_alloc::Mode::Count);
     for case in cases {
-        let frequencies = if matches!(case, Refusal::InvalidGrid) {
-            [100.0_f32, 100.0]
-        } else {
-            valid
+        let frequencies: &[f32] = match case {
+            Refusal::InvalidEmptyGrid => &empty,
+            Refusal::InvalidDuplicateGrid => &duplicate,
+            Refusal::InvalidNanGrid => &nan,
+            Refusal::InvalidInfinityGrid => &infinity,
+            Refusal::InvalidNegativeGrid => &negative,
+            Refusal::InvalidAboveNyquistGrid => &above_nyquist,
+            Refusal::InvalidDescendingGrid => &descending,
+            _ => &valid,
         };
+        let points = frequencies.len();
         let maximum_points = match case {
             Refusal::ZeroBudget => 0,
             Refusal::OverBudget => 1,
-            _ => frequencies.len(),
+            _ => points,
         };
         let mut total_left = [11.0_f32; 3];
         let mut total_right = [12.0_f32; 3];
         let mut sections_left = [13.0_f32; 5];
         let mut sections_right = [14.0_f32; 5];
         let expected = match case {
-            Refusal::InvalidGrid => InputFilterResponseError::InvalidFrequencyGrid,
+            Refusal::InvalidEmptyGrid
+            | Refusal::InvalidDuplicateGrid
+            | Refusal::InvalidNanGrid
+            | Refusal::InvalidInfinityGrid
+            | Refusal::InvalidNegativeGrid
+            | Refusal::InvalidAboveNyquistGrid
+            | Refusal::InvalidDescendingGrid => InputFilterResponseError::InvalidFrequencyGrid,
             Refusal::ZeroBudget | Refusal::OverBudget => InputFilterResponseError::Capacity,
             _ => InputFilterResponseError::OutputShape,
         };
@@ -427,30 +469,30 @@ fn malformed_grids_shapes_and_budgets_are_atomic_and_allocation_free() {
                 configuration_id: u64::MAX,
                 sample_rate_hz: 48_000,
                 configuration,
-                frequencies_hz: &frequencies,
+                frequencies_hz: frequencies,
                 maximum_points,
             },
             InputFilterResponseOutput {
                 total_left_db: match case {
                     Refusal::LeftTotalShort => &mut total_left[..1],
                     Refusal::LeftTotalLong => &mut total_left,
-                    _ => &mut total_left[..frequencies.len()],
+                    _ => &mut total_left[..points],
                 },
                 total_right_db: match case {
                     Refusal::RightTotalShort => &mut total_right[..1],
                     Refusal::RightTotalLong => &mut total_right,
-                    _ => &mut total_right[..frequencies.len()],
+                    _ => &mut total_right[..points],
                 },
-                sections_left_db: match case {
-                    Refusal::LeftSectionsShort => Some(&mut sections_left[..3]),
-                    Refusal::LeftSectionsLong => Some(&mut sections_left),
-                    _ => None,
-                },
-                sections_right_db: match case {
-                    Refusal::RightSectionsShort => Some(&mut sections_right[..3]),
-                    Refusal::RightSectionsLong => Some(&mut sections_right),
-                    _ => None,
-                },
+                sections_left_db: Some(match case {
+                    Refusal::LeftSectionsShort => &mut sections_left[..3],
+                    Refusal::LeftSectionsLong => &mut sections_left,
+                    _ => &mut sections_left[..points * 2],
+                }),
+                sections_right_db: Some(match case {
+                    Refusal::RightSectionsShort => &mut sections_right[..3],
+                    Refusal::RightSectionsLong => &mut sections_right,
+                    _ => &mut sections_right[..points * 2],
+                }),
             },
         );
         let delta = bench_alloc::current_thread_delta_since(mark);
@@ -511,6 +553,11 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
     exact.left.hpf_hz = successor;
     let mut total_left = [71.0_f32; 3];
     let mut total_right = [72.0_f32; 3];
+    let mut sections_left = [73.0_f32; 6];
+    let mut sections_right = [74.0_f32; 6];
+    bench_alloc::assert_installed();
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    let mark = bench_alloc::current_thread_counters();
     let result = query_input_filter_response_into(
         InputFilterResponseRequest {
             configuration_id: 1,
@@ -522,18 +569,24 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
         InputFilterResponseOutput {
             total_left_db: &mut total_left,
             total_right_db: &mut total_right,
-            sections_left_db: None,
-            sections_right_db: None,
+            sections_left_db: Some(&mut sections_left),
+            sections_right_db: Some(&mut sections_right),
         },
     );
+    let delta = bench_alloc::current_thread_delta_since(mark);
     assert_eq!(
         result,
         Err(InputFilterResponseError::Configuration(
             BuiltinParameterError::FilterCutoff
         ))
     );
+    assert_eq!(delta.allocations, 0, "successor allocations={delta:?}");
+    assert_eq!(delta.deallocations, 0, "successor frees={delta:?}");
+    assert_eq!(delta.reallocations, 0, "successor reallocations={delta:?}");
     assert_eq!(total_left, [71.0; 3]);
     assert_eq!(total_right, [72.0; 3]);
+    assert_eq!(sections_left, [73.0; 6]);
+    assert_eq!(sections_right, [74.0; 6]);
 
     let mut cases = Vec::new();
     let mut negative_zero = BuiltinParameters::default();
@@ -553,6 +606,8 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
     cases.push((negative, BuiltinParameterError::FilterCutoff));
     let mut order = filters(2_000.0, 1_000.0, 0.0, 0.0);
     cases.push((order, BuiltinParameterError::FilterOrder));
+    let equal = filters(1_000.0, 1_000.0, 0.0, 0.0);
+    cases.push((equal, BuiltinParameterError::FilterOrder));
     let mut gain = BuiltinParameters::default();
     gain.left.trim_db = f32::NAN;
     cases.push((gain, BuiltinParameterError::GainDomain));
@@ -560,6 +615,11 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
     matrix.matrix.ll = f32::NAN;
     cases.push((matrix, BuiltinParameterError::MatrixCoefficient));
     for (configuration, error) in cases {
+        let mut total_left = [1.0_f32; 3];
+        let mut total_right = [2.0_f32; 3];
+        let mut sections_left = [3.0_f32; 6];
+        let mut sections_right = [4.0_f32; 6];
+        let mark = bench_alloc::current_thread_counters();
         let result = query_input_filter_response_into(
             InputFilterResponseRequest {
                 configuration_id: 2,
@@ -569,13 +629,27 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
                 maximum_points: frequencies.len(),
             },
             InputFilterResponseOutput {
-                total_left_db: &mut [1.0; 3],
-                total_right_db: &mut [2.0; 3],
-                sections_left_db: None,
-                sections_right_db: None,
+                total_left_db: &mut total_left,
+                total_right_db: &mut total_right,
+                sections_left_db: Some(&mut sections_left),
+                sections_right_db: Some(&mut sections_right),
             },
         );
+        let delta = bench_alloc::current_thread_delta_since(mark);
         assert_eq!(result, Err(InputFilterResponseError::Configuration(error)));
+        assert_eq!(
+            delta.allocations, 0,
+            "config={error:?} allocations={delta:?}"
+        );
+        assert_eq!(delta.deallocations, 0, "config={error:?} frees={delta:?}");
+        assert_eq!(
+            delta.reallocations, 0,
+            "config={error:?} reallocations={delta:?}"
+        );
+        assert_eq!(total_left, [1.0; 3]);
+        assert_eq!(total_right, [2.0; 3]);
+        assert_eq!(sections_left, [3.0; 6]);
+        assert_eq!(sections_right, [4.0; 6]);
     }
     order.left.hpf_hz = 1_000.0;
     order.left.lpf_hz = 2_000.0;
@@ -587,6 +661,11 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
     );
 
     for rate in [0, 44_101, 176_400, 192_000, 352_800, 384_000] {
+        let mut total_left = [3.0_f32; 3];
+        let mut total_right = [4.0_f32; 3];
+        let mut sections_left = [5.0_f32; 6];
+        let mut sections_right = [6.0_f32; 6];
+        let mark = bench_alloc::current_thread_counters();
         let result = query_input_filter_response_into(
             InputFilterResponseRequest {
                 configuration_id: 3,
@@ -596,13 +675,116 @@ fn preparation_rejects_invalid_boundaries_rates_and_excluded_fields() {
                 maximum_points: frequencies.len(),
             },
             InputFilterResponseOutput {
-                total_left_db: &mut [3.0; 3],
-                total_right_db: &mut [4.0; 3],
-                sections_left_db: None,
-                sections_right_db: None,
+                total_left_db: &mut total_left,
+                total_right_db: &mut total_right,
+                sections_left_db: Some(&mut sections_left),
+                sections_right_db: Some(&mut sections_right),
             },
         );
+        let delta = bench_alloc::current_thread_delta_since(mark);
         assert_eq!(result, Err(InputFilterResponseError::UnsupportedSampleRate));
+        assert_eq!(delta.allocations, 0, "rate={rate} allocations={delta:?}");
+        assert_eq!(delta.deallocations, 0, "rate={rate} frees={delta:?}");
+        assert_eq!(
+            delta.reallocations, 0,
+            "rate={rate} reallocations={delta:?}"
+        );
+        assert_eq!(total_left, [3.0; 3]);
+        assert_eq!(total_right, [4.0; 3]);
+        assert_eq!(sections_left, [5.0; 6]);
+        assert_eq!(sections_right, [6.0; 6]);
+    }
+}
+
+#[test]
+fn every_launch_rate_checks_exact_maximum_successors_and_equal_order() {
+    bench_alloc::assert_installed();
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch maximum");
+        let successor = f32::from_bits(maximum.to_bits() + 1);
+        let frequencies = [0.0_f32, 1_000.0, rate as f32 * 0.5];
+
+        let exact = filters(maximum, 0.0, 0.0, maximum);
+        let mut total_left = [f32::NAN; 3];
+        let mut total_right = [f32::NAN; 3];
+        let mut sections_left = [f32::NAN; 6];
+        let mut sections_right = [f32::NAN; 6];
+        let summary = query_input_filter_response_into(
+            InputFilterResponseRequest {
+                configuration_id: u64::MAX,
+                sample_rate_hz: rate,
+                configuration: exact,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            InputFilterResponseOutput {
+                total_left_db: &mut total_left,
+                total_right_db: &mut total_right,
+                sections_left_db: Some(&mut sections_left),
+                sections_right_db: Some(&mut sections_right),
+            },
+        )
+        .expect("exact per-rate maxima are valid");
+        assert_eq!(summary.configuration_id, u64::MAX);
+        assert_eq!(summary.sample_rate_hz, rate);
+        assert!(total_left.iter().all(|value| value.is_finite()));
+        assert!(total_right.iter().all(|value| value.is_finite()));
+        assert!(sections_left.iter().all(|value| value.is_finite()));
+        assert!(sections_right.iter().all(|value| value.is_finite()));
+
+        let assert_refusal = |configuration: BuiltinParameters,
+                              expected: InputFilterResponseError| {
+            let mut total_left = [31.0_f32; 3];
+            let mut total_right = [32.0_f32; 3];
+            let mut sections_left = [33.0_f32; 6];
+            let mut sections_right = [34.0_f32; 6];
+            let mark = bench_alloc::current_thread_counters();
+            let result = query_input_filter_response_into(
+                InputFilterResponseRequest {
+                    configuration_id: u64::MAX,
+                    sample_rate_hz: rate,
+                    configuration,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                InputFilterResponseOutput {
+                    total_left_db: &mut total_left,
+                    total_right_db: &mut total_right,
+                    sections_left_db: Some(&mut sections_left),
+                    sections_right_db: Some(&mut sections_right),
+                },
+            );
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            assert_eq!(result, Err(expected));
+            assert_eq!(delta.allocations, 0, "rate={rate} allocations={delta:?}");
+            assert_eq!(delta.deallocations, 0, "rate={rate} frees={delta:?}");
+            assert_eq!(
+                delta.reallocations, 0,
+                "rate={rate} reallocations={delta:?}"
+            );
+            assert_eq!(total_left, [31.0; 3]);
+            assert_eq!(total_right, [32.0; 3]);
+            assert_eq!(sections_left, [33.0; 6]);
+            assert_eq!(sections_right, [34.0; 6]);
+        };
+
+        let mut successor_hpf = exact;
+        successor_hpf.left.hpf_hz = successor;
+        assert_refusal(
+            successor_hpf,
+            InputFilterResponseError::Configuration(BuiltinParameterError::FilterCutoff),
+        );
+        let mut successor_lpf = exact;
+        successor_lpf.right.lpf_hz = successor;
+        assert_refusal(
+            successor_lpf,
+            InputFilterResponseError::Configuration(BuiltinParameterError::FilterCutoff),
+        );
+        assert_refusal(
+            filters(1_000.0, 1_000.0, 0.0, 0.0),
+            InputFilterResponseError::Configuration(BuiltinParameterError::FilterOrder),
+        );
     }
 }
 

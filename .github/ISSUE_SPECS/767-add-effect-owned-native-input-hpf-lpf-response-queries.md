@@ -217,3 +217,31 @@ Directly read the captured focused result: 7 passed, none failed/ignored. Root f
 This is the single attempt-1 verdict. Passing commands do not supply omitted test assertions. No architecture rescope, tolerance change, generic harness, timed run, or revisit of delivered #764/#766 is needed. Parent #763 remains open; do not claim this child delivered until it earns PASS and completes required remote delivery/synchronization.
 
 Root authorizes attempt 2 for these bounded test assertions and checked-length rationale in existing allowed paths. Production arithmetic and all thresholds remain frozen. Run focused tests, all-target Clippy, formatting and diff checks before checkpoint; already-passing unchanged-production gates retain applicability for test-only corrections.
+
+## Attempt 2 focused correction evidence
+
+The bounded test correction adds every public invalid-grid category with shape-correct caller
+buffers, sentinels and zero allocation/free/reallocation assertions: empty, duplicate,
+non-finite, negative, above-Nyquist and descending grids. It also covers 10 Hz, high ordinary and
+exact-maximum HPF/LPF configurations at all four launch rates through the existing independent
+rounded-word oracle, loops each rate's exact maximum and immediate `f32` successor for both HPF
+and LPF, and asserts equal cutoff ordering refusal. Configuration and unsupported-rate refusals
+now retain total and section sentinels and measure zero allocation activity. Successful summaries
+assert `u64::MAX` exactly in addition to the existing `2^53+1` identity gate.
+
+The checked `2 * points` branch remains production-defensive but cannot be reached by a valid safe
+slice fixture: a safe `&[f32]` allocation is bounded by `isize::MAX` bytes, so its element count
+times the two-section factor remains below `usize::MAX`. No unsafe synthetic slice is appropriate;
+the test documents this bound while exercising all reachable capacity and output-shape paths.
+
+`cargo test --locked -p builtins --test filter_response -- --test-threads=1` exited `0` with 8
+tests passing. Authentic stdout, stderr and exit status are in
+`/tmp/miso-engine-767-attempt2-focused.stdout`,
+`/tmp/miso-engine-767-attempt2-focused.stderr`, and
+`/tmp/miso-engine-767-attempt2-focused.exit`. The required all-target
+`cargo clippy --locked -p builtins --all-targets -- -D warnings` exited `0`, with logs in
+`/tmp/miso-engine-767-attempt2-all-clippy.{stdout,stderr,exit}`. `cargo fmt --all -- --check`
+exited `0`, and `git diff --check` exited `0`; their authentic streams and statuses are in
+`/tmp/miso-engine-767-attempt2-fmt.{stdout,stderr,exit}` and
+`/tmp/miso-engine-767-attempt2-diff.{stdout,stderr,exit}`. No production arithmetic or DSP files
+changed in this attempt.
