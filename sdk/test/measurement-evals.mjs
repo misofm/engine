@@ -108,6 +108,9 @@ test("SDK measurement feeds use one shared lease and preserve copied projections
   assert.equal(update.generation, 3n);
   assert.equal(update.validity, 0xb);
   assert.equal(update.lossCount, 2);
+  assert.equal(update.windows, 3);
+  assert.equal(update.firstSample, 128n);
+  assert.equal(update.endSample, 512n);
   assert.deepEqual([...update.tracks].map(([id, meter]) => [id, {
     ...meter,
     peakLeft: Number(meter.peakLeft.toFixed(6)),
@@ -252,7 +255,7 @@ test("engine close clears measurement callbacks and releases a late successful a
   await Promise.resolve();
   const closing = engine.close();
   await assert.rejects(engine.subscribeMeters(() => undefined), (error) => error instanceof MisoUsageError);
-  lateListener?.(meterFrame());
+  lateListener?.({ ...meterFrame(), trackCount: 1, peaks: new Float32Array([0.1, 0.2, 0.9, 0.8]), trackGrDb: new Float32Array([1]) });
   assert.equal(delivered, 0, "close clears listeners before a late arm can publish");
   await closing;
   assert.equal(host.disposed, true);
@@ -260,7 +263,7 @@ test("engine close clears measurement callbacks and releases a late successful a
   settleArm();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(host.leases, [["meters", true], ["meters", false]]);
-  lateListener?.(meterFrame());
+  lateListener?.({ ...meterFrame(), trackCount: 1, peaks: new Float32Array([0.1, 0.2, 0.9, 0.8]), trackGrDb: new Float32Array([1]) });
   assert.equal(delivered, 0, "a late successful lease cannot revive a closed owner");
   await engine.close();
 });
@@ -317,4 +320,39 @@ test("browser console retains the managed observation conflict hook", async () =
   } finally {
     await engine.close();
   }
+});
+
+
+test("telemetry shares one lease until its last subscription and isolates throwing callbacks", async () => {
+  const host = fakeHost();
+  const feeds = createMeasurementFeeds(host, [], true);
+  let deliveries = 0;
+  const first = await feeds.telemetry(() => { throw new Error("consumer"); });
+  const second = await feeds.telemetry(() => { deliveries += 1; });
+  assert.deepEqual(host.leases, [["telemetry", true]]);
+  host.emitTelemetry(telemetryFrame);
+  assert.equal(deliveries, 1);
+  first(); first();
+  host.emitTelemetry(telemetryFrame);
+  assert.equal(deliveries, 2);
+  assert.deepEqual(host.leases, [["telemetry", true]]);
+  second(); second();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(host.leases, [["telemetry", true], ["telemetry", false]]);
+  feeds.close();
+});
+
+test("close inside a measurement callback suppresses remaining same-frame callbacks", async () => {
+  const host = fakeHost();
+  const engine = await openBrowser(host);
+  let closing;
+  await engine.subscribeTelemetry(() => { closing = engine.close(); });
+  await engine.subscribeTelemetry(() => assert.fail("callback after close started"));
+  // Callback exceptions are intentionally isolated, so assert delivery outside the callback.
+  let afterClose = 0;
+  await engine.subscribeTelemetry(() => { afterClose += 1; });
+  host.emitTelemetry(telemetryFrame);
+  assert.equal(afterClose, 0);
+  await closing;
+  assert.equal(host.disposed, true);
 });

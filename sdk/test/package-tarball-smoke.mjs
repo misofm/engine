@@ -580,10 +580,12 @@ document.querySelector('#meter').onclick = async () => {
       window.resolveMeter?.(window.meterCandidate);
     });
     engine.host.node.connect(engine.context.destination);
-    await engine.context.resume();
-    await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: 0n,
+    // Queue sample-zero PCM while suspended so browser scheduling cannot advance past it.
+    const admitted = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, frames: 128,
       planes: [new Float32Array(128).fill(.25), new Float32Array(128).fill(-.5)], endOfRegion: false });
+    if (admitted.result !== 0) throw new Error('meter fixture PCM admission failed: ' + admitted.result);
+    await engine.context.resume();
     await frame;
     stop();
     await engine.close();

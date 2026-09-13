@@ -218,3 +218,15 @@ Root paused implementation at this focused-green recovery boundary before more
 work. Packed-browser/generated/full-SDK results and complete independent verdict
 are not yet claimed; Astra now verifies the stable candidate and may fix only
 concrete bugs within this frozen scope. This remains coherent attempt 1.
+
+
+Astra MEDIUM verification checkpoint (attempt 1, no final verdict): independent
+full SDK 241/241 and types PASS. Review fixed a late-arm fixture that incorrectly
+fed two tracks to a one-track engine, added complete span/window assertions and
+telemetry/close-delivery cases; focused measurements now pass 12/12. The packed
+browser meter proof still times out after a bounded sample-zero prequeue
+correction; that unsuccessful fixture diagnosis is preserved, not accepted as
+a passing browser proof. Root checkpoints both test changes as useful, buildable
+evidence. Logs: `/tmp/miso-796-audit/verify-sdk-full.log`, `verify-types.log`,
+`verify-measurements.log`, and `verify-package1.log`. No runtime correction or
+registry availability is claimed by this checkpoint.
