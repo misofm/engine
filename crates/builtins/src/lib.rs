@@ -24,7 +24,7 @@ use core::cell::Cell;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use engine::{
-    SampleRateHz, is_extended_compatibility_sample_rate,
+    SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
 pub mod corpus;
@@ -35,7 +35,11 @@ pub use filter_response::{
     prepare_input_filter_response, query_input_filter_response_into,
 };
 
-use effect_contract::{BankWidth, ChannelSymmetryWitness};
+use effect_contract::{
+    BankWidth, ChannelSymmetryWitness, EffectPrepareError, ResponseAnalysisError,
+    ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSummary,
+};
 use lane::{
     Backend, Lane, Simd4, Simd8,
     kernels::{
@@ -1709,6 +1713,59 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
+    /// Copies one lane's retained HPF/LPF words into the live response transfer record.
+    ///
+    /// The sections are recovered from the coefficient words the render kernel loads. Trim and
+    /// polarity are deliberately absent because they do not belong to this response subtotal.
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        if lane >= self.members || lane >= L::WIDTH {
+            return Err(ResponseAnalysisError::Capacity);
+        }
+        if request.left.len() != 2 || request.right.len() != 2 {
+            return Err(ResponseAnalysisError::OutputShape);
+        }
+        if !is_launch_sample_rate(SampleRateHz(sample_rate_hz)) {
+            return Err(ResponseAnalysisError::Configuration(EffectPrepareError {
+                code: "effect.quality.unsupported",
+            }));
+        }
+        let bypassed = request.bypassed;
+        let left = request.left;
+        let right = request.right;
+        let track = self.lane_track(lane);
+        let left_sections = [track.left.hpf, track.left.lpf];
+        let right_sections = [track.right.hpf, track.right.lpf];
+        for (index, (left_section, right_section)) in
+            left_sections.into_iter().zip(right_sections).enumerate()
+        {
+            left[index] = ResponseSnapshotSection {
+                id: u32::try_from(index + 1).expect("builtin section count fits u32"),
+                kind: u32::try_from(index + 1).expect("builtin section kind fits u32"),
+                enabled: left_section.enabled,
+                word_count: 7,
+                words: left_section.words(),
+            };
+            right[index] = ResponseSnapshotSection {
+                id: u32::try_from(index + 1).expect("builtin section count fits u32"),
+                kind: u32::try_from(index + 1).expect("builtin section kind fits u32"),
+                enabled: right_section.enabled,
+                word_count: 7,
+                words: right_section.words(),
+            };
+        }
+        Ok(ResponseSnapshotSummary {
+            kind: ResponseSnapshotKind::BuiltinInputFilters,
+            sample_rate_hz,
+            bypassed,
+            sections: 2,
+        })
+    }
+
     /// Whether every designed word the input chain's kernel reads for `lane` compares
     /// **bit-equal** between the two channels, as
     /// [`compute_lane_channel_symmetry`](Self::compute_lane_channel_symmetry) defines it.
@@ -2589,6 +2646,16 @@ impl InputBuiltins {
         witness
     }
 
+    /// Copies this track's retained HPF/LPF words into caller-owned response storage.
+    pub fn copy_response_snapshot(
+        &self,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.stage
+            .copy_response_snapshot_lane(0, sample_rate_hz, request)
+    }
+
     /// Renders one already-validated block. Infallible: the block shape was checked once (F9).
     pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         let frames = block.left.len();
@@ -2755,6 +2822,23 @@ impl BuiltinInputBank {
     #[must_use]
     pub const fn active_lanes(&self) -> usize {
         self.members
+    }
+
+    /// Copies one populated lane's retained HPF/LPF words into caller-owned response storage.
+    pub fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        match &self.stage {
+            InputStageKernel::Simd4(stage) => {
+                stage.copy_response_snapshot_lane(lane, sample_rate_hz, request)
+            }
+            InputStageKernel::Simd8(stage) => {
+                stage.copy_response_snapshot_lane(lane, sample_rate_hz, request)
+            }
+        }
     }
 
     /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.

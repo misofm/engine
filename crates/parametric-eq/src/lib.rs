@@ -40,8 +40,9 @@ use effect_contract::{
     ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
     PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    ProcessReport, QualityDescriptor, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    ProcessReport, QualityDescriptor, ResetKind, ResponseAnalysisError, ResponseSnapshotKind,
+    ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSummary, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{
@@ -2310,6 +2311,13 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         self.metadata
     }
 
+    fn copy_response_snapshot(
+        &self,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.copy_response_snapshot_for_lane(0, request)
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.designed_channel_symmetry(0)
     }
@@ -2375,6 +2383,14 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         self.bank.clone()
     }
 
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.copy_response_snapshot_for_lane(lane, request)
+    }
+
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.designed_channel_symmetry(lane)
     }
@@ -2432,6 +2448,61 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    /// Copies one lane's retained target words into the live response transfer record.
+    ///
+    /// This reads the exact words held by each channel's `Section::target`; it never redesigns a
+    /// band from parameter values. The render owner supplies the bypass bit for the same boundary.
+    fn copy_response_snapshot_for_lane(
+        &self,
+        lane: usize,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        if lane >= W || lane >= L::WIDTH {
+            return Err(ResponseAnalysisError::Capacity);
+        }
+        if request.left.len() != EQ_SECTION_COUNT || request.right.len() != EQ_SECTION_COUNT {
+            return Err(ResponseAnalysisError::OutputShape);
+        }
+        let bypassed = request.bypassed;
+        let left = request.left;
+        let right = request.right;
+        for section in 0..EQ_SECTION_COUNT {
+            let left_target = self.left.targets[lane][section];
+            let right_target = self.right.targets[lane][section];
+            let left_words = self.left.target_words(section, lane).to_array();
+            let right_words = self.right.target_words(section, lane).to_array();
+            let mut left_bits = [0_u32; effect_contract::RESPONSE_SNAPSHOT_WORDS];
+            let mut right_bits = [0_u32; effect_contract::RESPONSE_SNAPSHOT_WORDS];
+            for (destination, source) in left_bits[..left_words.len()].iter_mut().zip(left_words) {
+                *destination = source.to_bits();
+            }
+            for (destination, source) in right_bits[..right_words.len()].iter_mut().zip(right_words)
+            {
+                *destination = source.to_bits();
+            }
+            left[section] = ResponseSnapshotSection {
+                id: u32::try_from(section + 1).expect("EQ section count fits u32"),
+                kind: left_target.kind as u32,
+                enabled: left_target.enabled,
+                word_count: u8::try_from(left_words.len()).expect("EQ words fit u8"),
+                words: left_bits,
+            };
+            right[section] = ResponseSnapshotSection {
+                id: u32::try_from(section + 1).expect("EQ section count fits u32"),
+                kind: right_target.kind as u32,
+                enabled: right_target.enabled,
+                word_count: u8::try_from(right_words.len()).expect("EQ words fit u8"),
+                words: right_bits,
+            };
+        }
+        Ok(ResponseSnapshotSummary {
+            kind: ResponseSnapshotKind::ParametricEq,
+            sample_rate_hz: self.metadata.sample_rate,
+            bypassed,
+            sections: EQ_SECTION_COUNT as u32,
+        })
+    }
+
     /// The one bank body, dual or collapsed: the shape guard, the automation drain, the bypass
     /// short circuit and the report are the same statements in the same order, and `MONO` chooses
     /// the render body and nothing else.

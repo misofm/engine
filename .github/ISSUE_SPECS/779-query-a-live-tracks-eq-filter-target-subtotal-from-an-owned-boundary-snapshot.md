@@ -54,3 +54,9 @@ If implementation discovers that the runtime identity/capture path cannot fit th
 ## Parent checklist stays binding
 
 Still required after this query: generic selective subscriptions/update/read/close, identical-job sharing, effective admission/defaults, bounded state-change delivery and last-close disarm; full engine/plan/state/content/publication/loss envelopes; required post-input/post-matrix/final-output spectra with FFT/window/normalization/smoothing/gap/underrun behavior; native/headless pump and browser SAB/qualified pooled fallback; packed remote vectors, bounded sample join, integrated examples/docs/resource evidence and the one frozen descriptive comparison. #775 requested preview and #777 per-effect resident reads remain delivered capabilities. Only the parent's explicit later allowances (frozen-word mode, arbitrary effect taps, phase/group delay/nonlinear estimates, device-clock mapping and extended research/optimization) stay outside this first live-query scope.
+
+## Implementation checkpoints
+
+Luna max first tranche adds bounded caller-owned section records and owner-copy hooks for actual EQ target words and prepared input-filter words. This is an internal checkpoint, not completion of the live query. Focused owner tests pass: two EQ cases for asymmetric words and refusal without writes, and two builtin cases for scalar/bank word identity and refusal without writes (`/tmp/issue779-eq-snapshot-test2.*`, `/tmp/issue779-builtins-snapshot-test.*`). Initial compile/test/format corrections remain in earlier `/tmp/issue779-*` logs. Runtime capture, boundary/identity enforcement, worker composition and SDK wiring remain in this same issue.
+
+Final focused compile, formatting and existing response-contract tests also pass (`/tmp/issue779-owner-check3.*`, `/tmp/issue779-owner-fmt3.*`, `/tmp/issue779-contract-response-test.*`). Root audited exact paths and commits this compiling owner-copy checkpoint before runtime plumbing.

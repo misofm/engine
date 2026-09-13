@@ -7,6 +7,61 @@
 
 use super::{EffectPrepareError, ObservationCost, ParameterUnit, PrepareEffectRequest};
 
+/// The owner kinds that can currently provide a live target snapshot.
+///
+/// This is an internal transfer identity rather than a public response mode. The response
+/// evaluator still decides how to interpret the copied words after the exclusive owner releases
+/// them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseSnapshotKind {
+    /// A native parametric EQ cascade.
+    ParametricEq,
+    /// The prepared input HPF/LPF pair.
+    BuiltinInputFilters,
+}
+
+/// Maximum number of words carried by one response section snapshot.
+pub const RESPONSE_SNAPSHOT_WORDS: usize = 7;
+
+/// One immutable owner section copied into caller-provided snapshot storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSnapshotSection {
+    /// Stable section identity in the owner's descriptor order.
+    pub id: u32,
+    /// Owner-specific section family, such as an EQ band kind.
+    pub kind: u32,
+    /// Whether this section contributes to its owner's subtotal.
+    pub enabled: bool,
+    /// Number of meaningful words in [`Self::words`].
+    pub word_count: u8,
+    /// Rounded owner words in a fixed bounded transfer record.
+    pub words: [u32; RESPONSE_SNAPSHOT_WORDS],
+}
+
+/// Caller-owned storage and boundary metadata for one owner snapshot copy.
+#[derive(Debug)]
+pub struct ResponseSnapshotRequest<'a> {
+    /// The live effect bypass state at the same ownership boundary as the copied sections.
+    pub bypassed: bool,
+    /// Left-channel section storage.
+    pub left: &'a mut [ResponseSnapshotSection],
+    /// Right-channel section storage.
+    pub right: &'a mut [ResponseSnapshotSection],
+}
+
+/// Metadata returned after a successful owner snapshot copy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSnapshotSummary {
+    /// The owner-specific snapshot kind.
+    pub kind: ResponseSnapshotKind,
+    /// The prepared owner's validated sample rate.
+    pub sample_rate_hz: u32,
+    /// The bypass state supplied for this exact boundary.
+    pub bypassed: bool,
+    /// Number of sections written in each channel.
+    pub sections: u32,
+}
+
 /// The only response mode shipped by the native response providers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponseAnalysisMode {

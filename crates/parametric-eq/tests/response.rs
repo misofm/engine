@@ -11,11 +11,13 @@ use dsp_reference::ReferenceSvfStateSpace;
 use effect_contract::{
     EffectProcessBlock, NativeEffectFactory, ParameterChannel, PreparedResponseAnalysis,
     ResponseAnalysisError, ResponseAnalysisMode, ResponseBypassSemantics, ResponseOutput,
-    ResponsePrepareLimits, ResponseQuery, ResponseTotalScope,
+    ResponsePrepareLimits, ResponseQuery, ResponseSnapshotKind, ResponseSnapshotRequest,
+    ResponseSnapshotSection, ResponseTotalScope,
 };
 use parametric_eq::{
     EQ_SECTION_COUNT, EqBandKind, EqResponseConfiguration, EqResponseError, EqResponseMode,
-    EqResponseOutput, EqResponseRequest, ParametricEqFactory, design_svf, query_response_into,
+    EqResponseOutput, EqResponseRequest, EqSvfWords, ParametricEqFactory, design_svf,
+    query_response_into,
 };
 use support::{
     FROZEN_FREQUENCIES, GridRow, LAUNCH_RATES, frozen_grid, request_at_rate, set_initial,
@@ -24,6 +26,16 @@ use support::{
 
 const FLOOR_DB: f64 = -120.0;
 const TOLERANCE_DB: f64 = 0.005;
+
+fn snapshot_sentinel() -> ResponseSnapshotSection {
+    ResponseSnapshotSection {
+        id: 99,
+        kind: 99,
+        enabled: true,
+        word_count: 7,
+        words: [0xDEAD_BEEF; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    }
+}
 
 fn prepared(
     values: &[effect_contract::InitialParameterValue],
@@ -1553,4 +1565,75 @@ fn common_eq_trait_object_query_is_allocation_free() {
     assert_eq!(delta.allocations, 0, "trait query allocated: {delta:?}");
     assert_eq!(delta.deallocations, 0, "trait query freed: {delta:?}");
     assert_eq!(delta.reallocations, 0, "trait query reallocated: {delta:?}");
+}
+
+#[test]
+fn prepared_owner_snapshot_copies_asymmetric_target_words() {
+    let mut configured = values();
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(&mut configured, 0, channel, 1.0);
+        set_initial(&mut configured, 1, channel, EqBandKind::Bell as u32 as f32);
+        set_initial(&mut configured, 2, channel, 1_000.0);
+        set_initial(
+            &mut configured,
+            3,
+            channel,
+            if channel == ParameterChannel::Left {
+                6.0
+            } else {
+                -6.0
+            },
+        );
+        set_initial(&mut configured, 4, channel, 0.7);
+        set_initial(&mut configured, 5, channel, 1.0);
+    }
+    let effect = ParametricEqFactory
+        .prepare(request_at_rate(&configured, false, 48_000))
+        .expect("prepared effect");
+    let sentinel = snapshot_sentinel();
+    let mut left = [sentinel; EQ_SECTION_COUNT];
+    let mut right = [sentinel; EQ_SECTION_COUNT];
+    let summary = effect
+        .copy_response_snapshot(ResponseSnapshotRequest {
+            bypassed: false,
+            left: &mut left,
+            right: &mut right,
+        })
+        .expect("owner snapshot");
+
+    assert_eq!(summary.kind, ResponseSnapshotKind::ParametricEq);
+    assert_eq!(summary.sample_rate_hz, 48_000);
+    assert!(!summary.bypassed);
+    assert_eq!(summary.sections, EQ_SECTION_COUNT as u32);
+    assert_eq!(left[0].kind, EqBandKind::Bell as u32);
+    assert!(left[0].enabled && right[0].enabled);
+    assert_eq!(left[0].word_count, 6);
+    assert_ne!(left[0].words[4], right[0].words[4]);
+    assert_eq!(
+        left[1].words[..6],
+        EqSvfWords::IDENTITY.to_array().map(f32::to_bits)
+    );
+    assert!(!left[1].enabled);
+    assert_eq!(right[3], left[3]);
+}
+
+#[test]
+fn prepared_owner_snapshot_rejects_wrong_shape_without_writing() {
+    let configured = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 0.7, 1.0);
+    let effect = ParametricEqFactory
+        .prepare(request_at_rate(&configured, false, 48_000))
+        .expect("prepared effect");
+    let sentinel = snapshot_sentinel();
+    let mut left = [sentinel; EQ_SECTION_COUNT - 1];
+    let mut right = [sentinel; EQ_SECTION_COUNT];
+    let error = effect
+        .copy_response_snapshot(ResponseSnapshotRequest {
+            bypassed: false,
+            left: &mut left,
+            right: &mut right,
+        })
+        .expect_err("wrong shape must refuse");
+    assert_eq!(error, ResponseAnalysisError::OutputShape);
+    assert!(left.iter().all(|section| *section == sentinel));
+    assert!(right.iter().all(|section| *section == sentinel));
 }
