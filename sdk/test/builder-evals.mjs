@@ -30,6 +30,10 @@ import { moduleBytes } from "./support.mjs";
 const CONTENT_A = `blake3:${"0".repeat(64)}`;
 const CONTENT_B = `blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea`;
 
+function assertNoNumericExponent(json) {
+  assert.doesNotMatch(json, /(?:[:[,]\s*)-?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d/);
+}
+
 let asset;
 
 before(async () => {
@@ -366,6 +370,7 @@ describe("validation refusals name the offending path", () => {
       `blake3:${"0".repeat(65)}`,
       `blake3:${"A".repeat(64)}`,
       `sha1:${"0".repeat(64)}`,
+      `sha256:${"0".repeat(64)}`,
       "0".repeat(64),
     ]) {
       assert.throws(
@@ -659,7 +664,7 @@ describe("canonical float spellings", () => {
       builtins: { trimDb: 1 / 3, hpfHz: 20.5 },
       fader: { leftDb: -3.5, rightDb: 0.1 },
     }).toJson();
-    assert.doesNotMatch(json, /[eE][-+]?\d/);
+    assertNoNumericExponent(json);
     assert.match(json, /"trim_db": 0\.33333334/);
     assert.match(json, /"hpf_hz": 20\.5/);
     assert.match(json, /"left_db": -3\.5/);
@@ -670,7 +675,7 @@ describe("canonical float spellings", () => {
     const json = oneTrack({
       racks: { simd1: [effect("miso.compressor", { mix: 1e-7 })] },
     }).toJson();
-    assert.doesNotMatch(json, /[eE][-+]?\d/);
+    assertNoNumericExponent(json);
     assert.match(json, /"value": 0\.0000001/);
   });
 
