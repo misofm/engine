@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BrowserResponsePreview } from "../src/browser/response.ts";
+import { MisoEngineAsset } from "../src/core/asset.ts";
 import { RESPONSE_CAPABILITIES } from "../src/core/response.ts";
+import { createResponsePreview as createHeadlessResponsePreview } from "../src/headless/response.ts";
+import { effect } from "../src/core/session.ts";
+import { moduleBytes } from "./support.mjs";
 
 class FakeWorker {
   listeners = new Map();
@@ -100,4 +104,45 @@ test("browser response Worker enforces one request, preserves bigint, and closes
   await preview.close();
   assert.equal(worker.terminated, 1);
   await assert.rejects(preview.query(query), /closed/);
+});
+
+test("candidate Wasm answers EQ and input-filter previews headlessly", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const preview = await createHeadlessResponsePreview({ asset });
+  try {
+    assert.ok(preview.capabilities.some((row) => row.target === "miso.parametric-eq"));
+    const eq = await preview.query({
+      configurationId: 9_007_199_254_740_993n,
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      configuration: effect("miso.parametric-eq", {
+        "band-1-enabled": true,
+        "band-1-kind": "bell",
+        "band-1-frequency": 1_000,
+        "band-1-gain": 3,
+        "band-1-q": 1,
+      }),
+      grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },
+      channels: "both",
+      fields: "totalAndSections",
+    });
+    assert.equal(eq.configurationId, 9_007_199_254_740_993n);
+    assert.equal(eq.sections.length, 4);
+    assert.equal(eq.frequenciesHz.length, 16);
+    assert.ok(eq.totalLeftDb?.some((value) => value > 0));
+    const filters = await preview.query({
+      ...query,
+      configurationId: 9_007_199_254_740_994n,
+      configuration: { kind: "inputFilters", left: { hpfHz: 80 }, right: { lpfHz: 12_000 } },
+      grid: { kind: "linear", points: 8, minimumHz: 0, maximumHz: 24_000 },
+      fields: "totalAndSections",
+    });
+    assert.equal(filters.sections.length, 2);
+    assert.equal(filters.frequenciesHz[0], 0);
+    assert.ok(filters.totalLeftDb?.[0] !== filters.totalLeftDb?.[filters.totalLeftDb.length - 1]);
+  } finally {
+    await preview.close();
+  }
 });
