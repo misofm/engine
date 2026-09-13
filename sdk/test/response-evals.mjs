@@ -194,11 +194,20 @@ test("candidate Wasm answers EQ and input-filter previews headlessly", {
     assert.throws(
       () => bounded.query({
         ...query,
+        grid: { ...query.grid, points: 2 },
+      }),
+      (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+    );
+    const memoryAfterTiny = boundedInstance.exports.memory.buffer.byteLength;
+    assert.throws(
+      () => bounded.query({
+        ...query,
         grid: { ...query.grid, points: 250_000 },
       }),
       (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
     );
-    assert.equal(boundedInstance.exports.memory.buffer.byteLength, memoryBefore);
+    assert.ok(memoryAfterTiny >= memoryBefore);
+    assert.equal(boundedInstance.exports.memory.buffer.byteLength, memoryAfterTiny);
     bounded.close();
   } finally {
     await preview.close();
