@@ -61,7 +61,7 @@ export type SessionSampleRateHz = 44_100 | 48_000 | 88_200 | 96_000;
  * A declared source: exactly the five keys Session V1 has, minus its ID.
  *
  * `locator`, `identity`, `mapping`, `region`, `startFrame` and the per-source `sampleRateHz` are
- * all gone with #241/A2. A source names *content* -- a `sha256:` identity over the canonical PCM
+ * all gone with #241/A2. A source names *content* -- a `blake3:` identity over the canonical PCM
  * preimage -- and declares the shape that content must prove to have. Resolving the identity to
  * bytes and checking the declaration against them is host policy (issue 010), not a document
  * field, so there is nowhere here to write a file path.
@@ -71,7 +71,7 @@ export interface SourceSpec {
   readonly bitDepth: BitDepth;
   /** Full canonical content length in frames, beginning at frame zero. Nonzero. */
   readonly frames: number | bigint;
-  /** `sha256:` followed by exactly 64 lowercase hex digits. */
+  /** `blake3:` followed by exactly 64 lowercase hex digits. */
   readonly content: string;
 }
 

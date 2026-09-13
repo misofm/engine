@@ -1,5 +1,5 @@
 /** Canonical stem identity spelling from the session schema. */
-export const STEM_SHA256_IDENTITY = /^sha256:([0-9a-f]{64})$/
+export const STEM_BLAKE3_IDENTITY = /^blake3:([0-9a-f]{64})$/
 
 /**
  * Parse a canonical stem identity and return its lowercase digest.
@@ -8,11 +8,11 @@ export const STEM_SHA256_IDENTITY = /^sha256:([0-9a-f]{64})$/
  * @returns {string}
  */
 export function stemDigest(identity) {
-  const match = STEM_SHA256_IDENTITY.exec(identity)
+  const match = STEM_BLAKE3_IDENTITY.exec(identity)
   if (match === null) {
     throw new StemResolverError(
       "stem.identity.invalid",
-      `Stem identity is not canonical SHA-256: ${String(identity)}`,
+      `Stem identity is not canonical BLAKE3-256: ${String(identity)}`,
       { identity }
     )
   }
@@ -21,7 +21,7 @@ export function stemDigest(identity) {
 
 /** @param {string} identity */
 export function stemFileName(identity) {
-  return `sha256-${stemDigest(identity)}`
+  return `blake3-${stemDigest(identity)}`
 }
 
 /** A typed resolver refusal. */

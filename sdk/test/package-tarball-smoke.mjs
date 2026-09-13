@@ -234,7 +234,7 @@ assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
 
 const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 48_000 })
   .source("stem", {
-    channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}`,
+    channels: 2, bitDepth: "32f", frames: 480, content: `blake3:${"0".repeat(64)}`,
   })
   .track("track", { source: "stem" })
   .output("main")
@@ -288,7 +288,7 @@ const cliRequest = JSON.stringify({
   session: { id: "tarball.cli", sampleRateHz: 48_000 },
   sources: [{
     id: "stem",
-    spec: { channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}` },
+    spec: { channels: 2, bitDepth: "32f", frames: 480, content: `blake3:${"0".repeat(64)}` },
   }],
   tracks: [{ id: "track", spec: { source: "stem" } }],
   outputs: ["main"],
@@ -323,7 +323,7 @@ assert.match(cliDocument, /^\{\n  "schema_version": 1,\n/);
 assert.equal(cliDocument.endsWith("\n"), true, "the request-mode snapshot is canonical JSON");
 const expectedCliDocument = imported["."].session({ id: "tarball.cli", sampleRateHz: 48_000 })
   .source("stem", {
-    channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}`,
+    channels: 2, bitDepth: "32f", frames: 480, content: `blake3:${"0".repeat(64)}`,
   })
   .track("track", { source: "stem" })
   .output("main")
@@ -378,7 +378,7 @@ const causalDocument = (withBypassedCompressor) => imported["."].session({
   sampleRateHz: 48_000,
 })
   .source("stem", {
-    channels: 2, bitDepth: "32f", frames: 128, content: `sha256:${"0".repeat(64)}`,
+    channels: 2, bitDepth: "32f", frames: 128, content: `blake3:${"0".repeat(64)}`,
   })
   .track("track", {
     source: "stem",

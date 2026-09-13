@@ -28,14 +28,14 @@ WORKFLOW = ROOT / ".github/workflows/npm-publish.yml"
 QUALIFICATION = ROOT / ".github/workflows/qualification.yml"
 
 PACKAGE = "@misofm/engine"
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 EXPECTED_SHA = "a" * 40
 
 # The workflow was read and hashed before the two authorized edits.  Normalizing precisely those
 # edits back out makes the test an invariant audit for all dispatch, publication, registry,
 # consumer, attestation, pin and evidence statements in the release workflow.
-BASELINE_WORKFLOW_SHA256 = "bf92f4676c176a51736f0ed4fc81a819ca57d337f15abf1f279800fd11e25516"
-QUALIFY_PACK_STEP_SHA256 = "da78c535653f2b58e5bacc05465be00964d0a5ac2f1c907d3f57996ec130c9ce"
+BASELINE_WORKFLOW_SHA256 = "478111e6393fda9e99dce3de8c521b71de0dcba141cc041ada2b0846352d107c"
+QUALIFY_PACK_STEP_SHA256 = "65f9cdee7267135423f20785b180ee192c3173ca60a7c2e47e7300601e4eaf91"
 
 MODE_ENV = "        env:\n          MODE: ${{ inputs.mode }}\n"
 PUBLISH_DRY_RUN = '          npm publish --dry-run --ignore-scripts "$archive"\n'
@@ -325,7 +325,7 @@ def write_consumer_package():
         (root / name).write_text(source, encoding="utf-8")
     bindir = root / "bin"
     bindir.mkdir(exist_ok=True)
-    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.2.3");\n'
+    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.2.4");\n'
     path = bindir / "enginectl.mjs"
     path.write_text(enginectl, encoding="utf-8")
     path.chmod(0o755)
@@ -394,7 +394,7 @@ SMOKE = '''import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const packageDir = process.argv[2];
 if (!packageDir || !existsSync(`${packageDir}/package.json`)) throw new Error("fixture smoke package is missing");
 const packageJson = JSON.parse(readFileSync(`${packageDir}/package.json`, "utf8"));
-if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.2.3") throw new Error("fixture package identity mismatch");
+if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.2.4") throw new Error("fixture package identity mismatch");
 appendFileSync(process.env.SMOKE_MARKER, "smoke\\n");
 '''
 
@@ -455,7 +455,7 @@ def valid_audit_report(sha512: str) -> dict:
     statement = {
         "_type": "https://in-toto.io/Statement/v1",
         "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": [{"name": "pkg:npm/%40misofm/engine@0.2.3", "digest": {"sha512": sha512}}],
+        "subject": [{"name": "pkg:npm/%40misofm/engine@0.2.4", "digest": {"sha512": sha512}}],
         "predicate": {
             "buildDefinition": {
                 "externalParameters": {"workflow": {

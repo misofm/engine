@@ -259,13 +259,13 @@ def load_inputs() -> tuple[dict, dict]:
             if effects[0]["identity"].get("effect_id") != effect_id:
                 raise ValueError(f"{name} effect identity changed")
 
-    # SHA-256 over 256 frames x 2 channels x 4 bytes, interleaved little-endian f32 bits, of
+    # BLAKE3-256 over 256 frames x 2 channels x 4 bytes, interleaved little-endian f32 bits, of
     # the `source.json` ramp the fixture feeds: per 128-frame block, left[i] = leftBase +
     # leftStep * i and right[i] = 0.
     check_session_fixture(
         "session.json",
         "256",
-        "sha256:a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949",
+        "blake3:6ce0c6f4220b52e88b9915b492af5c92549318c00560b12ecc0543778db5b82d",
     )
     # Issue #137 E2, extended by #140 C: the command timeline runs the identity session plus one
     # dynamic-rack parametric EQ over a longer region, and both legs read this exact file. The EQ
@@ -273,22 +273,22 @@ def load_inputs() -> tuple[dict, dict]:
     # a low shelf so a DC fixture can witness the parameter move at all.
     # Issue #143: the observation timeline's own session -- one track, one compressor in the
     # dynamic rack, so the per-node scalar publish path is what the browser exercises.
-    # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.5 -- the level
+    # BLAKE3-256 over 2048 frames x 2 channels x 4 bytes of constant 0.5 -- the level
     # `direct-oracle.mjs` fills into every observation-timeline block.
     check_session_fixture(
         "observation-session.json",
         "2048",
-        "sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c",
+        "blake3:0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea",
         "miso.compressor",
     )
-    # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.25 -- the level
+    # BLAKE3-256 over 2048 frames x 2 channels x 4 bytes of constant 0.25 -- the level
     # `direct-oracle.mjs` fills into every command-timeline block. It is deliberately not the
     # identity session's digest: the same content string under two different `frames` would be
     # two different preimage lengths, which STEM_IDENTITY_V1 forbids.
     check_session_fixture(
         "command-session.json",
         "2048",
-        "sha256:680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c",
+        "blake3:18e5038d588b861a1754abcd0e0cc0a943fe983d4ac112232a972a4d9b5c28c5",
         "miso.parametric-eq",
     )
     return source, expected

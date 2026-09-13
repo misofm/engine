@@ -1,5 +1,5 @@
 export * from "./identity.js"
-export * from "./incremental-sha256.js"
+export * from "./incremental-blake3.js"
 export * from "./opfs-store.js"
 export * from "./pcm-pump.js"
 export * from "./resolver.js"

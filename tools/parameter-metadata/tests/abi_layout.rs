@@ -115,7 +115,7 @@ fn one_effect_session(effect_id: &str) -> String {
   "quantum_frames": 128,
   "render_profile": {{ "id": "native", "mode": "single_thread" }},
   "output_profile": {{ "id": "main", "channels": 2, "sample_format": "f32_planar" }},
-  "sources": [{{ "id": "s", "content": "sha256:{}", "channels": 2, "bit_depth": 24, "frames": "48000" }}],
+  "sources": [{{ "id": "s", "content": "blake3:{}", "channels": 2, "bit_depth": 24, "frames": "48000" }}],
   "tracks": [{{
     "id": "t",
     "source_id": "s",

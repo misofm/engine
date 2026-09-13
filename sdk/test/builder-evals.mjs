@@ -27,8 +27,8 @@ import { writeCanonicalSessionDocument } from "../src/internal/session-json.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
 
-const CONTENT_A = `sha256:${"0".repeat(64)}`;
-const CONTENT_B = `sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea`;
+const CONTENT_A = `blake3:${"0".repeat(64)}`;
+const CONTENT_B = `blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea`;
 
 let asset;
 
@@ -358,13 +358,13 @@ describe("validation refusals name the offending path", () => {
   });
 
   test("a malformed content digest is refused at its own path", () => {
-    // The schema is exact: `sha256:` and 64 lowercase hex digits. Red mutation: relax the regex to
+    // The schema is exact: `blake3:` and 64 lowercase hex digits. Red mutation: relax the regex to
     // a prefix check, and every one of these becomes a boot-time refusal instead.
     for (const content of [
-      "sha256:beef",
-      `sha256:${"0".repeat(63)}`,
-      `sha256:${"0".repeat(65)}`,
-      `sha256:${"A".repeat(64)}`,
+      "blake3:beef",
+      `blake3:${"0".repeat(63)}`,
+      `blake3:${"0".repeat(65)}`,
+      `blake3:${"A".repeat(64)}`,
       `sha1:${"0".repeat(64)}`,
       "0".repeat(64),
     ]) {
@@ -373,7 +373,7 @@ describe("validation refusals name the offending path", () => {
         (error) => {
           assert.ok(error instanceof MisoUsageError, `accepted ${content}`);
           assert.match(error.message, /source\("stem"\)\.content/);
-          assert.match(error.message, /sha256:\[0-9a-f\]\{64\}/);
+          assert.match(error.message, /blake3:\[0-9a-f\]\{64\}/);
           return true;
         },
       );

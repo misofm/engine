@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { describe, test } from "node:test";
 
 const executable = resolve(process.env.ENGINECTL ?? "dist/enginectl.js");
-const CONTENT = `sha256:${"0".repeat(64)}`;
+const CONTENT = `blake3:${"0".repeat(64)}`;
 
 function request(overrides = {}) {
   return {

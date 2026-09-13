@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "artifact": "incremental-blake3.js",
+  "sha256": "fcdf222f41bda542f8742853da1a095c9ede0f8a1e9312a2643ff8e8c8c91a2c",
+  "dependencies": [
+    {
+      "artifact": "../hex-lower.js",
+      "sha256": "1eb5564599b0ae99ca404f0c139c0eb9abfe48d488bc55a4bad0b9aacd039560"
+    }
+  ],
+  "algorithmAuthority": "BLAKE3 specification, 32-byte default output",
+  "implementation": "repository-owned independent JavaScript implementation",
+  "reason": "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. No zero-shipped-code claim is made."
+}

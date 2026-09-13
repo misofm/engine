@@ -1,4 +1,4 @@
-export type StemIdentity = `sha256:${string}`
+export type StemIdentity = `blake3:${string}`
 
 export type StemProgress = {
   stage:
@@ -150,13 +150,13 @@ export class StemSessionGate {
   close(): Promise<void>
 }
 
-export class IncrementalSha256 {
+export class IncrementalBlake3 {
   update(bytes: ArrayBuffer | ArrayBufferView): this
   digest(): Uint8Array
   digestHex(): string
 }
 
-export function sha256Stream(
+export function blake3Stream(
   stream: ReadableStream<Uint8Array>,
   options?: {
     signal?: AbortSignal
@@ -228,4 +228,4 @@ export function createStemPumpWorker(options?: {
   url?: URL
 }): Worker
 
-export const DEFAULT_STEM_STORE_FOLDER: "miso-stems-v1"
+export const DEFAULT_STEM_STORE_FOLDER: "miso-stems-blake3-v1"
