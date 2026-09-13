@@ -1593,6 +1593,9 @@ impl AudioWorkletEngineHost {
         addresses: &[ObservationAddress],
         output: &mut [ObservationReadValues],
     ) -> Result<(), ObservationReadError> {
+        if self.status.state != STATE_READY {
+            return Err(ObservationReadError::WrongState);
+        }
         if addresses.len() > MAXIMUM_OBSERVATION_READS || output.len() < addresses.len() {
             return Err(ObservationReadError::BufferTooSmall);
         }
@@ -3486,8 +3489,12 @@ fn project_buffers(
     let retained = rows.into_iter().try_fold(0_u64, |total, row| {
         total.checked_add(row).ok_or_else(arithmetic)
     })?;
-    let largest = rows
-        .into_iter()
+    // `bridge_metadata` is the sum of retained payloads, not one allocation. Keep the largest
+    // row below to the individually allocated fixed buffers and add the staging helper's exact
+    // largest payload separately.
+    let largest = rows[..rows.len() - 1]
+        .iter()
+        .copied()
         .max()
         .unwrap_or(0)
         .max(host_shell_bytes)

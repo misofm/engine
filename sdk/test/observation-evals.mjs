@@ -34,6 +34,26 @@ function observationDocument() {
   });
 }
 
+function largeObservationDocument() {
+  const document = JSON.parse(observationDocument());
+  const trackTemplate = document.tracks[0];
+  const routeTemplate = document.routes[0];
+  const tracks = Array.from({ length: 257 }, (_unused, index) => {
+    const track = structuredClone(trackTemplate);
+    track.id = `t${index}`;
+    track.dynamic.effects = [structuredClone(trackTemplate.dynamic.effects[0])];
+    return track;
+  });
+  document.tracks = tracks;
+  document.routes = tracks.map((track, index) => {
+    const route = structuredClone(routeTemplate);
+    route.id = `main-${index}`;
+    route.source.track_id = track.id;
+    return route;
+  });
+  return JSON.stringify(document);
+}
+
 function selection(effectSlotId, channels = "both") {
   return { trackId: "t", rack: "dynamic", effectSlotId, tapId: 1, channels };
 }
@@ -85,6 +105,30 @@ describe("issue 777 -- selected resident observations", () => {
     assert.equal(decoded.window.firstSample, firstSample);
     assert.equal(decoded.window.endSample, firstSample + 128n);
     assert.equal(decoded.window.sequence, 9_007_199_254_740_995n);
+  });
+
+  test("reads an unarmed owner through the actual Wasm map beyond one read batch", async () => {
+    const engine = await createOfflineEngine(largeObservationDocument(), {
+      asset,
+      maximumMemoryBytes: 64n << 20n,
+      console: { commandQueueRecords: 64, observationTaps: 4 },
+    });
+    try {
+      const map = engine.observationMap();
+      assert.equal(map.bindings.length, 257);
+      const [binding] = map.bindings;
+      assert.ok(binding);
+      const [row] = engine.readObservations([{
+        trackId: binding.trackId,
+        rack: binding.rack,
+        effectSlotId: binding.effectSlotId,
+        tapId: binding.tapIds[0],
+        channels: "both",
+      }]);
+      assert.equal(row.status, "unarmed");
+    } finally {
+      engine.dispose();
+    }
   });
 
   test("headless reads two effects, preserves exact windows, and suppresses a re-arm", async () => {

@@ -636,7 +636,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     let mut document = one_track_session(128);
     // Keep this specifically a parser-projection boundary after JSON's denser model changed the
     // representative fixture ratio: insignificant trailing whitespace raises only parser input.
-    document.extend(core::iter::repeat_n(' ', 4_096));
+    document.extend(core::iter::repeat_n(' ', 8_192));
     let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,
@@ -4360,6 +4360,43 @@ fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
     };
     assert_eq!(compressor_after, compressor_consumed);
     assert_eq!(gate_after, gate_consumed);
+}
+
+#[test]
+fn selected_observation_numeric_read_refuses_failed_host_without_touching_output() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 0, None);
+    host.status.next_absolute_sample = u64::MAX;
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(host.status().state, STATE_FAILED);
+    let address = ObservationAddress {
+        track_index: 0,
+        rack: EffectRack::Dynamic,
+        effect_index: 0,
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    let sentinel = ObservationReadValues {
+        status: ObservationReadStatus::Ready,
+        sample_rate_hz: 48_000,
+        left: Some(3.5),
+        right: Some(-2.0),
+        ..ObservationReadValues::default()
+    };
+    let mut output = [sentinel];
+    assert_eq!(
+        host.read_observation_addresses_into(&[address], &mut output),
+        Err(ObservationReadError::WrongState)
+    );
+    assert_eq!(
+        output,
+        [sentinel],
+        "a failed read cannot overwrite caller output"
+    );
+    assert!(
+        host.ready.is_some(),
+        "the failed host retains its prepared owner"
+    );
 }
 
 /// Feed one quantum of a constant to every track's shared source and render it.
