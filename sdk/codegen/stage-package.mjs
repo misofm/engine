@@ -81,3 +81,13 @@ await build({
   target: "es2022",
   legalComments: "inline",
 });
+await build({
+  entryPoints: [resolve(sdkRoot, "dist", "browser", "response-worker.js")],
+  outfile: resolve(sdkRoot, "dist", "browser", "response-worker.js"),
+  allowOverwrite: true,
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  legalComments: "inline",
+});

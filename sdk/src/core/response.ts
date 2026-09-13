@@ -232,17 +232,21 @@ function normalizedConfiguration(configuration: ResponsePreviewConfiguration): R
   }
   const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
   if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
-  const rows = Object.entries(configuration.parameters)
-    .flatMap(([name, value]) => parameterRows(
-      descriptor,
-      name,
-      value,
-      configuration.options.channel,
-      `response.effect(${configuration.effectId}).parameters.${name}`,
-    ));
+  if (descriptor.response === null) {
+    throw new MisoUsageError(`effect ${configuration.effectId} does not publish a response capability`);
+  }
+  const parameters = Object.fromEntries(descriptor.parameters.map((row) => {
+    const supplied = configuration.parameters[row.name];
+    if (supplied !== undefined) return [row.name, supplied];
+    if (row.domainName === "boolean") return [row.name, row.default !== 0];
+    if (row.domainName === "enumeration") {
+      return [row.name, row.enumChoices.find((choice) => choice.value === row.default)?.label ?? row.default];
+    }
+    return [row.name, row.default];
+  }));
   return Object.freeze({
     ...configuration,
-    parameters: Object.freeze(Object.fromEntries(rows.map((row) => [String(row.parameter_id), row.value]))),
+    parameters: Object.freeze(parameters),
   }) as ResponsePreviewConfiguration;
 }
 
@@ -388,7 +392,7 @@ export class ResponsePreviewModule {
     const capability = inputFilters
       ? RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "builtins")
       : RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "effect" && candidate.target === configuration.effectId);
-    for (let index = 0; index < sectionCount; index += 1) {
+    for (let index = 0; (fields & FIELD_SECTIONS) !== 0 && index < sectionCount; index += 1) {
       const declaration = capability?.sections[index];
       if (declaration === undefined) continue;
       const leftDb = (channels & CHANNEL_LEFT) !== 0
