@@ -246,6 +246,76 @@ function validateSdkResponse(browserName, response) {
     && JSON.stringify(liveMemberOrder) === JSON.stringify(expectedLiveMemberOrder)
     && live.excludedMemberCount === 1,
   "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
+  const managedResponse = observations?.managedResponse;
+  const managedInitial = managedResponse?.initial;
+  const managedAfterRender = managedResponse?.afterRender;
+  const managedUpdated = managedResponse?.updated;
+  const managedLeftOnly = managedResponse?.leftOnly;
+  const managedMemberOrder = managedInitial?.members?.map((member) => [
+    member.nativeId, member.stableId, member.rack, member.kind, member.available, member.bypassed,
+  ]);
+  const expectedManagedMemberOrder = [
+    ["miso.builtin.input-filters", "input-filters", "input", "inputFilters", true, false],
+    ["miso.parametric-eq", "eq-simd1", "simd1", "parametricEq", true, false],
+    ["miso.compressor", "comp", "dynamic", "unavailable", false, false],
+    ["miso.parametric-eq", "eq-simd2", "simd2", "parametricEq", true, true],
+  ];
+  const finiteArray = (values) => Array.isArray(values) && values.length > 0
+    && values.every(Number.isFinite);
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.parityWithOneShot === true
+    && JSON.stringify(managedMemberOrder) === JSON.stringify(expectedManagedMemberOrder)
+    && managedInitial?.points === 5 && finiteArray(managedInitial?.frequencies)
+    && finiteArray(managedInitial?.left) && finiteArray(managedInitial?.right)
+    && managedInitial.frequencies.length === 5
+    && managedInitial.left.length === 5 && managedInitial.right.length === 5
+    && managedInitial.capturedSample === "0"
+    && liveU64(managedInitial.snapshotToken),
+  "managed track-response subscription did not match the one-shot owner membership and values");
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedBeforeRender === true
+    && managedResponse.unchangedNotificationCount === 0
+    && managedResponse.changedPublication === true
+    && managedResponse.callbackCount >= 1
+    && managedResponse.callbackOwner === managedResponse.owner
+    && managedResponse.callbackEpoch === managedResponse.epoch
+    && managedResponse.callbackJob === managedResponse.job
+    && BigInt(managedResponse.callbackRevision) > 1n
+    && managedResponse.callbackMatches === true
+    && managedResponse.automaticDelivery === true
+    && managedAfterRender?.points === 5
+    && finiteArray(managedAfterRender?.left)
+    && finiteArray(managedAfterRender?.right),
+  "managed track-response subscription did not suppress unchanged captures or publish the captured edit");
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.workerInitializations === 1
+    && managedResponse.workerQueries === 4
+    && managedResponse.unchangedPollSuppressed === true
+    && managedResponse.sharedJob === true
+    && managedResponse.arraysIsolated === true
+    && managedResponse.firstCloseKeepsJob === true
+    && managedResponse.invalidUpdateRefused === true
+    && managedResponse.invalidUpdatePreserved === true
+    && managedResponse.gridUpdated === true
+    && managedResponse.independentChannelJob === true
+    && managedResponse.lastCloseStoppedCapture === true
+    && managedResponse.staleReadRefused === true,
+  "managed track-response subscription did not preserve bounded shared-job and close/update semantics");
+  gate(browserName, "sdk-track-response-subscription", managedUpdated?.points === 7
+    && finiteArray(managedUpdated?.frequencies)
+    && finiteArray(managedUpdated?.left) && finiteArray(managedUpdated?.right)
+    && managedUpdated.frequencies.length === 7
+    && managedUpdated.left.length === 7 && managedUpdated.right.length === 7
+    && managedLeftOnly?.points === 7
+    && finiteArray(managedLeftOnly?.left)
+    && managedLeftOnly?.right === undefined
+    && managedLeftOnly.left.length === 7
+    && liveU64(managedResponse.owner) && liveU64(managedResponse.epoch)
+    && liveU64(managedResponse.job) && liveU64(managedResponse.revision)
+    && managedResponse.bounds?.maximumHandles > 0
+    && managedResponse.bounds?.maximumJobs > 0
+    && managedResponse.bounds?.maximumRetainedBytes > 0
+    && managedResponse.bounds?.maximumCaptureAttempts > 0
+    && managedResponse.bounds?.maximumPoints > 0
+    && managedResponse.bounds?.maximumCaptureBytes > 0,
+  "managed track-response subscription did not expose updated grids, channel ownership, or bounds");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
     && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
     && observations.pendingBeforeArm?.every((status) => status === "unarmed")

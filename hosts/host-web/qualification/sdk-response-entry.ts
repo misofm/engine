@@ -3,6 +3,7 @@ import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect } from "../../../sdk/src/core/session.ts";
 import type { ObservationReadResult } from "../../../sdk/src/core/observation.ts";
+import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts";
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
 import { createEngine } from "../../../sdk/src/browser/engine.ts";
 import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
@@ -108,6 +109,93 @@ function observationDocumentWithGate(raw: string): Uint8Array {
     gateEntry,
   ];
   return new TextEncoder().encode(JSON.stringify(document));
+}
+
+function responseArrayEqual(left: ArrayLike<number> | undefined, right: ArrayLike<number> | undefined): boolean {
+  if (left === undefined || right === undefined) return left === undefined && right === undefined;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function responseMemberKey(member: TrackResponseResult["members"][number]): string {
+  return JSON.stringify([
+    member.trackId,
+    member.nativeId,
+    member.stableId,
+    member.rack,
+    member.rackValue,
+    member.slot,
+    member.kind,
+    member.kindValue,
+    member.bypassed,
+    member.available,
+    member.excludedReason,
+    member.enabledLeft,
+    member.enabledRight,
+  ]);
+}
+
+function responseValuesEqual(left: TrackResponseResult, right: TrackResponseResult): boolean {
+  return left.trackId === right.trackId
+    && left.mode === right.mode
+    && left.meaning === right.meaning
+    && left.sampleRateHz === right.sampleRateHz
+    && left.floorDb === right.floorDb
+    && responseArrayEqual(left.frequenciesHz, right.frequenciesHz)
+    && responseArrayEqual(left.leftDb, right.leftDb)
+    && responseArrayEqual(left.rightDb, right.rightDb)
+    && left.excludedMemberCount === right.excludedMemberCount
+    && left.members.length === right.members.length
+    && left.members.every((member, index) => responseMemberKey(member) === responseMemberKey(right.members[index]!));
+}
+
+function serializeTrackResponse(result: TrackResponseResult) {
+  return {
+    trackId: result.trackId,
+    mode: result.mode,
+    meaning: result.meaning,
+    sampleRateHz: result.sampleRateHz,
+    points: result.frequenciesHz.length,
+    frequencies: Array.from(result.frequenciesHz),
+    left: result.leftDb === undefined ? undefined : Array.from(result.leftDb),
+    right: result.rightDb === undefined ? undefined : Array.from(result.rightDb),
+    members: result.members.map((member) => ({
+      nativeId: member.nativeId,
+      stableId: member.stableId,
+      rack: member.rack,
+      slot: member.slot,
+      kind: member.kind,
+      available: member.available,
+      bypassed: member.bypassed,
+      excludedReason: member.excludedReason,
+      enabledLeft: Array.from(member.enabledLeft),
+      enabledRight: Array.from(member.enabledRight),
+    })),
+    capturedSample: result.capturedSample.toString(),
+    snapshotToken: result.snapshotToken.toString(),
+    resultBytes: result.resultBytes.toString(),
+  };
+}
+
+function countingTrackResponseWorker(stats: { queries: number; initializations: number }) {
+  return (url: URL, options: { readonly type: "module" }) => {
+    const worker = new Worker(url, options);
+    return {
+      postMessage(message: { readonly type?: string }, transfer?: readonly Transferable[]) {
+        if (message.type === "track-response-init") stats.initializations += 1;
+        if (message.type === "track-response-query") stats.queries += 1;
+        worker.postMessage(message, transfer);
+      },
+      terminate: () => worker.terminate(),
+      addEventListener: (type: "message" | "error" | "messageerror", listener: (event: any) => void) =>
+        worker.addEventListener(type, listener),
+      removeEventListener: (type: "message" | "error" | "messageerror", listener: (event: any) => void) =>
+        worker.removeEventListener(type, listener),
+    };
+  };
 }
 
 function spectrumPlanes(block: number): Float32Array[] {
@@ -290,6 +378,218 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     busyRefused,
     closedRefused,
   };
+}
+
+async function createTrackResponseSubscriptionBrowser(stats: { queries: number; initializations: number }) {
+  const document = new TextEncoder().encode(
+    await (await fetch("/qualification/observation-session.json")).text(),
+  );
+  const browser = await createEngine({
+    document,
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: OBSERVATION_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      tracks: ["track"],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    createResponseWorker: countingTrackResponseWorker(stats),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  return browser;
+}
+
+async function runTrackResponseSubscriptionQualification(reference: TrackResponseResult): Promise<Record<string, unknown>> {
+  const stats = { queries: 0, initializations: 0 };
+  const browser = await createTrackResponseSubscriptionBrowser(stats);
+  const request = {
+    trackId: "track",
+    grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
+    channels: "both" as const,
+    responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 5_000 },
+  };
+  let callbackCount = 0;
+  let callbackOwner = "";
+  let callbackEpoch = "";
+  let callbackJob = "";
+  let callbackRevision = "";
+  let callbackResult: TrackResponseResult | undefined;
+  let resolveCallback: (() => void) | undefined;
+  const callbackDelivered = new Promise<void>((resolve) => { resolveCallback = resolve; });
+  try {
+    const subscription = await browser.subscribeTrackResponse({
+      ...request,
+      cadenceMs: 10,
+      onUpdate: (notification) => {
+        callbackCount += 1;
+        callbackOwner = notification.owner.toString();
+        callbackEpoch = notification.epoch.toString();
+        callbackJob = notification.job.toString();
+        callbackRevision = notification.revision.toString();
+        callbackResult = notification.handle.readLatest();
+        resolveCallback?.();
+      },
+    });
+    const initial = subscription.readLatest();
+    if (initial === undefined) throw new Error("track response subscription returned no initial result");
+    const initialQueries = stats.queries;
+    const console = await browser.console();
+    const command = await console.submit(
+      console.edit.track("track").effect("simd1", 0, "miso.parametric-eq")
+        .parameter("band-1-gain", -3),
+    );
+    if (!command.ok) throw new Error("queued response subscription control edit was refused");
+    const beforeRender = subscription.readLatest();
+    const unchangedBeforeRender = beforeRender !== undefined
+      && responseValuesEqual(initial, beforeRender)
+      && stats.queries === initialQueries;
+    const unchangedNotificationCount = callbackCount;
+
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const planes = observationPlanes(block);
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "console-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes,
+        frames: 128,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("SDK response subscription source submission refused");
+    }
+    await browser.context.startRendering();
+    const timerDelivered = await Promise.race([
+      callbackDelivered.then(() => true),
+      new Promise<boolean>((resolve) => globalThis.setTimeout(() => resolve(false), 500)),
+    ]);
+    let pumped = false;
+    if (!timerDelivered) pumped = (await subscription.pump())?.available === true;
+    const afterRender = subscription.readLatest();
+    if (afterRender === undefined) throw new Error("track response subscription lost its result after render");
+    const changedPublication = !responseValuesEqual(initial, afterRender)
+      && subscription.revision > 1n
+      && stats.queries >= initialQueries + 1;
+    const callbackMatches = callbackResult !== undefined && responseValuesEqual(callbackResult, afterRender);
+    const queriesAfterChange = stats.queries;
+    await subscription.pump();
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 30));
+    const unchangedPollSuppressed = stats.queries === queriesAfterChange;
+
+    const shared = await browser.subscribeTrackResponse({ ...request, cadenceMs: 25 });
+    const sharedJob = shared.job === subscription.job
+      && shared.owner === subscription.owner
+      && responseValuesEqual(shared.readLatest()!, afterRender);
+    const sharedView = shared.readLatest();
+    const originalSharedLeft = sharedView?.leftDb?.[0];
+    if (sharedView?.leftDb !== undefined && originalSharedLeft !== undefined) {
+      sharedView.leftDb[0] = originalSharedLeft + 100;
+    }
+    const arraysIsolated = originalSharedLeft !== undefined
+      && subscription.readLatest()?.leftDb?.[0] === originalSharedLeft
+      && shared.readLatest()?.leftDb?.[0] === originalSharedLeft;
+    await subscription.close();
+    const firstCloseKeepsJob = responseValuesEqual(shared.readLatest()!, afterRender);
+
+    const oldJob = shared.job;
+    const oldResult = shared.readLatest();
+    let invalidUpdateRefused = false;
+    try {
+      await shared.update({
+        ...request,
+        cadenceMs: 10,
+        grid: { ...request.grid, points: 1 },
+      });
+    } catch {
+      invalidUpdateRefused = true;
+    }
+    const invalidUpdatePreserved = shared.job === oldJob
+      && oldResult !== undefined && responseValuesEqual(shared.readLatest()!, oldResult);
+    const updatedReceipt = await shared.update({
+      ...request,
+      cadenceMs: 10,
+      grid: { ...request.grid, points: 7 },
+    });
+    const updated = shared.readLatest();
+    const gridUpdated = updated !== undefined
+      && updatedReceipt.job === shared.job
+      && shared.configuration.grid.points === 7
+      && updated.frequenciesHz.length === 7
+      && stats.queries === queriesAfterChange + 1;
+    const leftOnly = await browser.subscribeTrackResponse({
+      ...request,
+      cadenceMs: 10,
+      grid: { ...request.grid, points: 7 },
+      channels: "left" as const,
+    });
+    const leftOnlyResult = leftOnly.readLatest();
+    const independentChannelJob = leftOnly.job !== shared.job
+      && leftOnlyResult?.leftDb !== undefined && leftOnlyResult.rightDb === undefined;
+    await shared.close();
+    await leftOnly.close();
+    const queriesAtLastClose = stats.queries;
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 40));
+    const lastCloseStoppedCapture = stats.queries === queriesAtLastClose;
+    let staleReadRefused = false;
+    try {
+      shared.readLatest();
+    } catch {
+      staleReadRefused = true;
+    }
+    return {
+      initial: serializeTrackResponse(initial),
+      afterRender: serializeTrackResponse(afterRender),
+      updated: updated === undefined ? null : serializeTrackResponse(updated),
+      leftOnly: leftOnlyResult === undefined ? null : serializeTrackResponse(leftOnlyResult),
+      workerInitializations: stats.initializations,
+      workerQueries: stats.queries,
+      unchangedBeforeRender,
+      changedPublication,
+      callbackCount,
+      callbackOwner,
+      callbackEpoch,
+      callbackJob,
+      callbackRevision,
+      callbackMatches,
+      automaticDelivery: timerDelivered,
+      pumpDelivered: pumped,
+      unchangedPollSuppressed,
+      unchangedNotificationCount,
+      sharedJob,
+      arraysIsolated,
+      firstCloseKeepsJob,
+      invalidUpdateRefused,
+      invalidUpdatePreserved,
+      gridUpdated,
+      independentChannelJob,
+      lastCloseStoppedCapture,
+      staleReadRefused,
+      parityWithOneShot: responseValuesEqual(initial, reference),
+      owner: subscription.owner.toString(),
+      epoch: subscription.epoch.toString(),
+      job: subscription.job.toString(),
+      revision: subscription.revision.toString(),
+      capturedSample: initial.capturedSample.toString(),
+      snapshotToken: initial.snapshotToken.toString(),
+      bounds: subscription.bounds,
+    };
+  } finally {
+    await browser.close();
+  }
 }
 
 async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<typeof createEngine>>> {
@@ -563,6 +863,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       enabledLeft: member.enabledLeft.length,
       enabledRight: member.enabledRight.length,
     }));
+    const managedResponse = await runTrackResponseSubscriptionQualification(live);
     await browser.close();
     let liveClosedRefused = false;
     try {
@@ -620,6 +921,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
         closedRefused: liveClosedRefused,
       },
       resident,
+      managedResponse,
     };
   } finally {
     await browser.close();
