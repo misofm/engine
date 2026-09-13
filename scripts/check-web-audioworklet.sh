@@ -65,7 +65,18 @@ check_opcode_policy() {
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1
   grep -q 'f32x4.add' <<<"$simd_text" || return 1
   grep -q 'f32x4.sub' <<<"$simd_text" || return 1
-  ! grep -Eqi 'relaxed|atomic' <<<"$simd_text"
+  ! grep -Eqi 'relaxed' <<<"$simd_text" || return 1
+  check_no_atomic_opcodes "$simd_text"
+}
+
+# wasm-objdump annotates call instructions and function headers with Rust symbol names. A symbol
+# such as `core::sync::atomic::AtomicU8` is not an atomic Wasm instruction, so inspect only the
+# instruction column after `|` and remove its `<symbol>` annotation before matching opcodes.
+check_no_atomic_opcodes() {
+  local disassembly=$1
+  local instructions
+  instructions=$(awk -F'|' 'NF > 1 { print $2 }' <<<"$disassembly" | sed -E 's/<[^>]*>//g')
+  ! grep -Eqi '(^|[[:space:]])([[:alnum:]_]+\.)?atomic(\.|[[:space:]]|$)' <<<"$instructions"
 }
 
 if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
@@ -76,13 +87,24 @@ if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
     $'f32x4.mul\nf32x4.sub' \
     $'f32x4.mul\nf32x4.add' \
     $'f32x4.mul\nf32x4.add\nf32x4.sub\ni8x16.relaxed_swizzle' \
-    $'f32x4.mul\nf32x4.add\nf32x4.sub\ni32.atomic.load'
+    $'f32x4.mul\nf32x4.add\nf32x4.sub\n000004: fe 10 | i32.atomic.load 0' \
+    $'f32x4.mul\nf32x4.add\nf32x4.sub\n000004: 00 00 | memory.atomic.notify 0'
   do
     if check_opcode_policy "$mutation"; then
       echo "missing/forbidden SIMD opcode mutation escaped policy" >&2
       exit 1
     fi
   done
+  symbol_only=$'000000 func[1] <core::sync::atomic::AtomicU8::load>:\n  000001: 10 00 | call 0 <core::sync::atomic::AtomicU8::load>'
+  if ! check_no_atomic_opcodes "$symbol_only"; then
+    echo "symbol annotation was mistaken for an atomic opcode" >&2
+    exit 1
+  fi
+  atomic_instruction=$'000002 func[2] <render>:\n  000003: fe 10 | i32.atomic.load 0'
+  if check_no_atomic_opcodes "$atomic_instruction"; then
+    echo "atomic opcode mutation escaped policy" >&2
+    exit 1
+  fi
   echo "web AudioWorklet opcode-policy mutations passed"
   exit 0
 fi
@@ -256,7 +278,7 @@ for module in "$simd"; do
     exit 1
   fi
   disassembly=$(wasm-objdump -d "$module")
-  if grep -Eqi 'atomic' <<<"$disassembly"; then
+  if ! check_no_atomic_opcodes "$disassembly"; then
     echo "atomics found: $module" >&2
     exit 1
   fi
