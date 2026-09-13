@@ -256,3 +256,63 @@ preserved at `/tmp/miso-engine-763-response-attempt2-focused.stdout`,
 `/tmp/miso-engine-763-response-attempt2-focused.exit` (exit status `0`). No broad gates,
 benchmarks, Wasm checks, commits, or pushes ran after these changes; root must checkpoint and
 review this exact tranche before any further edits.
+
+### Attempt 2 broad gate evidence on frozen checkpoint
+
+Root checkpointed the focused tranche as `79fc3ba1`. The remaining required commands then ran
+against that frozen source with raw stdout, stderr, and exit status captured under
+`/tmp/miso-engine-763-response-attempt2-broad-*`:
+
+| Gate | Exit |
+| --- | ---: |
+| `cargo test --locked -p parametric-eq --lib --tests` | 0 |
+| `cargo clippy --locked -p parametric-eq --all-targets -- -D warnings` | 101 |
+| `cargo fmt --all -- --check` | 0 |
+| `bash scripts/check-parametric-eq-render-contract.sh` | 0 |
+| `bash scripts/check-realtime-policy.sh` | 0 |
+| Wasm scalar `cargo check` | 0 |
+| Wasm SIMD `cargo check` | 0 |
+
+Clippy is the sole failed gate. Its raw diagnostic reports four `clippy::unnecessary_operation`
+errors in `tests/response.rs` at lines 799, 812, 856, and 869: the unfinished-ramp twin test
+projects `.nonfinite_left_blocks` from four deliberately ignored `process` reports. The suggested
+correction is to use each `process(...)` call as a statement. No source edits were made after the
+failed gate; the frozen implementation remains available for Astra review, and the correction
+requires root authorization before any new source tranche.
+
+## Attempt 2 adversarial review: FAIL
+
+Verdict: **FAIL** — one previously identified discriminating assertion remains missing.
+
+Reviewed frozen source: `79fc3ba110dfa7e9c4d682f9382d26ad010d656f` in `/tmp/miso-engine-763`; attempt delta reviewed against `118a15d9`. Reviewer: Astra, medium. Read the latest spec/evidence, complete changed tests, production comment change, relevant payload layout, and prior findings. Worktree was clean at inspection. No source edits, commits, external actions, agents, benchmarks, or additional test runs were performed by the reviewer.
+
+## Remaining finding
+
+**The asymmetric right section outputs are still not checked against their independent expected response.** In `crates/parametric-eq/tests/response.rs:340`, the right-hand oracle loop calculates each section response but only accumulates `right_product`. The assertion at line 354 checks the right total. The right-only check at line 423 compares its section output to an earlier production output, not an independent expected result. The new complete-corpus test does check both section buffers, but constructs identical L/R configurations for every row.
+
+Consequently, changing the production right-section publication to use `left.section_db` would leave the entire response suite green: symmetric corpus outputs would still agree; asymmetric right totals remain correctly computed; the wrong right sections would match themselves in the right-only comparison. This is established by inspection of all `sections_right` assertions, not by a mutation-test execution. It is the same explicit gap in attempt-1 finding 3, and the latest evidence's claim that the asymmetric right section values are asserted is stronger than the test.
+
+Minimal correction: enumerate `right_rows` in the existing independent-oracle loop; for each section and point compute the floored dB magnitude of that already-computed right oracle response and assert `sections_right[section * frequencies.len() + point]` agrees within `TOLERANCE_DB`. Keep the existing right-only equality check: after the new independent assertion, it then checks that mode meaningfully. No new fixture or production change is needed. This is an evidence failure, not a discovered defect in the current right-output implementation, which correctly publishes `right.section_db`.
+
+## Prior findings resolved
+
+- The production query now executes all 1,488 existing frozen rows with DC, near-design, design, and Nyquist probes after sorting/deduplication. Both total buffers and every section buffer are compared to the independent realized-word oracle. The corpus includes the frozen gain signs, Q/frequency corners, and four launch rates. NaN/+infinity oracle values are rejected rather than silently floored. Production conditioning is now explained in the source comment.
+- The state test processes a 16-sample prefix, verifies serialized left section remaining-ramp word 14 is nonzero (confirmed against the production payload writer), snapshots around the query, then compares continued nonzero output bits and final payloads with an unqueried twin.
+- Refusal cases now cover zero/short budgets, short/long totals on either channel, malformed optional sections on either channel, allocation/free/reallocation counters, and retained sentinels. The original grid-category coverage remains. Safe slice-length limitations and the existing checked multiplication are documented without unsafe fake slices.
+- The committed boolean-assert lint fix is present. Bypass section output is now compared directly with the non-bypassed configured sections.
+
+## Design and evidence retained
+
+Production response arithmetic is unchanged from the preceding reviewed implementation; only its conditioning documentation changed. Prior source conclusions remain: exact rounded-word recurrence, private immutable ownership, complete constructor validation, four launch rates, identity handling, unfloored composition, numerical preflight before publication, fixed scratch, and no audible DSP/state/ABI/dependency changes. The actual PCM comparison, deep-null-plus-gain fixture, opaque IDs, source-mutation independence, and first-query allocation measurement remain intact.
+
+I directly read the captured focused-test stdout/stderr: 10 tests passed, none failed/ignored. Root reported the original broad commands were running on this frozen source; their final outcomes were not available at verdict time and are not inferred. Root explicitly authorized this single coherent verdict before remaining gates because the prior assertion gap is conclusive. Attach the actual broad outcomes separately; do not claim runtime Wasm parity from builds.
+
+This native-source verdict is independent of the separately identified shipped-artifact pin mismatch in CI. That qualification issue is not a reason for this FAIL. Even after this native child earns PASS, delivery remains blocked until the required qualification is green and GitHub/evidence state is synchronized; parent #763 remains open.
+
+## Factual gate addendum to the same attempt-2 verdict
+
+Root forwarded the completed Luna gate results immediately after the verdict: at frozen head `79fc3ba110dfa7e9c4d682f9382d26ad010d656f`, full crate tests, formatting, EQ render-contract policy, realtime policy, and release Wasm scalar and SIMD builds all passed. Clippy failed with four `unnecessary_operation` errors at `crates/parametric-eq/tests/response.rs:799`, `:812`, `:856`, and `:869`: the ramp/twin test uses `process(...).nonfinite_left_blocks` as an unused projection statement. Luna made no source edits in response. These are root-forwarded run results; raw stdout/stderr/exit files are preserved under `/tmp/miso-engine-763-response-attempt2-broad-*`.
+
+The same FAIL verdict therefore also requires the small Clippy correction in attempt 3: either call `process(...)` as a statement, or retain its report and assert meaningful nonfinite-block statistics. Make this correction together with the independent asymmetric right-section assertion above, then run the prescribed gates on that coherent attempt. This addendum records late-arriving gate facts; it is not another adversarial verdict or an additional attempt.
+
+Root authorizes attempt 3: add the missing independent asymmetric right-section assertion and correct the four unused process-report projections, within the existing test path. No production arithmetic, tolerance, fixture-framework, or scope changes. Clippy and focused tests must pass before checkpoint; other already-passing source/build gates retain applicability for this test-only correction unless evidence changes.
