@@ -786,10 +786,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         left: output.getFloat32(offset + 76, true),
         right: output.getFloat32(offset + 80, true),
       });
-      if (!validObservationRow(row)) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
       rows.push(row);
     }
     this.port.postMessage({
