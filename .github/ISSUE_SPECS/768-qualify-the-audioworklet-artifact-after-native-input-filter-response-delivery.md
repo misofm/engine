@@ -194,3 +194,42 @@ are unchanged. No source, test, dependency, build-input or qualification-input p
 
 This successful results tranche is paused for root's exact-path checkpoint and push audit. No
 successful gate is to be rerun merely to record this evidence.
+
+# Issue #768 artifact qualification attempt 1 review
+
+Verdict: **PASS — bounded artifact qualification**.
+
+Reviewed delivery head: `b92e72160b34329a354244a3d1edfa6441fc149b` in `/tmp/miso-engine-767`.
+Accepted #767 source: `dc070bcda506896fe05b4dfefb931841b6d6caa3` (Astra medium attempt-2 SOURCE PASS).
+Delivered baseline: `7dcb127518d0666f6cbe809053732b215defeb9f`.
+Reviewer: Astra, medium. This is one coherent attempt-1 verdict. Read the full #768 spec/evidence, identity and command records, substantive gate logs and tracked diff. Independently performed cheap read-only hash/file/authority/result comparisons. No source edits, agents, GitHub actions, commits, or repeated expensive gates were performed.
+
+## Verified identity and allowed changes
+
+The worktree was clean at the reviewed head. Since the accepted source, tracked changes are limited to #767/#768 issue records, the artifact pin, browser result lineage and generated matrix lineage. Accepted source/tests, dependencies/locks, host/SDK/ABI/assets, build scripts/toolchain settings, qualification scripts, resource expectations and PCM fixtures are unchanged. Discovery's identity record identifies the accepted source, docs-only intermediate head, delivered main, Rust/Cargo 1.97.1, Node v22.23.2, npm 10.9.8 and wasm-objdump 1.0.34. Locked prerequisite setup commands have successful preserved exits.
+
+The preserved discovery invocation uses the unchanged official report mode; the ordinary invocation explicitly unsets that mode. Both recorded builds complete successfully, with the provisional pin checkpoint between the coherent phases. No alternate source identity or speculative second candidate is used.
+
+## Artifact and conditional qualification
+
+Independently recomputed all six artifact hashes in `/tmp/issue768-attempt1-artifact`, verified exactly six regular nonsymlink files with the expected names, and confirmed the probe output directory remains empty. Candidate stdout is exactly 64 lowercase hex digits plus LF and agrees with the tracked canonical pin and ordinary Wasm digest:
+
+`0e6008d94c4a3a235feed551401983321f1782d73906144e227483803769d941`
+
+All six recomputed hashes match the recorded list. Independently compared all five non-Wasm payload bytes with their current authorities and each authority's delivered-baseline Git blob: all match. The new Wasm digest differs from #766's delivered artifact, so the changed-digest branch requiring a fresh browser run applies and was correctly followed.
+
+Every saved command exit under `/tmp/issue768-attempt1-logs` is zero. Invocation records identify the working directory and the same ordinary artifact for its consumers. The eight prescribed gates, plus diff-check, have separate actual stdout/stderr/exit evidence:
+
+- Static module/object/callgraph, metadata/ABI/vocabulary and boot-budget checks pass.
+- Resource/native-witness parity and the existing 26 negative controls pass.
+- Hermetic host/worklet/mutation checks, SDK types, headless tests and publishable-package checks pass.
+- A new all-browser run against the exact ordinary artifact, with accepted source `dc070bcda506896fe05b4dfefb931841b6d6caa3` and existing mutation self-tests, reports all gates passed for Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, then writes results/matrix.
+- Matrix consistency and diff-check exit zero.
+
+Parsed old/new results JSON: only `candidateCommit` and `wasmSha256` change, and both equal the accepted source/current artifact. The matrix changes only its corresponding generated lineage sentence. Browser versions, PCM/resource rows, gate vocabulary and expectations remain unchanged. No browser run is relabeled or reused to qualify different bytes.
+
+No correction is required. This evidence qualifies the existing representative consumer boundaries for the new artifact; it does not prove a layout-only explanation, universal PCM identity, or execution of the new native filter-response API in a browser.
+
+## Delivery boundary
+
+Combined #767/#768 PR delivery, required exact-head qualification, successful main qualification after merge, GitHub synchronization/closure and cleanup remain root's outstanding workflow. This PASS does not claim those actions already completed. Parent #763 remains open for its remaining native provider, SDK, live-analysis and integration milestones.
