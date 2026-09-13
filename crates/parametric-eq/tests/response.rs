@@ -338,12 +338,20 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
             (EqBandKind::Notch, 8_000.0, 0.0, 2.0, 1.0),
         ];
         let mut right_product = dsp_reference::Complex64 { re: 1.0, im: 0.0 };
-        for (kind, frequency, gain, q, slope) in right_rows {
+        for (section, (kind, frequency, gain, q, slope)) in right_rows.into_iter().enumerate() {
             let words = design_svf(kind, frequency, gain, q, slope, engine::SampleRateHz(rate))
                 .expect("right cascade design");
             let response = realized(words)
                 .response(f64::from(rate), f64::from(frequencies[point]))
                 .expect("right cascade probe");
+            let expected_section = (20.0 * response.re.hypot(response.im).log10()).max(FLOOR_DB);
+            let actual_section = sections_right[section * frequencies.len() + point];
+            assert!(actual_section.is_finite());
+            assert!(
+                (f64::from(actual_section) - expected_section).abs() <= TOLERANCE_DB,
+                "right section={section} f={}: got={actual_section} expected={expected_section}",
+                frequencies[point]
+            );
             right_product = dsp_reference::Complex64 {
                 re: right_product.re * response.re - right_product.im * response.im,
                 im: right_product.re * response.im + right_product.im * response.re,
@@ -796,20 +804,20 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
     let mut prefix_right = [-0.25_f32; 16];
     let mut twin_prefix_left = prefix_left;
     let mut twin_prefix_right = prefix_right;
-    queried
-        .process(
-            EffectProcessBlock::new(
-                &mut prefix_left,
-                &mut prefix_right,
-                None,
-                0,
-                &automation,
-                128,
-            )
-            .expect("automation prefix"),
+    let queried_prefix_report = queried.process(
+        EffectProcessBlock::new(
+            &mut prefix_left,
+            &mut prefix_right,
+            None,
+            0,
+            &automation,
+            128,
         )
-        .nonfinite_left_blocks;
-    twin.process(
+        .expect("automation prefix"),
+    );
+    assert_eq!(queried_prefix_report.nonfinite_left_blocks, 0);
+    assert_eq!(queried_prefix_report.nonfinite_right_blocks, 0);
+    let twin_prefix_report = twin.process(
         EffectProcessBlock::new(
             &mut twin_prefix_left,
             &mut twin_prefix_right,
@@ -819,8 +827,9 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
             128,
         )
         .expect("twin automation prefix"),
-    )
-    .nonfinite_left_blocks;
+    );
+    assert_eq!(twin_prefix_report.nonfinite_left_blocks, 0);
+    assert_eq!(twin_prefix_report.nonfinite_right_blocks, 0);
     let before = support::snapshot(queried.as_ref());
     assert_eq!(before, support::snapshot(twin.as_ref()));
     assert!(
@@ -853,20 +862,20 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
     let mut continuation_right = [-0.5_f32; 128];
     let mut twin_continuation_left = continuation_left;
     let mut twin_continuation_right = continuation_right;
-    queried
-        .process(
-            EffectProcessBlock::new(
-                &mut continuation_left,
-                &mut continuation_right,
-                None,
-                16,
-                &[],
-                128,
-            )
-            .expect("continued audio"),
+    let queried_continuation_report = queried.process(
+        EffectProcessBlock::new(
+            &mut continuation_left,
+            &mut continuation_right,
+            None,
+            16,
+            &[],
+            128,
         )
-        .nonfinite_left_blocks;
-    twin.process(
+        .expect("continued audio"),
+    );
+    assert_eq!(queried_continuation_report.nonfinite_left_blocks, 0);
+    assert_eq!(queried_continuation_report.nonfinite_right_blocks, 0);
+    let twin_continuation_report = twin.process(
         EffectProcessBlock::new(
             &mut twin_continuation_left,
             &mut twin_continuation_right,
@@ -876,8 +885,9 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
             128,
         )
         .expect("twin continued audio"),
-    )
-    .nonfinite_left_blocks;
+    );
+    assert_eq!(twin_continuation_report.nonfinite_left_blocks, 0);
+    assert_eq!(twin_continuation_report.nonfinite_right_blocks, 0);
     assert!(continuation_left.iter().any(|sample| *sample != 0.0));
     assert!(continuation_right.iter().any(|sample| *sample != 0.0));
     for (actual, expected) in continuation_left.iter().zip(twin_continuation_left) {

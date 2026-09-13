@@ -316,3 +316,30 @@ Root forwarded the completed Luna gate results immediately after the verdict: at
 The same FAIL verdict therefore also requires the small Clippy correction in attempt 3: either call `process(...)` as a statement, or retain its report and assert meaningful nonfinite-block statistics. Make this correction together with the independent asymmetric right-section assertion above, then run the prescribed gates on that coherent attempt. This addendum records late-arriving gate facts; it is not another adversarial verdict or an additional attempt.
 
 Root authorizes attempt 3: add the missing independent asymmetric right-section assertion and correct the four unused process-report projections, within the existing test path. No production arithmetic, tolerance, fixture-framework, or scope changes. Clippy and focused tests must pass before checkpoint; other already-passing source/build gates retain applicability for this test-only correction unless evidence changes.
+
+## Attempt 3 test-only correction evidence — Luna
+
+The authorized correction changed only `crates/parametric-eq/tests/response.rs`. The asymmetric
+oracle loop now enumerates the four right-channel sections and compares every published right
+section value at every probe against its independently realized and floored response, while
+retaining the right total and right-only buffer checks. The unfinished-ramp twin test now keeps
+each of its four process reports and asserts zero nonfinite left/right blocks, removing the
+Clippy-only projections. Production response code and tolerances are unchanged.
+
+All requested attempt-3 checks passed with exit status `0`:
+
+```
+cargo test --locked -p parametric-eq --test response -- --test-threads=1
+cargo clippy --locked -p parametric-eq --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+The response suite observed 10 passed, 0 failed, 0 ignored. Raw stdout, stderr, and exit files
+are preserved at `/tmp/miso-engine-763-response-attempt3-focused.{stdout,stderr,exit}`,
+`/tmp/miso-engine-763-response-attempt3-clippy.{stdout,stderr,exit}`,
+`/tmp/miso-engine-763-response-attempt3-fmt.{stdout,stderr,exit}`, and
+`/tmp/miso-engine-763-response-attempt3-diff-check.{stdout,stderr,exit}`. No unchanged broad gate
+was rerun for this test-only delta; prior full-test, render-contract, realtime-policy, and Wasm
+results remain recorded above. This exact green tranche is paused for root checkpoint and Astra's
+single attempt-3 medium verdict.
