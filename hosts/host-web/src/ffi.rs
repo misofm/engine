@@ -28,15 +28,18 @@ use crate::{
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
-    RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SPECTRUM_CAPTURE_BYTES,
-    SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
+    RESULT_REFUSED_LIFECYCLE, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE,
+    SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
     SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES,
-    SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS,
-    SPECTRUM_TARGET_TRACK_POST_MATRIX, SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES,
-    STATE_READY, WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest,
-    WebLiveResponseResult, WebLiveResponseSection, WebObservationResult, WebObservationSelection,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumWindow,
+    SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED, SPECTRUM_STREAM_STATUS_GAP,
+    SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING, SPECTRUM_STREAM_STATUS_READY,
+    SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
+    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_READY, WebBootOptions,
+    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
+    WebObservationResult, WebObservationSelection, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
+    WebSpectrumWindow,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -51,8 +54,10 @@ use host_core::{
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
     ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot,
     ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
-    ResponseSnapshotQueryError, SpectrumAnalyzer, SpectrumCaptureRequest, SpectrumChannels,
-    SpectrumTarget, SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
+    ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
+    SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousReadError,
+    SpectrumContinuousWindow, SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow,
+    prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -90,6 +95,21 @@ struct SpectrumStaging {
     result: Option<Vec<u8>>,
     result_len: usize,
     analyzer: Option<Box<SpectrumAnalyzer>>,
+    /// Additive stream metadata is inline so exposing its pointer never allocates after boot.
+    stream_metadata: WebSpectrumStreamMetadata,
+    /// Stream analysis configuration is control/worker state; render only writes the raw capture.
+    stream_active: bool,
+    stream_cadence: Option<SpectrumCadence>,
+    stream_smoothing: Option<SpectrumSmoothingConfig>,
+    stream_history: Option<Box<SpectrumAnalysisHistory>>,
+    stream_window: Option<SpectrumStreamWindowFacts>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SpectrumStreamWindowFacts {
+    stream_epoch: u64,
+    sequence: u64,
+    dropped_captures: u64,
 }
 
 impl SpectrumStaging {
@@ -106,6 +126,17 @@ impl SpectrumStaging {
             result: None,
             result_len: 0,
             analyzer: None,
+            stream_metadata: WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                status: SPECTRUM_STREAM_STATUS_INACTIVE,
+                ..WebSpectrumStreamMetadata::default()
+            },
+            stream_active: false,
+            stream_cadence: None,
+            stream_smoothing: None,
+            stream_history: None,
+            stream_window: None,
         }
     }
 
@@ -134,8 +165,19 @@ impl SpectrumStaging {
         self.capture = None;
         self.result = None;
         self.analyzer = None;
+        self.stream_history = None;
         self.capture_len = 0;
         self.result_len = 0;
+        self.stream_active = false;
+        self.stream_cadence = None;
+        self.stream_smoothing = None;
+        self.stream_window = None;
+        self.stream_metadata = WebSpectrumStreamMetadata {
+            struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+            abi_version: ABI_VERSION,
+            status: SPECTRUM_STREAM_STATUS_INACTIVE,
+            ..WebSpectrumStreamMetadata::default()
+        };
     }
 
     fn ensure_analysis_storage(&mut self) -> Result<(), u32> {
@@ -143,6 +185,28 @@ impl SpectrumStaging {
         if self.analyzer.is_none() {
             self.analyzer = Some(Box::new(SpectrumAnalyzer::new()));
         }
+        Ok(())
+    }
+
+    fn ensure_stream_analysis_storage(&mut self) -> Result<(), u32> {
+        self.ensure_analysis_storage()?;
+        if self.stream_history.is_none() {
+            self.stream_history = Some(Box::new(SpectrumAnalysisHistory::new()));
+        }
+        Ok(())
+    }
+
+    fn reset_stream_analysis(&mut self) -> Result<(), u32> {
+        if let Some(history) = self.stream_history.as_mut() {
+            history.reset().map_err(|_| RESULT_REFUSED_BUDGET)?;
+        }
+        self.stream_window = None;
+        self.result_len = 0;
+        self.stream_metadata.analysis_epoch = self
+            .stream_history
+            .as_ref()
+            .map_or(0, |history| history.analysis_epoch());
+        self.stream_metadata.history_start_sample = 0;
         Ok(())
     }
 }
@@ -233,16 +297,30 @@ pub(crate) const fn spectrum_staging_retained_bytes(configured: bool) -> u64 {
     size_of::<WebSpectrumRequest>() as u64
         + SPECTRUM_MAXIMUM_ID_BYTES as u64
         + if configured {
-            SPECTRUM_CAPTURE_BYTES as u64 * 2
+            SPECTRUM_CAPTURE_BYTES as u64 * 2 + SPECTRUM_STREAM_METADATA_BYTES as u64
         } else {
             0
         }
 }
 
+/// Separately reported worker-side history retained for managed spectrum analysis.
+pub(crate) const fn spectrum_analysis_history_retained_bytes(configured: bool) -> u64 {
+    if configured {
+        size_of::<SpectrumAnalysisHistory>() as u64
+    } else {
+        0
+    }
+}
+
 /// Largest one allocation in the one-shot spectrum staging area.
 pub(crate) const fn spectrum_staging_largest_allocation_bytes(configured: bool) -> u64 {
     if configured {
-        SPECTRUM_CAPTURE_BYTES as u64
+        let history = spectrum_analysis_history_retained_bytes(true);
+        if history > SPECTRUM_CAPTURE_BYTES as u64 {
+            history
+        } else {
+            SPECTRUM_CAPTURE_BYTES as u64
+        }
     } else {
         SPECTRUM_MAXIMUM_ID_BYTES as u64
     }
@@ -676,6 +754,114 @@ fn spectrum_failure(staging: &mut SpectrumStaging, result: u32) -> u32 {
     result
 }
 
+fn stream_metadata_profile(
+    staging: &mut SpectrumStaging,
+    target: u32,
+    channels: u32,
+    cadence: SpectrumCadence,
+    status: u32,
+    result: u32,
+) {
+    let metadata = &mut staging.stream_metadata;
+    metadata.struct_size = SPECTRUM_STREAM_METADATA_BYTES;
+    metadata.abi_version = ABI_VERSION;
+    metadata.result = result;
+    metadata.status = status;
+    metadata.target = target;
+    metadata.channels = channels;
+    metadata.sample_rate_hz = cadence.sample_rate_hz();
+    metadata.quantum_frames = cadence.quantum_frames();
+    metadata.hop_frames = cadence.hop_frames();
+    metadata.source_underrun = 0;
+    metadata.reserved0 = 0;
+    metadata.reserved1 = 0;
+}
+
+fn stream_metadata_error(
+    staging: &mut SpectrumStaging,
+    status: u32,
+    result: u32,
+    capture_epoch: Option<u64>,
+    dropped_captures: Option<u64>,
+) {
+    staging.stream_metadata.result = result;
+    staging.stream_metadata.status = status;
+    if let Some(epoch) = capture_epoch {
+        staging.stream_metadata.capture_epoch = epoch;
+    }
+    if let Some(drops) = dropped_captures {
+        staging.stream_metadata.dropped_captures = drops;
+    } else if status == SPECTRUM_STREAM_STATUS_FAILED && capture_epoch.is_some() {
+        // Failed windows start a fresh native capture epoch; ordinary pending/warming reads keep
+        // the current epoch's accumulated drops visible.
+        staging.stream_metadata.dropped_captures = 0;
+    }
+    staging.stream_metadata.source_underrun = 0;
+    staging.capture_len = 0;
+    staging.result_len = 0;
+    staging.stream_window = None;
+}
+
+fn imported_stream_configuration(
+    staging: &SpectrumStaging,
+) -> Result<(SpectrumCadence, SpectrumSmoothingConfig), u32> {
+    let metadata = staging.stream_metadata;
+    let windows = metadata
+        .sequence
+        .checked_add(1)
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    if metadata.struct_size != SPECTRUM_STREAM_METADATA_BYTES
+        || metadata.abi_version != ABI_VERSION
+        || metadata.result != RESULT_OK
+        || metadata.status != SPECTRUM_STREAM_STATUS_READY
+        || !(SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS..=SPECTRUM_TARGET_OUTPUT)
+            .contains(&metadata.target)
+        || !(SPECTRUM_CHANNEL_LEFT..=SPECTRUM_CHANNEL_BOTH).contains(&metadata.channels)
+        || metadata.source_underrun > 1
+        || metadata.reserved0 != 0
+        || metadata.reserved1 != 0
+        || metadata.capture_epoch == 0
+        || metadata.windows != windows
+        || metadata.end_sample
+            != metadata
+                .captured_sample
+                .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
+                .ok_or(RESULT_INVALID_ARGUMENT)?
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    spectrum_channels(metadata.channels)?;
+    let cadence = SpectrumCadence::new(metadata.sample_rate_hz, metadata.quantum_frames)
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if cadence.hop_frames() != metadata.hop_frames {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let smoothing =
+        SpectrumSmoothingConfig::new(metadata.smoothing_ms).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let bytes = staging
+        .capture
+        .as_ref()
+        .and_then(|capture| capture.get(..staging.capture_len))
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    let header: WebSpectrumWindow =
+        read_live_record(bytes, 0).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if header.struct_size != SPECTRUM_WINDOW_HEADER_BYTES
+        || header.abi_version != ABI_VERSION
+        || header.target != metadata.target
+        || header.channels != metadata.channels
+        || header.sample_rate_hz != metadata.sample_rate_hz
+        || header.frames != SPECTRUM_WINDOW_FRAMES
+        || header.source_underrun != metadata.source_underrun
+        || header.captured_sample != metadata.captured_sample
+        || header.end_sample != metadata.end_sample
+        || header.snapshot_token == 0
+        || staging.capture_len != spectrum_capture_bytes(header.channels)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok((cadence, smoothing))
+}
+
 fn append_spectrum_f32(bytes: &mut [u8], cursor: &mut usize, values: &[f32]) -> Result<u32, u32> {
     let byte_count = values
         .len()
@@ -784,8 +970,14 @@ fn spectrum_f32_plane(
     Ok(())
 }
 
-fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
-    if staging.ensure_analysis_storage().is_err() {
+fn run_spectrum_analysis(staging: &mut SpectrumStaging, continuous: bool) -> u32 {
+    if (if continuous {
+        staging.ensure_stream_analysis_storage()
+    } else {
+        staging.ensure_analysis_storage()
+    })
+    .is_err()
+    {
         return spectrum_failure(staging, RESULT_REFUSED_BUDGET);
     }
     let bytes = match staging
@@ -847,15 +1039,50 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
         left_dbfs: left.then_some(&mut left_dbfs),
         right_dbfs: right.then_some(&mut right_dbfs),
     };
-    if staging
-        .analyzer
-        .as_ref()
-        .expect("analysis storage initialized")
-        .analyze(&window, header.sample_rate_hz, &mut output)
-        .is_err()
-    {
-        return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
-    }
+    let continuous_metadata = if continuous {
+        let Some(cadence) = staging.stream_cadence else {
+            return spectrum_failure(staging, RESULT_WRONG_STATE);
+        };
+        let Some(smoothing) = staging.stream_smoothing else {
+            return spectrum_failure(staging, RESULT_WRONG_STATE);
+        };
+        let Some(facts) = staging.stream_window else {
+            return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
+        };
+        let continuous_window = SpectrumContinuousWindow {
+            left: window.left,
+            right: window.right,
+            first_sample: window.first_sample,
+            channels: window.channels,
+            source_underrun: window.source_underrun,
+            stream_epoch: facts.stream_epoch,
+            sequence: facts.sequence,
+            dropped_captures: facts.dropped_captures,
+        };
+        let Some(history) = staging.stream_history.as_mut() else {
+            return spectrum_failure(staging, RESULT_WRONG_STATE);
+        };
+        match staging
+            .analyzer
+            .as_ref()
+            .expect("analysis storage initialized")
+            .analyze_continuous(&continuous_window, cadence, smoothing, history, &mut output)
+        {
+            Ok(metadata) => Some(metadata),
+            Err(_) => return spectrum_failure(staging, RESULT_INVALID_ARGUMENT),
+        }
+    } else {
+        if staging
+            .analyzer
+            .as_ref()
+            .expect("analysis storage initialized")
+            .analyze(&window, header.sample_rate_hz, &mut output)
+            .is_err()
+        {
+            return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
+        }
+        None
+    };
     let mut cursor = SPECTRUM_RESULT_HEADER_BYTES as usize;
     let frequencies_offset = match append_spectrum_f32(
         staging
@@ -929,6 +1156,18 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
         return spectrum_failure(staging, RESULT_REFUSED_BUDGET);
     }
     staging.result_len = cursor;
+    if let Some(metadata) = continuous_metadata {
+        staging.stream_metadata.result = RESULT_OK;
+        staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+        staging.stream_metadata.source_underrun = u32::from(metadata.source_underrun);
+        staging.stream_metadata.capture_epoch = metadata.stream_epoch;
+        staging.stream_metadata.sequence = metadata.sequence;
+        staging.stream_metadata.captured_sample = metadata.fft_first_sample;
+        staging.stream_metadata.end_sample = metadata.fft_end_sample;
+        staging.stream_metadata.analysis_epoch = metadata.analysis_epoch;
+        staging.stream_metadata.history_start_sample = metadata.history_start_sample;
+        staging.stream_metadata.smoothing_ms = metadata.smoothing_ms;
+    }
     RESULT_OK
 }
 
@@ -2020,7 +2259,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_analysis() -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        run_spectrum_analysis(&mut staging)
+        run_spectrum_analysis(&mut staging, false)
     })
 }
 
@@ -2115,6 +2354,318 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
     })
 }
 
+/// Start the managed spectrum stream for the prepared target.
+///
+/// The host supplies the sample rate, quantum and hop in the returned metadata. The smoothing
+/// duration is validated before the prepared capture changes state.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
+    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
+        Ok(value) => value,
+        Err(_) => return RESULT_INVALID_ARGUMENT,
+    };
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
+            host.start_spectrum_stream()
+        });
+        let cadence = match cadence {
+            Ok(value) => value,
+            Err(result) => {
+                staging.stream_metadata.result = result;
+                return result;
+            }
+        };
+        if staging.reset_stream_analysis().is_err() {
+            let _ = with_host_mut(
+                handle,
+                RESULT_INTERNAL,
+                AudioWorkletEngineHost::stop_spectrum_stream,
+            );
+            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+            return RESULT_REFUSED_BUDGET;
+        }
+        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+        let channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+        let epoch = with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
+        staging.stream_active = true;
+        staging.stream_cadence = Some(cadence);
+        staging.stream_smoothing = Some(smoothing);
+        staging.capture_len = 0;
+        staging.result_len = 0;
+        staging.stream_window = None;
+        staging.stream_metadata = WebSpectrumStreamMetadata::default();
+        stream_metadata_profile(
+            &mut staging,
+            target,
+            channels,
+            cadence,
+            SPECTRUM_STREAM_STATUS_WARMING,
+            RESULT_OK,
+        );
+        staging.stream_metadata = WebSpectrumStreamMetadata {
+            struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            capture_epoch: epoch,
+            smoothing_ms: smoothing.smoothing_ms(),
+            ..staging.stream_metadata
+        };
+        RESULT_OK
+    })
+}
+
+/// Read one independently scheduled stream window into the existing fixed capture staging.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        staging.capture_len = 0;
+        staging.result_len = 0;
+        let read = with_host_mut(
+            handle,
+            Err(SpectrumContinuousReadError::NotActive),
+            |host| host.read_spectrum_stream(),
+        );
+        let window = match read {
+            Ok(window) => window,
+            Err(error) => {
+                let (status, result, epoch, drops) = match error {
+                    SpectrumContinuousReadError::NotActive => (
+                        SPECTRUM_STREAM_STATUS_INACTIVE,
+                        RESULT_WRONG_STATE,
+                        None,
+                        None,
+                    ),
+                    SpectrumContinuousReadError::Warming => (
+                        SPECTRUM_STREAM_STATUS_WARMING,
+                        RESULT_BACKPRESSURE,
+                        None,
+                        None,
+                    ),
+                    SpectrumContinuousReadError::Pending => (
+                        SPECTRUM_STREAM_STATUS_PENDING,
+                        RESULT_BACKPRESSURE,
+                        None,
+                        None,
+                    ),
+                    SpectrumContinuousReadError::Gap {
+                        stream_epoch,
+                        dropped_captures,
+                    } => (
+                        SPECTRUM_STREAM_STATUS_GAP,
+                        RESULT_OK,
+                        Some(stream_epoch),
+                        Some(dropped_captures),
+                    ),
+                    SpectrumContinuousReadError::Failed { stream_epoch } => (
+                        SPECTRUM_STREAM_STATUS_FAILED,
+                        RESULT_RENDER_REJECTED,
+                        Some(stream_epoch),
+                        None,
+                    ),
+                };
+                if matches!(
+                    error,
+                    SpectrumContinuousReadError::Gap { .. }
+                        | SpectrumContinuousReadError::Failed { .. }
+                ) && staging.reset_stream_analysis().is_err()
+                {
+                    stream_metadata_error(
+                        &mut staging,
+                        SPECTRUM_STREAM_STATUS_FAILED,
+                        RESULT_REFUSED_BUDGET,
+                        epoch,
+                        drops,
+                    );
+                    return RESULT_REFUSED_BUDGET;
+                }
+                stream_metadata_error(&mut staging, status, result, epoch, drops);
+                return result;
+            }
+        };
+        let Some(cadence) = staging.stream_cadence else {
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_FAILED,
+                RESULT_WRONG_STATE,
+                Some(window.stream_epoch),
+                Some(window.dropped_captures),
+            );
+            return RESULT_WRONG_STATE;
+        };
+        let windows = match window.sequence.checked_add(1) {
+            Some(value) => value,
+            None => {
+                stream_metadata_error(
+                    &mut staging,
+                    SPECTRUM_STREAM_STATUS_FAILED,
+                    RESULT_REFUSED_BUDGET,
+                    Some(window.stream_epoch),
+                    Some(window.dropped_captures),
+                );
+                return RESULT_REFUSED_BUDGET;
+            }
+        };
+        let Some(end_sample) = window.end_sample() else {
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_FAILED,
+                RESULT_INVALID_ARGUMENT,
+                Some(window.stream_epoch),
+                Some(window.dropped_captures),
+            );
+            return RESULT_INVALID_ARGUMENT;
+        };
+        staging.stream_window = Some(SpectrumStreamWindowFacts {
+            stream_epoch: window.stream_epoch,
+            sequence: window.sequence,
+            dropped_captures: window.dropped_captures,
+        });
+        staging.stream_metadata.result = RESULT_OK;
+        staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+        staging.stream_metadata.capture_epoch = window.stream_epoch;
+        staging.stream_metadata.sequence = window.sequence;
+        staging.stream_metadata.dropped_captures = window.dropped_captures;
+        staging.stream_metadata.windows = windows;
+        staging.stream_metadata.captured_sample = window.first_sample;
+        staging.stream_metadata.end_sample = end_sample;
+        staging.stream_metadata.source_underrun = u32::from(window.source_underrun);
+        let target = staging.stream_metadata.target;
+        let token = match window.sequence.checked_add(1) {
+            Some(value) => value,
+            None => {
+                stream_metadata_error(
+                    &mut staging,
+                    SPECTRUM_STREAM_STATUS_FAILED,
+                    RESULT_REFUSED_BUDGET,
+                    Some(window.stream_epoch),
+                    Some(window.dropped_captures),
+                );
+                return RESULT_REFUSED_BUDGET;
+            }
+        };
+        write_spectrum_window(
+            &mut staging,
+            &window.as_window(),
+            target,
+            cadence.sample_rate_hz(),
+            token,
+        )
+    })
+}
+
+/// Analyze the most recently read managed stream window using the worker-side smoothing history.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis() -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        if !staging.stream_active {
+            return RESULT_WRONG_STATE;
+        }
+        run_spectrum_analysis(&mut staging, true)
+    })
+}
+
+/// Import one ready stream window's metadata into a worker-side staging instance.
+///
+/// A browser analysis worker has no render-host handle, so it cannot call the host-backed stream
+/// start/read exports. It writes the capture metadata into the existing fixed record and calls
+/// this export before [`miso_engine_web_v1_spectrum_stream_analysis`].
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis_configure() -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let (cadence, smoothing) = match imported_stream_configuration(&staging) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+        if staging.ensure_stream_analysis_storage().is_err() {
+            return RESULT_REFUSED_BUDGET;
+        }
+        staging.stream_active = true;
+        staging.stream_cadence = Some(cadence);
+        staging.stream_smoothing = Some(smoothing);
+        staging.stream_window = Some(SpectrumStreamWindowFacts {
+            stream_epoch: staging.stream_metadata.capture_epoch,
+            sequence: staging.stream_metadata.sequence,
+            dropped_captures: staging.stream_metadata.dropped_captures,
+        });
+        RESULT_OK
+    })
+}
+
+/// Reset managed spectrum analysis history without stopping the native capture stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        if !staging.stream_active {
+            return RESULT_WRONG_STATE;
+        }
+        staging
+            .reset_stream_analysis()
+            .map_or(RESULT_REFUSED_BUDGET, |_| RESULT_OK)
+    })
+}
+
+/// Stop the managed native stream and retain its final normalized profile in metadata.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let result = with_host_mut(
+            handle,
+            RESULT_INVALID_ARGUMENT,
+            AudioWorkletEngineHost::stop_spectrum_stream,
+        );
+        if result == RESULT_OK {
+            staging.stream_active = false;
+            staging.stream_cadence = None;
+            staging.stream_smoothing = None;
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
+        } else {
+            staging.stream_metadata.result = result;
+        }
+        result
+    })
+}
+
+/// Return the fixed managed-stream metadata record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_ptr() -> u32 {
+    SPECTRUM_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        staging.stream_metadata.struct_size = SPECTRUM_STREAM_METADATA_BYTES;
+        staging.stream_metadata.abi_version = ABI_VERSION;
+        pointer_u32(ptr::from_mut(&mut staging.stream_metadata))
+    })
+}
+
+/// Return the fixed managed-stream metadata record byte size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
+    SPECTRUM_STREAM_METADATA_BYTES
+}
+
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
@@ -2122,6 +2673,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
+        if staging.stream_active {
+            staging.stream_metadata.result = RESULT_WRONG_STATE;
+            return RESULT_WRONG_STATE;
+        }
         staging.capture_len = 0;
         with_host_mut(
             handle,
@@ -2977,6 +3532,11 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
         };
         let result = live.host.dispose();
         drop(live);
+        SPECTRUM_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                staging.release_capture();
+            }
+        });
         BOOT_STAGING.with(|staging| {
             if let Ok(mut staging) = staging.try_borrow_mut() {
                 staging.reset_after_dispose();
@@ -3367,6 +3927,54 @@ mod spectrum_ffi_tests {
     }
 
     #[test]
+    fn failed_stream_metadata_starts_new_epoch_drop_count_at_zero() {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                capture_epoch: 7,
+                dropped_captures: 12,
+                ..WebSpectrumStreamMetadata::default()
+            };
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_PENDING,
+                RESULT_BACKPRESSURE,
+                None,
+                None,
+            );
+            assert_eq!(staging.stream_metadata.capture_epoch, 7);
+            assert_eq!(staging.stream_metadata.dropped_captures, 12);
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_FAILED,
+                RESULT_RENDER_REJECTED,
+                Some(8),
+                None,
+            );
+            assert_eq!(staging.stream_metadata.capture_epoch, 8);
+            assert_eq!(staging.stream_metadata.dropped_captures, 0);
+        });
+    }
+
+    #[test]
+    fn manual_spectrum_cancel_refuses_an_active_managed_stream() {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            staging.stream_active = true;
+            staging.capture_len = 32;
+        });
+        assert_eq!(miso_engine_web_v1_spectrum_cancel(0), RESULT_WRONG_STATE);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(staging.stream_active);
+            assert_eq!(staging.capture_len, 32);
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+    }
+
+    #[test]
     fn invalid_spectrum_channel_selection_preserves_window_for_valid_retry() {
         stage_left_output_request();
         let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -3411,5 +4019,263 @@ mod spectrum_ffi_tests {
             SPECTRUM_WINDOW_HEADER_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn continuous_spectrum_ffi_reports_profile_and_analyzes_one_window() {
+        stage_left_output_request();
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let handle = test_boot(
+            document.as_bytes(),
+            WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            },
+        );
+        assert_ne!(handle, 0, "spectrum fixture must boot");
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        let started = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(started.status, SPECTRUM_STREAM_STATUS_WARMING);
+        assert_eq!(started.sample_rate_hz, 48_000);
+        assert_eq!(started.quantum_frames, 128);
+        assert_eq!(started.hop_frames, 2_048);
+        assert_eq!(started.channels, SPECTRUM_CHANNEL_LEFT);
+        assert_eq!(started.smoothing_ms, 0.0);
+
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        for block in 0..16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let captured = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(captured.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(captured.capture_epoch, 1);
+        assert_eq!(captured.sequence, 0);
+        assert_eq!(captured.windows, 1);
+        assert_eq!(captured.captured_sample, 0);
+        assert_eq!(captured.end_sample, 2_048);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let analyzed = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(analyzed.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(analyzed.analysis_epoch, 0);
+        assert_eq!(analyzed.history_start_sample, 0);
+        assert_eq!(analyzed.smoothing_ms, 0.0);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.status),
+            SPECTRUM_STREAM_STATUS_STOPPED
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn continuous_spectrum_ffi_imports_metadata_without_a_host_handle() {
+        stage_left_output_request();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.configure_capture().expect("fixed spectrum staging");
+            let mut cursor = SPECTRUM_WINDOW_HEADER_BYTES as usize;
+            let samples = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let capture = staging.capture.as_mut().expect("capture staging");
+            append_spectrum_f32(capture, &mut cursor, &samples).expect("left plane");
+            let header = WebSpectrumWindow {
+                struct_size: SPECTRUM_WINDOW_HEADER_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                sample_rate_hz: 48_000,
+                frames: SPECTRUM_WINDOW_FRAMES,
+                captured_sample: 0,
+                end_sample: u64::from(SPECTRUM_WINDOW_FRAMES),
+                snapshot_token: 1,
+                left_offset: SPECTRUM_WINDOW_HEADER_BYTES,
+                ..WebSpectrumWindow::default()
+            };
+            assert!(copy_live_record(capture, 0, &header));
+            staging.capture_len = cursor;
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                status: SPECTRUM_STREAM_STATUS_READY,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                sample_rate_hz: 48_000,
+                quantum_frames: 128,
+                hop_frames: 2_048,
+                capture_epoch: 1,
+                sequence: 0,
+                windows: 1,
+                captured_sample: 0,
+                end_sample: u64::from(SPECTRUM_WINDOW_FRAMES),
+                smoothing_ms: 0.0,
+                ..WebSpectrumStreamMetadata::default()
+            };
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis_configure(),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(metadata.capture_epoch, 1);
+        assert_eq!(metadata.sequence, 0);
+        assert_eq!(metadata.analysis_epoch, 0);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let mut header: WebSpectrumWindow =
+                read_live_record(staging.capture.as_ref().expect("capture staging"), 0)
+                    .expect("window header");
+            header.target = SPECTRUM_TARGET_TRACK_POST_MATRIX;
+            assert!(copy_live_record(
+                staging.capture.as_mut().expect("capture staging"),
+                0,
+                &header
+            ));
+        });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis_configure(),
+            RESULT_INVALID_ARGUMENT,
+            "metadata/raw target disagreement must be rejected before analysis"
+        );
+    }
+
+    fn stage_imported_left_window(first_sample: u64, sample_rate_hz: u32, token: u64, value: f32) {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.configure_capture().expect("fixed spectrum staging");
+            let window = SpectrumWindow {
+                left: [value; host_core::SPECTRUM_WINDOW_FRAMES],
+                right: [0.0; host_core::SPECTRUM_WINDOW_FRAMES],
+                first_sample,
+                channels: SpectrumChannels::Left,
+                source_underrun: false,
+            };
+            assert_eq!(
+                write_spectrum_window(
+                    &mut staging,
+                    &window,
+                    SPECTRUM_TARGET_OUTPUT,
+                    sample_rate_hz,
+                    token,
+                ),
+                RESULT_OK
+            );
+        });
+    }
+
+    fn stage_imported_stream_metadata(
+        first_sample: u64,
+        sequence: u64,
+        sample_rate_hz: u32,
+        smoothing_ms: f64,
+    ) {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let end_sample = first_sample
+                .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
+                .expect("test sample range");
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                status: SPECTRUM_STREAM_STATUS_READY,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                sample_rate_hz,
+                quantum_frames: 128,
+                hop_frames: 2_048,
+                capture_epoch: 1,
+                sequence,
+                windows: sequence.checked_add(1).expect("test window count"),
+                captured_sample: first_sample,
+                end_sample,
+                smoothing_ms,
+                ..WebSpectrumStreamMetadata::default()
+            };
+        });
+    }
+
+    fn spectrum_result_header() -> WebSpectrumResult {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            read_live_record(staging.result.as_ref().expect("spectrum result staging"), 0)
+                .expect("spectrum result header")
+        })
+    }
+
+    #[test]
+    fn imported_stream_analysis_does_not_poison_one_shot_or_stream_history() {
+        stage_left_output_request();
+
+        // Import and analyze the first continuous window. This leaves the worker history armed
+        // while the raw staging area is reused for the one-shot query below.
+        stage_imported_left_window(0, 48_000, 1, 0.25);
+        stage_imported_stream_metadata(0, 0, 48_000, 100.0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis_configure(),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let first_stream = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(first_stream.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(first_stream.analysis_epoch, 0);
+        assert_eq!(first_stream.history_start_sample, 0);
+        assert_eq!(first_stream.sequence, 0);
+
+        // A one-shot window may use a different launch rate and sample boundary. Its result must
+        // come from the one-shot analyzer and must not reset or advance stream history merely
+        // because imported stream state remains active in this worker.
+        stage_imported_left_window(8_192, 44_100, 9, 0.5);
+        assert_eq!(miso_engine_web_v1_spectrum_analysis(), RESULT_OK);
+        let one_shot = spectrum_result_header();
+        assert_eq!(one_shot.sample_rate_hz, 44_100);
+        assert_eq!(one_shot.captured_sample, 8_192);
+        assert_eq!(one_shot.snapshot_token, 9);
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata),
+            first_stream,
+            "one-shot analysis must not consume continuous history"
+        );
+
+        // The next imported stream window must continue the original history rather than
+        // starting a new analysis epoch after the one-shot query.
+        stage_imported_left_window(2_048, 48_000, 10, 0.75);
+        stage_imported_stream_metadata(2_048, 1, 48_000, 100.0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis_configure(),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let second_stream = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(second_stream.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(second_stream.sequence, 1);
+        assert_eq!(second_stream.captured_sample, 2_048);
+        assert_eq!(second_stream.analysis_epoch, first_stream.analysis_epoch);
+        assert_eq!(
+            second_stream.history_start_sample,
+            first_stream.history_start_sample
+        );
+        assert_eq!(spectrum_result_header().captured_sample, 2_048);
+
+        stage_left_output_request();
     }
 }

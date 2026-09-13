@@ -142,10 +142,13 @@ pub use source::{
 };
 pub use spectrum::{
     SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
-    SpectrumAnalyzer, SpectrumCapture, SpectrumCaptureError, SpectrumCaptureReadError,
-    SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumChannels, SpectrumOutput,
-    SpectrumPrepareError, SpectrumTarget, SpectrumWindow, spectrum_capture_resources,
-    spectrum_capture_resources_for,
+    SpectrumAnalysisHistory, SpectrumAnalysisHistoryResources, SpectrumAnalysisMetadata,
+    SpectrumAnalyzer, SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureError,
+    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumChannels,
+    SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
+    SpectrumOutput, SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError,
+    SpectrumTarget, SpectrumWindow, spectrum_analysis_history_resources,
+    spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
 /// The control-side half of one prepared effect's live-console channel (issue #140 A).

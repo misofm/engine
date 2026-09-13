@@ -24,7 +24,12 @@ import {
   spectrumChannelsRaw,
   stageSpectrumRequest,
 } from "./spectrum.ts";
-import type { SpectrumQuery, SpectrumResult } from "./spectrum.ts";
+import type {
+  SpectrumQuery,
+  SpectrumResult,
+  SpectrumStreamRead,
+  SpectrumStreamStart,
+} from "./spectrum.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -472,6 +477,11 @@ export class WasmBoundary {
     return enrichObservationMap(tracks, raw);
   }
 
+  /** Internal managed-subscription view of the optional prepared spectrum query. */
+  preparedSpectrumQuery(): SpectrumQuery | undefined {
+    return this.#spectrumQuery;
+  }
+
   /** Read one bounded non-consuming batch from the current prepared owner. */
   readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
     validateObservationSelections(selections);
@@ -623,6 +633,76 @@ export class WasmBoundary {
     return this.#spectrum.analyzeCurrent(query);
   }
 
+  /** Start the managed continuous spectrum stream for the prepared boundary. */
+  startSpectrumStream(smoothingMs = 100, _query?: SpectrumQuery): SpectrumStreamStart {
+    const query = this.#spectrumQuery;
+    if (query === undefined) {
+      throw new MisoUsageError("this engine has no prepared spectrum boundary");
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_start(
+      this.#live(), smoothingMs,
+    ));
+    const metadata = this.#spectrumModule().streamMetadata(query);
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+      metadata,
+    });
+  }
+
+  /** Read and analyze one managed stream window, or return its explicit availability state. */
+  readSpectrumStream(queryOverride?: SpectrumQuery): SpectrumStreamRead {
+    const query = queryOverride ?? this.#spectrumQuery;
+    if (query === undefined) {
+      throw new MisoUsageError("this engine has no prepared spectrum boundary");
+    }
+    const prepared = this.#spectrumQuery;
+    if (prepared !== undefined) {
+      const preparedTarget = JSON.stringify(prepared.target);
+      if (preparedTarget !== JSON.stringify(query.target)
+          || (prepared.channels ?? "both") !== (query.channels ?? "both")) {
+        throw new MisoUsageError("the spectrum stream query differs from the prepared boundary");
+      }
+      const preparedMaximum = prepared.spectrumLimits?.maximumCaptureBytes
+        ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+      const requestedMaximum = query.spectrumLimits?.maximumCaptureBytes ?? preparedMaximum;
+      if (!Number.isSafeInteger(requestedMaximum) || requestedMaximum < 1 || requestedMaximum > preparedMaximum) {
+        throw new MisoUsageError("the spectrum stream capture limit exceeds the prepared bound");
+      }
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_read(this.#live()));
+    const metadata = this.#spectrumModule().streamMetadata(query);
+    const backpressure = constantValue("resultCodes", "backpressure");
+    const renderRejected = constantValue("resultCodes", "renderRejected");
+    const ok = constantValue("resultCodes", "ok");
+    if (result === backpressure || result === renderRejected) {
+      return Object.freeze({ metadata });
+    }
+    if (result !== ok) {
+      throw new MisoEngineError("the engine refused the spectrum stream read", {
+        phase: result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    if (metadata.status !== "ready") return Object.freeze({ metadata });
+    return this.#spectrumModule().analyzeStreamCurrent(query);
+  }
+
+  /** Stop the managed continuous spectrum stream. */
+  stopSpectrumStream(): EngineCallResult {
+    if (this.#spectrumQuery === undefined) {
+      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_stop(this.#live()));
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+    });
+  }
+
   /** Cancel a pending spectrum capture. */
   cancelSpectrum(): EngineCallResult {
     if (this.#spectrumQuery === undefined) {
@@ -634,6 +714,11 @@ export class WasmBoundary {
       result,
       code: resultName(result, "call"),
     });
+  }
+
+  #spectrumModule(): SpectrumModule {
+    this.#spectrum ??= new SpectrumModule(this.#exports);
+    return this.#spectrum;
   }
 
   /**

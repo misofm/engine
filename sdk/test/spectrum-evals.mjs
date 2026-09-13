@@ -5,6 +5,7 @@ import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 const WINDOW_FRAMES = 2_048;
@@ -209,4 +210,200 @@ test("candidate Wasm spectrum honors a selected channel and explicit capture lim
   } finally {
     engine.dispose();
   }
+});
+
+test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const engine = await makeEngine(asset, query);
+  let subscription;
+  try {
+    subscription = await engine.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 1 });
+    const manualCancel = engine.cancelSpectrum();
+    assert.equal(manualCancel.ok, false, "manual cancellation must not steal a managed capture");
+    assert.equal(manualCancel.code, "wrongState");
+    assert.equal(subscription.readLatest(), undefined);
+    for (let block = 0; block < WINDOW_FRAMES / engine.shape().quantumFrames; block += 1) {
+      feedAndRender(engine, block);
+    }
+    const notification = await subscription.pump();
+    assert.ok(notification);
+    assert.equal(notification.status, "ready");
+    assert.equal(notification.available, true);
+    assert.equal(notification.metadata.capturedSample, 0n);
+    const result = subscription.readLatest();
+    assert.ok(result);
+    assertSpectrumResult(result, query, 0);
+    assert.notEqual(result.frequenciesHz, result.leftDb);
+    assert.notEqual(result.leftDb, result.rightDb);
+  } finally {
+    await subscription?.close();
+    engine.dispose();
+  }
+});
+
+test("managed spectrum capture limits refuse before native activation and leave one-shot usable", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const engine = await makeEngine(asset, query);
+  try {
+    await assert.rejects(
+      engine.subscribeSpectrum({ ...query, spectrumLimits: { maximumCaptureBytes: 1 } }),
+      /serialized window|capture limit|spectrum capture/,
+    );
+    assert.equal(engine.armSpectrum().ok, true, "a refused managed admission must not orphan native capture state");
+    assert.equal(engine.cancelSpectrum().ok, true);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("managed spectrum loss baselines stay monotonic within an epoch and reset on failure", async () => {
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (status, sequence, droppedCaptures, captureEpoch = 1n) => Object.freeze({
+    result: 0,
+    status,
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 2_048,
+    sourceUnderrun: false,
+    captureEpoch,
+    sequence: BigInt(sequence),
+    droppedCaptures,
+    windows: BigInt(sequence + 1),
+    capturedSample: BigInt(sequence * 2_048),
+    endSample: BigInt((sequence + 1) * 2_048),
+    analysisEpoch: 1n,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+  const result = (sequence) => ({
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    windowFrames: 2_048,
+    binCount: 1,
+    floorDb: -120,
+    frequenciesHz: new Float32Array([0]),
+    leftDb: new Float32Array([0]),
+    rightDb: new Float32Array([0]),
+    capturedSample: BigInt(sequence * 2_048),
+    endSample: BigInt((sequence + 1) * 2_048),
+    snapshotToken: BigInt(sequence + 1),
+    graphSourceUnderrun: false,
+    resultBytes: 37n,
+  });
+  const reads = [
+    { metadata: metadata("gap", 5, 1n), result: undefined },
+    { metadata: metadata("ready", 4, 0n), result: result(4) },
+    { metadata: metadata("ready", 6, 1n), result: result(6) },
+    { metadata: metadata("pending", 6, 0n), result: undefined },
+    { metadata: metadata("failed", 0, 0n, 2n), result: undefined },
+    { metadata: metadata("ready", 1, 1n, 2n), result: result(1) },
+  ];
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }),
+    readObservations: () => [],
+    console: () => { throw new Error("unused"); },
+    spectrumPrepared: () => prepared,
+    spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
+    spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
+    spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
+  }, undefined, undefined, {});
+  const subscription = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 })).handle;
+  const first = await subscription.pump();
+  assert.equal(first.nativeMissedWindows, 1n);
+  const historical = await subscription.pump();
+  assert.equal(historical.nativeMissedWindows, 0n);
+  const job = subscription.job;
+  const revision = subscription.revision;
+  const updated = await subscription.update({ ...prepared, cadenceMs: 101 });
+  assert.equal(updated.job, job);
+  assert.equal(updated.revision, revision);
+  assert.equal(updated.configuration.cadenceMs, 101);
+  const recovery = await subscription.pump();
+  assert.equal(recovery.nativeMissedWindows, 0n);
+  assert.equal(await subscription.pump(), undefined);
+  assert.equal((await subscription.pump()).nativeMissedWindows, 0n);
+  assert.equal((await subscription.pump()).nativeMissedWindows, 1n);
+  await subscription.close();
+});
+
+test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (target = prepared.target, status = "warming") => Object.freeze({
+    result: 0,
+    status,
+    target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 1_024,
+    sourceUnderrun: false,
+    captureEpoch: 1n,
+    sequence: 0n,
+    droppedCaptures: 0n,
+    windows: 0n,
+    capturedSample: 0n,
+    endSample: 0n,
+    analysisEpoch: 0n,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+  const makeOwner = (spectrumSubscriptionLimits, startMetadata = metadata()) => {
+    let starts = 0;
+    let stops = 0;
+    let reads = 0;
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => ({ bindings: [] }),
+      readObservations: () => [],
+      console: () => { throw new Error("unused"); },
+      spectrumPrepared: () => prepared,
+      spectrumStart: async () => {
+        starts += 1;
+        return { ok: true, result: 0, code: "ok", metadata: startMetadata };
+      },
+      spectrumRead: async () => {
+        reads += 1;
+        return { metadata: metadata(prepared.target, "pending") };
+      },
+      spectrumStop: async () => {
+        stops += 1;
+        return { ok: true, result: 0, code: "ok" };
+      },
+    }, undefined, undefined, spectrumSubscriptionLimits);
+    return { owner, counts: () => ({ starts, stops, reads }) };
+  };
+
+  const refused = makeOwner({ maximumDeliveredBytesPerSecond: 1 });
+  await assert.rejects(
+    refused.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
+    /delivery bound/,
+  );
+  assert.deepEqual(refused.counts(), { starts: 0, stops: 0, reads: 0 });
+
+  const malformed = makeOwner(undefined, metadata({ kind: "trackPostMatrix", trackId: "other" }));
+  await assert.rejects(
+    malformed.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
+    /target differs|not prepared/,
+  );
+  assert.deepEqual(malformed.counts(), { starts: 1, stops: 1, reads: 0 });
+
+  const working = makeOwner();
+  const subscription = (await working.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 })).handle;
+  await assert.rejects(
+    subscription.update({ ...prepared, target: { kind: "output", outputId: "missing" }, cadenceMs: 1 }),
+    /not prepared/,
+  );
+  assert.deepEqual(working.counts(), { starts: 1, stops: 0, reads: 0 });
+  await subscription.pump();
+  assert.deepEqual(working.counts(), { starts: 1, stops: 0, reads: 1 });
+  await subscription.close();
+  assert.deepEqual(working.counts(), { starts: 1, stops: 1, reads: 1 });
 });

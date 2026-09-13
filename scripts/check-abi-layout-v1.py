@@ -88,6 +88,10 @@ RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 RESPONSE_FIELDS = [(1, "total"), (2, "sections")]
 SPECTRUM_TARGETS = [(1, "trackPostInputBuiltins"), (2, "trackPostMatrix"), (3, "output")]
 SPECTRUM_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
+SPECTRUM_STREAM_STATUSES = [
+    (0, "inactive"), (1, "warming"), (2, "pending"), (3, "gap"),
+    (4, "failed"), (5, "stopped"), (6, "ready"),
+]
 
 STAGING_SEQUENCE = [
     "miso_engine_web_v1_abi_version",
@@ -163,6 +167,14 @@ EXPORTS = [
     "miso_engine_web_v1_spectrum_request_ptr",
     "miso_engine_web_v1_spectrum_result_bytes",
     "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_stream_analysis",
+    "miso_engine_web_v1_spectrum_stream_analysis_configure",
+    "miso_engine_web_v1_spectrum_stream_metadata_bytes",
+    "miso_engine_web_v1_spectrum_stream_metadata_ptr",
+    "miso_engine_web_v1_spectrum_stream_read",
+    "miso_engine_web_v1_spectrum_stream_reset",
+    "miso_engine_web_v1_spectrum_stream_start",
+    "miso_engine_web_v1_spectrum_stream_stop",
     "miso_engine_web_v1_spectrum_target_id_capacity",
     "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
@@ -198,6 +210,7 @@ STRUCTURES = {
     "spectrumRequest": 40,
     "spectrumWindow": 64,
     "spectrumResult": 88,
+    "spectrumStreamMetadata": 120,
     "liveResponseRequest": 48,
     "liveResponseOwner": 64,
     "liveResponseSection": 44,
@@ -266,6 +279,12 @@ SPECTRUM_RESULT_FIELDS = [
     "snapshotToken", "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset",
     "reserved0",
 ]
+SPECTRUM_STREAM_METADATA_FIELDS = [
+    "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
+    "quantumFrames", "hopFrames", "sourceUnderrun", "reserved0", "reserved1", "captureEpoch",
+    "sequence", "droppedCaptures", "windows", "capturedSample", "endSample", "analysisEpoch",
+    "historyStartSample", "smoothingMs",
+]
 OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
     "reserved",
@@ -276,7 +295,7 @@ OBSERVATION_RESULT_FIELDS = [
     "leftPresent", "rightPresent", "left", "right", "reserved",
 ]
 
-WIDTHS = {"u8": 1, "u32": 4, "u64": 8}
+WIDTHS = {"u8": 1, "u32": 4, "u64": 8, "f64": 8}
 
 
 class Invalid(Exception):
@@ -398,6 +417,7 @@ def validate(document: object) -> None:
         ("spectrumRequest", SPECTRUM_REQUEST_FIELDS),
         ("spectrumWindow", SPECTRUM_WINDOW_FIELDS),
         ("spectrumResult", SPECTRUM_RESULT_FIELDS),
+        ("spectrumStreamMetadata", SPECTRUM_STREAM_METADATA_FIELDS),
         ("liveResponseRequest", LIVE_RESPONSE_REQUEST_FIELDS),
         ("liveResponseOwner", LIVE_RESPONSE_OWNER_FIELDS),
         ("liveResponseSection", LIVE_RESPONSE_SECTION_FIELDS),
@@ -426,6 +446,7 @@ def validate(document: object) -> None:
         "liveResponseCaptureBytes", "spectrumTargets", "spectrumChannels", "spectrumCaptureBytes",
         "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
         "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes", "maximumPreparedSpectrumTargets",
+        "spectrumStreamStatuses", "spectrumStreamMetadataBytes",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -441,6 +462,7 @@ def validate(document: object) -> None:
     check_named(document, "responseFields", RESPONSE_FIELDS)
     check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
     check_named(document, "spectrumChannels", SPECTRUM_CHANNELS)
+    check_named(document, "spectrumStreamStatuses", SPECTRUM_STREAM_STATUSES)
     check_named(document, "liveResponseModes", [(1, "target")])
     check_named(document, "liveResponseMeanings", [(1, "eqFilterSubtotal")])
     check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
@@ -478,6 +500,7 @@ def validate(document: object) -> None:
         ("spectrumRequestBytes", 40),
         ("spectrumWindowHeaderBytes", 64),
         ("spectrumResultHeaderBytes", 88),
+        ("spectrumStreamMetadataBytes", 120),
         ("spectrumWindowFrames", 2048),
         ("spectrumBinCount", 1025),
         ("maximumSpectrumIdBytes", 127),

@@ -79,14 +79,17 @@ use host_web::{
     RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
     SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
     SPECTRUM_CHANNEL_RIGHT, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS,
-    SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES,
+    SPECTRUM_STREAM_STATUS_FAILED, SPECTRUM_STREAM_STATUS_GAP, SPECTRUM_STREAM_STATUS_INACTIVE,
+    SPECTRUM_STREAM_STATUS_PENDING, SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED,
+    SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT,
     SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
     STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
     WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebMeterHeader,
     WebObservationResult, WebObservationSelection, WebResourceReport, WebResponseParameter,
     WebResponseRequest, WebResponseResult, WebSpectrumRequest, WebSpectrumResult,
-    WebSpectrumWindow, WebStatus,
+    WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -120,7 +123,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 79] = [
+pub const EXPORTS: [&str; 87] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -185,6 +188,14 @@ pub const EXPORTS: [&str; 79] = [
     "miso_engine_web_v1_spectrum_request_ptr",
     "miso_engine_web_v1_spectrum_result_bytes",
     "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_stream_analysis",
+    "miso_engine_web_v1_spectrum_stream_analysis_configure",
+    "miso_engine_web_v1_spectrum_stream_metadata_bytes",
+    "miso_engine_web_v1_spectrum_stream_metadata_ptr",
+    "miso_engine_web_v1_spectrum_stream_read",
+    "miso_engine_web_v1_spectrum_stream_reset",
+    "miso_engine_web_v1_spectrum_stream_start",
+    "miso_engine_web_v1_spectrum_stream_stop",
     "miso_engine_web_v1_spectrum_target_id_capacity",
     "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
@@ -1043,6 +1054,116 @@ fn spectrum_result_fields() -> [Field; 18] {
     ]
 }
 
+fn spectrum_stream_metadata_fields() -> [Field; 21] {
+    [
+        (
+            "structSize",
+            offset_of!(WebSpectrumStreamMetadata, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebSpectrumStreamMetadata, abi_version),
+            "u32",
+        ),
+        (
+            "result",
+            offset_of!(WebSpectrumStreamMetadata, result),
+            "u32",
+        ),
+        (
+            "status",
+            offset_of!(WebSpectrumStreamMetadata, status),
+            "u32",
+        ),
+        (
+            "target",
+            offset_of!(WebSpectrumStreamMetadata, target),
+            "u32",
+        ),
+        (
+            "channels",
+            offset_of!(WebSpectrumStreamMetadata, channels),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebSpectrumStreamMetadata, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "quantumFrames",
+            offset_of!(WebSpectrumStreamMetadata, quantum_frames),
+            "u32",
+        ),
+        (
+            "hopFrames",
+            offset_of!(WebSpectrumStreamMetadata, hop_frames),
+            "u32",
+        ),
+        (
+            "sourceUnderrun",
+            offset_of!(WebSpectrumStreamMetadata, source_underrun),
+            "u32",
+        ),
+        (
+            "reserved0",
+            offset_of!(WebSpectrumStreamMetadata, reserved0),
+            "u32",
+        ),
+        (
+            "reserved1",
+            offset_of!(WebSpectrumStreamMetadata, reserved1),
+            "u32",
+        ),
+        (
+            "captureEpoch",
+            offset_of!(WebSpectrumStreamMetadata, capture_epoch),
+            "u64",
+        ),
+        (
+            "sequence",
+            offset_of!(WebSpectrumStreamMetadata, sequence),
+            "u64",
+        ),
+        (
+            "droppedCaptures",
+            offset_of!(WebSpectrumStreamMetadata, dropped_captures),
+            "u64",
+        ),
+        (
+            "windows",
+            offset_of!(WebSpectrumStreamMetadata, windows),
+            "u64",
+        ),
+        (
+            "capturedSample",
+            offset_of!(WebSpectrumStreamMetadata, captured_sample),
+            "u64",
+        ),
+        (
+            "endSample",
+            offset_of!(WebSpectrumStreamMetadata, end_sample),
+            "u64",
+        ),
+        (
+            "analysisEpoch",
+            offset_of!(WebSpectrumStreamMetadata, analysis_epoch),
+            "u64",
+        ),
+        (
+            "historyStartSample",
+            offset_of!(WebSpectrumStreamMetadata, history_start_sample),
+            "u64",
+        ),
+        (
+            "smoothingMs",
+            offset_of!(WebSpectrumStreamMetadata, smoothing_ms),
+            "f64",
+        ),
+    ]
+}
+
 fn live_response_owner_fields() -> [Field; 16] {
     [
         (
@@ -1429,6 +1550,13 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
+        "spectrumStreamMetadata",
+        SPECTRUM_STREAM_METADATA_BYTES,
+        &spectrum_stream_metadata_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
         "liveResponseOwner",
         LIVE_RESPONSE_OWNER_BYTES,
         &live_response_owner_fields(),
@@ -1544,6 +1672,19 @@ pub fn render() -> String {
             (SPECTRUM_CHANNEL_BOTH, "both"),
         ],
     );
+    render_named_constants(
+        &mut out,
+        "spectrumStreamStatuses",
+        &[
+            (SPECTRUM_STREAM_STATUS_INACTIVE, "inactive"),
+            (SPECTRUM_STREAM_STATUS_WARMING, "warming"),
+            (SPECTRUM_STREAM_STATUS_PENDING, "pending"),
+            (SPECTRUM_STREAM_STATUS_GAP, "gap"),
+            (SPECTRUM_STREAM_STATUS_FAILED, "failed"),
+            (SPECTRUM_STREAM_STATUS_STOPPED, "stopped"),
+            (SPECTRUM_STREAM_STATUS_READY, "ready"),
+        ],
+    );
     out.push_str(&format!(
         "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     ));
@@ -1595,6 +1736,9 @@ pub fn render() -> String {
     ));
     out.push_str(&format!(
         "    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumStreamMetadataBytes\": {SPECTRUM_STREAM_METADATA_BYTES},\n"
     ));
     out.push_str(&format!(
         "    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"

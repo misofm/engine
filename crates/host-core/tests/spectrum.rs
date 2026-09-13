@@ -460,13 +460,27 @@ fn selected_capture_is_pcm_bit_exact_and_allocation_free_for_idle_and_active_ren
         &compiled,
         &test_caps,
         &SpectrumCaptureRequest {
-            target,
+            target: target.clone(),
             channels: SpectrumChannels::Left,
             maximum_capture_bytes: resources.retained_bytes,
         },
     )
     .expect("active capture prepares");
     active_capture.arm().expect("active capture arms");
+    let (continuous_host, mut continuous_capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &test_caps,
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Left,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("continuous capture prepares");
+    let cadence = continuous_capture
+        .start_continuous(48_000, NON_DIVIDING_QUANTUM as u32)
+        .expect("continuous capture starts");
+    assert_eq!(cadence.hop_frames(), 2_112);
 
     let (mut baseline, mut baseline_sources, _) = baseline_host
         .start_render_session()
@@ -474,100 +488,142 @@ fn selected_capture_is_pcm_bit_exact_and_allocation_free_for_idle_and_active_ren
     let (mut idle, mut idle_sources, _) = idle_host.start_render_session().expect("idle starts");
     let (mut active, mut active_sources, _) =
         active_host.start_render_session().expect("active starts");
+    let (mut continuous, mut continuous_sources, _) = continuous_host
+        .start_render_session()
+        .expect("continuous starts");
     audit::warm_up();
     bench_alloc::assert_installed();
 
-    for block in 0..BLOCKS {
-        let left = [0.25_f32; NON_DIVIDING_QUANTUM];
-        let right = [-0.5_f32; NON_DIVIDING_QUANTUM];
-        let start = (block * NON_DIVIDING_QUANTUM) as u64;
-        for sources in [
-            &mut baseline_sources,
-            &mut idle_sources,
-            &mut active_sources,
-        ] {
-            sources
-                .submit(
-                    b"fixture-source",
-                    SourceSubmission {
-                        generation: 1,
-                        start_frame: start,
-                        sample_rate_hz: 48_000,
-                        planes: &[&left, &right],
-                        frames: NON_DIVIDING_QUANTUM as u32,
-                        end_of_region: false,
-                    },
-                )
-                .expect("source block");
-        }
+    for batch in 0..2 {
+        for block in 0..BLOCKS {
+            let left = [0.25_f32; NON_DIVIDING_QUANTUM];
+            let right = [-0.5_f32; NON_DIVIDING_QUANTUM];
+            let start = (batch * 2_112 + block * NON_DIVIDING_QUANTUM) as u64;
+            for sources in [
+                &mut baseline_sources,
+                &mut idle_sources,
+                &mut active_sources,
+                &mut continuous_sources,
+            ] {
+                sources
+                    .submit(
+                        b"fixture-source",
+                        SourceSubmission {
+                            generation: 1,
+                            start_frame: start,
+                            sample_rate_hz: 48_000,
+                            planes: &[&left, &right],
+                            frames: NON_DIVIDING_QUANTUM as u32,
+                            end_of_region: false,
+                        },
+                    )
+                    .expect("source block");
+            }
 
-        let mut baseline_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
-        let mut idle_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
-        let mut active_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
-        audit::reset();
-        let thread_mark = bench_alloc::current_thread_counters();
-        let reports = audit::in_render_scope(|| {
-            let baseline_report = baseline.render_planar(
-                &mut baseline_pcm,
-                2,
-                NON_DIVIDING_QUANTUM,
-                NON_DIVIDING_QUANTUM,
-                start,
+            let mut baseline_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+            let mut idle_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+            let mut active_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+            let mut continuous_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+            audit::reset();
+            let thread_mark = bench_alloc::current_thread_counters();
+            let reports = audit::in_render_scope(|| {
+                let baseline_report = baseline.render_planar(
+                    &mut baseline_pcm,
+                    2,
+                    NON_DIVIDING_QUANTUM,
+                    NON_DIVIDING_QUANTUM,
+                    start,
+                );
+                let idle_report = idle.render_planar(
+                    &mut idle_pcm,
+                    2,
+                    NON_DIVIDING_QUANTUM,
+                    NON_DIVIDING_QUANTUM,
+                    start,
+                );
+                let active_report = active.render_planar(
+                    &mut active_pcm,
+                    2,
+                    NON_DIVIDING_QUANTUM,
+                    NON_DIVIDING_QUANTUM,
+                    start,
+                );
+                let continuous_report = continuous.render_planar(
+                    &mut continuous_pcm,
+                    2,
+                    NON_DIVIDING_QUANTUM,
+                    NON_DIVIDING_QUANTUM,
+                    start,
+                );
+                (
+                    baseline_report,
+                    idle_report,
+                    active_report,
+                    continuous_report,
+                    audit::snapshot(),
+                )
+            });
+            let thread_delta = bench_alloc::current_thread_delta_since(thread_mark);
+            assert!(reports.0.is_ok(), "baseline render: {:?}", reports.0);
+            assert!(reports.1.is_ok(), "idle render: {:?}", reports.1);
+            assert!(reports.2.is_ok(), "active render: {:?}", reports.2);
+            assert!(reports.3.is_ok(), "continuous render: {:?}", reports.3);
+            assert_eq!(
+                (reports.4.allocations, reports.4.deallocations),
+                (0, 0),
+                "spectrum render touched the realtime allocator audit"
             );
-            let idle_report = idle.render_planar(
-                &mut idle_pcm,
-                2,
-                NON_DIVIDING_QUANTUM,
-                NON_DIVIDING_QUANTUM,
-                start,
+            assert_eq!(
+                (
+                    thread_delta.allocations,
+                    thread_delta.reallocations,
+                    thread_delta.deallocations
+                ),
+                (0, 0, 0),
+                "spectrum render allocated or freed on the render owner"
             );
-            let active_report = active.render_planar(
-                &mut active_pcm,
-                2,
-                NON_DIVIDING_QUANTUM,
-                NON_DIVIDING_QUANTUM,
-                start,
-            );
-            (
-                baseline_report,
-                idle_report,
-                active_report,
-                audit::snapshot(),
-            )
-        });
-        let thread_delta = bench_alloc::current_thread_delta_since(thread_mark);
-        assert!(reports.0.is_ok(), "baseline render: {:?}", reports.0);
-        assert!(reports.1.is_ok(), "idle render: {:?}", reports.1);
-        assert!(reports.2.is_ok(), "active render: {:?}", reports.2);
+            for (baseline, idle) in baseline_pcm.iter().zip(idle_pcm.iter()) {
+                assert_eq!(
+                    baseline.to_bits(),
+                    idle.to_bits(),
+                    "idle capture changed PCM"
+                );
+            }
+            for (baseline, active) in baseline_pcm.iter().zip(active_pcm.iter()) {
+                assert_eq!(
+                    baseline.to_bits(),
+                    active.to_bits(),
+                    "active capture changed PCM"
+                );
+            }
+            for (baseline, continuous) in baseline_pcm.iter().zip(continuous_pcm.iter()) {
+                assert_eq!(
+                    baseline.to_bits(),
+                    continuous.to_bits(),
+                    "continuous capture changed PCM"
+                );
+            }
+        }
+        let window = continuous_capture
+            .try_read_continuous()
+            .expect("nondividing continuous window completes");
+        assert_eq!(window.channels, SpectrumChannels::Left);
+        assert_eq!(window.stream_epoch, 1);
+        assert_eq!(window.sequence, batch as u64);
+        assert_eq!(window.dropped_captures, 0);
         assert_eq!(
-            (reports.3.allocations, reports.3.deallocations),
-            (0, 0),
-            "spectrum render touched the realtime allocator audit"
+            window.first_sample,
+            (batch * 2_112) as u64,
+            "continuous window follows the scheduled hop"
         );
         assert_eq!(
-            (
-                thread_delta.allocations,
-                thread_delta.reallocations,
-                thread_delta.deallocations
-            ),
-            (0, 0, 0),
-            "spectrum render allocated or freed on the render owner"
+            window.end_sample(),
+            Some((batch * 2_112 + SPECTRUM_WINDOW_FRAMES) as u64)
         );
-        for (baseline, idle) in baseline_pcm.iter().zip(idle_pcm.iter()) {
-            assert_eq!(
-                baseline.to_bits(),
-                idle.to_bits(),
-                "idle capture changed PCM"
-            );
-        }
-        for (baseline, active) in baseline_pcm.iter().zip(active_pcm.iter()) {
-            assert_eq!(
-                baseline.to_bits(),
-                active.to_bits(),
-                "active capture changed PCM"
-            );
-        }
+        assert!(window.left.iter().any(|value| *value != 0.0));
+        assert!(window.right.iter().all(|value| *value == 0.0));
     }
+    continuous_capture.stop_continuous();
 
     assert_eq!(
         idle_capture

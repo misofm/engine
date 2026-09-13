@@ -15,7 +15,13 @@ import type {
   TrackResponseQuery,
   TrackResponseResult,
 } from "../core/live-response.ts";
-import type { SpectrumQuery, SpectrumResult, SpectrumLimits } from "../core/spectrum.ts";
+import type {
+  SpectrumQuery,
+  SpectrumResult,
+  SpectrumLimits,
+  SpectrumStreamMetadata,
+} from "../core/spectrum.ts";
+import { cloneSpectrumStreamMetadata, decodeSpectrumResult } from "../core/spectrum.ts";
 import type { ResponseWorker, ResponseWorkerError, ResponseWorkerFactory, ResponseWorkerReply } from "./response-worker.ts";
 
 export interface BrowserResponsePreviewOptions {
@@ -399,6 +405,12 @@ export interface BrowserSpectrumOptions {
   readonly signal?: AbortSignal;
 }
 
+interface BrowserSpectrumStreamResult {
+  readonly result: SpectrumResult;
+  readonly buffer: ArrayBuffer;
+  readonly metadata: SpectrumStreamMetadata;
+}
+
 /** A dedicated Worker client for one copied spectrum snapshot at a time. */
 export class BrowserSpectrum {
   readonly #worker: ResponseWorker;
@@ -406,10 +418,19 @@ export class BrowserSpectrum {
   #closed = false;
   #nextRequestId = 1;
   #pending: {
+    readonly kind: "snapshot";
     readonly requestId: number;
     readonly resolve: (result: SpectrumResult) => void;
     readonly reject: (error: unknown) => void;
     readonly timer: ReturnType<typeof setTimeout>;
+  } | {
+    readonly kind: "stream";
+    readonly requestId: number;
+    readonly resolve: (result: BrowserSpectrumStreamResult) => void;
+    readonly reject: (error: unknown) => void;
+    readonly timer: ReturnType<typeof setTimeout>;
+    readonly buffer: ArrayBuffer;
+    readonly query: SpectrumQuery;
   } | undefined;
   #ready: Promise<void>;
   #resolveReady!: () => void;
@@ -431,8 +452,8 @@ export class BrowserSpectrum {
     if (options.module === undefined && options.moduleUrl === undefined) {
       throw new MisoUsageError("a spectrum engine module or module URL is required");
     }
-    const limits = options.spectrumLimits ?? {};
-    const deadline = limits.requestDeadlineMs ?? 5_000;
+    const spectrumLimits = options.spectrumLimits ?? {};
+    const deadline = spectrumLimits.requestDeadlineMs ?? 5_000;
     if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
       throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
     }
@@ -448,7 +469,7 @@ export class BrowserSpectrum {
     } catch (error) {
       throw new MisoUsageError(`spectrum Worker could not start: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const client = new BrowserSpectrum(worker, limits);
+    const client = new BrowserSpectrum(worker, spectrumLimits);
     try {
       await client.initialize(options.module, options.moduleUrl, options.signal, deadline);
       return client;
@@ -475,7 +496,7 @@ export class BrowserSpectrum {
         if (this.#pending?.requestId !== requestId) return;
         this.#terminate(new MisoUsageError("spectrum query exceeded its deadline"));
       }, deadline);
-      this.#pending = { requestId, resolve, reject, timer };
+      this.#pending = { kind: "snapshot", requestId, resolve, reject, timer };
       try {
         const copy = snapshot.slice();
         this.#worker.postMessage(
@@ -485,6 +506,49 @@ export class BrowserSpectrum {
       } catch (error) {
         clearTimeout(timer);
         this.#pending = undefined;
+        reject(error);
+      }
+    });
+  }
+
+  /** Analyze one stream capture and return ownership of its reusable buffer. */
+  queryStream(
+    request: SpectrumQuery,
+    buffer: ArrayBuffer,
+    byteLength: number,
+    metadata: SpectrumStreamMetadata,
+  ): Promise<BrowserSpectrumStreamResult> {
+    if (this.#closed) return Promise.reject(new MisoUsageError("the spectrum Worker is closed"));
+    if (this.#pending !== undefined) return Promise.reject(new MisoUsageError("a spectrum query is already in flight"));
+    if (!(buffer instanceof ArrayBuffer) || !Number.isSafeInteger(byteLength)
+        || byteLength <= 0 || byteLength > buffer.byteLength) {
+      return Promise.reject(new MisoUsageError("the spectrum stream buffer is malformed"));
+    }
+    const requestId = this.#nextRequestId;
+    this.#nextRequestId = requestId === 0x7fff_ffff ? 1 : requestId + 1;
+    const deadline = request.spectrumLimits?.requestDeadlineMs
+      ?? this.#spectrumLimits.requestDeadlineMs
+      ?? 5_000;
+    if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
+      return Promise.reject(new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647"));
+    }
+    return new Promise<BrowserSpectrumStreamResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.#pending?.requestId !== requestId) return;
+        // The Worker owns the transferred buffer after this point. Termination invalidates that
+        // credit rather than pretending it can be safely reused.
+        this.#terminate(new MisoUsageError("spectrum query exceeded its deadline"));
+      }, deadline);
+      this.#pending = { kind: "stream", requestId, resolve, reject, timer, buffer, query: request };
+      try {
+        this.#worker.postMessage(
+          { type: "spectrum-stream-query", requestId, query: request, buffer, byteLength, metadata },
+          [buffer],
+        );
+      } catch (error) {
+        clearTimeout(timer);
+        this.#pending = undefined;
+        if (buffer.byteLength !== 0) (error as Error & { spectrumBuffer?: ArrayBuffer }).spectrumBuffer = buffer;
         reject(error);
       }
     });
@@ -530,11 +594,43 @@ export class BrowserSpectrum {
         const pending = this.#pending;
         this.#pending = undefined;
         clearTimeout(pending.timer);
+        if (pending.kind === "stream" && reply.buffer !== undefined) {
+          (error as Error & { spectrumBuffer?: ArrayBuffer }).spectrumBuffer = reply.buffer;
+        }
         pending.reject(error);
       }
       return;
     }
-    if (reply.type !== "spectrum-result" || this.#pending?.requestId !== reply.requestId) return;
+    if (reply.type === "spectrum-stream-result") {
+      if (this.#pending?.kind !== "stream" || this.#pending.requestId !== reply.requestId) return;
+      const pending = this.#pending;
+      this.#pending = undefined;
+      clearTimeout(pending.timer);
+      try {
+        if (!(reply.buffer instanceof ArrayBuffer)
+            || !Number.isSafeInteger(reply.resultByteLength)
+            || reply.resultByteLength <= 0 || reply.resultByteLength > reply.buffer.byteLength) {
+          throw new MisoUsageError("the spectrum Worker returned a malformed stream result buffer");
+        }
+        const result = decodeSpectrumResult(
+          pending.query,
+          reply.metadata.result,
+          new Uint8Array(reply.buffer, 0, reply.resultByteLength),
+        );
+        pending.resolve({
+          result,
+          buffer: reply.buffer,
+          metadata: cloneSpectrumStreamMetadata(reply.metadata),
+        });
+      } catch (error) {
+        (error as Error & { spectrumBuffer?: ArrayBuffer }).spectrumBuffer = reply.buffer;
+        pending.reject(error);
+        this.#terminate(error);
+      }
+      return;
+    }
+    if (reply.type !== "spectrum-result" || this.#pending?.kind !== "snapshot"
+        || this.#pending.requestId !== reply.requestId) return;
     const pending = this.#pending;
     this.#pending = undefined;
     clearTimeout(pending.timer);

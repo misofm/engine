@@ -132,7 +132,9 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered managed resident subscriptions:** #783 via PR #784, merged main 6af7ff4b445264c924b2b8b01e1cd98b1c702bf2. Astra medium PASS; required qualification 34754869954 PASS on final head 7b96fe5f51f1103f780b6499b6dff3b34c585b3f. Both SDKs provide bounded subscribe/update/latest/pump/close, shared bindings, original owner spans, consumer cadence/loss accounting and last-close disarm. All 215 SDK tests, real three-browser and package gates pass. The post-merge decimal timestamp validator correction is delivered through PR #786, merged main 6d47b93bb723d5ef08eae64a47042cced96c5a8a; required qualification 34755860598 passes. No runtime change was needed. Issue #783 is CLOSED and verified.
 
-**Active:** #785 adds managed live track-response subscriptions with captured-state suppression, reusing the accepted SDK lifetimes and #779 capture/evaluator. Astra xhigh scope is frozen; Luna max implements, Astra medium verifies bugs only. All remaining parent obligations stay attached below.
+**Delivered managed live response subscriptions:** #785 via PR #788, merged main 8b69aaf660408986d4f25f99acc82450009fe786. Astra medium attempt 1 PASS; required qualification 34756579779 PASS on final head f22910b03f48dd134542f951a157d0768aa1dbdd. Both SDKs share the managed owner/lifetime, admit bounded response jobs and suppress unchanged captured-state evaluation/publication. All 219 SDK tests, real three-browser and package gates pass. Issue #785 is CLOSED and verified.
+
+**Active:** #789 adds continuous managed spectrum capture for the existing one prepared target, native sample-clock hops and gap/loss semantics, Rust power smoothing and a reusable browser transfer buffer. Astra xhigh scope is frozen; Luna max implements, Astra medium verifies bugs only. Multiple targets, SAB and all remaining parent requirements stay attached.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 

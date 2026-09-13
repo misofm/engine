@@ -7,7 +7,7 @@ import type {
 import { TrackResponseModule } from "../core/live-response.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { SpectrumModule } from "../core/spectrum.ts";
-import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
+import type { SpectrumQuery, SpectrumResult, SpectrumStreamMetadata } from "../core/spectrum.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 
 export type ResponseWorkerRequest =
@@ -17,6 +17,7 @@ export type ResponseWorkerRequest =
   | { readonly type: "track-response-query"; readonly requestId: number; readonly query: TrackResponseQuery; readonly snapshot: Uint8Array }
   | { readonly type: "spectrum-init"; readonly module?: WebAssembly.Module; readonly moduleUrl?: string }
   | { readonly type: "spectrum-query"; readonly requestId: number; readonly query: SpectrumQuery; readonly snapshot: Uint8Array }
+  | { readonly type: "spectrum-stream-query"; readonly requestId: number; readonly query: SpectrumQuery; readonly buffer: ArrayBuffer; readonly byteLength: number; readonly metadata: SpectrumStreamMetadata }
   | { readonly type: "response-close" | "track-response-close" | "spectrum-close" };
 
 export type ResponseWorkerReply =
@@ -27,7 +28,8 @@ export type ResponseWorkerReply =
   | { readonly type: "track-response-result"; readonly requestId: number; readonly result: TrackResponseResult }
   | { readonly type: "spectrum-ready" }
   | { readonly type: "spectrum-result"; readonly requestId: number; readonly result: SpectrumResult }
-  | { readonly type: "response-failure"; readonly requestId?: number; readonly error: ResponseWorkerError };
+  | { readonly type: "spectrum-stream-result"; readonly requestId: number; readonly resultByteLength: number; readonly buffer: ArrayBuffer; readonly metadata: SpectrumStreamMetadata }
+  | { readonly type: "response-failure"; readonly requestId?: number; readonly error: ResponseWorkerError; readonly buffer?: ArrayBuffer };
 
 export type ResponseWorkerError = Readonly<{
   readonly kind: "engine" | "usage" | "error";
@@ -102,6 +104,21 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
       if (spectrum === undefined) throw new MisoUsageError("the spectrum Worker is not initialized");
       const result = spectrum.analyzeSnapshot(request.query, request.snapshot);
       scope.postMessage({ type: "spectrum-result", requestId: request.requestId, result }, transferForSpectrum(result));
+    } else if (request.type === "spectrum-stream-query") {
+      if (spectrum === undefined) throw new MisoUsageError("the spectrum Worker is not initialized");
+      const read = spectrum.analyzeStreamBuffer(
+        request.query,
+        request.buffer,
+        request.byteLength,
+        request.metadata,
+      );
+      scope.postMessage({
+        type: "spectrum-stream-result",
+        requestId: request.requestId,
+        resultByteLength: read.resultByteLength,
+        metadata: read.metadata,
+        buffer: request.buffer,
+      }, [request.buffer]);
     } else {
       preview?.close();
       preview = undefined;
@@ -112,12 +129,15 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
     }
   } catch (error) {
     const request = event.data;
+    const streamBuffer = request.type === "spectrum-stream-query" ? request.buffer : undefined;
     scope.postMessage({
       type: "response-failure",
-      ...((request.type === "response-query" || request.type === "track-response-query")
+      ...((request.type === "response-query" || request.type === "track-response-query"
+        || request.type === "spectrum-stream-query")
         ? { requestId: request.requestId } : {}),
       error: serializeError(error),
-    });
+      ...(streamBuffer === undefined ? {} : { buffer: streamBuffer }),
+    }, streamBuffer === undefined ? [] : [streamBuffer]);
   }
 }
 

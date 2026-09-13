@@ -95,6 +95,16 @@ const SPECTRUM_TARGETS = new Set(["trackPostInputBuiltins", "trackPostMatrix", "
 const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
 const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
+const SPECTRUM_STREAM_METADATA_BYTES = 120;
+const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
+const SPECTRUM_STREAM_START_REQUEST_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
+const SPECTRUM_STREAM_READ_REQUEST_FIELDS = ["tag", "requestId", "operation", "buffer"];
+const SPECTRUM_STREAM_STOP_REQUEST_FIELDS = ["tag", "requestId", "operation"];
+const SPECTRUM_STREAM_START_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
+const SPECTRUM_STREAM_STOP_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
+const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
+  "tag", "requestId", "operation", "result", "byteLength", "buffer", "metadata",
+];
 
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
@@ -279,6 +289,32 @@ function validSpectrumBoot(options) {
     && Number.isSafeInteger(options.maximumCaptureBytes)
     && options.maximumCaptureBytes > 0
     && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
+}
+
+function validSpectrumStreamMetadata(metadata) {
+  return hasExactFields(metadata, [
+    "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
+    "quantumFrames", "hopFrames", "sourceUnderrun", "captureEpoch", "sequence",
+    "droppedCaptures", "windows", "capturedSample", "endSample", "analysisEpoch",
+    "historyStartSample", "smoothingMs",
+  ])
+    && metadata.structSize === SPECTRUM_STREAM_METADATA_BYTES
+    && metadata.abiVersion === 0x00010000
+    && validResult(metadata.result)
+    && SPECTRUM_STREAM_STATUSES.has(metadata.status)
+    && validU32(metadata.target) && metadata.target > 0 && metadata.target <= 3
+    && validU32(metadata.channels) && metadata.channels > 0 && metadata.channels <= 3
+    && validU32(metadata.sampleRateHz) && metadata.sampleRateHz > 0
+    && validU32(metadata.quantumFrames) && metadata.quantumFrames > 0
+    && validU32(metadata.hopFrames) && metadata.hopFrames > 0
+    && validU32(metadata.sourceUnderrun) && metadata.sourceUnderrun <= 1
+    && validU64(metadata.captureEpoch) && validU64(metadata.sequence)
+    && validU64(metadata.droppedCaptures) && validU64(metadata.windows)
+    && validU64(metadata.capturedSample) && validU64(metadata.endSample)
+    && metadata.endSample >= metadata.capturedSample
+    && validU64(metadata.analysisEpoch) && validU64(metadata.historyStartSample)
+    && typeof metadata.smoothingMs === "number" && Number.isFinite(metadata.smoothingMs)
+    && metadata.smoothingMs >= 0 && metadata.smoothingMs <= 10_000;
 }
 
 function validBootOptions(options) {
@@ -577,7 +613,13 @@ class MisoAudioWorkletHost {
               : pending.response === "trackResponse"
                 ? TRACK_RESPONSE_REPLY_FIELDS
                 : pending.response === "spectrum"
-                  ? ["tag", "requestId", "result", "operation", "snapshot"]
+                  ? pending.spectrumOperation === "streamRead"
+                    ? SPECTRUM_STREAM_READ_REPLY_FIELDS
+                    : pending.spectrumOperation === "streamStart"
+                      ? SPECTRUM_STREAM_START_REPLY_FIELDS
+                      : pending.spectrumOperation === "streamStop"
+                        ? SPECTRUM_STREAM_STOP_REPLY_FIELDS
+                        : ["tag", "requestId", "result", "operation", "snapshot"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -641,13 +683,26 @@ class MisoAudioWorkletHost {
     );
     const validSpectrum = pending.response !== "spectrum" || (
       message.operation === pending.spectrumOperation
-      && message.snapshot instanceof Uint8Array
-      && message.snapshot.buffer instanceof ArrayBuffer
-      && (message.result === RESULT_OK
-        ? (pending.spectrumOperation === "read"
-          ? message.snapshot.byteLength > 0 && message.snapshot.byteLength <= SPECTRUM_MAXIMUM_BYTES
-          : message.snapshot.byteLength === 0)
-        : message.snapshot.byteLength === 0)
+      && ((pending.spectrumOperation === "streamStart" || pending.spectrumOperation === "streamStop")
+        ? validSpectrumStreamMetadata(message.metadata)
+        : pending.spectrumOperation === "streamRead"
+          ? validSpectrumStreamMetadata(message.metadata)
+            && Number.isSafeInteger(message.byteLength) && message.byteLength >= 0
+            && message.byteLength <= SPECTRUM_MAXIMUM_BYTES
+            && message.buffer instanceof ArrayBuffer
+            && message.buffer.byteLength === pending.spectrumBufferBytes
+            && (message.result === RESULT_OK
+              ? (message.metadata.status === 6
+                ? message.byteLength > 0 && message.byteLength <= message.buffer.byteLength
+                : message.byteLength === 0)
+              : message.byteLength === 0)
+          : message.snapshot instanceof Uint8Array
+            && message.snapshot.buffer instanceof ArrayBuffer
+            && (message.result === RESULT_OK
+              ? (pending.spectrumOperation === "read"
+                ? message.snapshot.byteLength > 0 && message.snapshot.byteLength <= SPECTRUM_MAXIMUM_BYTES
+                : message.snapshot.byteLength === 0)
+              : message.snapshot.byteLength === 0))
     );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
@@ -755,6 +810,8 @@ class MisoAudioWorkletHost {
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
         spectrumOperation: stamped.operation,
+        spectrumBuffer: stamped.buffer,
+        spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,
         resolve,
         reject,
         response,
@@ -1009,6 +1066,41 @@ class MisoAudioWorkletHost {
   cancelSpectrum() {
     return this.#request(
       { tag: "miso.spectrum.v1", operation: "cancel", channels: "both" },
+      [],
+      "spectrum",
+    );
+  }
+
+  /// Start the managed continuous spectrum stream for the prepared boundary.
+  startSpectrumStream(smoothingMs = 100) {
+    if (typeof smoothingMs !== "number" || !Number.isFinite(smoothingMs)
+        || smoothingMs < 0 || smoothingMs > 10_000) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "streamStart", smoothingMs },
+      [],
+      "spectrum",
+    );
+  }
+
+  /// Read the next scheduled managed stream window into the supplied reusable buffer.
+  readSpectrumStream(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0
+        || buffer.byteLength > SPECTRUM_MAXIMUM_BYTES) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "streamRead", buffer },
+      [buffer],
+      "spectrum",
+    );
+  }
+
+  /// Stop the managed continuous spectrum stream.
+  stopSpectrumStream() {
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "streamStop" },
       [],
       "spectrum",
     );

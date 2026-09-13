@@ -38,9 +38,10 @@ use host_core::{
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
-    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCapture, SpectrumCaptureError,
-    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
-    SpectrumWindow,
+    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
+    SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
+    SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
+    SpectrumTarget, SpectrumWindow,
 };
 use session::CompileCaps;
 
@@ -208,6 +209,21 @@ pub const SPECTRUM_WINDOW_FRAMES: u32 = host_core::SPECTRUM_WINDOW_FRAMES as u32
 pub const SPECTRUM_MAXIMUM_RESULT_BYTES: u32 =
     SPECTRUM_WINDOW_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32 * 2;
 
+/// A continuous spectrum stream has not been started on this prepared host.
+pub const SPECTRUM_STREAM_STATUS_INACTIVE: u32 = 0;
+/// A continuous stream is active but has not observed a complete first window.
+pub const SPECTRUM_STREAM_STATUS_WARMING: u32 = 1;
+/// A continuous stream is active and has no completed window available yet.
+pub const SPECTRUM_STREAM_STATUS_PENDING: u32 = 2;
+/// A bounded stream queue dropped one or more completed windows.
+pub const SPECTRUM_STREAM_STATUS_GAP: u32 = 3;
+/// A graph discontinuity or failed render reset the stream history.
+pub const SPECTRUM_STREAM_STATUS_FAILED: u32 = 4;
+/// A stream was stopped after a successful activation.
+pub const SPECTRUM_STREAM_STATUS_STOPPED: u32 = 5;
+/// A completed stream window and its metadata are available to the worker.
+pub const SPECTRUM_STREAM_STATUS_READY: u32 = 6;
+
 /// Preparation request staged before boot when the caller wants one spectrum boundary.
 #[allow(missing_docs)]
 #[repr(C)]
@@ -268,6 +284,39 @@ pub struct WebSpectrumResult {
     pub reserved0: u32,
 }
 
+/// Self-describing metadata for the additive managed spectrum stream.
+///
+/// The one-shot [`WebSpectrumWindow`] and [`WebSpectrumResult`] records remain byte-for-byte
+/// unchanged. This record carries the stream cadence, capture history and worker-side smoothing
+/// history that cannot be inferred from a single raw window. The two reserved words make the
+/// alignment before the first `u64` explicit rather than relying on C layout padding.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumStreamMetadata {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub status: u32,
+    pub target: u32,
+    pub channels: u32,
+    pub sample_rate_hz: u32,
+    pub quantum_frames: u32,
+    pub hop_frames: u32,
+    pub source_underrun: u32,
+    pub reserved0: u32,
+    pub reserved1: u32,
+    pub capture_epoch: u64,
+    pub sequence: u64,
+    pub dropped_captures: u64,
+    pub windows: u64,
+    pub captured_sample: u64,
+    pub end_sample: u64,
+    pub analysis_epoch: u64,
+    pub history_start_sample: u64,
+    pub smoothing_ms: f64,
+}
+
 /// Byte sizes of the fixed spectrum ABI records.
 #[allow(missing_docs)]
 pub const SPECTRUM_REQUEST_BYTES: u32 = size_of::<WebSpectrumRequest>() as u32;
@@ -275,6 +324,9 @@ pub const SPECTRUM_REQUEST_BYTES: u32 = size_of::<WebSpectrumRequest>() as u32;
 pub const SPECTRUM_WINDOW_HEADER_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
 #[allow(missing_docs)]
 pub const SPECTRUM_RESULT_HEADER_BYTES: u32 = size_of::<WebSpectrumResult>() as u32;
+/// Byte size of the additive continuous-spectrum metadata record.
+#[allow(missing_docs)]
+pub const SPECTRUM_STREAM_METADATA_BYTES: u32 = size_of::<WebSpectrumStreamMetadata>() as u32;
 
 fn spectrum_target_raw(target: &SpectrumTarget) -> u32 {
     match target {
@@ -1764,6 +1816,82 @@ impl AudioWorkletEngineHost {
             Err(SpectrumCaptureReadError::NotArmed) => Err(RESULT_WRONG_STATE),
             Err(SpectrumCaptureReadError::Invalid) => Err(RESULT_RENDER_REJECTED),
         }
+    }
+
+    /// Start the managed spectrum stream for this prepared target.
+    ///
+    /// The sample rate and render quantum come from the prepared host, so callers cannot create
+    /// a stream whose cadence differs from the graph that will produce its samples.
+    pub fn start_spectrum_stream(&mut self) -> Result<SpectrumCadence, u32> {
+        if self.status.state != STATE_READY {
+            return Err(RESULT_WRONG_STATE);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(RESULT_WRONG_STATE);
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return Err(RESULT_UNSUPPORTED);
+        };
+        capture
+            .start_continuous(self.status.sample_rate_hz, self.status.quantum_frames)
+            .map_err(|error| match error {
+                SpectrumContinuousCaptureError::Busy => RESULT_BACKPRESSURE,
+                SpectrumContinuousCaptureError::Cadence(error) => match error {
+                    host_core::SpectrumCadenceError::UnsupportedRate => RESULT_UNSUPPORTED,
+                    host_core::SpectrumCadenceError::ZeroQuantum => RESULT_INVALID_ARGUMENT,
+                    host_core::SpectrumCadenceError::HopOverflow => RESULT_REFUSED_BUDGET,
+                },
+                SpectrumContinuousCaptureError::EpochOverflow => RESULT_REFUSED_BUDGET,
+            })
+    }
+
+    /// Read one independently scheduled managed stream window or its explicit availability state.
+    pub fn read_spectrum_stream(
+        &mut self,
+    ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        if self.status.state != STATE_READY {
+            return Err(SpectrumContinuousReadError::NotActive);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(SpectrumContinuousReadError::NotActive);
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return Err(SpectrumContinuousReadError::NotActive);
+        };
+        capture.try_read_continuous()
+    }
+
+    /// Stop the managed stream and discard its queued native window.
+    pub fn stop_spectrum_stream(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return RESULT_UNSUPPORTED;
+        };
+        capture.stop_continuous();
+        RESULT_OK
+    }
+
+    /// Return the active managed stream cadence, if it is running.
+    #[must_use]
+    pub fn spectrum_stream_cadence(&self) -> Option<SpectrumCadence> {
+        self.ready
+            .as_ref()
+            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(SpectrumCapture::cadence)
+    }
+
+    /// Return the native capture epoch for the active managed stream.
+    #[must_use]
+    pub fn spectrum_stream_epoch(&self) -> Option<u64> {
+        self.ready
+            .as_ref()
+            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(SpectrumCapture::stream_epoch)
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
@@ -3822,6 +3950,11 @@ fn project_buffers(
                 spectrum_configured,
             ))
         })
+        .and_then(|bytes| {
+            bytes.checked_add(crate::ffi::spectrum_analysis_history_retained_bytes(
+                spectrum_configured,
+            ))
+        })
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3850,6 +3983,9 @@ fn project_buffers(
         .max(crate::ffi::observation_staging_largest_allocation_bytes())
         .max(crate::ffi::live_response_staging_largest_allocation_bytes())
         .max(crate::ffi::spectrum_staging_largest_allocation_bytes(
+            spectrum_configured,
+        ))
+        .max(crate::ffi::spectrum_analysis_history_retained_bytes(
             spectrum_configured,
         ));
     let mut report = empty_resource_report(selected_backend());
