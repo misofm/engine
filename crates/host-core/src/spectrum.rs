@@ -14,8 +14,8 @@ use engine::realtime::{
     Consumer, Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
 };
 use graph::{
-    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphResidentObservationBlock,
-    GraphRuntimeObserver, StableGraphId, TrackStage,
+    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphObservationValidity,
+    GraphResidentObservationBlock, GraphRuntimeObserver, StableGraphId, TrackStage,
 };
 
 /// The fixed number of samples in one spectrum capture.
@@ -134,21 +134,27 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
         .total_bytes()
         .expect("fixed spectrum queue bytes fit usize");
     let state_bytes = core::mem::size_of::<SpectrumStateAllocation>();
+    let observer_binding_bytes = core::mem::size_of::<GraphNodeObserverBinding>();
     let observer_bytes = u64::try_from(observer_bytes).expect("observer bytes fit u64");
     let queue_bytes = u64::try_from(queue_bytes).expect("queue bytes fit u64");
     let state_bytes = u64::try_from(state_bytes).expect("state bytes fit u64");
+    let observer_binding_bytes =
+        u64::try_from(observer_binding_bytes).expect("observer binding bytes fit u64");
     let id_bytes = u64::try_from(id_bytes).expect("target ID bytes fit u64");
+    let target_ids = id_bytes.checked_mul(2).expect("target IDs fit u64");
     SpectrumCaptureResources {
         retained_bytes: observer_bytes
             .checked_add(queue_bytes)
             .and_then(|value| value.checked_add(state_bytes))
-            .and_then(|value| value.checked_add(id_bytes))
+            .and_then(|value| value.checked_add(observer_binding_bytes))
+            .and_then(|value| value.checked_add(target_ids))
             .expect("spectrum storage fits u64"),
         largest_allocation_bytes: observer_bytes
             .max(
                 u64::try_from(queue.largest_allocation_bytes()).expect("queue allocation fits u64"),
             )
             .max(state_bytes)
+            .max(observer_binding_bytes)
             .max(id_bytes),
     }
 }
@@ -311,6 +317,7 @@ pub(crate) fn prepare_capture(
         first_sample: 0,
         next_sample: 0,
         armed: false,
+        source_underrun: false,
     };
     Ok((
         GraphNodeObserverBinding::new(node, SPECTRUM_OBSERVER_HANDLE, Box::new(observer)),
@@ -328,11 +335,17 @@ struct SpectrumCaptureObserver {
     first_sample: u64,
     next_sample: u64,
     armed: bool,
+    source_underrun: bool,
 }
 
 impl SpectrumCaptureObserver {
     // REALTIME_POLICY_BEGIN
-    fn begin_block(&mut self, first_sample: u64, frames: usize) -> Option<usize> {
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        frames: usize,
+        validity: GraphObservationValidity,
+    ) -> Option<usize> {
         let state = self.state.load(Ordering::Acquire);
         if state == ARMED {
             if self
@@ -346,6 +359,13 @@ impl SpectrumCaptureObserver {
             self.first_sample = first_sample;
             self.next_sample = first_sample;
             self.armed = true;
+            self.source_underrun = validity.source_underrun;
+        } else if state == CAPTURING {
+            if validity.source_generation_changed {
+                self.invalidate();
+                return None;
+            }
+            self.source_underrun |= validity.source_underrun;
         }
         if self.state.load(Ordering::Acquire) != CAPTURING || !self.armed {
             return None;
@@ -381,7 +401,7 @@ impl SpectrumCaptureObserver {
                 right: self.right,
                 first_sample: self.first_sample,
                 channels: self.channels,
-                source_underrun: false,
+                source_underrun: self.source_underrun,
             };
             if self.producer.try_push(window).is_ok() {
                 self.state.store(COMPLETE, Ordering::Release);
@@ -392,14 +412,20 @@ impl SpectrumCaptureObserver {
         }
     }
 
-    fn capture(&mut self, left: &[f32], right: &[f32], first_sample: u64) {
+    fn capture(
+        &mut self,
+        left: &[f32],
+        right: &[f32],
+        first_sample: u64,
+        validity: GraphObservationValidity,
+    ) {
         if left.len() != right.len() {
             if matches!(self.state.load(Ordering::Acquire), ARMED | CAPTURING) {
                 self.invalidate();
             }
             return;
         }
-        let Some(count) = self.begin_block(first_sample, left.len()) else {
+        let Some(count) = self.begin_block(first_sample, left.len(), validity) else {
             return;
         };
         if self.channels.includes_left() && left[..count].iter().any(|value| !value.is_finite())
@@ -442,7 +468,7 @@ impl SpectrumCaptureObserver {
             self.invalidate();
             return;
         };
-        let Some(count) = self.begin_block(block.first_sample, frames) else {
+        let Some(count) = self.begin_block(block.first_sample, frames, block.validity) else {
             return;
         };
         for frame in 0..count {
@@ -480,15 +506,31 @@ impl SpectrumCaptureObserver {
     }
 
     fn invalidate(&mut self) {
-        self.armed = false;
-        self.state.store(INVALID, Ordering::Release);
+        if matches!(self.state.load(Ordering::Acquire), ARMED | CAPTURING) {
+            self.armed = false;
+            self.state.store(INVALID, Ordering::Release);
+        }
     }
     // REALTIME_POLICY_END
 }
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
-        self.capture(block.left, block.right, block.first_sample);
+        self.capture(
+            block.left,
+            block.right,
+            block.first_sample,
+            GraphObservationValidity::CLEAR,
+        );
+        Ok(())
+    }
+
+    fn observe_with_validity(
+        &mut self,
+        block: GraphObservationBlock<'_>,
+        validity: GraphObservationValidity,
+    ) -> Result<(), RenderError> {
+        self.capture(block.left, block.right, block.first_sample, validity);
         Ok(())
     }
 
@@ -498,6 +540,10 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
     ) -> Option<Result<(), RenderError>> {
         self.capture_resident(block);
         Some(Ok(()))
+    }
+
+    fn invalidate(&mut self) {
+        self.invalidate();
     }
 }
 
@@ -530,7 +576,7 @@ impl SpectrumAnalyzer {
                 (2.0 * core::f64::consts::PI * index as f64) / SPECTRUM_WINDOW_FRAMES as f64;
             let value = 0.5 - 0.5 * math::cos(phase);
             *weight = value as f32;
-            weight_sum += value;
+            weight_sum += f64::from(*weight);
         }
         Self {
             weights,
@@ -630,7 +676,7 @@ fn amplitude_db(amplitude: f64) -> Result<f32, SpectrumAnalysisError> {
     if amplitude == 0.0 {
         return Ok(SPECTRUM_FLOOR_DB);
     }
-    let db = 20.0 * math::log(amplitude);
+    let db = 20.0 * math::log10(amplitude);
     if !db.is_finite() {
         return Err(SpectrumAnalysisError::Numerical);
     }
@@ -712,6 +758,24 @@ mod tests {
             SpectrumAnalysisError::InvalidWindow
         );
         assert_eq!(left[0], SPECTRUM_FLOOR_DB);
+    }
+
+    #[test]
+    fn analyzer_calibrates_a_half_amplitude_at_minus_six_dbfs() {
+        let analyzer = SpectrumAnalyzer::new();
+        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut right = [0.0; SPECTRUM_BIN_COUNT];
+        let mut output = super::SpectrumOutput {
+            frequencies_hz: &mut frequencies,
+            left_dbfs: Some(&mut left),
+            right_dbfs: Some(&mut right),
+        };
+        analyzer
+            .analyze(&window(0.5), 48_000, &mut output)
+            .expect("half-amplitude window analyzes");
+        assert!((left[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", left[0]);
+        assert!((right[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", right[0]);
     }
 
     #[test]

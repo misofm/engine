@@ -152,6 +152,22 @@ impl StartedRenderSession {
         )
     }
 
+    /// Apply an admitted source seek between render blocks on this exclusive render owner.
+    ///
+    /// The matching [`SourceControlSet`](crate::SourceControlSet) queues the seek first; this
+    /// method consumes that admitted command without rendering or advancing the audio clock.
+    /// A prepared spectrum capture treats the resulting generation boundary as a discontinuity
+    /// when it occurs during a partial window.
+    pub fn prepare_source_seek(
+        &mut self,
+        source_index: usize,
+        generation: u64,
+        frame: u64,
+    ) -> bool {
+        self.plan
+            .prepare_source_seek(source_index, generation, frame)
+    }
+
     /// Address-free facts about the plan this session renders.
     #[must_use]
     pub fn next_absolute_sample(&self) -> u64 {

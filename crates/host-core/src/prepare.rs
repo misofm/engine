@@ -241,6 +241,9 @@ pub struct HostPrepareReport {
     /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
     /// over the built runtime rather than computed from the request.
     pub observation_retained_bytes: u64,
+    /// Bytes retained by one prepared spectrum capture, including its graph observer binding.
+    /// Zero when this preparation did not request a spectrum capture.
+    pub spectrum_capture_retained_bytes: u64,
     /// Total source ID text bytes.
     pub source_id_bytes: u64,
     /// Largest single engine-owned allocation: the maximum over the graph, source and builtin
@@ -501,6 +504,29 @@ pub fn prepare_host_runtime_with_console(
         false,
         Backend::current(),
     )
+}
+
+/// Prepare a host with live-console handles and one selected, fixed-size spectrum observer.
+///
+/// Meter configuration remains part of [`HostConsoleRequest`], so this entry keeps the console,
+/// meter and spectrum resources in one transactional preparation boundary.
+pub fn prepare_host_runtime_with_console_and_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    spectrum: &SpectrumCaptureRequest,
+) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCapture), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        None,
+        false,
+        Backend::current(),
+        Some(spectrum),
+    )?;
+    let capture = capture.ok_or_else(|| resource("host.spectrum.capture"))?;
+    Ok((prepared, handles, capture))
 }
 
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
@@ -911,9 +937,14 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let graph_report = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
     let session_resources = compiled.resource_estimate();
+    let spectrum_resources = spectrum_request
+        .map(|request| crate::spectrum::spectrum_capture_resources_for(&request.target));
+    let spectrum_capture_retained_bytes =
+        spectrum_resources.map_or(0, |resources| resources.retained_bytes);
     let admitted_graph_and_model = graph_resources
         .session_plus_plan_bytes
         .checked_add(session_resources.compiled_model_bytes)
+        .and_then(|bytes| bytes.checked_add(spectrum_capture_retained_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
         return Err(resource("host.graph.resource.limit"));
@@ -929,7 +960,8 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let largest_engine_allocation_bytes = graph_resources
         .largest_allocation_bytes
         .max(source_resources.largest_allocation_bytes)
-        .max(builtin_resources.maximum_single_allocation_bytes);
+        .max(builtin_resources.maximum_single_allocation_bytes)
+        .max(spectrum_resources.map_or(0, |resources| resources.largest_allocation_bytes));
     if largest_engine_allocation_bytes.max(session_resources.single_allocation_bytes)
         > caps.maximum_named_allocation_bytes
         || builtin_resources.engine_owned_retained_payload_bytes
@@ -1070,6 +1102,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
         observation_retained_bytes,
+        spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
         largest_engine_allocation_bytes,
     };

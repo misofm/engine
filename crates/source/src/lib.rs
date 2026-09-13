@@ -18,8 +18,8 @@ use engine::{
     },
 };
 use graph::{
-    GraphNodeId, GraphPreparedSourceSet, GraphPreparedSourceSetDriver, GraphSourceInputClaim,
-    GraphSourceSetResourceReport,
+    GraphNodeId, GraphObservationValidity, GraphPreparedSourceSet, GraphPreparedSourceSetDriver,
+    GraphSourceInputClaim, GraphSourceSetResourceReport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -440,6 +440,8 @@ pub struct SourceReadReport {
     pub end_of_region: bool,
     /// Active generation used for this render quantum.
     pub active_generation: SourceGeneration,
+    /// Whether a seek generation was applied at this block boundary.
+    pub generation_changed: bool,
     /// Saturating cumulative accepted PCM frame reads (silence is excluded).
     pub cumulative_read_frames: u64,
     /// Saturating cumulative missing in-region frame count.
@@ -626,6 +628,7 @@ impl PcmSourceRing {
             underrun_frames: 0,
             underrun_events: 0,
             native_decoder_sanitized_samples: 0,
+            generation_changed: false,
         };
         for _ in 0..shape.transfer_block_count.get() {
             let block = Box::new(TransferBlock::try_new(shape.samples_per_block)?);
@@ -1038,6 +1041,7 @@ pub struct PcmSourceConsumer {
     underrun_frames: u64,
     underrun_events: u64,
     native_decoder_sanitized_samples: u64,
+    generation_changed: bool,
 }
 
 impl PcmSourceConsumer {
@@ -1121,6 +1125,7 @@ impl PcmSourceConsumer {
     pub fn begin_block(&mut self) -> SourceReadReport {
         self.end_block();
         self.flush_deferred_recycle();
+        self.generation_changed = false;
         self.observe_seek_at_block_boundary();
         self.acquire_current_block();
         let mut copied_frames = 0_u32;
@@ -1171,6 +1176,7 @@ impl PcmSourceConsumer {
             underrun_event: underrun_frames != 0,
             end_of_region: self.end_of_region,
             active_generation: self.active_generation,
+            generation_changed: self.generation_changed,
             cumulative_read_frames: self.cumulative_read_frames,
             cumulative_underrun_frames: self.underrun_frames,
             cumulative_underrun_events: self.underrun_events,
@@ -1281,6 +1287,7 @@ impl PcmSourceConsumer {
         let Ok(SourceCommand::Seek { generation, frame }) = self.command_consumer.try_pop() else {
             return;
         };
+        self.generation_changed = true;
         self.active_generation = generation;
         self.next_frame = frame;
         self.end_frame = None;
@@ -1474,6 +1481,8 @@ struct SourceGraphSourceSetDriver {
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
     copied_claims: usize,
+    block_validity: GraphObservationValidity,
+    pending_generation_change: bool,
 }
 
 fn allocation_class<T>(
@@ -1556,9 +1565,14 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         let Some(generation) = SourceGeneration::new(generation) else {
             return false;
         };
-        self.sources
+        let prepared = self
+            .sources
             .get_mut(source_index)
-            .is_some_and(|source| source.consumer.prepare_seek(generation, SourceFrame(frame)))
+            .is_some_and(|source| source.consumer.prepare_seek(generation, SourceFrame(frame)));
+        if prepared {
+            self.pending_generation_change = true;
+        }
+        prepared
     }
 
     fn claim_count(&self) -> usize {
@@ -1573,8 +1587,15 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         if frames != self.quantum_frames {
             return Err(engine::realtime::RenderError::InvalidEnvelope);
         }
+        self.block_validity = GraphObservationValidity {
+            source_underrun: false,
+            source_generation_changed: self.pending_generation_change,
+        };
+        self.pending_generation_change = false;
         for source in &mut self.sources {
-            source.consumer.begin_block();
+            let report = source.consumer.begin_block();
+            self.block_validity.source_underrun |= report.underrun_event;
+            self.block_validity.source_generation_changed |= report.generation_changed;
         }
         self.copied_claims = 0;
         if self.mappings.is_empty() {
@@ -1583,6 +1604,10 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             }
         }
         Ok(())
+    }
+
+    fn observation_validity(&self) -> GraphObservationValidity {
+        self.block_validity
     }
 
     fn copy_track_input(
@@ -1732,6 +1757,8 @@ pub fn prepare_graph_source_set(
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
             copied_claims: 0,
+            block_validity: GraphObservationValidity::CLEAR,
+            pending_generation_change: false,
         }),
     ))
 }
@@ -2171,7 +2198,42 @@ mod tests {
             mappings: mappings.into_boxed_slice(),
             quantum_frames: 4,
             copied_claims: 0,
+            block_validity: GraphObservationValidity::CLEAR,
+            pending_generation_change: false,
         }
+    }
+
+    #[test]
+    fn graph_driver_forwards_underrun_and_seek_generation_facts() {
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
+
+        driver.begin_block(0, 4).expect("first block");
+        assert_eq!(
+            driver.observation_validity(),
+            GraphObservationValidity {
+                source_underrun: true,
+                source_generation_changed: false,
+            }
+        );
+        let samples = [1.0; 4];
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .expect("seek");
+        assert!(driver.prepare_source_seek(0, 2, 100));
+        host.submit(chunk(2, 100, &[&samples], 4, false))
+            .expect("fresh block");
+        driver.begin_block(4, 4).expect("second block");
+        assert_eq!(
+            driver.observation_validity(),
+            GraphObservationValidity {
+                source_underrun: false,
+                source_generation_changed: true,
+            }
+        );
     }
 
     #[test]
@@ -2292,6 +2354,7 @@ mod tests {
         let mut output = [&mut output_plane[..]];
         let report = consumer.read_block(&mut output).expect("new generation");
         assert_eq!(report.active_generation, SourceGeneration(2));
+        assert!(report.generation_changed);
         assert_eq!(output_plane, fresh);
         assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
         assert!(matches!(

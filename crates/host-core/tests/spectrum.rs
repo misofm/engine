@@ -1,10 +1,11 @@
 //! Native graph-to-window spectrum capture gates for issue #781.
 
 use host_core::{
-    HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT, SPECTRUM_WINDOW_FRAMES, SourceSubmission,
-    SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCaptureReadError, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumTarget, compile_host_session, prepare_host_runtime_with_spectrum,
-    spectrum_capture_resources, spectrum_capture_resources_for,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
+    SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
+    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
+    compile_host_session, prepare_host_runtime_with_console_and_spectrum,
+    prepare_host_runtime_with_spectrum, spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -201,4 +202,172 @@ fn analyzer_preserves_outputs_on_invalid_rate_and_nonfinite_window() {
     assert_eq!(frequencies[0], 1.0);
     assert_eq!(left_dbfs[0], 2.0);
     assert_eq!(right_dbfs[0], 3.0);
+}
+
+#[test]
+fn graph_wide_source_underrun_is_retained_in_the_completed_window() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let target = SpectrumTarget::Output("main-out".into());
+    let resources = spectrum_capture_resources_for(&target);
+    let (host, mut capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("capture prepares");
+    capture.arm().expect("arm capture");
+    let (mut session, mut sources, _) = host.start_render_session().expect("start render");
+    for block in 0..(SPECTRUM_WINDOW_FRAMES / QUANTUM) {
+        let left = [0.25_f32; QUANTUM];
+        let right = [-0.5_f32; QUANTUM];
+        if block != 0 {
+            sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: (block * QUANTUM) as u64,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
+        let mut output = [0.0_f32; QUANTUM * 2];
+        session
+            .render_planar(&mut output, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
+            .expect("render block");
+        if block == 0 {
+            sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: 0,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("late first source block");
+        }
+    }
+    let window = capture.try_read().expect("underrun window completes");
+    assert!(
+        window.source_underrun,
+        "graph-wide underrun must be retained"
+    );
+}
+
+#[test]
+fn seek_generation_invalidates_a_partial_spectrum_window() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let target = SpectrumTarget::Output("main-out".into());
+    let resources = spectrum_capture_resources_for(&target);
+    let (host, mut capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("capture prepares");
+    capture.arm().expect("arm capture");
+    let (mut session, mut sources, _) = host.start_render_session().expect("start render");
+    for block in 0..8 {
+        let left = [0.25_f32; QUANTUM];
+        let right = [-0.5_f32; QUANTUM];
+        sources
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: (block * QUANTUM) as u64,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        let mut output = [0.0_f32; QUANTUM * 2];
+        session
+            .render_planar(&mut output, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
+            .expect("render block");
+    }
+    sources
+        .seek(b"fixture-source", 2, 2_048)
+        .expect("queue generation change");
+    assert!(
+        session.prepare_source_seek(0, 2, 2_048),
+        "exclusive plan owner applies seek"
+    );
+    let fresh_left = [0.75_f32; QUANTUM];
+    let fresh_right = [-0.25_f32; QUANTUM];
+    sources
+        .submit(
+            b"fixture-source",
+            SourceSubmission {
+                generation: 2,
+                start_frame: 2_048,
+                sample_rate_hz: 48_000,
+                planes: &[&fresh_left, &fresh_right],
+                frames: QUANTUM as u32,
+                end_of_region: false,
+            },
+        )
+        .expect("fresh generation block");
+    let mut output = [0.0_f32; QUANTUM * 2];
+    session
+        .render_planar(&mut output, 2, QUANTUM, QUANTUM, 1_024)
+        .expect("render after seek");
+    assert_eq!(
+        capture
+            .try_read()
+            .expect_err("seek invalidates partial window"),
+        SpectrumCaptureReadError::Invalid
+    );
+}
+
+#[test]
+fn console_and_meter_preparation_keeps_spectrum_in_one_transaction() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let mut limits = caps();
+    limits.maximum_meter_streams = 9;
+    limits.maximum_meter_items = u64::MAX;
+    limits.maximum_meter_bytes = u64::MAX;
+    let console = HostConsoleRequest {
+        control_queue_depth: core::num::NonZeroUsize::new(1),
+        meter_period_frames: core::num::NonZeroU32::new(128),
+        ..HostConsoleRequest::default()
+    };
+    let target = SpectrumTarget::Output("main-out".into());
+    let resources = spectrum_capture_resources_for(&target);
+    let (host, handles, capture) = prepare_host_runtime_with_console_and_spectrum(
+        &compiled,
+        &limits,
+        &console,
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Left,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("console, meters and spectrum prepare together");
+    assert_eq!(handles.track_controls.len(), 9);
+    assert_eq!(handles.meters.len(), 9);
+    assert_eq!(
+        host.report.spectrum_capture_retained_bytes,
+        resources.retained_bytes
+    );
+    assert_eq!(capture.target(), &SpectrumTarget::Output("main-out".into()));
 }

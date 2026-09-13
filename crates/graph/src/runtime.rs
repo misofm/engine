@@ -195,7 +195,8 @@ use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
     GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphPreparedEffect, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor,
+    GraphObservationValidity, GraphPreparedEffect, GraphRuntimeProcessor,
+    GraphRuntimeSplitPairProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -1721,10 +1722,11 @@ impl Runtime {
         &mut self,
         index: usize,
         first_sample: u64,
+        validity: GraphObservationValidity,
     ) -> Result<(), RenderError> {
         let Self { lease, units, .. } = self;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None),
+            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, validity),
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -1761,9 +1763,30 @@ impl Runtime {
                     } else {
                         None
                     };
-                    observe(member, lease, first_sample, resident)?;
+                    observe(member, lease, first_sample, resident, validity)?;
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// Invalidate every prepared observer after a render failure before the error leaves the
+    /// executor. This preserves the one-shot capture boundary without touching audio state.
+    pub(crate) fn invalidate_observers(&mut self) {
+        for unit in &mut self.units {
+            match unit {
+                RuntimeUnit::Op(op) => {
+                    for observer in &mut op.observers {
+                        observer.observer.invalidate();
+                    }
+                }
+                RuntimeUnit::Bank { members, .. } => {
+                    for member in members {
+                        for observer in &mut member.observers {
+                            observer.observer.invalidate();
+                        }
+                    }
+                }
             }
         }
     }
@@ -2011,6 +2034,7 @@ fn observe(
     lease: &ArenaLease,
     first_sample: u64,
     resident: Option<rack::ResidentOutputLane<'_>>,
+    validity: GraphObservationValidity,
 ) -> Result<(), RenderError> {
     #[cfg(any(test, feature = "test-support"))]
     let resident =
@@ -2024,9 +2048,14 @@ fn observe(
                 counts[1] += 1;
                 value.set(counts);
             });
-            if let Some(result) = observer
-                .observer
-                .observe_resident(crate::GraphResidentObservationBlock { lane, first_sample })
+            if let Some(result) =
+                observer
+                    .observer
+                    .observe_resident(crate::GraphResidentObservationBlock {
+                        lane,
+                        first_sample,
+                        validity,
+                    })
             {
                 #[cfg(any(test, feature = "test-support"))]
                 TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
@@ -2047,11 +2076,14 @@ fn observe(
             });
             lease.read_stereo(op.output)
         });
-        observer.observer.observe(GraphObservationBlock {
-            left,
-            right,
-            first_sample,
-        })?;
+        observer.observer.observe_with_validity(
+            GraphObservationBlock {
+                left,
+                right,
+                first_sample,
+            },
+            validity,
+        )?;
     }
     Ok(())
 }
@@ -5038,7 +5070,13 @@ mod tests {
                 observers,
             };
             test_only_meter_input_reset(false);
-            let result = observe(&mut op, &lease, 71, Some(view));
+            let result = observe(
+                &mut op,
+                &lease,
+                71,
+                Some(view),
+                GraphObservationValidity::CLEAR,
+            );
             let take = accepts
                 .iter()
                 .position(|a| *a == Some(true))
@@ -5089,7 +5127,7 @@ mod tests {
                 && production.matches(".final_output_lane(").count() == 1
                 && [
                     "let Self { lease, units, .. } = self;",
-                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None)",
+                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, validity)",
                     "let eligible = population > 0",
                     "population <= width",
                     "!members.is_empty()",
@@ -5105,7 +5143,7 @@ mod tests {
                     "let resident = if eligible",
                     "index.checked_sub(start)",
                     "chain.final_output_lane(frames?, lane)",
-                    "observe(member, lease, first_sample, resident)?;",
+                    "observe(member, lease, first_sample, resident, validity)?;",
                 ]
                 .iter()
                 .all(|term| observation.contains(term))
@@ -5128,7 +5166,7 @@ mod tests {
                 "chain.final_output_lane(1, lane)",
             ),
             (
-                "observe(member, lease, first_sample, resident)?;",
+                "observe(member, lease, first_sample, resident, validity)?;",
                 "observe(member, lease, first_sample, resident).ok();",
             ),
         ] {
@@ -5180,7 +5218,7 @@ mod tests {
             let expected = [
                 "if let Err(error) = runtime.execute(unit, time.absolute_sample) {",
                 "return Err(error);",
-                "if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {",
+                "if let Err(error) =\n                runtime.observe_unit(unit, time.absolute_sample, source_validity)\n            {",
                 "return Err(error);",
             ];
             let mut remaining = loop_body;
@@ -5215,7 +5253,7 @@ mod tests {
         );
         assert!(!valid(&bypass, graph, rack), "admission-bypass control");
         let skipped_observer = graph.replacen(
-            "runtime.observe_unit(unit, time.absolute_sample)",
+            "runtime.observe_unit(unit, time.absolute_sample, source_validity)",
             "Ok::<(), RenderError>(())",
             1,
         );
@@ -5233,8 +5271,8 @@ mod tests {
             "producer failure must prevent successor execution"
         );
         let next_observer = graph.replacen(
-            "runtime.observe_unit(unit, time.absolute_sample)",
-            "runtime.observe_unit(unit + 1, time.absolute_sample)",
+            "runtime.observe_unit(unit, time.absolute_sample, source_validity)",
+            "runtime.observe_unit(unit + 1, time.absolute_sample, source_validity)",
             1,
         );
         assert!(
