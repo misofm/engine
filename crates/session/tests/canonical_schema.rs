@@ -42,7 +42,7 @@ fn parametric_eq_session_fixture_bytes_are_immutable() {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
     assert_eq!(PARAMETRIC_EQ.len(), 16_712);
-    assert_eq!(hash, 0x8447_0d4a_dee9_8387);
+    assert_eq!(hash, 0x95f3_0d0f_2c18_5ce0);
 }
 
 #[test]

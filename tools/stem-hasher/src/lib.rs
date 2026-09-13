@@ -10,7 +10,7 @@ use std::{
     path::PathBuf,
 };
 
-use sha2::{Digest, Sha256};
+use blake3::Hasher;
 use source::{NativeWaveEncoding, NativeWaveError, NativeWaveParseCaps, parse_native_wave};
 
 const STREAM_BYTES: usize = 48 * 1024;
@@ -121,12 +121,12 @@ impl CanonicalPcmShape {
     }
 }
 
-/// Successful canonicalization and SHA-256 identity result.
+/// Successful canonicalization and BLAKE3-256 identity result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StemIdentityReport {
     /// Shape derived from WAVE or supplied for raw PCM.
     pub shape: CanonicalPcmShape,
-    /// SHA-256 digest of canonical sample bytes only.
+    /// BLAKE3-256 digest of canonical sample bytes only.
     pub digest: [u8; 32],
     /// Exact bytes hashed and optionally emitted.
     pub canonical_bytes: u64,
@@ -136,7 +136,7 @@ impl StemIdentityReport {
     /// Canonical scheme-prefixed identity string.
     #[must_use]
     pub fn identity(self) -> String {
-        format!("sha256:{}", lowercase_hex(self.digest))
+        format!("blake3:{}", lowercase_hex(self.digest))
     }
 }
 
@@ -169,7 +169,7 @@ impl std::error::Error for StemHasherError {}
 /// Canonicalize and hash little-endian raw samples of the declared shape.
 ///
 /// The input must contain exactly the declared number of bytes. `canonical_output` receives the
-/// same samples in the normative serialization while SHA-256 is computed incrementally.
+/// same samples in the normative serialization while BLAKE3-256 is computed incrementally.
 pub fn canonicalize_raw_pcm<R: Read, W: Write>(
     input: &mut R,
     shape: CanonicalPcmShape,
@@ -231,7 +231,7 @@ fn canonicalize_stream<R: Read, W: Write>(
     let mut input_bytes = vec![0_u8; STREAM_BYTES];
     let mut canonical = Vec::with_capacity(STREAM_BYTES);
     let mut remaining = canonical_bytes;
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     while remaining != 0 {
         let read_bytes = usize::try_from(remaining.min(STREAM_BYTES as u64))
             .map_err(|_| StemHasherError::new("shape.byte_length.overflow"))?;
@@ -259,7 +259,7 @@ fn canonicalize_stream<R: Read, W: Write>(
     }
     Ok(StemIdentityReport {
         shape,
-        digest: hasher.finalize().into(),
+        digest: *hasher.finalize().as_bytes(),
         canonical_bytes,
     })
 }

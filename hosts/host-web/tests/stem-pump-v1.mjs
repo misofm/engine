@@ -1,5 +1,4 @@
 import assert from "node:assert/strict"
-import { createHash } from "node:crypto"
 import {
   CanonicalPcmPump,
   Msb1RingWriter,
@@ -7,12 +6,15 @@ import {
   deinterleaveCanonicalPcm,
 } from "../web/stem-store/pcm-pump.js"
 import { OpfsStemStore } from "../web/stem-store/opfs-store.js"
+import { IncrementalBlake3 } from "../web/stem-store/incremental-blake3.js"
 import { MemoryStemResolver } from "../web/stem-store/resolver.js"
 import { StemSessionGate } from "../web/stem-store/session-gate.js"
 import { FakeLockManager, FakeOpfsBackend } from "./stem-store-fakes.mjs"
 
 function identity(bytes) {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+  const hash = new IncrementalBlake3()
+  hash.update(bytes)
+  return `blake3:${hash.digestHex()}`
 }
 
 function pcm16(samples, channels) {
@@ -223,7 +225,7 @@ async function rejectsWindowSmallerThanRingBeforeEngaging() {
       windowFrames: 2,
       sources: [{
         sourceId: "invalid-window",
-        identity: `sha256:${"0".repeat(64)}`,
+        identity: `blake3:${"0".repeat(64)}`,
         channels: 1,
         bitDepth: 16,
         frames: 1,
@@ -254,7 +256,7 @@ async function readFailureHardStops() {
     sources: [
       {
         sourceId: "dead",
-        identity: `sha256:${"0".repeat(64)}`,
+        identity: `blake3:${"0".repeat(64)}`,
         channels: 1,
         bitDepth: 16,
         frames: 2,
@@ -330,14 +332,14 @@ async function sameSessionReplacementReleasesPredecessorPin() {
     return true
   })
   let index = JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   )
   assert.deepEqual(index.stems[stemIdentity].pins, [
     "session:same-reopen:same",
   ])
   await gate.close()
   index = JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   )
   assert.deepEqual(index.stems[stemIdentity].pins, [])
 }
@@ -387,7 +389,7 @@ async function rejectedResumeDoesNotLeakPins() {
     /route changed/
   )
   const index = JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   )
   assert.deepEqual(index.stems[stemIdentity].pins, [])
 }

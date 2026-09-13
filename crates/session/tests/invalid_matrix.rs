@@ -256,8 +256,8 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     parse_case(
         &mut count,
         &replaced(
-            "content = \"sha256:",
-            "content = false, old_content = \"sha256:",
+            "content = \"blake3:",
+            "content = false, old_content = \"blake3:",
         ),
         DiagnosticCode::WrongType,
         "$.sources[0].content",
@@ -586,7 +586,7 @@ fn finite_unit_and_local_range_category_has_24_distinct_cases() {
 }
 
 #[test]
-fn source_identity_and_shape_category_has_20_distinct_cases() {
+fn source_identity_and_shape_category_has_21_distinct_cases() {
     let mut count = 0;
     model_case(
         &mut count,
@@ -596,7 +596,7 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content = "sha256:abc".to_owned(),
+        |s| s.sources[0].content = "blake3:abc".to_owned(),
         DiagnosticCode::SourceContentIdentityFormat,
         "$.sources[0].content",
     );
@@ -610,7 +610,15 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content = s.sources[0].content.replacen("sha256:", "sha512:", 1),
+        |s| s.sources[0].content = s.sources[0].content.replacen("blake3:", "sha512:", 1),
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
+    );
+    // The complete legacy spelling has a valid digest shape but is still refused. This catches a
+    // compatibility mutation that accepts both source-identity schemes.
+    model_case(
+        &mut count,
+        |s| s.sources[0].content = s.sources[0].content.replacen("blake3:", "sha256:", 1),
         DiagnosticCode::SourceContentIdentityFormat,
         "$.sources[0].content",
     );
@@ -702,7 +710,7 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
             "$.sources[0].bit_depth",
         );
     }
-    assert_eq!(count, 20);
+    assert_eq!(count, 21);
 }
 
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {

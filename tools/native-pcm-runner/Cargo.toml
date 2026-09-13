@@ -14,6 +14,7 @@ capi.workspace = true
 session.workspace = true
 source.workspace = true
 sha2.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 bench-support.workspace = true

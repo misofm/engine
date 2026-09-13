@@ -16,7 +16,7 @@
   "sources": [
     {
       "id": "console-source",
-      "content": "sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c",
+      "content": "blake3:0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea",
       "channels": 2,
       "bit_depth": "32f",
       "frames": "2048"

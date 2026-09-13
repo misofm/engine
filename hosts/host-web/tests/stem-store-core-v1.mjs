@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
-import { createHash } from "node:crypto"
 import { performance } from "node:perf_hooks"
+import { IncrementalBlake3 } from "../web/stem-store/incremental-blake3.js"
 import {
   OpfsStemStore,
   StemStoreError,
@@ -33,8 +33,9 @@ function fixture(label, bytes = 4096) {
   for (let index = 0; index < pcm.length; index += 1) {
     pcm[index] = seed[index % seed.length] ^ ((index * 29) & 0xff)
   }
-  const digest = createHash("sha256").update(pcm).digest("hex")
-  return { identity: `sha256:${digest}`, bytes: pcm.byteLength, pcm }
+  const hash = new IncrementalBlake3()
+  hash.update(pcm)
+  return { identity: `blake3:${hash.digestHex()}`, bytes: pcm.byteLength, pcm }
 }
 
 function stemMap(stems) {
@@ -47,7 +48,7 @@ function requirements(stems) {
 
 function indexStems(backend) {
   return JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   ).stems
 }
 
@@ -138,11 +139,11 @@ async function twoTabCollision() {
     tabB.openSession({ sessionId: "B", stems: requirements([stem]), resolver }),
   ])
   assert.equal(resolver.requests.length, 1, "Web Lock single-flight prevents double download")
-  assert.equal(backend.names("miso-stems-v1/staging").length, 0)
+  assert.equal(backend.names("miso-stems-blake3-v1/staging").length, 0)
 
   let release
   const held = locks.request(
-    `miso:stem-store:v1:miso-stems-v1:ingest:${other.identity.slice(7)}`,
+    `miso:stem-store:v1:miso-stems-blake3-v1:ingest:${other.identity.slice(7)}`,
     { mode: "exclusive" },
     () => new Promise((resolve) => {
       release = resolve
@@ -185,7 +186,7 @@ async function corruptionSelfHeals() {
   assert.equal(resolver.requests.length, 2, "staging corruption forces a fresh resolve")
   await first.close()
 
-  const path = `miso-stems-v1/sha256-${stem.identity.slice(7)}`
+  const path = `miso-stems-blake3-v1/blake3-${stem.identity.slice(7)}`
   const corrupted = new Uint8Array(backend.bytes(path))
   corrupted[stem.bytes - 3] ^= 1
   backend.setBytes(path, corrupted)
@@ -222,8 +223,8 @@ async function indexRecoveryAdoptsSelfVerifyingFinals() {
     })
     await seedLease.close()
 
-    if (damage === "missing") backend.remove("miso-stems-v1/index.json")
-    else backend.setBytes("miso-stems-v1/index.json", encoder.encode("{not-json"))
+    if (damage === "missing") backend.remove("miso-stems-blake3-v1/index.json")
+    else backend.setBytes("miso-stems-blake3-v1/index.json", encoder.encode("{not-json"))
 
     const resolver = new MemoryStemResolver(stemMap([stem]))
     const recovered = store(backend, locks, { tabId: `recover-${damage}` })
@@ -238,11 +239,11 @@ async function indexRecoveryAdoptsSelfVerifyingFinals() {
       `${damage} crash-only index must adopt a self-verifying final without re-ingest`
     )
     const index = JSON.parse(
-      new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+      new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
     )
     assert.equal(index.stems[stem.identity].bytes, stem.bytes)
     assert.deepEqual(
-      backend.bytes(`miso-stems-v1/sha256-${stem.identity.slice(7)}`),
+      backend.bytes(`miso-stems-blake3-v1/blake3-${stem.identity.slice(7)}`),
       stem.pcm
     )
     await lease.close()
@@ -280,16 +281,16 @@ async function promoteAtomicityAndCrashSweep() {
     }),
     /simulated tab death/
   )
-  assert.equal(crashBackend.names("miso-stems-v1/staging").length, 1)
+  assert.equal(crashBackend.names("miso-stems-blake3-v1/staging").length, 1)
   assert.equal(
-    crashBackend.has(`miso-stems-v1/sha256-${crashStem.identity.slice(7)}`),
+    crashBackend.has(`miso-stems-blake3-v1/blake3-${crashStem.identity.slice(7)}`),
     true,
     "copy may leave final-name debris"
   )
   await store(crashBackend, crashLocks, { tabId: "next-tab" }).open()
-  assert.deepEqual(crashBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(crashBackend.names("miso-stems-blake3-v1/staging"), [])
   assert.equal(
-    crashBackend.has(`miso-stems-v1/sha256-${crashStem.identity.slice(7)}`),
+    crashBackend.has(`miso-stems-blake3-v1/blake3-${crashStem.identity.slice(7)}`),
     false,
     "unindexed final debris is never trusted"
   )
@@ -297,7 +298,7 @@ async function promoteAtomicityAndCrashSweep() {
 
 async function fallbackWritesObeyAbortAndDeadline() {
   const stem = fixture("fallback-write-abort", 8192)
-  const finalName = `sha256-${stem.identity.slice(7)}`
+  const finalName = `blake3-${stem.identity.slice(7)}`
   const never = new Promise(() => {})
   let writeStarted
   const started = new Promise((resolve) => { writeStarted = resolve })
@@ -345,16 +346,16 @@ async function fallbackWritesObeyAbortAndDeadline() {
     abortElapsedMs < localDeadlineMs,
     `fallback abort escaped its ${localDeadlineMs} ms local-store deadline: ${abortElapsedMs} ms`
   )
-  assert.deepEqual(abortBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(abortBackend.names("miso-stems-blake3-v1/staging"), [])
   assert.equal(
-    abortBackend.has(`miso-stems-v1/${finalName}`),
+    abortBackend.has(`miso-stems-blake3-v1/${finalName}`),
     false,
     "aborted fallback promotion left unindexed final debris"
   )
 
   for (const operation of ["createWritable", "write", "close"]) {
     const deadlineStem = fixture(`fallback-${operation}-deadline`, 4096)
-    const deadlineFinal = `sha256-${deadlineStem.identity.slice(7)}`
+    const deadlineFinal = `blake3-${deadlineStem.identity.slice(7)}`
     const blocker = ({ fileName }) =>
       fileName === deadlineFinal ? never : undefined
     const backend = new FakeOpfsBackend({
@@ -386,9 +387,9 @@ async function fallbackWritesObeyAbortAndDeadline() {
       `wedged fallback ${operation} escaped its local-store deadline`
     )
     assert.equal(outcome.code, "storage.write_stalled")
-    assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+    assert.deepEqual(backend.names("miso-stems-blake3-v1/staging"), [])
     assert.equal(
-      backend.has(`miso-stems-v1/${deadlineFinal}`),
+      backend.has(`miso-stems-blake3-v1/${deadlineFinal}`),
       false,
       `wedged fallback ${operation} left unindexed final debris`
     )
@@ -418,7 +419,7 @@ async function openerDoesNotSweepActivePromote() {
     resolver: new MemoryStemResolver(stemMap([stem])),
   })
   await reachedMove
-  const finalPath = `miso-stems-v1/sha256-${stem.identity.slice(7)}`
+  const finalPath = `miso-stems-blake3-v1/blake3-${stem.identity.slice(7)}`
   assert.equal(backend.has(finalPath), true)
   await store(backend, locks, { tabId: "observer" }).open()
   assert.equal(
@@ -444,7 +445,7 @@ async function crashedSessionPinsAreRecoverable() {
   while ((await locks.query()).held.length !== 0) await Promise.resolve()
   await store(backend, locks, { tabId: "recovery" }).open()
   const index = JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   )
   assert.deepEqual(index.stems[stem.identity].pins, [])
 }
@@ -529,9 +530,9 @@ async function quotaFailureKeepsSurvivors() {
     ),
     false
   )
-  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(backend.names("miso-stems-blake3-v1/staging"), [])
   const failedIndex = JSON.parse(
-    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))
   )
   assert.deepEqual(
     failedIndex.stems[firstStem.identity].pins,
@@ -622,11 +623,11 @@ async function tabCloseMidStaging() {
     }),
     /tab closed/
   )
-  assert.equal(backend.names("miso-stems-v1/staging").length, 1)
+  assert.equal(backend.names("miso-stems-blake3-v1/staging").length, 1)
   await store(backend, locks, { tabId: "replacement" }).open()
-  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(backend.names("miso-stems-blake3-v1/staging"), [])
   assert.equal(
-    backend.names("miso-stems-v1").filter((name) => name.startsWith("sha256-")).length,
+    backend.names("miso-stems-blake3-v1").filter((name) => name.startsWith("blake3-")).length,
     0
   )
 }
@@ -657,9 +658,9 @@ async function abortCleansStaging() {
     }),
     (error) => error.name === "AbortError"
   )
-  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(backend.names("miso-stems-blake3-v1/staging"), [])
   assert.equal(
-    backend.names("miso-stems-v1").some((name) => name.startsWith("sha256-")),
+    backend.names("miso-stems-blake3-v1").some((name) => name.startsWith("blake3-")),
     false
   )
 }
@@ -708,7 +709,7 @@ async function wedgedDecoderObeysAbortAndDeadline() {
     "wedged decoder ignored mix-switch abort"
   )
   assert.equal(abortOutcome.name, "AbortError")
-  assert.deepEqual(abortBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(abortBackend.names("miso-stems-blake3-v1/staging"), [])
 
   const deadlineBackend = new FakeOpfsBackend()
   const deadlineStore = store(deadlineBackend, new FakeLockManager(), {
@@ -728,7 +729,7 @@ async function wedgedDecoderObeysAbortAndDeadline() {
   ])
   assert.notEqual(deadlineOutcome, "timed-out", "wedged decoder escaped its deadline")
   assert.equal(deadlineOutcome.code, "stem.decode.stalled")
-  assert.deepEqual(deadlineBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(deadlineBackend.names("miso-stems-blake3-v1/staging"), [])
 }
 
 // STEM_IDENTITY_V1 §4: the preimage length is shape-derived and never enters
@@ -738,7 +739,7 @@ async function wedgedDecoderObeysAbortAndDeadline() {
 // fallback-final first, so that each arm is the only one left holding.
 async function lyingDeclarationIsRefused() {
   const stem = fixture("lying-declaration", 8192)
-  const finalPath = `miso-stems-v1/sha256-${stem.identity.slice(7)}`
+  const finalPath = `miso-stems-blake3-v1/blake3-${stem.identity.slice(7)}`
   const lied = { identity: stem.identity, bytes: stem.bytes + 64 }
 
   const fallbackBackend = new FakeOpfsBackend({ moveSupported: false })
@@ -762,7 +763,7 @@ async function lyingDeclarationIsRefused() {
     "a lying declaration must never survive fallback promotion"
   )
   assert.equal(fallbackBackend.has(finalPath), false, "no final may be adopted")
-  assert.deepEqual(fallbackBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(fallbackBackend.names("miso-stems-blake3-v1/staging"), [])
   assert.deepEqual(indexStems(fallbackBackend), {})
 
   const backend = new FakeOpfsBackend()
@@ -783,7 +784,7 @@ async function lyingDeclarationIsRefused() {
       assert.equal(error.details.identity, stem.identity)
       assert.equal(error.details.expectedBytes, lied.bytes)
       assert.equal(error.details.observedBytes, stem.bytes)
-      assert.equal(error.details.expectedSha256, stem.identity.slice(7))
+      assert.equal(error.details.expectedBlake3, stem.identity.slice(7))
       return true
     },
     "a lying declaration must never be promoted"
@@ -798,7 +799,7 @@ async function lyingDeclarationIsRefused() {
     []
   )
   assert.equal(backend.has(finalPath), false, "a refused ingest indexes nothing")
-  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(backend.names("miso-stems-blake3-v1/staging"), [])
   assert.deepEqual(indexStems(backend), {})
   assert.equal(resolver.requests.length, 2, "the typed integrity refusal retries once")
 
@@ -891,7 +892,7 @@ async function lyingDeclarationIsRefused() {
     "over-length delivery is refused before staging fills past the declaration"
   )
   assert.equal(overBackend.has(finalPath), false)
-  assert.deepEqual(overBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(overBackend.names("miso-stems-blake3-v1/staging"), [])
   assert.deepEqual(indexStems(overBackend), {})
 }
 

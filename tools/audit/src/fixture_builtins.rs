@@ -5073,7 +5073,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"a240547d7e57f76a087c7c43cffc2c54944f96e7ac88a1a19158f65a4a0bc77b\""),
+            benchmark_field_pair("session_template_sha256", "\"1ed6ca319bc7b3e7f630f8e9e0cb0a7eb2cadf26a480194c3a926846b58ff4fd\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5243,7 +5243,7 @@ mod tests {
             // payload lengths and every render-bearing fixture remain unchanged.
             // Re-pinned by issue #519: the metric-selection field grows `MeterAccumulator` by 8
             // bytes after alignment while `MeterSnapshot` remains 160 by using existing padding.
-            "31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796",
+            "436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0",
             "accepted joined-corpus manifest identity"
         );
 

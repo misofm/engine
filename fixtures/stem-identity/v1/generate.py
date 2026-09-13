@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Independent stdlib-only canonical-PCM vector generator/checker."""
+"""Independent stdlib-only canonical-PCM BLAKE3 vector generator/checker."""
 
 from __future__ import annotations
 
-import hashlib
 import pathlib
 import struct
 import sys
@@ -24,6 +23,54 @@ VECTORS = {
     "pcm24-mono-boundaries": ("24", ((0,), (8388607,), (-8388608,), (1,), (-1,))),
     "pcm24-stereo-boundaries": ("24", ((0, 8388607), (-8388608, 1), (-1, 0))),
 }
+
+# The frozen corpus inputs all fit within one 1024-byte BLAKE3 chunk. Keeping the small,
+# one-chunk reference here makes the generated pins independently checkable without a Python
+# package while the streaming Rust implementation is qualified separately by its official vectors.
+IV = (0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19)
+MESSAGE_PERMUTATION = (2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8)
+CHUNK_START = 1
+CHUNK_END = 2
+ROOT_OUTPUT = 8
+
+
+def rotate_right(value: int, amount: int) -> int:
+    return ((value >> amount) | (value << (32 - amount))) & 0xFFFFFFFF
+
+
+def mix(state: list[int], a: int, b: int, c: int, d: int, x: int, y: int) -> None:
+    state[a] = (state[a] + state[b] + x) & 0xFFFFFFFF
+    state[d] = rotate_right(state[d] ^ state[a], 16)
+    state[c] = (state[c] + state[d]) & 0xFFFFFFFF
+    state[b] = rotate_right(state[b] ^ state[c], 12)
+    state[a] = (state[a] + state[b] + y) & 0xFFFFFFFF
+    state[d] = rotate_right(state[d] ^ state[a], 8)
+    state[c] = (state[c] + state[d]) & 0xFFFFFFFF
+    state[b] = rotate_right(state[b] ^ state[c], 7)
+
+
+def compress(block: bytes, block_length: int, flags: int) -> bytes:
+    words = list(struct.unpack("<16I", block.ljust(64, b"\0")))
+    state = list(IV) + list(IV[:4]) + [0, 0, block_length, flags]
+    for round_index in range(7):
+        mix(state, 0, 4, 8, 12, words[0], words[1])
+        mix(state, 1, 5, 9, 13, words[2], words[3])
+        mix(state, 2, 6, 10, 14, words[4], words[5])
+        mix(state, 3, 7, 11, 15, words[6], words[7])
+        mix(state, 0, 5, 10, 15, words[8], words[9])
+        mix(state, 1, 6, 11, 12, words[10], words[11])
+        mix(state, 2, 7, 8, 13, words[12], words[13])
+        mix(state, 3, 4, 9, 14, words[14], words[15])
+        if round_index != 6:
+            words = [words[index] for index in MESSAGE_PERMUTATION]
+    output = [state[index] ^ state[index + 8] for index in range(8)]
+    return struct.pack("<8I", *output)
+
+
+def blake3_256(payload: bytes) -> bytes:
+    if len(payload) > 64:
+        raise ValueError("fixed corpus BLAKE3 reference accepts one block only")
+    return compress(payload, len(payload), CHUNK_START | CHUNK_END | ROOT_OUTPUT)
 
 
 def publish(path: pathlib.Path, payload: bytes) -> None:
@@ -82,7 +129,7 @@ def main() -> None:
         if "stereo" in name:
             wave_name = f"{name}.wav"
             publish(ROOT / wave_name, wave(bit_depth, frames, pcm))
-        identity = "sha256:" + hashlib.sha256(pcm).hexdigest()
+        identity = "blake3:" + blake3_256(pcm).hex()
         rows.append(
             "\t".join(
                 (

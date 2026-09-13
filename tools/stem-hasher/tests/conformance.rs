@@ -15,6 +15,18 @@ const FIXTURES: &str = concat!(
 );
 const BINARY: &str = env!("CARGO_BIN_EXE_stem-hasher");
 
+#[test]
+fn blake3_official_empty_and_abc_vectors_match() {
+    assert_eq!(
+        blake3::hash(b"").to_hex().as_str(),
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
+    assert_eq!(
+        blake3::hash(b"abc").to_hex().as_str(),
+        "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+    );
+}
+
 struct Vector<'a> {
     name: &'a str,
     bit_depth: &'a str,

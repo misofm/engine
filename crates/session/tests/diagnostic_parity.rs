@@ -298,7 +298,7 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             "source-content-short",
             SourceContentIdentityFormat,
             "$.sources[0].content",
-            |s| s.sources[0].content = "sha256:abc".to_owned()
+            |s| s.sources[0].content = "blake3:abc".to_owned()
         ),
         case!(
             "source-content-uppercase",

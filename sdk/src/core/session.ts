@@ -98,7 +98,7 @@ export interface SessionOptions {
 }
 
 const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
-const CONTENT_IDENTITY = /^sha256:[0-9a-f]{64}$/;
+const CONTENT_IDENTITY = /^blake3:[0-9a-f]{64}$/;
 const LAUNCH_RATES: readonly number[] = [44_100, 48_000, 88_200, 96_000];
 const U64_MAX = 18_446_744_073_709_551_615n;
 const SEND_TAPS: ReadonlySet<string> = new Set([
@@ -542,7 +542,7 @@ export class SessionBuilder {
     }
     if (u64(spec.frames, `${path}.frames`) === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
     if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
-      fail(`${path}.content`, "source content must match sha256:[0-9a-f]{64}");
+      fail(`${path}.content`, "source content must match blake3:[0-9a-f]{64}");
     }
     return this.#next({
       sources: [...this.#state.sources, freeze({ id, spec: { ...spec } })],
