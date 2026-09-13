@@ -89,3 +89,5 @@ hand-authored. Keep dist, tarballs and caches outside commits.
    already exist. Synchronize issue evidence/closure and give adapter #95 the
    exact published version/source/archive identities; app #210 waits for its
    matching adapter release too.
+
+Implementation checkpoint: Luna max verified registry versions/latest still end at0.2.4 and selected unused0.2.5 (/tmp/issue794-registry-versions.log, /tmp/issue794-registry-tags.log). Only package version, both lock versions, and existing workflow version/accepted-Wasm guards changed; dependencies, product code and release security checks are unchanged. JSON/YAML checks and package/generated/build/enginectl/tarball smoke pass against accepted /tmp/issue793-candidate1-artifact (/tmp/issue794-package-check.log). Publication remains pending required CI, one combined main merge, and existing qualify/publish/verify workflow.
