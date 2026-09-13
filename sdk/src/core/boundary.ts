@@ -11,6 +11,19 @@ import {
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
+import {
+  decodeObservationRows,
+  enrichObservationMap,
+  resolveObservationAddressesWithTracks,
+  validateObservationSelections,
+} from "./observation.ts";
+import type {
+  ObservationMap,
+  ObservationReadResult,
+  ObservationSelection,
+  RawObservationBinding,
+  RawObservationRow,
+} from "./observation.ts";
 
 /**
  * The wasm boundary: one instance, one staging sequence, one live session.
@@ -93,6 +106,20 @@ export interface SessionMap {
   readonly tracks: readonly string[];
   readonly sources: readonly SourceShape[];
   readonly metersAttached: boolean;
+}
+
+interface ObservationLayoutField {
+  readonly name: string;
+  readonly offset: number;
+  readonly type: string;
+}
+
+function observationField(structure: "observationSelection" | "observationResult", name: string): ObservationLayoutField {
+  const field = ABI_LAYOUT.structures[structure].fields.find((candidate) => candidate.name === name);
+  if (field === undefined) {
+    throw new MisoUsageError(`the generated ABI layout has no ${structure}.${name}`);
+  }
+  return field;
 }
 
 /** A direct snapshot of the frozen status structure. */
@@ -336,6 +363,192 @@ export class WasmBoundary {
       sources: shape.sources,
       metersAttached: this.#metersAttached,
     });
+  }
+
+  /** Read the current prepared owner's stable resident-observation bindings. */
+  observationMap(): ObservationMap {
+    const handle = this.#live();
+    const count = Number(this.#exports.miso_engine_web_v1_observation_count(handle));
+    const maximum = ABI_LAYOUT.constants.maximumCommandRecords;
+    if (!Number.isSafeInteger(count) || count < 0 || count > maximum) {
+      throw new MisoEngineError("the engine returned an invalid observation binding count", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.observation.count", path: "$" }],
+      });
+    }
+    const idPointer = Number(this.#exports.miso_engine_web_v1_observation_id_ptr());
+    const idCapacity = Number(this.#exports.miso_engine_web_v1_observation_id_capacity());
+    if (idPointer === 0 || !Number.isSafeInteger(idCapacity) || idCapacity <= 0) {
+      throw new MisoEngineError("the engine returned invalid observation ID staging", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.observation.id_staging", path: "$" }],
+      });
+    }
+    const tracks = this.shape().tracks;
+    const raw: RawObservationBinding[] = [];
+    const readId = (length: number, path: string): string => {
+      if (!Number.isSafeInteger(length) || length <= 0 || length > idCapacity) {
+        throw new MisoEngineError("the engine returned an invalid observation ID length", {
+          phase: "output",
+          code: "abiMismatch",
+          result: constantValue("resultCodes", "abiMismatch"),
+          diagnostics: [{ code: "sdk.observation.id", path }],
+        });
+      }
+      return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, idPointer, length));
+    };
+    for (let index = 0; index < count; index += 1) {
+      const effectSlotId = readId(
+        Number(this.#exports.miso_engine_web_v1_observation_effect_slot_id(handle, index)),
+        `${index}.effectSlotId`,
+      );
+      const nativeEffectId = readId(
+        Number(this.#exports.miso_engine_web_v1_observation_native_effect_id(handle, index)),
+        `${index}.nativeEffectId`,
+      );
+      const tapCount = Number(this.#exports.miso_engine_web_v1_observation_tap_count(handle, index));
+      if (!Number.isSafeInteger(tapCount) || tapCount <= 0 || tapCount > 32) {
+        throw new MisoEngineError("the engine returned an invalid observation tap count", {
+          phase: "output",
+          code: "abiMismatch",
+          result: constantValue("resultCodes", "abiMismatch"),
+          diagnostics: [{ code: "sdk.observation.taps", path: String(index) }],
+        });
+      }
+      const tapIds: number[] = [];
+      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+        const tapId = Number(this.#exports.miso_engine_web_v1_observation_tap_id(
+          handle,
+          index,
+          tapIndex,
+        ));
+        if (!Number.isSafeInteger(tapId) || tapId <= 0) {
+          throw new MisoEngineError("the engine returned an invalid observation tap ID", {
+            phase: "output",
+            code: "abiMismatch",
+            result: constantValue("resultCodes", "abiMismatch"),
+            diagnostics: [{ code: "sdk.observation.tap", path: `${index}/${tapIndex}` }],
+          });
+        }
+        tapIds.push(tapId);
+      }
+      raw.push({
+        trackIndex: Number(this.#exports.miso_engine_web_v1_observation_track_index(handle, index)),
+        rack: Number(this.#exports.miso_engine_web_v1_observation_rack(handle, index)),
+        effectIndex: Number(this.#exports.miso_engine_web_v1_observation_effect_index(handle, index)),
+        effectSlotId,
+        nativeEffectId,
+        tapIds,
+      });
+    }
+    return enrichObservationMap(tracks, raw);
+  }
+
+  /** Read one bounded non-consuming batch from the current prepared owner. */
+  readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
+    validateObservationSelections(selections);
+    const handle = this.#live();
+    const map = this.observationMap();
+    const tracks = this.shape().tracks;
+    const addresses = resolveObservationAddressesWithTracks(map, tracks, selections);
+    const selectionPointer = Number(this.#exports.miso_engine_web_v1_observation_selection_ptr());
+    const selectionCapacity = Number(this.#exports.miso_engine_web_v1_observation_selection_capacity());
+    const selectionBytes = Number(this.#exports.miso_engine_web_v1_observation_selection_bytes());
+    if (selectionPointer === 0 || selectionBytes !== structBytes("observationSelection")
+        || selectionCapacity < selections.length) {
+      throw new MisoEngineError("the engine returned insufficient observation selection staging", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.observation.selection_staging", path: "$" }],
+      });
+    }
+    const memory = new DataView(
+      this.#exports.memory.buffer,
+      selectionPointer,
+      selectionCapacity * selectionBytes,
+    );
+    const writeU32 = (field: string, value: number, index: number): void => {
+      memory.setUint32(
+        index * selectionBytes + observationField("observationSelection", field).offset,
+        value,
+        true,
+      );
+    };
+    addresses.forEach((address, index) => {
+      writeU32("structSize", selectionBytes, index);
+      writeU32("abiVersion", ABI_LAYOUT.abiVersion, index);
+      writeU32("trackIndex", address.trackIndex, index);
+      writeU32("rack", address.rack, index);
+      writeU32("effectIndex", address.effectIndex, index);
+      writeU32("tapId", address.tapId, index);
+      writeU32("channels", address.channels, index);
+      writeU32("reserved", 0, index);
+    });
+    const result = Number(this.#exports.miso_engine_web_v1_observation_read(
+      handle,
+      selections.length,
+    ));
+    if (result !== constantValue("resultCodes", "ok")) {
+      throw new MisoEngineError("the engine refused the selected observation read", {
+        phase: result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    const resultPointer = Number(this.#exports.miso_engine_web_v1_observation_result_ptr());
+    const resultBytes = Number(this.#exports.miso_engine_web_v1_observation_result_bytes());
+    const rowBytes = structBytes("observationResult");
+    if (resultPointer === 0 || resultBytes !== selections.length * rowBytes) {
+      throw new MisoEngineError("the engine returned invalid observation result staging", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.observation.result_staging", path: "$" }],
+      });
+    }
+    const output = new DataView(this.#exports.memory.buffer, resultPointer, resultBytes);
+    const readU32 = (field: string, index: number): number => output.getUint32(
+      index * rowBytes + observationField("observationResult", field).offset,
+      true,
+    );
+    const readU64 = (field: string, index: number): bigint => output.getBigUint64(
+      index * rowBytes + observationField("observationResult", field).offset,
+      true,
+    );
+    const readF32 = (field: string, index: number): number => output.getFloat32(
+      index * rowBytes + observationField("observationResult", field).offset,
+      true,
+    );
+    const rows: RawObservationRow[] = selections.map((_selection, index) => ({
+      trackIndex: readU32("trackIndex", index),
+      rack: readU32("rack", index),
+      effectIndex: readU32("effectIndex", index),
+      tapId: readU32("tapId", index),
+      channels: readU32("channels", index),
+      status: readU32("status", index),
+      sampleRateHz: readU32("sampleRateHz", index),
+      firstSample: readU64("firstSample", index),
+      endSample: readU64("endSample", index),
+      sequence: readU64("sequence", index),
+      blocks: readU32("blocks", index),
+      leftPresent: readU32("leftPresent", index),
+      rightPresent: readU32("rightPresent", index),
+      left: readF32("left", index),
+      right: readF32("right", index),
+    }));
+    return decodeObservationRows(
+      map,
+      tracks,
+      selections,
+      addresses,
+      rows,
+      this.#status().u32("sampleRateHz"),
+    );
   }
 
   /**

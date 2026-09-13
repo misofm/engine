@@ -1,7 +1,7 @@
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { SessionShape } from "../core/boundary.ts";
-import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
 import type { SourceSpec } from "../core/types.ts";
 import {
@@ -18,6 +18,19 @@ import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserConsole } from "./console.ts";
+import {
+  decodeObservationRows,
+  enrichObservationMap,
+  resolveObservationAddressesWithTracks,
+  validateObservationSelections,
+} from "../core/observation.ts";
+import type {
+  ObservationMap,
+  ObservationReadResult,
+  ObservationSelection,
+  RawObservationBinding,
+  RawObservationRow,
+} from "../core/observation.ts";
 
 /**
  * The browser entry (issue #243 S3, consuming #240 S5's sealed choreography).
@@ -112,6 +125,10 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readonly shape: SessionShape;
   readonly context: Context;
   readonly host: MisoAudioWorkletHost;
+  /** Read the current prepared owner's stable resident-observation bindings. */
+  observationMap(): Promise<ObservationMap>;
+  /** Read one bounded non-consuming batch from the current prepared owner. */
+  readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
   /** Bind the semantic console once; rejects with MisoUsageError when no console was attached. */
   console(): Promise<EngineConsole>;
   /** Dispose the worklet host, then close its context. Safe to call more than once. */
@@ -234,10 +251,46 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     });
     let semanticConsole: Promise<EngineConsole> | undefined;
     let closePromise: Promise<void> | undefined;
+    const observationMap = async (): Promise<ObservationMap> => {
+      const reply = await host.observationMap();
+      if (reply.result !== constantValue("resultCodes", "ok")) {
+        throw new MisoEngineError("the browser host refused the observation map", {
+          phase: "output",
+          code: resultName(reply.result, "call"),
+          result: reply.result,
+        });
+      }
+      return enrichObservationMap(shape.tracks, reply.bindings as readonly RawObservationBinding[]);
+    };
+    const readObservations = async (
+      selections: readonly ObservationSelection[],
+    ): Promise<readonly ObservationReadResult[]> => {
+      validateObservationSelections(selections);
+      const map = await observationMap();
+      const addresses = resolveObservationAddressesWithTracks(map, shape.tracks, selections);
+      const reply = await host.readObservations({ selections: [...addresses] });
+      if (reply.result !== constantValue("resultCodes", "ok")) {
+        throw new MisoEngineError("the browser host refused the selected observation read", {
+          phase: reply.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+          code: resultName(reply.result, "call"),
+          result: reply.result,
+        });
+      }
+      return decodeObservationRows(
+        map,
+        shape.tracks,
+        selections,
+        addresses,
+        reply.rows as readonly RawObservationRow[],
+        shape.sampleRateHz,
+      );
+    };
     return Object.freeze({
       shape,
       context,
       host,
+      observationMap,
+      readObservations,
       console: () => {
         semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
           ? Promise.reject(new MisoUsageError(

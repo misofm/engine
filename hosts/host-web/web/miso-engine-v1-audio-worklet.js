@@ -20,6 +20,19 @@ const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
 const COMMAND_REPORT_BYTES = 48;
+const OBSERVATION_SELECTION_BYTES = 32;
+const OBSERVATION_RESULT_BYTES = 96;
+const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
+const OBSERVATION_MAP_FIELDS = [
+  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
+];
+const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
+const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
+const OBSERVATION_STATUSES = new Set([1, 2, 3]);
+const OBSERVATION_ROW_FIELDS = [
+  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
+  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
+];
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
 const TELEMETRY_WINDOW_BLOCKS = 128;
@@ -36,6 +49,15 @@ const SOURCE_FIELDS = [
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
+
+function validObservationAddress(address) {
+  return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
+    && u32(address.trackIndex)
+    && u32(address.rack) && address.rack <= 2
+    && u32(address.effectIndex)
+    && u32(address.tapId) && address.tapId > 0
+    && u32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
+}
 
 /// The render clock (issue #137 D3).
 ///
@@ -159,6 +181,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryBudgetMs = 0;
     this.telemetryPeakMs = 0;
     this.telemetryDeadlineMisses = 0;
+    this.observations = Object.freeze([]);
+    this.observationSelectionView = null;
     this.clock = renderClock();
     this.port.onmessage = (event) => this.receive(event.data);
     try {
@@ -339,6 +363,73 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
           || !u64(frames) || frames === 0n) return false;
       this.sources.push({ id, channels, frames });
     }
+
+    // Observation bindings and the fixed selection staging view are control-path state. They are
+    // read by request handlers only; the render callback never follows an observation pointer or
+    // allocates a reply row. The map is rebuilt at each boot so a reboot cannot retain an old
+    // numeric owner address behind a stable SDK selection.
+    const observationCount = this.exports.miso_engine_web_v1_observation_count(this.handle);
+    if (!u32(observationCount) || observationCount > MAXIMUM_OBSERVATION_READS) return false;
+    const observationIdPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
+    const observationIdCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
+    if (!u32(observationIdPointer) || observationIdPointer === 0
+        || !u32(observationIdCapacity) || observationIdCapacity === 0) return false;
+    const readObservationId = (length) => {
+      if (!u32(length) || length === 0 || length > observationIdCapacity) return null;
+      const bytes = new Uint8Array(this.memoryBuffer, observationIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return null;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      return id;
+    };
+    const bindings = [];
+    for (let index = 0; index < observationCount; index += 1) {
+      const trackIndex = this.exports.miso_engine_web_v1_observation_track_index(this.handle, index);
+      const rack = this.exports.miso_engine_web_v1_observation_rack(this.handle, index);
+      const effectIndex = this.exports.miso_engine_web_v1_observation_effect_index(this.handle, index);
+      const effectSlotId = readObservationId(
+        this.exports.miso_engine_web_v1_observation_effect_slot_id(this.handle, index),
+      );
+      const nativeEffectId = readObservationId(
+        this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
+      );
+      const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
+      if (!u32(trackIndex) || !u32(rack) || rack > 2 || !u32(effectIndex)
+          || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
+          || tapCount === 0 || tapCount > 32) return false;
+      const tapIds = [];
+      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+        const tapId = this.exports.miso_engine_web_v1_observation_tap_id(
+          this.handle, index, tapIndex,
+        );
+        if (!u32(tapId) || tapId === 0) return false;
+        tapIds.push(tapId);
+      }
+      bindings.push(Object.freeze({
+        trackIndex,
+        rack,
+        effectIndex,
+        effectSlotId,
+        nativeEffectId,
+        tapIds: Object.freeze(tapIds),
+      }));
+    }
+    this.observations = Object.freeze(bindings);
+    const observationSelectionPointer = this.exports.miso_engine_web_v1_observation_selection_ptr();
+    const observationSelectionBytes = this.exports.miso_engine_web_v1_observation_selection_bytes();
+    const observationSelectionCapacity = this.exports.miso_engine_web_v1_observation_selection_capacity();
+    if (!u32(observationSelectionPointer) || observationSelectionPointer === 0
+        || observationSelectionBytes !== OBSERVATION_SELECTION_BYTES
+        || !u32(observationSelectionCapacity)
+        || observationSelectionCapacity < 1
+        || observationSelectionCapacity > MAXIMUM_OBSERVATION_READS) return false;
+    this.observationSelectionView = new DataView(
+      this.memoryBuffer,
+      observationSelectionPointer,
+      observationSelectionCapacity * observationSelectionBytes,
+    );
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
@@ -583,6 +674,17 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         })),
         metersAttached: this.metersAttached === true,
       });
+    } else if (message?.tag === "miso.observationmap.v1"
+        && exactFields(message, ["tag", "requestId"])) {
+      this.port.postMessage({
+        tag: "miso.observationmap.v1",
+        requestId: message.requestId,
+        result: RESULT_OK,
+        bindings: this.observations,
+      });
+    } else if (message?.tag === "miso.observation.v1"
+        && exactFields(message, ["tag", "requestId", "selections"])) {
+      this.receiveObservationRead(message);
     } else if (message?.tag === "miso.status.v1"
         && exactFields(message, ["tag", "requestId"])) {
       this.port.postMessage({
@@ -595,6 +697,102 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
     }
+  }
+
+  receiveObservationRead(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || !Array.isArray(message.selections)
+        || message.selections.length === 0
+        || message.selections.length > MAXIMUM_OBSERVATION_READS
+        || !message.selections.every(validObservationAddress)
+        || this.observationSelectionView === null) {
+      if (this.observationSelectionView === null && Array.isArray(message.selections)
+          && message.selections.length > 0 && message.selections.length <= MAXIMUM_OBSERVATION_READS
+          && message.selections.every(validObservationAddress)) {
+        this.port.postMessage({
+          tag: "miso.observation.v1",
+          requestId: message.requestId,
+          result: RESULT_UNSUPPORTED,
+          rows: [],
+        });
+      } else {
+        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      }
+      return;
+    }
+    const view = this.observationSelectionView;
+    const count = message.selections.length;
+    for (let index = 0; index < count; index += 1) {
+      const selection = message.selections[index];
+      const offset = index * OBSERVATION_SELECTION_BYTES;
+      view.setUint32(offset, OBSERVATION_SELECTION_BYTES, true);
+      view.setUint32(offset + 4, ABI_VERSION, true);
+      view.setUint32(offset + 8, selection.trackIndex, true);
+      view.setUint32(offset + 12, selection.rack, true);
+      view.setUint32(offset + 16, selection.effectIndex, true);
+      view.setUint32(offset + 20, selection.tapId, true);
+      view.setUint32(offset + 24, selection.channels, true);
+      view.setUint32(offset + 28, 0, true);
+    }
+    const result = this.exports.miso_engine_web_v1_observation_read(this.handle, count);
+    if (result !== RESULT_OK) {
+      this.port.postMessage({
+        tag: "miso.observation.v1",
+        requestId: message.requestId,
+        result,
+        rows: [],
+      });
+      return;
+    }
+    const resultPointer = this.exports.miso_engine_web_v1_observation_result_ptr();
+    const resultBytes = this.exports.miso_engine_web_v1_observation_result_bytes();
+    if (!u32(resultPointer) || resultPointer === 0
+        || resultBytes !== count * OBSERVATION_RESULT_BYTES) {
+      this.sticky(RESULT_INTERNAL, message.requestId);
+      return;
+    }
+    const output = new DataView(this.memoryBuffer, resultPointer, resultBytes);
+    const rows = [];
+    for (let index = 0; index < count; index += 1) {
+      const offset = index * OBSERVATION_RESULT_BYTES;
+      if (output.getUint32(offset, true) !== OBSERVATION_RESULT_BYTES
+          || output.getUint32(offset + 4, true) !== ABI_VERSION
+          || output.getUint32(offset + 36, true) !== 0
+          || output.getUint32(offset + 84, true) !== 0
+          || output.getUint32(offset + 88, true) !== 0
+          || output.getUint32(offset + 92, true) !== 0) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      const row = Object.freeze({
+        trackIndex: output.getUint32(offset + 12, true),
+        rack: output.getUint32(offset + 16, true),
+        effectIndex: output.getUint32(offset + 20, true),
+        tapId: output.getUint32(offset + 24, true),
+        channels: output.getUint32(offset + 28, true),
+        status: output.getUint32(offset + 8, true),
+        sampleRateHz: output.getUint32(offset + 32, true),
+        firstSample: output.getBigUint64(offset + 40, true),
+        endSample: output.getBigUint64(offset + 48, true),
+        sequence: output.getBigUint64(offset + 56, true),
+        blocks: output.getUint32(offset + 64, true),
+        leftPresent: output.getUint32(offset + 68, true),
+        rightPresent: output.getUint32(offset + 72, true),
+        left: output.getFloat32(offset + 76, true),
+        right: output.getFloat32(offset + 80, true),
+      });
+      if (!validObservationRow(row)) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      rows.push(row);
+    }
+    this.port.postMessage({
+      tag: "miso.observation.v1",
+      requestId: message.requestId,
+      result: RESULT_OK,
+      rows,
+    });
   }
 
   receiveSource(message) {
