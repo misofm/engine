@@ -80,6 +80,12 @@ export interface SpectrumStreamRead {
   readonly result?: SpectrumResult;
 }
 
+/** @internal Encoded stream result returned while its reusable transfer buffer is still owned. */
+export interface SpectrumEncodedStreamRead {
+  readonly metadata: SpectrumStreamMetadata;
+  readonly resultByteLength: number;
+}
+
 /** Native profile acknowledgement returned when a managed spectrum stream starts. */
 export interface SpectrumStreamStart {
   readonly ok: boolean;
@@ -247,6 +253,7 @@ function contract() {
     request: structure("spectrumRequest"),
     window: structure("spectrumWindow"),
     result: structure("spectrumResult"),
+    streamMetadata: structure("spectrumStreamMetadata"),
     abiVersion: ABI_LAYOUT.abiVersion,
     maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
     maximumIdBytes: ABI_LAYOUT.constants.maximumSpectrumIdBytes,
@@ -334,6 +341,53 @@ export function stageSpectrumRequest(
   requestView.setBigUint64(requestPtr + requestOffset("maximumCaptureBytes"), BigInt(maximum), true);
 }
 
+function writeStreamMetadata(
+  exports: SpectrumExports,
+  query: SpectrumQuery,
+  metadata: SpectrumStreamMetadata,
+  shape: ReturnType<typeof contract>,
+): void {
+  if (metadata.target !== undefined && targetValue(metadata.target) !== targetValue(query.target)) {
+    throw malformed("the imported spectrum stream target differs from the prepared target");
+  }
+  const channels = channelValue(metadata.channels ?? query.channels);
+  if (channels !== channelValue(query.channels)) {
+    throw malformed("the imported spectrum stream channels differ from the prepared channels");
+  }
+  const statusRow = STREAM_STATUSES.find((candidate) => candidate.name === metadata.status);
+  if (statusRow === undefined) throw malformed("the imported spectrum stream status is unknown");
+  const status = statusRow.value;
+  const pointer = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_stream_metadata_ptr")());
+  const bytesLength = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_stream_metadata_bytes")());
+  if (pointer <= 0 || bytesLength !== shape.streamMetadata.bytes) {
+    throw malformed("invalid spectrum stream metadata staging");
+  }
+  const bytes = bytesView(exports);
+  range(bytes, pointer, shape.streamMetadata.bytes, "stream metadata");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const at = (name: string) => field(shape.streamMetadata, name).offset;
+  for (let index = 0; index < shape.streamMetadata.bytes; index += 1) bytes[pointer + index] = 0;
+  view.setUint32(pointer + at("structSize"), shape.streamMetadata.bytes, true);
+  view.setUint32(pointer + at("abiVersion"), shape.abiVersion, true);
+  view.setUint32(pointer + at("result"), metadata.result, true);
+  view.setUint32(pointer + at("status"), status, true);
+  view.setUint32(pointer + at("target"), targetValue(query.target), true);
+  view.setUint32(pointer + at("channels"), channels, true);
+  view.setUint32(pointer + at("sampleRateHz"), metadata.sampleRateHz, true);
+  view.setUint32(pointer + at("quantumFrames"), metadata.quantumFrames, true);
+  view.setUint32(pointer + at("hopFrames"), metadata.hopFrames, true);
+  view.setUint32(pointer + at("sourceUnderrun"), metadata.sourceUnderrun ? 1 : 0, true);
+  view.setBigUint64(pointer + at("captureEpoch"), metadata.captureEpoch, true);
+  view.setBigUint64(pointer + at("sequence"), metadata.sequence, true);
+  view.setBigUint64(pointer + at("droppedCaptures"), metadata.droppedCaptures, true);
+  view.setBigUint64(pointer + at("windows"), metadata.windows, true);
+  view.setBigUint64(pointer + at("capturedSample"), metadata.capturedSample, true);
+  view.setBigUint64(pointer + at("endSample"), metadata.endSample, true);
+  view.setBigUint64(pointer + at("analysisEpoch"), metadata.analysisEpoch, true);
+  view.setBigUint64(pointer + at("historyStartSample"), metadata.historyStartSample, true);
+  view.setFloat64(pointer + at("smoothingMs"), metadata.smoothingMs, true);
+}
+
 /** Internal analyzer and raw capture decoder shared by headless and browser Workers. */
 export class SpectrumModule {
   readonly #exports: SpectrumExports;
@@ -346,6 +400,8 @@ export class SpectrumModule {
   readonly #resultBytes: SpectrumExport;
   readonly #close: SpectrumExport;
   readonly #streamAnalysis: SpectrumExport;
+  readonly #streamAnalysisConfigure: SpectrumExport;
+  readonly #streamReset: SpectrumExport;
   readonly #streamMetadataPtr: SpectrumExport;
   readonly #streamMetadataBytes: SpectrumExport;
   readonly #contract = contract();
@@ -364,6 +420,8 @@ export class SpectrumModule {
     this.#resultBytes = exportFunction(table, "miso_engine_web_v1_spectrum_result_bytes");
     this.#close = exportFunction(table, "miso_engine_web_v1_spectrum_close");
     this.#streamAnalysis = exportFunction(table, "miso_engine_web_v1_spectrum_stream_analysis");
+    this.#streamAnalysisConfigure = exportFunction(table, "miso_engine_web_v1_spectrum_stream_analysis_configure");
+    this.#streamReset = exportFunction(table, "miso_engine_web_v1_spectrum_stream_reset");
     this.#streamMetadataPtr = exportFunction(table, "miso_engine_web_v1_spectrum_stream_metadata_ptr");
     this.#streamMetadataBytes = exportFunction(table, "miso_engine_web_v1_spectrum_stream_metadata_bytes");
   }
@@ -386,6 +444,12 @@ export class SpectrumModule {
     }
     if (snapshot.byteLength > maximumCaptureBytes) {
       throw refusal("the spectrum snapshot exceeded its bound", RESULT_REFUSED_BUDGET);
+    }
+    // A Worker may have analyzed a managed stream before this one-shot request. The native
+    // stream reset is a no-op for an inactive analyzer and clears the stream mode when needed.
+    const reset = Number(this.#streamReset());
+    if (reset !== RESULT_OK && reset !== RESULT_WRONG_STATE) {
+      throw refusal("the spectrum stream analyzer could not reset for one-shot analysis", reset);
     }
     // The analysis Worker uses the same request staging as the headless path. This also wakes
     // lazy bridge buffers in a host that deliberately retained no capture storage at boot.
@@ -469,6 +533,47 @@ export class SpectrumModule {
     return Object.freeze({ metadata, result: this.#decodeCurrent(query, result) });
   }
 
+  /** Analyze one stream window in a caller-owned reusable transfer buffer. */
+  analyzeStreamBuffer(
+    query: SpectrumQuery,
+    buffer: ArrayBuffer,
+    byteLength: number,
+    importedMetadata: SpectrumStreamMetadata,
+  ): SpectrumEncodedStreamRead {
+    if (this.#closed) throw new MisoUsageError("the spectrum module is closed");
+    if (!(buffer instanceof ArrayBuffer) || !Number.isSafeInteger(byteLength)
+        || byteLength < this.#contract.window.bytes || byteLength > buffer.byteLength
+        || byteLength > this.#contract.maximumCaptureBytes) {
+      throw malformed("the reusable spectrum capture buffer is malformed");
+    }
+    stageSpectrumRequest(this.#exports, query);
+    const capturePointer = Number(this.#capturePtr());
+    const captureCapacity = Number(this.#captureCapacity());
+    if (capturePointer <= 0 || captureCapacity !== this.#contract.maximumCaptureBytes) {
+      throw malformed("invalid spectrum capture staging");
+    }
+    const bytes = bytesView(this.#exports);
+    range(bytes, capturePointer, byteLength, "capture");
+    bytes.set(new Uint8Array(buffer, 0, byteLength), capturePointer);
+    const set = Number(this.#captureSetBytes(byteLength));
+    if (set !== RESULT_OK) throw refusal("the spectrum capture was refused", set);
+    writeStreamMetadata(this.#exports, query, importedMetadata, this.#contract);
+    const configured = Number(this.#streamAnalysisConfigure());
+    if (configured !== RESULT_OK) throw refusal("the spectrum stream metadata was refused", configured);
+    const result = Number(this.#streamAnalysis());
+    const metadata = this.streamMetadata(query);
+    if (result !== RESULT_OK) throw refusal("the spectrum stream analyzer refused the capture", result);
+    const pointer = Number(this.#resultPtr());
+    const length = Number(this.#resultBytes());
+    if (pointer <= 0 || !Number.isSafeInteger(length)
+        || length < this.#contract.result.bytes || length > buffer.byteLength) {
+      throw malformed("invalid reusable spectrum result staging");
+    }
+    range(bytes, pointer, length, "result");
+    new Uint8Array(buffer, 0, length).set(new Uint8Array(bytes.buffer, pointer, length));
+    return Object.freeze({ metadata, resultByteLength: length });
+  }
+
   #analyzeCurrent(query: SpectrumQuery): SpectrumResult {
     return this.#decodeCurrent(query, Number(this.#analysis()));
   }
@@ -486,50 +591,62 @@ export class SpectrumModule {
         || length > this.#contract.maximumCaptureBytes) throw malformed("invalid spectrum result staging");
     range(bytes, pointer, length, "result");
     const payload = bytes.slice(pointer, pointer + length);
-    const layout = this.#contract.result;
-    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    const at = (name: string) => field(layout, name).offset;
-    const u32 = (name: string) => view.getUint32(at(name), true);
-    const u64 = (name: string) => view.getBigUint64(at(name), true);
-    if (u32("structSize") !== layout.bytes || u32("abiVersion") !== this.#contract.abiVersion) {
-      throw malformed("the engine returned a malformed spectrum result header");
-    }
-    if (result !== RESULT_OK || u32("result") !== RESULT_OK) throw refusal("the spectrum analyzer refused the capture", u32("result"));
-    const target = targetValue(query.target);
-    const channels = u32("channels");
-    if (u32("target") !== target || channels !== channelValue(query.channels)
-        || u32("sampleRateHz") <= 0 || u32("windowFrames") !== this.#contract.windowFrames
-        || u32("binCount") !== this.#contract.binCount || u32("sourceUnderrun") > 1
-        || !Number.isFinite(view.getFloat32(at("floorDb"), true))
-        || u64("endSample") !== u64("capturedSample") + BigInt(this.#contract.windowFrames)
-        || u64("resultBytes") !== BigInt(payload.byteLength)
-        || u32("reserved0") !== 0) {
-      throw malformed("the engine returned a malformed spectrum result");
-    }
-    const count = this.#contract.binCount;
-    const frequenciesHz = readF32Array(payload, u32("frequenciesOffset"), count, "frequency axis");
-    const left = channels === value(CHANNELS, "left") || channels === value(CHANNELS, "both")
-      ? readF32Array(payload, u32("leftOffset"), count, "left spectrum") : undefined;
-    const right = channels === value(CHANNELS, "right") || channels === value(CHANNELS, "both")
-      ? readF32Array(payload, u32("rightOffset"), count, "right spectrum") : undefined;
-    const targetCopy = query.target.kind === "output"
-      ? Object.freeze({ kind: query.target.kind, outputId: query.target.outputId })
-      : Object.freeze({ kind: query.target.kind, trackId: query.target.trackId });
-    return Object.freeze({
-      target: targetCopy,
-      channels: channelName(channels),
-      sampleRateHz: u32("sampleRateHz"),
-      windowFrames: u32("windowFrames"),
-      binCount: u32("binCount"),
-      floorDb: view.getFloat32(at("floorDb"), true),
-      frequenciesHz,
-      ...(left === undefined ? {} : { leftDb: left }),
-      ...(right === undefined ? {} : { rightDb: right }),
-      capturedSample: u64("capturedSample"),
-      endSample: u64("endSample"),
-      snapshotToken: u64("snapshotToken"),
-      graphSourceUnderrun: u32("sourceUnderrun") !== 0,
-      resultBytes: u64("resultBytes"),
-    });
+    return decodeSpectrumResult(query, result, payload);
   }
+}
+
+/** @internal Decode an owned encoded result after the stream buffer returns to the SDK. */
+export function decodeSpectrumResult(
+  query: SpectrumQuery,
+  result: number,
+  payload: Uint8Array,
+): SpectrumResult {
+  const shape = contract();
+  const layout = shape.result;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const at = (name: string) => field(layout, name).offset;
+  const u32 = (name: string) => view.getUint32(at(name), true);
+  const u64 = (name: string) => view.getBigUint64(at(name), true);
+  if (u32("structSize") !== layout.bytes || u32("abiVersion") !== shape.abiVersion) {
+    throw malformed("the engine returned a malformed spectrum result header");
+  }
+  if (result !== RESULT_OK || u32("result") !== RESULT_OK) {
+    throw refusal("the spectrum analyzer refused the capture", u32("result"));
+  }
+  const target = targetValue(query.target);
+  const channels = u32("channels");
+  if (u32("target") !== target || channels !== channelValue(query.channels)
+      || u32("sampleRateHz") <= 0 || u32("windowFrames") !== shape.windowFrames
+      || u32("binCount") !== shape.binCount || u32("sourceUnderrun") > 1
+      || !Number.isFinite(view.getFloat32(at("floorDb"), true))
+      || u64("endSample") !== u64("capturedSample") + BigInt(shape.windowFrames)
+      || u64("resultBytes") !== BigInt(payload.byteLength)
+      || u32("reserved0") !== 0) {
+    throw malformed("the engine returned a malformed spectrum result");
+  }
+  const count = shape.binCount;
+  const frequenciesHz = readF32Array(payload, u32("frequenciesOffset"), count, "frequency axis");
+  const left = channels === value(CHANNELS, "left") || channels === value(CHANNELS, "both")
+    ? readF32Array(payload, u32("leftOffset"), count, "left spectrum") : undefined;
+  const right = channels === value(CHANNELS, "right") || channels === value(CHANNELS, "both")
+    ? readF32Array(payload, u32("rightOffset"), count, "right spectrum") : undefined;
+  const targetCopy = query.target.kind === "output"
+    ? Object.freeze({ kind: query.target.kind, outputId: query.target.outputId })
+    : Object.freeze({ kind: query.target.kind, trackId: query.target.trackId });
+  return Object.freeze({
+    target: targetCopy,
+    channels: channelName(channels),
+    sampleRateHz: u32("sampleRateHz"),
+    windowFrames: u32("windowFrames"),
+    binCount: u32("binCount"),
+    floorDb: view.getFloat32(at("floorDb"), true),
+    frequenciesHz,
+    ...(left === undefined ? {} : { leftDb: left }),
+    ...(right === undefined ? {} : { rightDb: right }),
+    capturedSample: u64("capturedSample"),
+    endSample: u64("endSample"),
+    snapshotToken: u64("snapshotToken"),
+    graphSourceUnderrun: u32("sourceUnderrun") !== 0,
+    resultBytes: u64("resultBytes"),
+  });
 }

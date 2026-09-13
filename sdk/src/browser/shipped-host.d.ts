@@ -480,6 +480,47 @@ export interface MisoSpectrumReply {
   readonly snapshot: Uint8Array;
 }
 
+/** Raw generated metadata copied from one managed stream read. */
+export interface MisoSpectrumStreamMetadata {
+  readonly structSize: number;
+  readonly abiVersion: number;
+  readonly result: number;
+  readonly status: number;
+  readonly target: number;
+  readonly channels: number;
+  readonly sampleRateHz: number;
+  readonly quantumFrames: number;
+  readonly hopFrames: number;
+  readonly sourceUnderrun: number;
+  readonly captureEpoch: bigint;
+  readonly sequence: bigint;
+  readonly droppedCaptures: bigint;
+  readonly windows: bigint;
+  readonly capturedSample: bigint;
+  readonly endSample: bigint;
+  readonly analysisEpoch: bigint;
+  readonly historyStartSample: bigint;
+  readonly smoothingMs: number;
+}
+
+export interface MisoSpectrumStreamStartReply {
+  readonly tag: "miso.spectrum.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly operation: "streamStart" | "streamStop";
+  readonly metadata: MisoSpectrumStreamMetadata;
+}
+
+export interface MisoSpectrumStreamReadReply {
+  readonly tag: "miso.spectrum.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly operation: "streamRead";
+  readonly byteLength: number;
+  readonly buffer: ArrayBuffer;
+  readonly metadata: MisoSpectrumStreamMetadata;
+}
+
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -755,6 +796,12 @@ export interface MisoAudioWorkletHost {
   readSpectrum(request: { readonly channels: MisoSpectrumChannels }): Promise<MisoSpectrumReply>;
   /// Cancel the prepared spectrum boundary and discard any pending window.
   cancelSpectrum(): Promise<MisoSpectrumReply>;
+  /// Start the managed continuous spectrum stream for the prepared boundary.
+  startSpectrumStream(smoothingMs?: number): Promise<MisoSpectrumStreamStartReply>;
+  /// Read one scheduled stream window into a caller-owned reusable buffer.
+  readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
+  /// Stop the managed continuous spectrum stream.
+  stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
   /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,
