@@ -163,3 +163,9 @@ PR #765 owns delivery of both children. Required final-head CI and merge remain 
 ## Stage 2 accepted; integrated delivery pending
 
 #767 native input HPF/LPF response query passed Astra medium attempt 2 at `dc070bcda506896fe05b4dfefb931841b6d6caa3`. #768 changed-artifact qualification passed Astra medium attempt 1 at `b92e72160b34329a354244a3d1edfa6441fc149b`, including all existing source-consumer/SDK/resource and three-browser gates. New Wasm digest: `0e6008d94c4a3a235feed551401983321f1782d73906144e227483803769d941`. Luna max supplied implementation/qualification. Required PR/main CI and merge remain pending; neither child is claimed closed here. The next native response-provider/discovery precursor is briefed and retains session binding/composition/SDK/live/spectrum stages as required successors.
+
+## Stage 2 delivered; common native provider active
+
+#767/#768/#771 are delivered by PR #769, merged main `5d8fe1401983da9bd1c731522b9a201f74244261`, with required PR `34730464919` and post-main `34730813104` qualification successful. Native input HPF/LPF requested-configuration response queries now complement the delivered parametric-EQ queries. All three child issues close with synchronized evidence.
+
+#770 owns common native owner-response discovery/providers. Attempt 1 passed commands but failed adversarial review on metadata consistency, diagnostic spelling and adapter assertion coverage; bounded attempt 2 is active. Remaining session binding/composition/generated SDK/live/spectrum/transport/join stages remain required and open.
