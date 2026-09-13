@@ -469,6 +469,19 @@ export interface MisoSpectrumBootOptions {
   readonly maximumCaptureBytes: number;
 }
 
+/** Several exact graph boundaries prepared for one atomic managed spectrum owner. */
+export interface MisoSpectrumCollectionEntry {
+  readonly target: MisoSpectrumTarget;
+  readonly targetId: string;
+  readonly channels: MisoSpectrumChannels;
+}
+
+/** Caller-sized collection staging; the limit covers all retained entries. */
+export interface MisoSpectrumCollectionBootOptions {
+  readonly entries: readonly MisoSpectrumCollectionEntry[];
+  readonly maximumCaptureBytes: number;
+}
+
 export type MisoSpectrumOperation = "arm" | "read" | "cancel";
 
 /** Reply for one bounded spectrum arm/read/cancel request. */
@@ -509,6 +522,14 @@ export interface MisoSpectrumStreamStartReply {
   readonly result: number;
   readonly operation: "streamStart" | "streamStop";
   readonly metadata: MisoSpectrumStreamMetadata;
+}
+
+export interface MisoSpectrumSelectionReply {
+  readonly tag: "miso.spectrum.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly operation: "select" | "streamSelect";
+  readonly metadata?: MisoSpectrumStreamMetadata;
 }
 
 export interface MisoSpectrumStreamReadReply {
@@ -686,6 +707,7 @@ export interface MisoWebBootOptions {
   consoleMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;
+  spectrumCollection?: MisoSpectrumCollectionBootOptions | null;
 }
 
 export interface MisoWebResourceReport {
@@ -798,6 +820,19 @@ export interface MisoAudioWorkletHost {
   cancelSpectrum(): Promise<MisoSpectrumReply>;
   /// Start the continuously scheduled spectrum boundary.
   startSpectrumStream(smoothingMs?: number): Promise<MisoSpectrumStreamStartReply>;
+  /// Select one prepared collection entry before starting its managed stream.
+  selectSpectrum(request: {
+    readonly target: MisoSpectrumTarget;
+    readonly targetId: string;
+    readonly channels: MisoSpectrumChannels;
+  }): Promise<MisoSpectrumSelectionReply>;
+  /// Atomically update the active collection entry and smoothing profile.
+  selectSpectrumStream(request: {
+    readonly target: MisoSpectrumTarget;
+    readonly targetId: string;
+    readonly channels: MisoSpectrumChannels;
+    readonly smoothingMs: number;
+  }): Promise<MisoSpectrumSelectionReply>;
   /// Read one scheduled stream window into a caller-owned reusable buffer.
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.

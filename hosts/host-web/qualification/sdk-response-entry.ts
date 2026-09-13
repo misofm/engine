@@ -36,6 +36,22 @@ const SPECTRUM_QUERIES = [
   },
 ];
 
+const SPECTRUM_COLLECTION_ENTRIES = [
+  {
+    target: { kind: "trackPostMatrix" as const, trackId: "track-a" },
+    channels: "both" as const,
+  },
+  {
+    target: { kind: "trackPostMatrix" as const, trackId: "track-b" },
+    channels: "left" as const,
+  },
+];
+
+const SPECTRUM_COLLECTION = {
+  entries: SPECTRUM_COLLECTION_ENTRIES,
+  maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes * 2,
+};
+
 function observationSelection(effectSlotId: string, channels: "left" | "right" | "both" = "both") {
   return { trackId: "track", rack: "dynamic" as const, effectSlotId, tapId: 1, channels };
 }
@@ -290,6 +306,37 @@ function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array
   return new TextEncoder().encode(JSON.stringify(document));
 }
 
+/** Build the same known-signal fixture with two prepared, differently tuned track boundaries. */
+function spectrumCollectionDocument(raw: string, frames: number): Uint8Array {
+  const document = JSON.parse(new TextDecoder().decode(spectrumDocument(raw, frames, true)));
+  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "console-source");
+  const original = document.tracks?.find((candidate: { id?: string }) => candidate.id === "track");
+  const route = document.routes?.[0];
+  if (source === undefined || original === undefined || route === undefined) {
+    throw new Error("spectrum collection fixture is unavailable");
+  }
+  const trackA = structuredClone(original);
+  const trackB = structuredClone(original);
+  trackA.id = "track-a";
+  trackB.id = "track-b";
+  // The input is the same 750 Hz signal for both tracks; this trim makes a selected B
+  // window distinguishable without changing the capture boundary or adding a DSP fixture.
+  for (const lane of [trackB.builtins?.left, trackB.builtins?.right]) {
+    if (lane === undefined) throw new Error("spectrum collection track has no builtins");
+    lane.trim_db = -6;
+  }
+  document.tracks = [trackA, trackB];
+  document.routes = [
+    { ...structuredClone(route), id: "track-a-main", source: {
+      ...structuredClone(route.source), track_id: "track-a",
+    } },
+    { ...structuredClone(route), id: "track-b-main", source: {
+      ...structuredClone(route.source), track_id: "track-b",
+    } },
+  ];
+  return new TextEncoder().encode(JSON.stringify(document));
+}
+
 async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES, peak = false) {
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const document = spectrumDocument(raw, frames, peak);
@@ -325,6 +372,37 @@ async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES
   return browser;
 }
 
+async function createSpectrumCollectionBrowser() {
+  const raw = await (await fetch("/qualification/observation-session.json")).text();
+  const frames = 16 * SPECTRUM_FRAMES;
+  const document = spectrumCollectionDocument(raw, frames);
+  const browser = await createEngine({
+    document,
+    spectrumCollection: SPECTRUM_COLLECTION,
+    policy: { sourceRingFrames: 4_096 },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: 4_096,
+      backend: "simd128" as const,
+      sources: [{ id: "console-source", channels: 2, frames: BigInt(frames) }],
+      tracks: ["track-a", "track-b"],
+    }),
+    createContext: () => {
+      return new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  return browser;
+}
+
 async function submitSpectrumSource(browser, frames = SPECTRUM_FRAMES, planeForBlock = spectrumPlanes) {
   for (let block = 0; block < frames / 128; block += 1) {
     const acknowledgement = await browser.host.submitSource({
@@ -343,6 +421,13 @@ async function submitSpectrumSource(browser, frames = SPECTRUM_FRAMES, planeForB
 function toneSpectrumPlanes(block: number, startFrame: number): Float32Array[] {
   const scale = block < 2 * SPECTRUM_FRAMES / 128 ? 1 : 0.5;
   return [PEAK_LEFT_AMPLITUDE * scale, PEAK_RIGHT_AMPLITUDE * scale].map((amplitude) =>
+    Float32Array.from({ length: 128 }, (_, index) => amplitude * Math.sin(
+      2 * Math.PI * PEAK_FREQUENCY_HZ * (startFrame + index) / 48_000,
+    )));
+}
+
+function collectionSpectrumPlanes(_block: number, startFrame: number): Float32Array[] {
+  return [PEAK_LEFT_AMPLITUDE, PEAK_RIGHT_AMPLITUDE].map((amplitude) =>
     Float32Array.from({ length: 128 }, (_, index) => amplitude * Math.sin(
       2 * Math.PI * PEAK_FREQUENCY_HZ * (startFrame + index) / 48_000,
     )));
@@ -614,7 +699,137 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     busyRefused,
     closedRefused,
     continuous: await runContinuousSpectrumQualification(),
+    collection: await runSpectrumCollectionQualification(),
   };
+}
+
+async function runSpectrumCollectionQualification(): Promise<Record<string, unknown>> {
+  const browser = await createSpectrumCollectionBrowser();
+  const [entryA, entryB] = SPECTRUM_COLLECTION_ENTRIES;
+  if (entryA === undefined || entryB === undefined) throw new Error("spectrum collection fixture is incomplete");
+  const query = (entry: typeof entryA) => ({
+    ...entry,
+    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+  });
+  const firstQuery = query(entryA);
+  const secondQuery = query(entryB);
+  const totalFrames = 16 * SPECTRUM_FRAMES;
+  const totalBlocks = totalFrames / 128;
+  const submitBlocks = async (firstBlock: number, lastBlock: number, endOfRegion: boolean) => {
+    for (let block = firstBlock; block < lastBlock; block += 1) {
+      let acknowledgement;
+      for (let retry = 0; retry < 200; retry += 1) {
+        acknowledgement = await browser.host.submitSource({
+          sourceId: "console-source",
+          generation: 1n,
+          startFrame: BigInt(block * 128),
+          sampleRateHz: 48_000,
+          planes: collectionSpectrumPlanes(block, block * 128),
+          frames: 128,
+          endOfRegion: endOfRegion && block === lastBlock - 1,
+        });
+        if (acknowledgement.result === 0) break;
+        if (acknowledgement.result !== 6) {
+          throw new Error(`SDK spectrum collection source submission refused (${acknowledgement.result}) at block ${block}`);
+        }
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 5));
+      }
+      if (acknowledgement?.result !== 0) {
+        throw new Error(`SDK spectrum collection source submission remained backpressured at block ${block}`);
+      }
+    }
+  };
+  const waitForResult = async (subscription, entry) => {
+    const targetKey = spectrumTargetKey(entry.target);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const current = subscription.readLatest();
+      if (current !== undefined
+          && spectrumTargetKey(current.target) === targetKey
+          && current.channels === (entry.channels ?? "both")) {
+        return current;
+      }
+      await subscription.pump();
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 10));
+    }
+    throw new Error(`SDK spectrum collection did not publish ${targetKey}`);
+  };
+  try {
+    const subscription = (await browser.subscribeSpectrum({
+      ...firstQuery,
+      smoothingMs: 0,
+      cadenceMs: 1,
+    })).handle;
+    const context = browser.context as AudioContext;
+    await submitBlocks(0, 16, false);
+    await context.resume();
+    const remainingSource = submitBlocks(16, totalBlocks, true);
+    const first = await waitForResult(subscription, entryA);
+    const firstClock = context.currentTime;
+    const firstLeft = first.leftDb;
+    if (firstLeft === undefined) throw new Error("spectrum collection omitted the first A channel");
+    const firstPeak = spectrumPeak(firstLeft);
+
+    const toB = await subscription.update({ ...secondQuery, smoothingMs: 0, cadenceMs: 1 });
+    const bCleared = subscription.readLatest() === undefined;
+    const second = await waitForResult(subscription, entryB);
+    const secondClock = context.currentTime;
+    const secondLeft = second.leftDb;
+    if (secondLeft === undefined) throw new Error("spectrum collection omitted the selected B channel");
+    const secondPeak = spectrumPeak(secondLeft);
+
+    const toA = await subscription.update({ ...firstQuery, smoothingMs: 0, cadenceMs: 1 });
+    const aCleared = subscription.readLatest() === undefined;
+    const result = await waitForResult(subscription, entryA);
+    const finalClock = context.currentTime;
+    const left = result.leftDb;
+    if (left === undefined) throw new Error("spectrum collection omitted the final A channel");
+    const peak = spectrumPeak(left);
+    await remainingSource;
+    const owned = result.frequenciesHz !== result.leftDb
+      && result.frequenciesHz !== result.rightDb
+      && result.leftDb !== result.rightDb;
+    const resultTarget = spectrumTargetKey(result.target);
+    await subscription.close();
+    const audioContinued = context.state === "running" && secondClock >= firstClock && finalClock >= secondClock;
+    return {
+      selections: [firstQuery, secondQuery, firstQuery].map((entry) => spectrumTargetKey(entry.target)),
+      masks: [firstQuery.channels, secondQuery.channels],
+      toBTarget: spectrumTargetKey(toB.configuration.target),
+      toBChannels: toB.configuration.channels,
+      toBOk: true,
+      toAOks: true,
+      bCleared,
+      aCleared,
+      firstTarget: spectrumTargetKey(first.target),
+      firstChannels: first.channels,
+      firstCapturedSample: first.capturedSample.toString(),
+      firstEndSample: first.endSample.toString(),
+      secondTarget: spectrumTargetKey(second.target),
+      secondChannels: second.channels,
+      secondCapturedSample: second.capturedSample.toString(),
+      secondEndSample: second.endSample.toString(),
+      resultTarget,
+      resultChannels: result.channels,
+      capturedSample: result.capturedSample.toString(),
+      endSample: result.endSample.toString(),
+      peakBin: peak.index,
+      peakHz: result.frequenciesHz[peak.index],
+      firstPeakDb: firstPeak.value,
+      secondPeakDb: secondPeak.value,
+      finalPeakDb: peak.value,
+      firstPeakHz: first.frequenciesHz[firstPeak.index],
+      secondPeakHz: second.frequenciesHz[secondPeak.index],
+      distinctSelectedSignal: Math.abs(firstPeak.value - secondPeak.value) > 3,
+      finite: Array.from(result.frequenciesHz).every(Number.isFinite)
+        && Array.from(result.leftDb ?? []).every(Number.isFinite)
+        && Array.from(result.rightDb ?? []).every(Number.isFinite),
+      owned,
+      audioContinued,
+      switchedWithoutRestart: true,
+    };
+  } finally {
+    await browser.close();
+  }
 }
 
 async function createTrackResponseSubscriptionBrowser(stats: { queries: number; initializations: number }) {

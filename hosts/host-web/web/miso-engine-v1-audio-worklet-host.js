@@ -33,9 +33,9 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum", "spectrumCollection",
 ];
-const LEGACY_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -1);
+const LEGACY_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
 
 const SOURCE_FIELDS = [
   "sourceId",
@@ -91,6 +91,8 @@ const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
 const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
 const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
 const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
+const SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "targetId", "channels"];
+const SPECTRUM_COLLECTION_FIELDS = ["entries", "maximumCaptureBytes"];
 const SPECTRUM_TARGETS = new Set(["trackPostInputBuiltins", "trackPostMatrix", "output"]);
 const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
@@ -100,6 +102,12 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 const SPECTRUM_STREAM_START_REQUEST_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
 const SPECTRUM_STREAM_READ_REQUEST_FIELDS = ["tag", "requestId", "operation", "buffer"];
 const SPECTRUM_STREAM_STOP_REQUEST_FIELDS = ["tag", "requestId", "operation"];
+const SPECTRUM_SELECT_REQUEST_FIELDS = ["tag", "requestId", "operation", "target", "targetId", "channels"];
+const SPECTRUM_STREAM_SELECT_REQUEST_FIELDS = [
+  "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
+];
+const SPECTRUM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation"];
+const SPECTRUM_STREAM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
 const SPECTRUM_STREAM_START_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
 const SPECTRUM_STREAM_STOP_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
 const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
@@ -291,6 +299,21 @@ function validSpectrumBoot(options) {
     && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
 }
 
+function validSpectrumCollectionBoot(options) {
+  if (options === null) return true;
+  return hasExactFields(options, SPECTRUM_COLLECTION_FIELDS)
+    && Array.isArray(options.entries)
+    && options.entries.length > 0
+    && options.entries.every((entry) => hasExactFields(entry, SPECTRUM_COLLECTION_ENTRY_FIELDS)
+      && SPECTRUM_TARGETS.has(entry.target)
+      && typeof entry.targetId === "string"
+      && entry.targetId.length > 0
+      && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
+      && SPECTRUM_CHANNELS.has(entry.channels))
+    && Number.isSafeInteger(options.maximumCaptureBytes)
+    && options.maximumCaptureBytes > 0;
+}
+
 function validSpectrumStreamMetadata(metadata) {
   return hasExactFields(metadata, [
     "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
@@ -332,7 +355,10 @@ function validBootOptions(options) {
     && validU64(options.consoleMasterTrackPlusOne)
     && options.consoleMasterTrackPlusOne <= 0xffffffffn
     && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n)
-    && validSpectrumBoot(options.spectrum ?? null);
+    && validSpectrumBoot(options.spectrum ?? null)
+    && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
+    && (options.spectrum === null || options.spectrum === undefined
+      || options.spectrumCollection === null || options.spectrumCollection === undefined);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -615,10 +641,14 @@ class MisoAudioWorkletHost {
                 : pending.response === "spectrum"
                   ? pending.spectrumOperation === "streamRead"
                     ? SPECTRUM_STREAM_READ_REPLY_FIELDS
+                    : pending.spectrumOperation === "streamSelect"
+                      ? SPECTRUM_STREAM_SELECT_REPLY_FIELDS
                     : pending.spectrumOperation === "streamStart"
                       ? SPECTRUM_STREAM_START_REPLY_FIELDS
                       : pending.spectrumOperation === "streamStop"
                         ? SPECTRUM_STREAM_STOP_REPLY_FIELDS
+                        : pending.spectrumOperation === "select"
+                          ? SPECTRUM_SELECT_REPLY_FIELDS
                         : ["tag", "requestId", "result", "operation", "snapshot"]
           : pending.response === "status"
         ? [
@@ -683,7 +713,9 @@ class MisoAudioWorkletHost {
     );
     const validSpectrum = pending.response !== "spectrum" || (
       message.operation === pending.spectrumOperation
-      && ((pending.spectrumOperation === "streamStart" || pending.spectrumOperation === "streamStop")
+      && ((pending.spectrumOperation === "streamSelect")
+        ? validSpectrumStreamMetadata(message.metadata)
+        : (pending.spectrumOperation === "streamStart" || pending.spectrumOperation === "streamStop")
         ? validSpectrumStreamMetadata(message.metadata)
         : pending.spectrumOperation === "streamRead"
           ? validSpectrumStreamMetadata(message.metadata)
@@ -696,7 +728,9 @@ class MisoAudioWorkletHost {
                 ? message.byteLength > 0 && message.byteLength <= message.buffer.byteLength
                 : message.byteLength === 0)
               : message.byteLength === 0)
-          : message.snapshot instanceof Uint8Array
+          : pending.spectrumOperation === "select"
+            ? true
+            : message.snapshot instanceof Uint8Array
             && message.snapshot.buffer instanceof ArrayBuffer
             && (message.result === RESULT_OK
               ? (pending.spectrumOperation === "read"
@@ -1062,6 +1096,43 @@ class MisoAudioWorkletHost {
     );
   }
 
+  /// Select one exact prepared collection entry before starting its managed stream.
+  selectSpectrum(request) {
+    if (!hasExactFields(request, ["target", "targetId", "channels"])
+        || !SPECTRUM_TARGETS.has(request.target)
+        || typeof request.targetId !== "string"
+        || request.targetId.length === 0
+        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
+        || !SPECTRUM_CHANNELS.has(request.channels)) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "select", ...request },
+      [],
+      "spectrum",
+    );
+  }
+
+  /// Atomically update the active collection entry and smoothing profile.
+  selectSpectrumStream(request) {
+    if (!hasExactFields(request, ["target", "targetId", "channels", "smoothingMs"])
+        || !SPECTRUM_TARGETS.has(request.target)
+        || typeof request.targetId !== "string"
+        || request.targetId.length === 0
+        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
+        || !SPECTRUM_CHANNELS.has(request.channels)
+        || typeof request.smoothingMs !== "number"
+        || !Number.isFinite(request.smoothingMs)
+        || request.smoothingMs < 0 || request.smoothingMs > 10_000) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "streamSelect", ...request },
+      [],
+      "spectrum",
+    );
+  }
+
   /// Cancel the prepared one-shot spectrum observer.
   cancelSpectrum() {
     return this.#request(
@@ -1190,7 +1261,11 @@ export async function createMisoAudioWorkletHost(options) {
       processorOptions: {
         module: selected.module,
         document: new Uint8Array(options.document),
-        options: { ...options.options, spectrum: options.options.spectrum ?? null },
+        options: {
+          ...options.options,
+          spectrum: options.options.spectrum ?? null,
+          spectrumCollection: options.options.spectrumCollection ?? null,
+        },
       },
     });
     const ready = await new Promise((resolve, reject) => {

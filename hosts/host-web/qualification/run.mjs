@@ -449,6 +449,43 @@ function validateSdkResponse(browserName, response) {
     && Math.abs(continuousFirst.responseGainDb?.[0] - 6) < 0.02
     && Math.abs(continuousFirst.responseGainDb?.[1] - 6) < 0.02,
   "continuous spectrum did not align the 750 Hz peak with response, meter, and owned PCM");
+  const collection = spectrum?.collection;
+  const collectionFirstCaptured = canonicalU64(collection?.firstCapturedSample);
+  const collectionFirstEnd = canonicalU64(collection?.firstEndSample);
+  const collectionSecondCaptured = canonicalU64(collection?.secondCapturedSample);
+  const collectionSecondEnd = canonicalU64(collection?.secondEndSample);
+  const collectionCaptured = canonicalU64(collection?.capturedSample);
+  const collectionEnd = canonicalU64(collection?.endSample);
+  gate(browserName, "sdk-spectrum-collection", JSON.stringify(collection?.selections) === JSON.stringify([
+      "trackPostMatrix:track-a", "trackPostMatrix:track-b", "trackPostMatrix:track-a",
+    ])
+    && JSON.stringify(collection?.masks) === JSON.stringify(["both", "left"])
+    && collection?.toBOk === true && collection?.toAOks === true
+    && collection?.toBTarget === "trackPostMatrix:track-b"
+    && collection?.toBChannels === "left"
+    && collection?.bCleared === true && collection?.aCleared === true
+    && collection?.switchedWithoutRestart === true,
+  "spectrum collection did not atomically switch the existing owner A-to-B-to-A with fresh results");
+  gate(browserName, "sdk-spectrum-collection", collection?.firstTarget === "trackPostMatrix:track-a"
+    && collection?.firstChannels === "both"
+    && collectionFirstCaptured === 0n
+    && collectionFirstEnd === 2_048n
+    && collection?.secondTarget === "trackPostMatrix:track-b"
+    && collection?.secondChannels === "left"
+    && collectionSecondCaptured !== undefined && collectionSecondEnd !== undefined
+    && collectionSecondEnd > collectionSecondCaptured
+    && Math.abs(collection?.firstPeakHz - 750) < 0.01
+    && Math.abs(collection?.secondPeakHz - 750) < 0.01
+    && collection?.distinctSelectedSignal === true
+    && collection?.resultTarget === "trackPostMatrix:track-a"
+    && collection?.resultChannels === "both"
+    && collectionCaptured !== undefined && collectionEnd !== undefined
+    && collectionSecondEnd !== undefined && collectionCaptured > collectionSecondEnd
+    && collectionEnd > collectionCaptured
+    && collection?.peakBin === 32 && Math.abs(collection?.peakHz - 750) < 0.01
+    && collection?.finite === true && collection?.owned === true
+    && collection?.audioContinued === true,
+  "spectrum collection did not return distinct owned A/B/A known-signal spans while audio continued");
 }
 
 function mutate(result, mutation) {

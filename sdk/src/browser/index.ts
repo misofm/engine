@@ -57,6 +57,7 @@ export type {
 export type {
   SpectrumStreamMetadata,
   SpectrumStreamRead,
+  SpectrumStreamSelection,
   SpectrumStreamStart,
   SpectrumStreamStatus,
 } from "../core/spectrum.ts";

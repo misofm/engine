@@ -53,6 +53,8 @@ const TRACK_RESPONSE_FIELDS = [
   "maximumResultBytes",
 ];
 const SPECTRUM_REQUEST_BYTES = 40;
+const SPECTRUM_COLLECTION_REQUEST_BYTES = 32;
+const SPECTRUM_COLLECTION_ENTRY_BYTES = 24;
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
 const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
 const SPECTRUM_STREAM_METADATA_BYTES = 120;
@@ -67,9 +69,9 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum", "spectrumCollection",
 ];
-const LEGACY_OPTION_FIELDS = OPTION_FIELDS.slice(0, -1);
+const LEGACY_OPTION_FIELDS = OPTION_FIELDS.slice(0, -2);
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
   "endOfRegion",
@@ -81,6 +83,10 @@ const SPECTRUM_FIELDS = ["tag", "requestId", "operation", "channels"];
 const SPECTRUM_STREAM_START_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
 const SPECTRUM_STREAM_READ_FIELDS = ["tag", "requestId", "operation", "buffer"];
 const SPECTRUM_STREAM_STOP_FIELDS = ["tag", "requestId", "operation"];
+const SPECTRUM_SELECT_FIELDS = ["tag", "requestId", "operation", "target", "targetId", "channels"];
+const SPECTRUM_STREAM_SELECT_FIELDS = [
+  "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
+];
 
 function validObservationAddress(address) {
   return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
@@ -193,6 +199,27 @@ function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
   return byteLength;
 }
 
+function boundedUtf8Length(value, capacity) {
+  let byteLength = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
+        index += 1;
+      } else {
+        codePoint = 0xfffd;
+      }
+    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+      codePoint = 0xfffd;
+    }
+    byteLength += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    if (byteLength > capacity) return -1;
+  }
+  return byteLength;
+}
+
 class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -245,7 +272,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } catch (_) {
       return RESULT_INVALID_ARGUMENT;
     }
-    const spectrumResult = this.stageSpectrumRequest(init.options.spectrum);
+    const hasSpectrum = init.options.spectrum !== null && init.options.spectrum !== undefined;
+    const hasSpectrumCollection = init.options.spectrumCollection !== null
+      && init.options.spectrumCollection !== undefined;
+    if (hasSpectrum && hasSpectrumCollection) {
+      return RESULT_INVALID_ARGUMENT;
+    }
+    const spectrumResult = hasSpectrumCollection
+      ? this.stageSpectrumCollectionRequest(init.options.spectrumCollection)
+      : this.stageSpectrumRequest(init.options.spectrum);
     if (spectrumResult !== RESULT_OK) return spectrumResult;
     const documentPointer = this.exports.miso_engine_web_v1_document_ptr(init.document.byteLength);
     if (!u32(documentPointer) || documentPointer === 0) {
@@ -395,6 +430,86 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     view.setBigUint64(24, BigInt(options.maximumCaptureBytes), true);
     view.setUint32(32, 0, true);
     view.setUint32(36, 0, true);
+    return RESULT_OK;
+  }
+
+  stageSpectrumCollectionRequest(options) {
+    if (options === null || options === undefined) return RESULT_OK;
+    if (!exactFields(options, ["entries", "maximumCaptureBytes"])
+        || !Array.isArray(options.entries) || options.entries.length === 0
+        || options.entries.length > 0xffffffff
+        || !Number.isSafeInteger(options.maximumCaptureBytes)
+        || options.maximumCaptureBytes <= 0) {
+      return RESULT_INVALID_ARGUMENT;
+    }
+    const requestPointer = this.exports.miso_engine_web_v1_spectrum_collection_request_ptr();
+    const requestBytes = this.exports.miso_engine_web_v1_spectrum_collection_request_bytes();
+    if (!u32(requestPointer) || requestPointer === 0 || requestBytes !== SPECTRUM_COLLECTION_REQUEST_BYTES) {
+      return RESULT_INTERNAL;
+    }
+    let bytes = this.exports.memory.buffer;
+    const request = new DataView(bytes, requestPointer, requestBytes);
+    request.setUint32(0, SPECTRUM_COLLECTION_REQUEST_BYTES, true);
+    request.setUint32(4, ABI_VERSION, true);
+    request.setUint32(8, options.entries.length, true);
+    request.setUint32(12, 0, true);
+    request.setBigUint64(16, BigInt(options.maximumCaptureBytes), true);
+    request.setUint32(24, 0, true);
+    request.setUint32(28, 0, true);
+
+    const entryPointer = this.exports.miso_engine_web_v1_spectrum_collection_entry_ptr();
+    const entryBytes = this.exports.miso_engine_web_v1_spectrum_collection_entry_bytes();
+    const entryCapacity = this.exports.miso_engine_web_v1_spectrum_collection_entry_capacity();
+    if (!u32(entryPointer) || entryPointer === 0 || entryBytes !== SPECTRUM_COLLECTION_ENTRY_BYTES
+        || entryCapacity !== options.entries.length) {
+      return RESULT_INTERNAL;
+    }
+    bytes = this.exports.memory.buffer;
+    const entries = new DataView(bytes, entryPointer, entryCapacity * entryBytes);
+    const encodedIds = [];
+    for (let index = 0; index < options.entries.length; index += 1) {
+      const entry = options.entries[index];
+      const target = entry?.target === "trackPostInputBuiltins"
+        ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
+        : entry?.target === "trackPostMatrix"
+          ? SPECTRUM_TARGET_TRACK_POST_MATRIX
+          : entry?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
+      const channels = entry?.channels === "left"
+        ? SPECTRUM_CHANNEL_LEFT
+        : entry?.channels === "right"
+          ? SPECTRUM_CHANNEL_RIGHT
+          : entry?.channels === "both" ? SPECTRUM_CHANNEL_BOTH : 0;
+      if (!exactFields(entry, ["target", "targetId", "channels"])
+          || target === 0 || channels === 0
+          || typeof entry.targetId !== "string" || entry.targetId.length === 0) {
+        return RESULT_INVALID_ARGUMENT;
+      }
+      const idBytes = boundedUtf8Length(entry.targetId, SPECTRUM_MAXIMUM_ID_BYTES);
+      if (idBytes <= 0) {
+        return RESULT_INVALID_ARGUMENT;
+      }
+      encodedIds.push({ value: entry.targetId, bytes: idBytes });
+      const offset = entryPointer + index * entryBytes;
+      entries.setUint32(offset - entryPointer, target, true);
+      entries.setUint32(offset - entryPointer + 4, channels, true);
+      entries.setUint32(offset - entryPointer + 8, idBytes, true);
+      entries.setUint32(offset - entryPointer + 12, 0, true);
+      entries.setUint32(offset - entryPointer + 16, 0, true);
+      entries.setUint32(offset - entryPointer + 20, 0, true);
+    }
+    const totalIdBytes = encodedIds.reduce((total, id) => total + id.bytes, 0);
+    const idPointer = this.exports.miso_engine_web_v1_spectrum_collection_target_ids_ptr();
+    const idCapacity = this.exports.miso_engine_web_v1_spectrum_collection_target_ids_capacity();
+    if (!u32(idPointer) || idPointer === 0 || idCapacity !== totalIdBytes) {
+      return RESULT_INTERNAL;
+    }
+    bytes = this.exports.memory.buffer;
+    let idOffset = idPointer;
+    for (const id of encodedIds) {
+      const written = writeBoundedUtf8(id.value, bytes, idOffset, id.bytes);
+      if (written !== id.bytes) return RESULT_INVALID_ARGUMENT;
+      idOffset += id.bytes;
+    }
     return RESULT_OK;
   }
 
@@ -798,6 +913,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveTrackResponse(message);
     } else if (message?.tag === "miso.spectrum.v1"
         && (exactFields(message, SPECTRUM_FIELDS)
+          || exactFields(message, SPECTRUM_SELECT_FIELDS)
+          || exactFields(message, SPECTRUM_STREAM_SELECT_FIELDS)
           || exactFields(message, SPECTRUM_STREAM_START_FIELDS)
           || exactFields(message, SPECTRUM_STREAM_READ_FIELDS)
           || exactFields(message, SPECTRUM_STREAM_STOP_FIELDS))) {
@@ -994,6 +1111,83 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Arm, read or cancel the one prepared spectrum observer. The Worklet only copies raw samples;
   /// FFT/window/log analysis remains in the off-render SDK Worker.
   receiveSpectrum(message) {
+    const selectionOperation = message.operation === "select"
+      || message.operation === "streamSelect";
+    if (selectionOperation) {
+      const streamSelection = message.operation === "streamSelect";
+      if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+          || !exactFields(
+            message,
+            streamSelection ? [
+              "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
+            ] : ["tag", "requestId", "operation", "target", "targetId", "channels"],
+          )
+          || (message.target !== "trackPostInputBuiltins"
+            && message.target !== "trackPostMatrix" && message.target !== "output")
+          || typeof message.targetId !== "string" || message.targetId.length === 0
+          || (message.channels !== "left" && message.channels !== "right" && message.channels !== "both")
+          || (streamSelection
+            && (typeof message.smoothingMs !== "number" || !Number.isFinite(message.smoothingMs)
+              || message.smoothingMs < 0 || message.smoothingMs > 10_000))) {
+        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+        return;
+      }
+      const target = message.target === "trackPostInputBuiltins"
+        ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
+        : message.target === "trackPostMatrix" ? SPECTRUM_TARGET_TRACK_POST_MATRIX : SPECTRUM_TARGET_OUTPUT;
+      const channels = message.channels === "left"
+        ? SPECTRUM_CHANNEL_LEFT
+        : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;
+      const pointer = this.exports.miso_engine_web_v1_spectrum_target_id_ptr();
+      const capacity = this.exports.miso_engine_web_v1_spectrum_target_id_capacity();
+      if (!u32(pointer) || pointer === 0 || !u32(capacity) || capacity === 0) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      const idBytes = writeBoundedUtf8(message.targetId, this.memoryBuffer, pointer, capacity);
+      if (idBytes <= 0) {
+        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+        return;
+      }
+      let result;
+      try {
+        result = streamSelection
+          ? this.exports.miso_engine_web_v1_spectrum_stream_select(
+            this.handle, target, channels, idBytes, message.smoothingMs,
+          )
+          : this.exports.miso_engine_web_v1_spectrum_select(
+            this.handle, target, channels, idBytes,
+          );
+      } catch (_) {
+        result = RESULT_INTERNAL;
+      }
+      if (this.exports.memory.buffer !== this.memoryBuffer) {
+        this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
+        return;
+      }
+      if (!streamSelection) {
+        this.port.postMessage({
+          tag: "miso.spectrum.v1",
+          requestId: message.requestId,
+          result,
+          operation: message.operation,
+        });
+        return;
+      }
+      const metadata = this.readSpectrumStreamMetadata();
+      if (metadata === null) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      this.port.postMessage({
+        tag: "miso.spectrum.v1",
+        requestId: message.requestId,
+        result,
+        operation: message.operation,
+        metadata,
+      });
+      return;
+    }
     const streamOperation = message.operation === "streamStart"
       || message.operation === "streamRead" || message.operation === "streamStop";
     if (streamOperation) {
