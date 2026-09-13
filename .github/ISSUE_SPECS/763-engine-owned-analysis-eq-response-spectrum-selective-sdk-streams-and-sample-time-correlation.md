@@ -136,7 +136,7 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered continuous managed spectrum:** #789 and bounded accounting successor #791 via PR #792, merged main b34b39f256d5a264c43363b3aeb8ee502ce4c546. Required qualification 34764358890 PASS; 227 SDK tests, actual three-browser meter/EQ/spectrum alignment, realtime/resource and package gates pass. Native sample-clock hops, Rust power smoothing, reusable transfer credit and shared managed lifecycle are delivered for one prepared target. Both issues are CLOSED and verified.
 
-**Active:** #793 prepares multiple explicitly bounded targets and atomically switches one active managed stream without interrupting audio, enabling the app focused EQ panel. Astra xhigh briefs, Luna max implements, Astra medium verifies bugs only. Simultaneous jobs, SAB and all remaining parent requirements stay attached.
+**Delivered prepared-target switching:** #793 via PR #795, merged main `69c268f240bf30b2a43b43dd521120cd89dcc0b9`. Independent Astra medium PASS; exact-head PR qualification `34773328154` and merged-main qualification `34788089349` PASS, including actual Chromium, Firefox and WebKit gates. The focused stream supports atomic selection without restarting audio. SDK release #794 remains OPEN; registry latest is still 0.2.4, so this is main-source delivery rather than publication. Simultaneous jobs, SAB and all remaining parent requirements stay attached.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 
