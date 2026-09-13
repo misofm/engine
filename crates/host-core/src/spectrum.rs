@@ -707,10 +707,9 @@ fn fft_magnitude(fft: &[microfft::Complex32; SPECTRUM_WINDOW_FRAMES / 2], bin: u
         f64::from(fft[0].im.abs())
     } else {
         let value = fft[bin];
-        math::sqrt(f64::from(value.re).mul_add(
-            f64::from(value.re),
-            f64::from(value.im) * f64::from(value.im),
-        ))
+        let real = f64::from(value.re);
+        let imaginary = f64::from(value.im);
+        math::sqrt(real * real + imaginary * imaginary)
     }
 }
 
