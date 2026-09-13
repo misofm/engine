@@ -98,3 +98,45 @@ Deliver together with #767 through its feature PR, without a separate PR merely 
 ## Accepted source freeze
 
 #767 earned Astra medium SOURCE PASS on attempt 2 at `dc070bcda506896fe05b4dfefb931841b6d6caa3`, with Luna max implementation. It is pushed and frozen. Prior full builtin/Clippy/policy/scalar-SIMD Wasm gates passed; final test-only correction passed focused8/Clippy/fmt/diff gates. This exact source identity is `FILTER_ARTIFACT_SOURCE`; later evidence commits do not relabel it. #768 now owns active artifact qualification while #767 is a passive source dependency. Candidate discovery has not run.
+
+## Attempt 1 candidate discovery checkpoint — Luna
+
+The accepted frozen source identity is `dc070bcda506896fe05b4dfefb931841b6d6caa3`. The current
+worktree head is `d4ad8bf730c0fae7c6eca4c2a4da090adac1cf00`, and `origin/main` is
+`7dcb127518d0666f6cbe809053732b215defeb9f`. The source-to-head audit lists only the #767 issue
+spec update and this #768 issue spec; `git diff --exit-code` over `crates/builtins`, `Cargo.lock`,
+`hosts`, `sdk` and `scripts` passed. Rust/Cargo are `1.97.1`, Node is `v22.23.2`, npm is
+`10.9.8`, and `/usr/bin/wasm-objdump` is `1.0.34`. The identity command's authentic streams and
+exit are `/tmp/issue768-attempt1-logs/identity.{stdout,stderr,exit}`, with its exact invocation in
+`/tmp/issue768-attempt1-logs/identity.invocation`.
+
+The locked prerequisites were absent in this worktree, so the unchanged allowed setup commands
+ran successfully: `npm --prefix sdk ci --ignore-scripts`,
+`npm --prefix hosts/host-web/qualification ci --ignore-scripts`, and
+`hosts/host-web/qualification/node_modules/.bin/playwright install chromium firefox webkit`.
+Each exited `0`; authentic streams, exit files and invocations are preserved as
+`/tmp/issue768-attempt1-logs/{sdk-setup,qualification-setup,playwright-setup}.{stdout,stderr,exit,invocation}`.
+
+Fresh empty nonsymlink directories were created at `/tmp/issue768-attempt1-probe` and
+`/tmp/issue768-attempt1-artifact`. The official report-mode builder was invoked exactly once from
+`/tmp/miso-engine-767`:
+
+```
+FILTER_ARTIFACT_SOURCE=dc070bcda506896fe05b4dfefb931841b6d6caa3
+FILTER_ARTIFACT_PROBE=/tmp/issue768-attempt1-probe
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh "$FILTER_ARTIFACT_PROBE"
+```
+
+It exited `0` and emitted exactly one lowercase 64-hex digest plus LF:
+`0e6008d94c4a3a235feed551401983321f1782d73906144e227483803769d941`. Canonical-output and empty
+probe checks also exited `0`. The authentic discovery invocation, streams and exits are in
+`/tmp/issue768-attempt1-logs/candidate-discovery.{invocation,stdout,stderr,exit}` and
+`/tmp/issue768-attempt1-logs/candidate-discovery.verification.{invocation,stdout,stderr,exit}`.
+
+The discovered candidate differs from the delivered pin
+`b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69`, so the allowed pin file now
+contains the candidate digest plus LF as a **provisional** pin. The update exited `0`, with the
+old/new values and exact invocation preserved at
+`/tmp/issue768-attempt1-logs/provisional-pin.{invocation,stdout,stderr,exit}`. No ordinary
+artifact was built, no six-file output or result/matrix update was produced, and no qualification
+gate ran. This discovery/pin tranche is paused for root's exact-path checkpoint and push audit.
