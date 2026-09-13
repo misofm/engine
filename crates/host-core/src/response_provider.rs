@@ -911,3 +911,87 @@ impl ResponseBinding {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_catalog() -> PreparedSessionResponseCatalog {
+        PreparedSessionResponseCatalog {
+            identity: RequestedResponseIdentity {
+                configuration_id: u64::MAX,
+                plan_id: Some(u64::MAX),
+            },
+            bindings: Vec::new(),
+            resources: SessionResponseResources {
+                bindings: 0,
+                grid_points: 0,
+                grid_bytes: 0,
+                metadata_bytes: 0,
+                owned_id_bytes: 0,
+                owner_prepared_bytes: 0,
+                total_retained_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn generation_exhaustion_preserves_catalog_and_unknown_ordinals_refuse() {
+        let catalog = empty_catalog();
+        let mut provider = SessionResponseProvider {
+            catalog,
+            generation: NonZeroU64::new(u64::MAX).expect("nonzero maximum"),
+        };
+        let candidate = empty_catalog();
+        assert_eq!(
+            provider.replace_catalog(candidate),
+            Err(SessionResponseError::GenerationExhausted)
+        );
+        assert_eq!(provider.resources().bindings, 0);
+
+        let handle = SessionResponseHandle {
+            generation: NonZeroU64::new(u64::MAX).expect("nonzero maximum"),
+            ordinal: NonZeroU64::new(1).expect("nonzero ordinal"),
+        };
+        let mut left = [f32::from_bits(0x7fc0_1111); 1];
+        let mut right = left;
+        assert_eq!(
+            provider
+                .query_into(
+                    handle,
+                    ResponseOutput {
+                        total_left_db: &mut left,
+                        total_right_db: &mut right,
+                        sections_left_db: None,
+                        sections_right_db: None,
+                    },
+                )
+                .unwrap_err(),
+            SessionResponseError::UnknownHandle
+        );
+        assert_eq!(left[0].to_bits(), 0x7fc0_1111);
+
+        let normal = SessionResponseProvider::new(empty_catalog());
+        let unknown = SessionResponseHandle {
+            generation: NonZeroU64::new(1).expect("nonzero generation"),
+            ordinal: NonZeroU64::new(2).expect("nonzero ordinal"),
+        };
+        let mut total = [0.0_f32; 1];
+        let mut total_right = [0.0_f32; 1];
+        assert_eq!(
+            normal
+                .query_into(
+                    unknown,
+                    ResponseOutput {
+                        total_left_db: &mut total,
+                        total_right_db: &mut total_right,
+                        sections_left_db: None,
+                        sections_right_db: None,
+                    },
+                )
+                .unwrap_err(),
+            SessionResponseError::UnknownHandle
+        );
+    }
+}

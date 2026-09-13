@@ -16,6 +16,8 @@ use session::{CompileCaps, EffectParam, ParameterChannel, ParameterUnit, StableI
 
 const SESSION: &str =
     include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
+const NONPROVIDER_SESSION: &str =
+    include_str!("../../../fixtures/session/v1/compressor-dynamic-observation.json");
 static ALLOCATION_LOCK: Mutex<()> = Mutex::new(());
 
 fn limits() -> SessionResponseLimits {
@@ -48,6 +50,15 @@ fn effect_caps() -> EffectCompileCaps {
 }
 
 fn prepared_session(rate: u32, all_racks: bool, asymmetric: bool) -> EffectPreparedSession {
+    prepared_session_with_bypass(rate, all_racks, asymmetric, false)
+}
+
+fn prepared_session_with_bypass(
+    rate: u32,
+    all_racks: bool,
+    asymmetric: bool,
+    bypass: bool,
+) -> EffectPreparedSession {
     let mut model = session::parse_session_json(SESSION).expect("fixture parses");
     model.sample_rate_hz = rate;
     let track = model
@@ -57,6 +68,7 @@ fn prepared_session(rate: u32, all_racks: bool, asymmetric: bool) -> EffectPrepa
         .expect("fixture track");
     let effect = track.simd1.effects.pop().expect("fixture EQ");
     track.dynamic.effects.push(effect);
+    track.dynamic.effects[0].bypass = bypass;
     if asymmetric {
         track.builtins.left.hpf_hz = 100.0;
         track.builtins.right.hpf_hz = 300.0;
@@ -89,6 +101,14 @@ fn prepared_session(rate: u32, all_racks: bool, asymmetric: bool) -> EffectPrepa
         track.simd1.effects.push(simd1);
         track.simd2.effects.push(simd2);
     }
+    let compiled = session::compile_session(&model, compile_caps()).expect("session compiles");
+    let registry = effect_compiler::launch_native_effect_registry().expect("launch registry");
+    effect_compiler::prepare_native_session_effects(&compiled, &registry, effect_caps())
+        .expect("effects prepare")
+}
+
+fn prepared_nonprovider_session() -> EffectPreparedSession {
+    let model = session::parse_session_json(NONPROVIDER_SESSION).expect("compressor fixture");
     let compiled = session::compile_session(&model, compile_caps()).expect("session compiles");
     let registry = effect_compiler::launch_native_effect_registry().expect("launch registry");
     effect_compiler::prepare_native_session_effects(&compiled, &registry, effect_caps())
@@ -205,6 +225,71 @@ fn target_resolution_uses_stable_tuples() {
             .err(),
         Some(SessionResponseError::DuplicateSelection)
     );
+    let unknown_analysis = SessionResponseSelection {
+        target: ResponseTarget::InputFilters {
+            track_id: stable("eq0"),
+        },
+        analysis_id: 99,
+        grid: ResponseFrequencyGrid::Linear {
+            points: 2,
+            minimum_hz: 0.0,
+            maximum_hz: 24_000.0,
+        },
+    };
+    assert_eq!(
+        PreparedSessionResponseCatalog::prepare(
+            &effects,
+            identity(),
+            &[unknown_analysis],
+            limits()
+        )
+        .err(),
+        Some(SessionResponseError::UnknownAnalysis)
+    );
+    assert_eq!(
+        describe_session_response_target(
+            &effects,
+            &ResponseTarget::Effect {
+                track_id: stable("eq0"),
+                rack: EffectRack::Simd1,
+                effect_slot_id: stable("eq"),
+            }
+        ),
+        Err(SessionResponseError::UnknownEffectSlot)
+    );
+
+    let unsupported = prepared_nonprovider_session();
+    assert_eq!(
+        describe_session_response_target(
+            &unsupported,
+            &ResponseTarget::Effect {
+                track_id: stable("comp0"),
+                rack: EffectRack::Dynamic,
+                effect_slot_id: stable("comp"),
+            }
+        ),
+        Err(SessionResponseError::UnsupportedResponse)
+    );
+
+    let mut malformed = prepared_session(48_000, false, false);
+    malformed
+        .entries
+        .iter_mut()
+        .find(|entry| entry.rack == EffectRack::Dynamic)
+        .expect("dynamic entry")
+        .metadata
+        .sample_rate = 44_100;
+    assert_eq!(
+        describe_session_response_target(
+            &malformed,
+            &ResponseTarget::Effect {
+                track_id: stable("eq0"),
+                rack: EffectRack::Dynamic,
+                effect_slot_id: stable("eq"),
+            }
+        ),
+        Err(SessionResponseError::PreparedEntryMismatch)
+    );
 }
 
 fn identity() -> RequestedResponseIdentity {
@@ -217,7 +302,7 @@ fn identity() -> RequestedResponseIdentity {
 #[test]
 fn owner_query_parity_at_launch_rates() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
-        let effects = prepared_session(rate, false, true);
+        let effects = prepared_session_with_bypass(rate, false, true, rate == 96_000);
         let selections = [input_selection(rate), effect_selection(EffectRack::Dynamic, "eq", rate)];
         let provider = provider(&effects, &selections);
         for view in provider.bindings() {
@@ -242,6 +327,21 @@ fn owner_query_parity_at_launch_rates() {
             assert_eq!(summary.summary.sample_rate_hz, rate);
             assert!(left.iter().all(|value| value.is_finite()));
             assert!(right.iter().all(|value| value.is_finite()));
+            assert_eq!(view.configuration.sample_rate_hz, rate);
+            match view.target {
+                host_core::ResponseTargetView::InputFilters { .. } => {
+                    assert!(view.configuration.enabled_left.iter().any(|enabled| *enabled));
+                    assert!(view.configuration.enabled_right.iter().any(|enabled| *enabled));
+                    assert_eq!(view.configuration.bypass, None);
+                }
+                host_core::ResponseTargetView::Effect { .. } => {
+                    assert_eq!(view.configuration.bypass, Some(rate == 96_000));
+                    if rate == 96_000 {
+                        assert!(left.iter().all(|value| *value == 0.0));
+                        assert!(right.iter().all(|value| *value == 0.0));
+                    }
+                }
+            }
 
             let (mut direct_left, mut direct_right, mut direct_sections_left, mut direct_sections_right) = (
                 vec![f32::NAN; frequencies.len()],
@@ -354,6 +454,56 @@ fn owner_query_parity_at_launch_rates() {
             assert_eq!(right, direct_right);
             assert_eq!(sections_left, direct_sections_left);
             assert_eq!(sections_right, direct_sections_right);
+
+            let mut total_only_left = vec![f32::NAN; frequencies.len()];
+            let mut total_only_right = vec![f32::NAN; frequencies.len()];
+            provider
+                .query_into(
+                    view.handle,
+                    ResponseOutput {
+                        total_left_db: &mut total_only_left,
+                        total_right_db: &mut total_only_right,
+                        sections_left_db: None,
+                        sections_right_db: None,
+                    },
+                )
+                .expect("total-only query");
+            assert_eq!(total_only_left, left);
+            assert_eq!(total_only_right, right);
+
+            let mut left_sections_only = vec![f32::NAN; sections_left.len()];
+            let mut left_only_total = vec![f32::NAN; frequencies.len()];
+            let mut left_only_right = vec![f32::NAN; frequencies.len()];
+            provider
+                .query_into(
+                    view.handle,
+                    ResponseOutput {
+                        total_left_db: &mut left_only_total,
+                        total_right_db: &mut left_only_right,
+                        sections_left_db: Some(&mut left_sections_only),
+                        sections_right_db: None,
+                    },
+                )
+                .expect("left-section-only query");
+            assert_eq!(left_only_total, left);
+            assert_eq!(left_only_right, right);
+
+            let mut right_sections_only = vec![f32::NAN; sections_right.len()];
+            let mut right_only_total = vec![f32::NAN; frequencies.len()];
+            let mut right_only_left = vec![f32::NAN; frequencies.len()];
+            provider
+                .query_into(
+                    view.handle,
+                    ResponseOutput {
+                        total_left_db: &mut right_only_left,
+                        total_right_db: &mut right_only_total,
+                        sections_left_db: None,
+                        sections_right_db: Some(&mut right_sections_only),
+                    },
+                )
+                .expect("right-section-only query");
+            assert_eq!(right_only_left, left);
+            assert_eq!(right_only_total, right);
         }
     }
 }
@@ -446,15 +596,50 @@ fn frequency_grids_validate_before_publication() {
     assert_eq!(view.frequencies_hz.first(), Some(&0.0));
     assert_eq!(view.frequencies_hz.last(), Some(&24_000.0));
     assert!(view.frequencies_hz.windows(2).all(|pair| pair[1] > pair[0]));
+    let logarithmic_two = SessionResponseSelection {
+        target: ResponseTarget::InputFilters {
+            track_id: stable("eq0"),
+        },
+        analysis_id: 1,
+        grid: ResponseFrequencyGrid::Logarithmic {
+            points: 2,
+            minimum_hz: 20.0,
+            maximum_hz: 24_000.0,
+        },
+    };
+    let logarithmic = PreparedSessionResponseCatalog::prepare(
+        &effects,
+        identity(),
+        &[logarithmic_two],
+        limits(),
+    )
+    .expect("two-point logarithmic grid");
+    let logarithmic_provider = SessionResponseProvider::new(logarithmic);
+    let logarithmic_view = logarithmic_provider
+        .bindings()
+        .next()
+        .expect("logarithmic binding");
+    assert_eq!(logarithmic_view.frequencies_hz, &[20.0, 24_000.0]);
 }
 
 #[test]
 fn replacement_invalidates_previous_bindings() {
     let effects = prepared_session(48_000, false, false);
-    let first = [input_selection(48_000)];
+    let mut first = [input_selection(48_000)];
     let second = [effect_selection(EffectRack::Dynamic, "eq", 48_000)];
     let mut provider = provider(&effects, &first);
-    let old = provider.bindings().next().expect("old binding").handle;
+    first[0].analysis_id = 77;
+    first[0].grid = ResponseFrequencyGrid::Linear {
+        points: 2,
+        minimum_hz: 100.0,
+        maximum_hz: 200.0,
+    };
+    let old = {
+        let retained = provider.bindings().next().expect("old binding");
+        assert_eq!(retained.analysis_id, 1);
+        assert_eq!(retained.frequencies_hz, &[0.0, 6_000.0, 12_000.0, 18_000.0, 24_000.0]);
+        retained.handle
+    };
     let candidate = PreparedSessionResponseCatalog::prepare(&effects, identity(), &second, limits())
         .expect("new catalog");
     provider.replace_catalog(candidate).expect("replacement");
@@ -487,6 +672,20 @@ fn replacement_invalidates_previous_bindings() {
         effect_slot_id: "eq",
     });
     assert_eq!(new.configuration.sample_rate_hz, 48_000);
+
+    let changed_effects = prepared_session_with_bypass(48_000, false, true, true);
+    let changed_candidate = PreparedSessionResponseCatalog::prepare(
+        &changed_effects,
+        identity(),
+        &second,
+        limits(),
+    )
+    .expect("changed configuration catalog");
+    provider
+        .replace_catalog(changed_candidate)
+        .expect("changed configuration replacement");
+    let changed = provider.bindings().next().expect("changed binding");
+    assert_eq!(changed.configuration.bypass, Some(true));
 }
 
 #[test]

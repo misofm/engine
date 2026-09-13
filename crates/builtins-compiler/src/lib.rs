@@ -4602,6 +4602,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn requested_track_builtin_parameters_preserves_projection_and_refusals() {
+        let compiled = session();
+        let track = &compiled.normalized_model().tracks[0];
+        assert_eq!(
+            requested_track_builtin_parameters(track, u32::MAX),
+            track_parameters(track, u32::MAX)
+        );
+
+        let mut invalid = track.clone();
+        let (session::MatrixOrPan::Pan {
+            smoothing_samples,
+            ..
+        }
+        | session::MatrixOrPan::Matrix {
+            smoothing_samples,
+            ..
+        }) = &mut invalid.matrix_or_pan
+        ;
+        *smoothing_samples = 1;
+        assert_eq!(
+            requested_track_builtin_parameters(&invalid, 0),
+            Err(BuiltinParameterError::MatrixSmoothing)
+        );
+        assert_eq!(
+            requested_track_builtin_parameters(&invalid, 0),
+            track_parameters(&invalid, 0)
+        );
+    }
+
     struct SourceSetDriver {
         claim_count: usize,
         marker: u64,
