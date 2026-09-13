@@ -39,3 +39,17 @@ Astra medium supplies one verdict on the exact corrected checkpoint, verifying t
 No artifact rebuild, repin or browser qualification rerun is needed: test comments and issue records are not inputs to the shipped six-file build. Verify the allowed diff and retain #768's honest source/artifact/result lineage, without relabeling its completed browser run. Any other changed build input invalidates this shortcut and requires scope review.
 
 Root integrates the correction into PR #769, requires successful qualification for its exact final head and main after merge, synchronizes the related GitHub issues/evidence, then closes this successor and the delivered children. Parent #763 remains open. #770 implementation resumes after this isolated correction is checkpointed and its shared source basis is synchronized.
+
+## Attempt 1 gate evidence
+
+The approved two-line comment replacement is the only source change. All six required commands
+exited 0; each command's unedited stdout/stderr and exit status is preserved outside the repository:
+
+- `cargo test --locked -p builtins --test filter_response` — `/tmp/issue771-cargo-test-filter-response.log`, exit `/tmp/issue771-cargo-test-filter-response.exit` (`0`)
+- `cargo fmt --all -- --check` — `/tmp/issue771-cargo-fmt.log`, exit `/tmp/issue771-cargo-fmt.exit` (`0`)
+- `bash scripts/check-builtins-policy.sh` — `/tmp/issue771-check-builtins-policy.log`, exit `/tmp/issue771-check-builtins-policy.exit` (`0`)
+- `bash scripts/test-builtins-policy.sh` — `/tmp/issue771-test-builtins-policy.log`, exit `/tmp/issue771-test-builtins-policy.exit` (`0`)
+- `bash scripts/check-realtime-policy.sh` — `/tmp/issue771-check-realtime-policy.log`, exit `/tmp/issue771-check-realtime-policy.exit` (`0`)
+- `git diff --check` — `/tmp/issue771-git-diff-check.log`, exit `/tmp/issue771-git-diff-check.exit` (`0`)
+
+The working diff contains only the approved comment lines in `crates/builtins/tests/filter_response.rs`.
