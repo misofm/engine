@@ -11,6 +11,12 @@ import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
 const OBSERVATION_FRAMES = 2_048;
 const SPECTRUM_FRAMES = 2_048;
+const CONTINUOUS_FRAMES = 6_144;
+const CONTINUOUS_BLOCKS = CONTINUOUS_FRAMES / 128;
+const PEAK_FREQUENCY_HZ = 750;
+const PEAK_LEFT_AMPLITUDE = 0.1;
+const PEAK_RIGHT_AMPLITUDE = 0.05;
+const PEAK_EQ_GAIN_DB = 6;
 
 const SPECTRUM_QUERIES = [
   {
@@ -245,18 +251,234 @@ async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
   return browser;
 }
 
-async function submitSpectrumSource(browser) {
-  for (let block = 0; block < SPECTRUM_FRAMES / 128; block += 1) {
+function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array {
+  const document = JSON.parse(raw);
+  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "console-source");
+  const track = document.tracks?.find((candidate: { id?: string }) => candidate.id === "track");
+  if (source === undefined || track === undefined) throw new Error("spectrum fixture is unavailable");
+  source.frames = String(frames);
+  if (peak) {
+    for (const lane of [track.builtins?.left, track.builtins?.right]) {
+      if (lane === undefined) throw new Error("spectrum peak fixture has no builtins");
+      lane.hpf_hz = 0;
+      lane.lpf_hz = 0;
+      lane.delay_samples = 0;
+      lane.trim_db = 0;
+      lane.polarity_invert = false;
+    }
+    const eq = track.simd1?.effects?.find((entry: { identity?: { effect_id?: string } }) =>
+      entry.identity?.effect_id === "miso.parametric-eq");
+    const definition = CATALOG.effects.find((candidate) => candidate.id === "miso.parametric-eq");
+    if (eq === undefined || definition === undefined) throw new Error("spectrum peak EQ fixture is unavailable");
+    const names = new Map([
+      ["band-1-enabled", 1],
+      ["band-1-kind", 1],
+      ["band-1-frequency", PEAK_FREQUENCY_HZ],
+      ["band-1-gain", PEAK_EQ_GAIN_DB],
+    ]);
+    eq.params = definition.parameters
+      .filter((parameter) => names.has(parameter.name) || parameter.name === "band-1-q")
+      .map((parameter) => ({
+        parameter_id: parameter.id,
+        channel: "both",
+        unit: parameter.unitName,
+        value: names.get(parameter.name) ?? parameter.default,
+      }));
+    track.dynamic.effects = [];
+    track.simd2.effects = [];
+  }
+  return new TextEncoder().encode(JSON.stringify(document));
+}
+
+async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES, peak = false) {
+  const raw = await (await fetch("/qualification/observation-session.json")).text();
+  const document = spectrumDocument(raw, frames, peak);
+  const browser = await createEngine({
+    document,
+    spectrum: query,
+    policy: {
+      sourceRingFrames: frames,
+      console: { commandQueueRecords: 64, meterBlocks: 16 },
+    },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: frames,
+      backend: "simd128" as const,
+      sources: [{ id: "console-source", channels: 2, frames: BigInt(frames) }],
+      tracks: ["track"],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, frames, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  return browser;
+}
+
+async function submitSpectrumSource(browser, frames = SPECTRUM_FRAMES, planeForBlock = spectrumPlanes) {
+  for (let block = 0; block < frames / 128; block += 1) {
     const acknowledgement = await browser.host.submitSource({
       sourceId: "console-source",
       generation: 1n,
       startFrame: BigInt(block * 128),
       sampleRateHz: 48_000,
-      planes: spectrumPlanes(block),
+      planes: planeForBlock(block, block * 128),
       frames: 128,
-      endOfRegion: block === SPECTRUM_FRAMES / 128 - 1,
+      endOfRegion: block === frames / 128 - 1,
     });
     if (acknowledgement.result !== 0) throw new Error("SDK spectrum source submission refused");
+  }
+}
+
+function toneSpectrumPlanes(block: number, startFrame: number): Float32Array[] {
+  const scale = block < 2 * SPECTRUM_FRAMES / 128 ? 1 : 0.5;
+  return [PEAK_LEFT_AMPLITUDE * scale, PEAK_RIGHT_AMPLITUDE * scale].map((amplitude) =>
+    Float32Array.from({ length: 128 }, (_, index) => amplitude * Math.sin(
+      2 * Math.PI * PEAK_FREQUENCY_HZ * (startFrame + index) / 48_000,
+    )));
+}
+
+function spectrumPeak(values: Float32Array): { readonly index: number; readonly value: number } {
+  let index = 0;
+  for (let candidate = 1; candidate < values.length; candidate += 1) {
+    if (values[candidate]! > values[index]!) index = candidate;
+  }
+  return { index, value: values[index]! };
+}
+
+async function runContinuousSpectrumQualification(): Promise<Record<string, unknown>> {
+  const query = {
+    target: { kind: "output" as const, outputId: "main-out" },
+    channels: "both" as const,
+    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+  };
+  const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true);
+  const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
+  let callbackCount = 0;
+  let callbackGap = false;
+  let callbackResolve: (() => void) | undefined;
+  const callbackSeen = new Promise<void>((resolve) => { callbackResolve = resolve; });
+  let subscription;
+  let shared;
+  try {
+    const meterLease = await browser.host.meters({
+      enabled: true,
+      onFrame: (frame) => meterFrames.push(frame),
+    });
+    if (meterLease.result !== 0) throw new Error("continuous spectrum meter lease refused");
+    const response = await browser.queryTrackResponse({
+      trackId: "track",
+      grid: { kind: "linear", points: 1_025, minimumHz: 0, maximumHz: 24_000 },
+      channels: "both",
+      responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 5_000 },
+    });
+    subscription = await browser.subscribeSpectrum({
+      ...query,
+      smoothingMs: 0,
+      cadenceMs: 1,
+      onUpdate: (notification) => {
+        callbackCount += 1;
+        callbackGap ||= notification.nativeMissedWindows > 0n || notification.skippedPublications > 0n;
+        callbackResolve?.();
+      },
+    });
+    shared = await browser.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 100 });
+    const pendingBeforeRender = subscription.readLatest() === undefined;
+    const sharedJob = shared.job === subscription.job
+      && shared.owner === subscription.owner && shared.epoch === subscription.epoch;
+    await submitSpectrumSource(browser, CONTINUOUS_FRAMES, toneSpectrumPlanes);
+    const rendered = await browser.context.startRendering();
+    const firstPcmPeak = Math.max(
+      ...[rendered.getChannelData(0), rendered.getChannelData(1)].map((plane) => {
+        let peak = 0;
+        for (const value of plane) peak = Math.max(peak, Math.abs(value));
+        return peak;
+      }),
+    );
+    const automaticDelivery = await Promise.race([
+      callbackSeen.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    const notifications = [];
+    for (let attempt = 0; attempt < CONTINUOUS_BLOCKS; attempt += 1) {
+      const notification = await subscription.pump();
+      if (notification !== undefined) notifications.push(notification);
+      if (notification?.status === "gap") break;
+    }
+    const first = subscription.readLatest();
+    if (first === undefined) throw new Error("continuous spectrum did not publish a window");
+    const firstLeft = first.leftDb;
+    const firstRight = first.rightDb;
+    if (firstLeft === undefined || firstRight === undefined) throw new Error("continuous spectrum omitted a channel");
+    const leftPeak = spectrumPeak(firstLeft);
+    const rightPeak = spectrumPeak(firstRight);
+    const sharedResult = shared.readLatest();
+    if (sharedResult === undefined) throw new Error("shared continuous spectrum had no result");
+    const original = sharedResult.leftDb?.[0];
+    if (original === undefined || subscription.readLatest()?.leftDb?.[0] !== original) {
+      throw new Error("continuous spectrum did not preserve owned arrays");
+    }
+    sharedResult.leftDb![0] = original + 100;
+    const ownedArrays = subscription.readLatest()?.leftDb?.[0] === original;
+    const secondNotification = notifications.at(-1);
+    const gap = secondNotification?.status === "gap"
+      || secondNotification?.nativeMissedWindows > 0n
+      || secondNotification?.skippedPublications > 0n
+      || callbackGap;
+    const readyNotification = notifications.find((notification) => notification.available);
+    const sharedAfterFirstClose = (await subscription.close(), shared.readLatest() !== undefined);
+    await shared.close();
+    let staleReadRefused = false;
+    try { shared.readLatest(); } catch { staleReadRefused = true; }
+    const meter = meterFrames.find((frame) => frame.peaks.length >= 4);
+    const expectedLeft = PEAK_LEFT_AMPLITUDE * 10 ** (PEAK_EQ_GAIN_DB / 20);
+    const expectedRight = PEAK_RIGHT_AMPLITUDE * 10 ** (PEAK_EQ_GAIN_DB / 20);
+    return {
+      pendingBeforeRender,
+      sharedJob,
+      callbackCount,
+      automaticDelivery,
+      windows: notifications.length,
+      statuses: notifications.map((notification) => notification.status),
+      sequences: notifications.map((notification) => notification.metadata.sequence.toString()),
+      gap,
+      ownedArrays,
+      sharedAfterFirstClose,
+      staleReadRefused,
+      first: {
+        capturedSample: first.capturedSample.toString(),
+        endSample: first.endSample.toString(),
+        sequence: readyNotification?.metadata.sequence.toString() ?? "",
+        snapshotToken: first.snapshotToken.toString(),
+        peakBins: [leftPeak.index, rightPeak.index],
+        peakHz: [first.frequenciesHz[leftPeak.index], first.frequenciesHz[rightPeak.index]],
+        peakDbfs: [leftPeak.value, rightPeak.value],
+        responseHz: response.frequenciesHz[32],
+        responseGainDb: [response.leftDb[32], response.rightDb[32]],
+        sampleRateHz: first.sampleRateHz,
+        windowFrames: first.windowFrames,
+        binCount: first.binCount,
+        sourceUnderrun: first.graphSourceUnderrun,
+        firstPcmPeak,
+        expectedLinearPeaks: [expectedLeft, expectedRight],
+        meterPeaks: meter === undefined ? [] : Array.from(meter.peaks),
+        meterSpan: meter === undefined ? [] : [meter.firstSample.toString(), meter.endSample.toString()],
+      },
+    };
+  } finally {
+    await shared?.close();
+    await subscription?.close();
+    await browser.close();
   }
 }
 
@@ -377,6 +599,7 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     ownedArrays: rows.every((row) => row.ownedArrays && row.ownedAfterClose),
     busyRefused,
     closedRefused,
+    continuous: await runContinuousSpectrumQualification(),
   };
 }
 

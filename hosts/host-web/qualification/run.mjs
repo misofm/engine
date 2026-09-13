@@ -419,6 +419,34 @@ function validateSdkResponse(browserName, response) {
     && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
     && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
   "SDK spectrum query did not prove owned arrays, graph-boundary distinction, or lifecycle refusals");
+  const continuous = spectrum?.continuous;
+  const continuousFirst = continuous?.first;
+  gate(browserName, "sdk-spectrum-continuous", continuous?.pendingBeforeRender === true
+    && continuous?.sharedJob === true && continuous?.automaticDelivery === true
+    && continuous?.windows >= 1 && continuous?.gap === true
+    && continuous?.ownedArrays === true && continuous?.sharedAfterFirstClose === true
+    && continuous?.staleReadRefused === true,
+  "continuous spectrum did not prove warmup, shared ownership, capture loss, or close lifecycle");
+  gate(browserName, "sdk-spectrum-continuous", continuous?.statuses?.includes("ready") === true
+    && continuous?.statuses?.includes("gap") === true
+    && continuousFirst?.sampleRateHz === 48_000
+    && continuousFirst?.windowFrames === 2_048
+    && continuousFirst?.binCount === 1_025
+    && continuousFirst?.peakBins?.[0] === 32 && continuousFirst?.peakBins?.[1] === 32
+    && Math.abs(continuousFirst?.peakHz?.[0] - 750) < 0.01
+    && Math.abs(continuousFirst?.peakHz?.[1] - 750) < 0.01
+    && Math.abs(continuousFirst?.responseHz - 750) < 0.01
+    && continuousFirst?.sourceUnderrun === false
+    && Array.isArray(continuousFirst?.meterPeaks)
+    && continuousFirst.meterPeaks.length >= 4
+    && Math.abs(continuousFirst.meterPeaks[0] - continuousFirst.expectedLinearPeaks[0]) < 0.01
+    && Math.abs(continuousFirst.meterPeaks[1] - continuousFirst.expectedLinearPeaks[1]) < 0.01
+    && Math.abs(continuousFirst.meterPeaks[2] - continuousFirst.expectedLinearPeaks[0]) < 0.01
+    && Math.abs(continuousFirst.meterPeaks[3] - continuousFirst.expectedLinearPeaks[1]) < 0.01
+    && Math.abs(continuousFirst.firstPcmPeak - continuousFirst.expectedLinearPeaks[0]) < 0.01
+    && Math.abs(continuousFirst.responseGainDb?.[0] - 6) < 0.02
+    && Math.abs(continuousFirst.responseGainDb?.[1] - 6) < 0.02,
+  "continuous spectrum did not align the 750 Hz peak with response, meter, and owned PCM");
 }
 
 function mutate(result, mutation) {

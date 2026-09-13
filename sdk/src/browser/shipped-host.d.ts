@@ -796,11 +796,11 @@ export interface MisoAudioWorkletHost {
   readSpectrum(request: { readonly channels: MisoSpectrumChannels }): Promise<MisoSpectrumReply>;
   /// Cancel the prepared spectrum boundary and discard any pending window.
   cancelSpectrum(): Promise<MisoSpectrumReply>;
-  /// Start the managed continuous spectrum stream for the prepared boundary.
+  /// Start the continuously scheduled spectrum boundary.
   startSpectrumStream(smoothingMs?: number): Promise<MisoSpectrumStreamStartReply>;
   /// Read one scheduled stream window into a caller-owned reusable buffer.
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
-  /// Stop the managed continuous spectrum stream.
+  /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
