@@ -476,6 +476,7 @@ pub fn query_response_into(
 /// `host-core`: a caller can multiply several independent linear owners in log space and apply
 /// the public floor once, after the complete subtotal is known.  All validation and numerical
 /// work happens before the first output word is written.
+#[allow(clippy::too_many_arguments)] // Explicit caller-owned input/output buffers.
 pub fn query_snapshot_magnitudes_into(
     sample_rate_hz: u32,
     bypassed: bool,

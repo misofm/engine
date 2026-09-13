@@ -755,7 +755,7 @@ fn read_live_record<T: Copy>(bytes: &[u8], offset: u32) -> Result<T, u32> {
     Ok(unsafe { ptr::read_unaligned(source.as_ptr().cast::<T>()) })
 }
 
-fn live_payload_bytes<'a>(bytes: &'a [u8], offset: u32, count: u32) -> Result<&'a [u8], u32> {
+fn live_payload_bytes(bytes: &[u8], offset: u32, count: u32) -> Result<&[u8], u32> {
     let start = usize::try_from(offset).map_err(|_| RESULT_INVALID_ARGUMENT)?;
     let length = usize::try_from(count).map_err(|_| RESULT_INVALID_ARGUMENT)?;
     let end = start.checked_add(length).ok_or(RESULT_INVALID_ARGUMENT)?;
@@ -2386,5 +2386,216 @@ mod response_budget_tests {
             ),
             Ok(()),
         );
+    }
+}
+
+#[cfg(test)]
+mod live_response_ffi_tests {
+    use super::*;
+    use core::alloc::Layout;
+    use core::cell::Cell;
+    use std::alloc::{GlobalAlloc, System};
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+        static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    struct CountingAllocator;
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn count_allocation() {
+        if ARMED.try_with(Cell::get).unwrap_or(false) {
+            ALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        }
+    }
+
+    fn count_deallocation() {
+        if ARMED.try_with(Cell::get).unwrap_or(false) {
+            DEALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        }
+    }
+
+    // SAFETY: every allocator operation is forwarded unchanged to the system allocator; the
+    // thread-local counters observe successful operations but never alter ownership or layout.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplied this layout for one system allocation.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                count_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplied this layout for one zeroed system allocation.
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() {
+                count_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_deallocation();
+            // SAFETY: the pointer and layout are the matching allocation supplied by the caller.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: the caller supplied the matching allocation and replacement size.
+            let replacement = unsafe { System.realloc(pointer, layout, new_size) };
+            if !replacement.is_null() {
+                count_allocation();
+                count_deallocation();
+            }
+            replacement
+        }
+    }
+
+    fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+        ARMED.with(|armed| armed.set(false));
+        ALLOCATIONS.with(|count| count.set(0));
+        DEALLOCATIONS.with(|count| count.set(0));
+        ARMED.with(|armed| armed.set(true));
+        let result = operation();
+        ARMED.with(|armed| armed.set(false));
+        (
+            result,
+            ALLOCATIONS.with(Cell::get),
+            DEALLOCATIONS.with(Cell::get),
+        )
+    }
+
+    fn stage_request(track_id: &[u8]) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            assert!(track_id.len() <= staging.live_track_id.len());
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..track_id.len()].copy_from_slice(track_id);
+            *staging.live_request = WebLiveResponseRequest {
+                struct_size: LIVE_RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                track_id_bytes: u32::try_from(track_id.len()).expect("short test track ID"),
+                grid: crate::RESPONSE_GRID_LINEAR,
+                channels: crate::RESPONSE_CHANNEL_BOTH,
+                points: 5,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+                maximum_result_bytes: LIVE_RESPONSE_CAPTURE_BYTES as u32,
+                reserved: [0; 3],
+            };
+            staging.live_result_len = 0;
+        });
+    }
+
+    fn captured_header() -> WebLiveResponseResult {
+        RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
+    }
+
+    #[test]
+    fn ffi_live_capture_analysis_is_prewarmed_and_token_exhaustion_is_typed() {
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let handle = test_boot(document.as_bytes(), options);
+        assert_ne!(handle, 0, "the mixed input-filter/EQ fixture must boot");
+
+        // Initialize every fixed response staging allocation before measuring the owner callback.
+        assert_eq!(
+            miso_engine_web_v1_track_response_request_bytes(),
+            LIVE_RESPONSE_REQUEST_BYTES
+        );
+        let _ = miso_engine_web_v1_track_response_request_ptr();
+        let _ = miso_engine_web_v1_track_response_track_id_ptr();
+        let _ = miso_engine_web_v1_track_response_snapshot_ptr();
+        assert_eq!(
+            miso_engine_web_v1_track_response_snapshot_capacity(),
+            LIVE_RESPONSE_CAPTURE_BYTES as u32
+        );
+        stage_request(b"eq0");
+
+        let (capture_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(capture_result, RESULT_OK);
+        assert_eq!(allocations, 0, "prewarmed FFI capture allocated");
+        assert_eq!(deallocations, 0, "prewarmed FFI capture freed");
+        let capture_header = captured_header();
+        assert_eq!(capture_header.result, RESULT_OK);
+        assert_eq!(capture_header.captured_sample, 0);
+        assert_eq!(capture_header.snapshot_token, 1);
+        assert!(
+            capture_header.owner_count >= 2,
+            "input filters and EQ must both be captured"
+        );
+        assert!(capture_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+
+        let (snapshot, token) = RESPONSE_STAGING
+            .with(|slot| parse_live_snapshot(&slot.borrow()).expect("captured mixed snapshot"));
+        assert_eq!(token, 1);
+        assert!(
+            snapshot
+                .owners
+                .iter()
+                .any(|owner| owner.native_id.as_ref() == "miso.builtin.input-filters")
+        );
+        assert!(
+            snapshot
+                .owners
+                .iter()
+                .any(|owner| owner.native_id.as_ref() == "miso.parametric-eq")
+        );
+
+        assert_eq!(miso_engine_web_v1_track_response_analysis(), RESULT_OK);
+        let analysis_header = captured_header();
+        assert_eq!(analysis_header.result, RESULT_OK);
+        assert_eq!(analysis_header.points, 5);
+        assert_eq!(analysis_header.captured_sample, 0);
+        assert_eq!(analysis_header.snapshot_token, 1);
+        assert!(analysis_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+        let result_len = miso_engine_web_v1_track_response_result_bytes();
+        assert_eq!(analysis_header.result_bytes, u64::from(result_len));
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let values = bytes
+                .chunks_exact(size_of::<f32>())
+                .skip(size_of::<WebLiveResponseResult>() / size_of::<f32>())
+                .take(15)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 word")));
+            assert!(values.into_iter().all(f32::is_finite));
+        });
+
+        // Closing clears payload length but must not reset the host-scoped sequence identity.
+        assert_eq!(miso_engine_web_v1_track_response_close(), RESULT_OK);
+        stage_request(b"eq0");
+        let (second_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(second_result, RESULT_OK);
+        assert_eq!(allocations, 0);
+        assert_eq!(deallocations, 0);
+        assert_eq!(captured_header().snapshot_token, 2);
+
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
+        stage_request(b"eq0");
+        let (exhausted_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(exhausted_result, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "token exhaustion refusal allocated");
+        assert_eq!(deallocations, 0, "token exhaustion refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            u64::MAX,
+            "exhaustion must not wrap or reuse a snapshot token"
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 }

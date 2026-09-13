@@ -406,6 +406,7 @@ pub fn query_input_filter_response_into(
 /// This is intentionally a word consumer rather than a parameter designer.  It lets a host
 /// compose the input subtotal with other linear owners in one f64 log-space pass and apply the
 /// public response floor only after all owners have been included.
+#[allow(clippy::too_many_arguments)] // Explicit caller-owned input/output buffers.
 pub fn query_input_filter_snapshot_magnitudes_into(
     sample_rate_hz: u32,
     bypassed: bool,
