@@ -16,6 +16,7 @@ lane.workspace = true
 math.workspace = true
 
 [dev-dependencies]
+bench-support.workspace = true
 dsp-reference.workspace = true
 sha2.workspace = true
 

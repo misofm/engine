@@ -250,3 +250,7 @@ No correction is required by this review. The evidence qualifies the existing re
 ## Delivery boundary
 
 Required PR qualification for the exact delivered head remains a separate pending delivery gate. This PASS is not a claim that PR/main CI, merge, issue synchronization/closure or cleanup has completed. Root may append evidence-only records and proceed when exact-head required CI permits; verify successful main qualification and synchronize #766/#764 after delivery. Parent #763 remains open, with its browser/headless analysis milestones still outstanding.
+
+## Delivered through PR #765
+
+Merged as `7dcb127518d0666f6cbe809053732b215defeb9f`. Required final-PR qualification `34728325698` and post-main qualification `34728654011` both succeeded. #764 source passed Astra medium attempt 3 at `c125794add17bc60f044bcaeb5f2907a4fdc359d`; #766 artifact qualification passed attempt 1 at `e9674c93554db64815fca53c392d9f44e516f745`. The delivered capability is the native parametric-EQ requested-configuration query plus qualification of the changed linked AudioWorklet. It adds no browser response endpoint. Root synchronized and closes both children; parent #763 remains open.

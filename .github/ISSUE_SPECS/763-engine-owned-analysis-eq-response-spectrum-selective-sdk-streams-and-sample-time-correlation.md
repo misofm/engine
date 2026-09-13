@@ -153,3 +153,13 @@ The only currently authorized outside-parent successors are those the parent alr
 #764 supplies the native requested-configuration parametric-EQ curve query. Luna max implemented it; Astra medium passed attempt 3 at `c125794add17bc60f044bcaeb5f2907a4fdc359d`. #766 qualified its linked AudioWorklet artifact through the existing static/resource/SDK/headless/package and three-browser gates; Astra medium passed qualification attempt 1 at `e9674c93554db64815fca53c392d9f44e516f745`. The changed artifact digest is `b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69`; no layout-only explanation or new browser response endpoint is claimed.
 
 PR #765 owns delivery of both children. Required final-head CI and merge remain pending at this evidence checkpoint; neither child is reported closed here. Stage 2 native input-filter response is briefed but not implemented. All remaining parent stages and full engine/SDK acceptance remain open.
+
+## Stage 1 delivered; stage 2 active
+
+#764 and its required artifact successor #766 are delivered through PR #765, merged main `7dcb127518d0666f6cbe809053732b215defeb9f`. Final PR qualification `34728325698` and post-main qualification `34728654011` succeeded. Native callers can prepare immutable EQ configurations and query independent L/R totals and optional band curves without query allocations. This is native requested-configuration functionality, not the complete SDK preview milestone. Both children close with synchronized evidence.
+
+#767 now owns native input HPF/LPF response queries under the same Astra xhigh / Luna max / Astra medium workflow. All remaining parent stages stay required and open.
+
+## Stage 2 accepted; integrated delivery pending
+
+#767 native input HPF/LPF response query passed Astra medium attempt 2 at `dc070bcda506896fe05b4dfefb931841b6d6caa3`. #768 changed-artifact qualification passed Astra medium attempt 1 at `b92e72160b34329a354244a3d1edfa6441fc149b`, including all existing source-consumer/SDK/resource and three-browser gates. New Wasm digest: `0e6008d94c4a3a235feed551401983321f1782d73906144e227483803769d941`. Luna max supplied implementation/qualification. Required PR/main CI and merge remain pending; neither child is claimed closed here. The next native response-provider/discovery precursor is briefed and retains session binding/composition/SDK/live/spectrum stages as required successors.

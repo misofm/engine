@@ -192,6 +192,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "builtins"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "dsp-reference",
  "effect-contract",
  "engine",
