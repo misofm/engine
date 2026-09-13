@@ -98,3 +98,47 @@ Actual headless EQ/input-filter tests pass 3/3. Actual Chromium 151.0.7922.34, F
 Root host-core all-feature library/prepare/fp tests and workspace-all-target check pass (`/tmp/issue775-root-{host-tests,workspace-check}.*`). Remaining existing consumer gates and Astra medium verification are pending. This establishes a working requested-configuration SDK path, not complete #763 telemetry or final delivery.
 
 The existing metadata self-test fixture initially lacked the newly generated builtin response field, causing hermetic failure `Invalid: builtin keys`. Updating only that generated fixture restores the strict validator self-test and hermetic gate (exit 0, `/tmp/issue775-parameter-metadata-self-test-fix.*`, `/tmp/issue775-candidate1-web-hermetic-fix.*`). Product source, artifact and browser evidence are unchanged. Static and expected-resource gates already pass; remaining SDK/package gates continue.
+
+## Attempt 1 verification verdict
+
+# Issue #775 — Astra medium adversarial review, attempt 1
+
+**Verdict: FAIL.** Reviewed product source: `577512eedb86cf81855c5e0b2b5009d7799e4535`, against main `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`, in `/tmp/miso-engine-775`. The later checkpoint `6feb3635f462de46cb6c49c59aac64940d8b5358` changes the existing metadata self-test fixture and evidence only; it does not correct the product findings below.
+
+This review applies the full #775 requirements-first rescope and explicit user instruction that verification fixes bugs rather than expands scope. The explicit stopped configuration utility is the accepted product. No catalog, session compilation, plan binding, live state, new harness, optimization or extended matrix is required by this verdict. Parent #763 remains open.
+
+## Blocking findings and minimal corrections
+
+1. **High — caller byte caps do not precede point-sized allocations.** `hosts/host-web/src/ffi.rs:381–418` computes section points and allocates the frequency, both total, and optional both-section vectors before checking even whether the fixed result header fits `maximum_result_bytes`. `response_grid` at line 227 merely converts the u32 point count; the SDK at `sdk/src/core/response.ts:327` accepts up to `u32::MAX`. Checked multiplication alone does not enforce a usable budget. A malformed or excessive request can allocate far beyond its configured result cap, exhaust Wasm memory or trap before returning the required typed refusal.
+
+   Bounded real-candidate reproduction: with `maximumResultBytes: 16` and an otherwise valid input-filter request containing 250,000 linear points, the call eventually returned `refusedBudget`, but Wasm memory grew from **1,245,184 to 4,390,912 bytes** first. No huge/OOM probe was run. This directly contradicts the frozen requirement that checked counts/ranges/caps precede allocation/output publication and that the temporary unwanted lane is budgeted.
+
+   Minimal fix: compute and validate checked output/header sizes and the bounded working-vector requirement (including both owner lanes and optional sections) before allocating point-sized storage. Refuse invalid grids/counts and over-budget requests early with the existing typed status. A small existing-harness regression should establish that a tiny cap plus large point count refuses before point-sized work/storage; no new resource framework is needed.
+
+2. **Medium — malformed SDK selectors silently request different valid analyses.** `sdk/src/core/response.ts:177–180,330–343` falls back to both channels for any unknown channel, to total plus sections for any non-`total` fields value, and to a logarithmic grid for any non-`linear` grid kind. The generated Rust boundary correctly rejects unknown numeric selector bits, but the SDK converts invalid strings into valid bits before reaching it. Plain JavaScript callers therefore receive successful output for requests the frozen brief explicitly requires to refuse.
+
+   Real-candidate probes using `fields: "bogus"`, `channels: "bogus"`, and `grid.kind: "bogus"` all **succeeded**. The invalid fields request even returned two filter sections. TypeScript unions do not validate runtime JavaScript input.
+
+   Minimal fix: explicitly validate the supported selector literals before encoding, preserving the documented defaults when a selector is omitted. Throw the existing typed usage error for an unsupported value. Add concise cases in the existing SDK evals for these invalid selectors.
+
+3. **Medium — a timeout releases admission while the original Worker request remains outstanding.** `sdk/src/browser/response.ts:87–91` clears `#pending` and rejects the promise without stopping the Worker or retaining an outstanding-work marker. A subsequent call is then posted while the timed-out request may still be computing or queued. Repeated deadlines can accumulate Worker messages, violating the one-outstanding-request contract. The fatal `error`/`messageerror` paths at lines 152–161 similarly clear pending work without making the unusable preview terminal.
+
+   Existing-style fake-Worker reproduction: a Worker that never replies to queries receives **two query messages after two successive deadlines, with zero terminations**. This is a scheduling probe, not substituted real-Wasm evidence.
+
+   Minimal fix: make timeout/fatal Worker failure terminal and terminate/remove listeners/reject pending work using the existing lifecycle, or preserve backpressure until actual outstanding work ends. Terminal close is the smaller approach. Add one concise timeout lifecycle regression and reuse it to check no second job is admitted; preserve idempotent close.
+
+## Evidence and scope assessment
+
+The representative endpoint works: the authentic focused headless log reports 3/3 passing, and all three actual browser SDK/Worker qualification paths pass. These successful tests do not exercise the failing budget/selector/timeout cases above. Their success is preserved, not reclassified as a failure.
+
+The candidate artifact is `/tmp/issue775-candidate1-artifact`, digest `0f128146feef23a36eb35ced25d5400b83b95cb03b5607d2b2f8ffe08ab4d45f`, built from `9a77a12ac607b0621e8ab4a934c6ce50c843023d`. The later JavaScript correction `a1027699` and runner import at reviewed source `577512ee` are documented separately. This review does not falsely attribute rebuilt Wasm to the later source head.
+
+Recorded gate evidence remains valid for the tested source/candidate: host-core tests, workspace-all-target check and all-feature Clippy exit 0; `/tmp/issue775-fmt-check.exit` is 0. The earlier `/tmp/issue775-root-fmt.exit` is 1 and is not a passing formatting record. The later existing metadata fixture correction has reported passing strict self-test/hermetic/static/resource gates. Verified exit files under `/tmp/issue775-candidate1-remaining-gates3/` are 0 for SDK types, full headless, package and matrix. Full headless reports **196 passed, 0 failed, 0 skipped**; package reports **11 passed** and the publishable-tarball gate passed. No expensive successful gates were rerun for this review.
+
+The thin Rust adapter reuses the native registry, descriptor defaults and accepted owner preparation/query implementation, without preparing an audio processor or replacing owner transfer math. Browser execution stays in the analysis Worker; headless uses the same core adapter. Result curve buffers are copied out of Wasm, and result decoding reacquires memory after the allocating query. These are appropriate choices for the frozen slice. This verdict does not require revisiting previously accepted owner DSP, adding catalog/plan machinery, or broadening numerical evidence.
+
+Bounded independent reproduction source and output are preserved in `/tmp/issue775-review-probe.mjs` and `/tmp/issue775-review-probe.log`; `node /tmp/issue775-review-probe.mjs` exited 0. The script makes only the three small selector requests, the bounded 250,000-point budget probe, and the fake-Worker timeout probe. No source files were edited, no agents delegated, and no commits or GitHub mutations were performed.
+
+Correct these three bugs in one bounded revision, with focused discriminating regressions and relevant reruns. The Rust allocation-order correction changes the artifact input, so the corrected deliverable needs a newly identified candidate; the successful attempt-1 logs must remain attributed to their original candidate. No optional abstraction, additional matrix, optimization or unrelated hardening is a blocker in this verdict.
+
+Attempt 2 is limited to these three reproduced bugs and focused regressions. Existing working endpoint evidence is preserved; no new capability, abstraction or qualification framework is added.
