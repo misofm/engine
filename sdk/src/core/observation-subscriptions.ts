@@ -924,9 +924,16 @@ export class ObservationSubscriptionOwner {
       this.#assertEpoch(epoch);
       const job = await this.#ensureResponseJob(normalized.configuration, epoch);
       this.#assertEpoch(epoch);
+      try {
+        this.#assertResponseDeliveryBudget(job, normalized.configuration.cadenceMs);
+      } catch (error) {
+        this.#dropUnreferencedResponseJob(job);
+        throw error;
+      }
       job.refs += 1;
       const state = this.#newResponseHandle(normalized.configuration, normalized.callback, job);
       this.#responseHandles.set(state.id, state);
+      this.#refreshResponseJobCadence(job);
       this.#startTimer();
       return this.#responseReceipt(state);
     });
@@ -949,6 +956,12 @@ export class ObservationSubscriptionOwner {
       const current = state.job;
       const job = await this.#ensureResponseJob(normalized.configuration, epoch);
       this.#assertEpoch(epoch);
+      try {
+        this.#assertResponseDeliveryBudget(job, normalized.configuration.cadenceMs, state);
+      } catch (error) {
+        this.#dropUnreferencedResponseJob(job);
+        throw error;
+      }
       if (job !== current) {
         current.refs -= 1;
         if (current.refs === 0) this.#responseJobs.delete(current.key);
@@ -959,6 +972,8 @@ export class ObservationSubscriptionOwner {
       state.callback = normalized.callback;
       state.cursor = job.publicationSequence;
       state.nextDeliveryAt = 0;
+      this.#refreshResponseJobCadence(current);
+      if (job !== current) this.#refreshResponseJobCadence(job);
       this.#restartTimer();
       return this.#responseReceipt(state);
     });
@@ -968,6 +983,9 @@ export class ObservationSubscriptionOwner {
     return this.#enqueue(async () => {
       this.#assertResponseHandle(state);
       const epoch = this.#epoch;
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      if (this.#responseJobs.get(state.job.key) === state.job) state.job.nextCaptureAt = 0;
       await this.#poll();
       this.#assertEpoch(epoch);
       return this.#notifyResponse(state, false);
@@ -984,6 +1002,7 @@ export class ObservationSubscriptionOwner {
       this.#responseHandles.delete(state.id);
       job.refs -= 1;
       if (job.refs === 0) this.#responseJobs.delete(job.key);
+      else this.#refreshResponseJobCadence(job);
       this.#stopTimerIfIdle();
     });
     const retryable = pending.catch((error: unknown) => {
@@ -1037,6 +1056,8 @@ export class ObservationSubscriptionOwner {
       id: this.#nextResponseJob++, key, query, refs: 0, state, result,
       revision: 1n, publicationSequence: 1n,
       retainedBytes: responseRetainedBytes(result, state),
+      fastestCadenceMs: configuration.cadenceMs,
+      nextCaptureAt: Date.now() + configuration.cadenceMs,
     };
     this.#assertResponseRetainedBytes(job.retainedBytes);
     this.#responseJobs.set(key, job);
@@ -1071,11 +1092,51 @@ export class ObservationSubscriptionOwner {
         || (result.rightDb?.length ?? 0) > this.responseBounds.maximumPoints) {
       throw new MisoUsageError("the live response points exceed the subscription bound");
     }
-    if (responseVectorBytes(result) > subscriptionLimits.maximumDeliveredBytesPerSecond) {
-      throw new MisoUsageError("the live response vectors exceed the delivery bound");
-    }
     if (responseRetainedBytes(result, state) > subscriptionLimits.maximumRetainedBytes) {
       throw new MisoUsageError("the live response retained bytes exceed the subscription bound");
+    }
+  }
+
+  #assertResponseDeliveryBudget(
+    candidate: ResponseJobState,
+    candidateCadenceMs?: number,
+    replacing?: ResponseHandleState,
+    candidateResult?: TrackResponseResult,
+  ): void {
+    const maximum = this.#responseSubscriptionLimits!.maximumDeliveredBytesPerSecond;
+    let delivered = 0;
+    for (const handle of this.#responseHandles.values()) {
+      if (handle === replacing) continue;
+      const result = handle.job === candidate && candidateResult !== undefined
+        ? candidateResult : handle.job.result;
+      delivered += responseDeliveryRate(result, handle.configuration.cadenceMs);
+      if (!Number.isFinite(delivered) || delivered > maximum) {
+        throw new MisoUsageError("the live response vectors exceed the delivery bound");
+      }
+    }
+    if (candidateCadenceMs !== undefined) {
+      delivered += responseDeliveryRate(candidateResult ?? candidate.result, candidateCadenceMs);
+      if (!Number.isFinite(delivered) || delivered > maximum) {
+        throw new MisoUsageError("the live response vectors exceed the delivery bound");
+      }
+    }
+  }
+
+  #dropUnreferencedResponseJob(job: ResponseJobState): void {
+    if (job.refs === 0 && this.#responseJobs.get(job.key) === job) this.#responseJobs.delete(job.key);
+  }
+
+  #refreshResponseJobCadence(job: ResponseJobState): void {
+    if (job.refs === 0) return;
+    let fastest = this.#responseSubscriptionLimits!.maximumCadenceMs;
+    for (const handle of this.#responseHandles.values()) {
+      if (handle.job === job && handle.configuration.cadenceMs < fastest) {
+        fastest = handle.configuration.cadenceMs;
+      }
+    }
+    if (fastest !== job.fastestCadenceMs) {
+      job.fastestCadenceMs = fastest;
+      job.nextCaptureAt = Date.now() + fastest;
     }
   }
 
@@ -1103,8 +1164,10 @@ export class ObservationSubscriptionOwner {
     }
     for (const job of jobs) {
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
+      if (Date.now() < job.nextCaptureAt) continue;
       const read = await responseRead(job.query, job.state);
       this.#assertEpoch(epoch);
+      job.nextCaptureAt = Date.now() + job.fastestCadenceMs;
       if (!read.changed) continue;
       if (read.result === undefined) {
         throw new MisoEngineError("the changed live response capture did not produce a result", {
@@ -1114,6 +1177,7 @@ export class ObservationSubscriptionOwner {
       const state = copyObservedState(read.state);
       const result = copyTrackResponseResult(read.result);
       this.#assertResponseResultBounds(result, state);
+      this.#assertResponseDeliveryBudget(job, undefined, undefined, result);
       this.#assertResponseRetainedBytes(responseRetainedBytes(result, state), job);
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
       job.state = state;
@@ -1270,6 +1334,8 @@ interface ResponseJobState {
   revision: bigint;
   publicationSequence: bigint;
   retainedBytes: number;
+  fastestCadenceMs: number;
+  nextCaptureAt: number;
 }
 
 interface ResponseHandleState {
@@ -1343,6 +1409,7 @@ function responseJobKey(query: TrackResponseQuery): string {
     query.grid.maximumHz,
     query.channels,
     query.responseLimits?.maximumResultBytes,
+    query.responseLimits?.requestDeadlineMs ?? 5_000,
   ]);
 }
 
@@ -1367,6 +1434,15 @@ function responseVectorBytes(result: TrackResponseResult): number {
   return result.frequenciesHz.byteLength
     + (result.leftDb?.byteLength ?? 0)
     + (result.rightDb?.byteLength ?? 0);
+}
+
+function responseDeliveryRate(result: TrackResponseResult, cadenceMs: number): number {
+  const bytes = responseVectorBytes(result);
+  const rate = bytes * 1000 / cadenceMs;
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new MisoUsageError("the live response vectors exceed the delivery bound");
+  }
+  return rate;
 }
 
 function responseRetainedBytes(result: TrackResponseResult, state: TrackResponseObservedState): number {

@@ -481,6 +481,12 @@ no evaluation or notification. Headless pumping performs the same comparison wit
 `update()` validates a replacement before releasing the old configuration; refusal preserves it.
 Each `readLatest()` returns owned arrays, and the last close releases the job.
 
+Engine creation accepts `responseSubscriptionLimits`: defaults allow 64 handles, 16 jobs,
+16 MiB of retained result/key payload, 16 capture attempts per poll, and 16 MiB/s of admitted
+vector delivery across consumers. The default cadence is 100 ms; the maximum is 60 seconds.
+Generated endpoint bounds also cap points and capture size. The engine-owned response Worker and
+its Wasm instance are fixed per-engine resources, separate from the per-job payload budget.
+
 The handle reports its effective configuration and bounds. Its bigint `revision` identifies an
 observed captured-state change within this SDK owner/epoch/job. It does not count every intervening
 engine edit. Results retain their original `snapshotToken` and `capturedSample`; unchanged polls
