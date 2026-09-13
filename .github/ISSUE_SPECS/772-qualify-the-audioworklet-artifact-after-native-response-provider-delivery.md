@@ -129,3 +129,57 @@ checkpoint before the ordinary build.
 ## Discovery validation correction before ordinary build
 
 Root found the original diagnostic log printed `digest_record_shape=False` while exiting0, so that log did not establish the claimed shape validation. It is preserved unchanged. Root independently read the original builder stdout and enforced all conditions: exactly65bytes matching lowercase64hex+LF, byte-identical provisional pin, empty probe and actual builder exit0. All checks passed with an enforced zero status; authentic output/exit are `/tmp/issue772-root-discovery-verification.log` and `.exit`. No candidate discovery or build was repeated, and the pin is unchanged. This explicit verification supersedes the original diagnostic's claim; subsequent validation must fail on false predicates.
+
+## Attempt 1 ordinary artifact and qualification results
+
+Root checkpointed the corrected discovery evidence and authorized the single ordinary build. The
+report variable was unset and the fresh external artifact directory was
+`/tmp/issue772-attempt1-artifact`:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN bash scripts/build-web-audioworklet.sh /tmp/issue772-attempt1-artifact
+```
+
+The builder exited `0`; authentic stdout, stderr and exit are
+`/tmp/issue772-attempt1-ordinary-build.stdout`,
+`/tmp/issue772-attempt1-ordinary-build.stderr` and
+`/tmp/issue772-attempt1-ordinary-build.exit`. Strict post-build validation (including a failing
+status for every false predicate) exited `0`; its output is
+`/tmp/issue772-attempt1-ordinary-validation.stdout`,
+`/tmp/issue772-attempt1-ordinary-validation.stderr` and
+`/tmp/issue772-attempt1-ordinary-validation.exit`. The artifact contains exactly six regular
+non-symlink files. Their basename-normalized SHA-256 values are:
+
+```text
+miso-engine-v1-abi-layout.json              40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919
+miso-engine-v1-audio-worklet-host.d.ts      c42c997bc8bdcb21245f54251fff9f95020a0f5305bc24d22fe54386f043f18e
+miso-engine-v1-audio-worklet-host.js       59549964170b87f331a7ecb90fa4272734ad09184f891f6e5b46ab71aa0fb425
+miso-engine-v1-audio-worklet.js            225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb
+miso-engine-v1-audio-worklet.simd128.wasm  68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee
+miso-engine-v1-parameter-metadata.json      2b0e1195bbad7e2672de62a4e4f331d21f01f5ce042338ae8e400a4a9afa5585
+```
+
+The candidate Wasm digest, pin record and output agree. All five authority `cmp` checks and the
+delivered-reference authority diff exited `0`; authentic output, stderr and exit are
+`/tmp/issue772-attempt1-authority-comparison.stdout`,
+`/tmp/issue772-attempt1-authority-comparison.stderr` and
+`/tmp/issue772-attempt1-authority-comparison.exit`.
+
+The six existing gates ran exactly once against this same artifact. The aggregate runner exited
+`0` (`/tmp/issue772-attempt1-six-gates.exit`), and each command's authentic stdout, stderr and
+exit is preserved under `/tmp/issue772-attempt1-gate-{check-web-audioworklet,browser-expected-resources,test-web-audioworklet,check-sdk-types,check-sdk-headless,sdk-package-check}.{stdout,stderr,exit}`.
+All six command exits are `0`; the AudioWorklet test's stderr contains its expected mutation
+negative-control diagnostics while its command passed.
+
+The changed digest required the one all-browser recording run, using candidate commit
+`a5db34217ff7f656765121463c7acd8247f65e1b`. Chromium `151.0.7922.34`, Firefox `153.0`, and
+WebKit `26.5` passed, including self-test mutations; the command exited `0`. Authentic stdout,
+stderr and exit are `/tmp/issue772-attempt1-browser-qualify.stdout`,
+`/tmp/issue772-attempt1-browser-qualify.stderr` and
+`/tmp/issue772-attempt1-browser-qualify.exit`. The generated tracked results and matrix update
+only the candidate lineage and Wasm digest to this accepted source and
+`68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee`.
+
+The unconditional `generate-matrix.mjs --check` and `git diff --check` both exited `0`; authentic
+output, stderr and exit are `/tmp/issue772-attempt1-final-checks.stdout`,
+`/tmp/issue772-attempt1-final-checks.stderr` and `/tmp/issue772-attempt1-final-checks.exit`.
