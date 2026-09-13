@@ -428,6 +428,29 @@ metadata. Excluded effects remain identified in the result. Fader, pan, routing 
 processing are outside this subtotal. Use `createResponsePreview` above for hypothetical
 configurations that have not been applied to the engine.
 
+## Captured spectrum
+
+Prepare one spectrum target by passing `spectrum` when creating the browser or headless engine:
+
+```ts
+const spectrum = {
+  target: { kind: "trackPostMatrix", trackId: "vocals" },
+  channels: "both",
+} as const;
+// Pass spectrum alongside your existing createEngine/bootHeadless options.
+const result = await browserEngine.querySpectrum(spectrum);
+```
+
+Targets are `trackPostInputBuiltins`, `trackPostMatrix`, or `output` (with `outputId`).
+One target is prepared per engine; replacing the session permits selecting another target.
+Each query captures 2,048 contiguous samples and returns owned frequency and dBFS arrays,
+exact `bigint` sample boundaries, and a graph-wide source-underrun flag. Only one capture
+can be outstanding. FFT analysis runs off the audio thread.
+
+For headless use, call `armSpectrum()`, render normally, then call `readSpectrum()`;
+it returns `undefined` until the capture is ready. Queries never render implicitly.
+Use `cancelSpectrum()` to abandon a capture.
+
 ## Tests
 
 The eval suites run under Node's native type stripping, so `sdk/src/**/*.ts` is imported directly

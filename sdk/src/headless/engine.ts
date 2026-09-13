@@ -15,6 +15,7 @@ import type {
   ObservationSelection,
 } from "../core/observation.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
+import type { SpectrumResult } from "../core/spectrum.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -138,6 +139,21 @@ export class OfflineEngine {
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
   queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
     return this.#boundary.queryTrackResponse(request);
+  }
+
+  /** Arm the optional prepared spectrum boundary for its next complete 2048-frame window. */
+  armSpectrum(): EngineCallResult {
+    return this.#boundary.armSpectrum();
+  }
+
+  /** Read/analyze the completed spectrum window; `undefined` means more explicit renders are needed. */
+  readSpectrum(): SpectrumResult | undefined {
+    return this.#boundary.readSpectrum();
+  }
+
+  /** Cancel the optional pending spectrum capture. */
+  cancelSpectrum(): EngineCallResult {
+    return this.#boundary.cancelSpectrum();
   }
 
   /** A semantic console bound to the currently loaded session. */

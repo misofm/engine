@@ -18,6 +18,7 @@ export type {
   TrackResponseQuery,
   TrackResponseResult,
 } from "../core/live-response.ts";
+export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "../core/spectrum.ts";
 
 export { scratchBootWithWorker, prepareBrowserSessionWithWorker } from "./scratch.ts";
 export type { ScratchWorker, ScratchWorkerFactory, ScratchBootWorkerOptions, PreparedBrowserSession } from "./scratch.ts";

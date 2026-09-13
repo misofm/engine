@@ -21,8 +21,11 @@ import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserConsole } from "./console.ts";
 import { createTrackResponse } from "./response.ts";
 import type { BrowserTrackResponse } from "./response.ts";
+import { createSpectrum } from "./response.ts";
+import type { BrowserSpectrum } from "./response.ts";
 import type { TrackResponseHostRequest, TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
+import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -102,6 +105,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly createWorker?: ScratchWorkerFactory;
   readonly responseWorkerModuleUrl?: string | URL;
   readonly createResponseWorker?: ResponseWorkerFactory;
+  /** One prepared spectrum boundary. The query target must match it. */
+  readonly spectrum?: SpectrumQuery;
   readonly requestDeadlineMs?: number;
   readonly signal?: AbortSignal;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
@@ -138,6 +143,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
+  /** Arm, capture and analyze one complete 2048-frame spectrum window. */
+  querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
   /** Bind the semantic console once; rejects with MisoUsageError when no console was attached. */
   console(): Promise<EngineConsole>;
   /** Dispose the worklet host, then close its context. Safe to call more than once. */
@@ -193,6 +200,100 @@ function trackResponseHostRequest(request: TrackResponseQuery): TrackResponseHos
     maximumHz: request.grid.maximumHz,
     maximumResultBytes,
   };
+}
+
+function spectrumTargetId(target: SpectrumQuery["target"]): string {
+  if (target === null || typeof target !== "object") {
+    throw new MisoUsageError("spectrum target must be an object");
+  }
+  let id: unknown;
+  switch (target.kind) {
+    case "trackPostInputBuiltins":
+    case "trackPostMatrix":
+      id = target.trackId;
+      break;
+    case "output":
+      id = target.outputId;
+      break;
+    default:
+      throw new MisoUsageError("target.kind must name a supported spectrum boundary");
+  }
+  if (typeof id !== "string" || id.length === 0) {
+    throw new MisoUsageError("spectrum target identity must be a nonempty string");
+  }
+  return id;
+}
+
+function sameSpectrumTarget(left: SpectrumQuery["target"], right: SpectrumQuery["target"]): boolean {
+  if (left === null || typeof left !== "object" || right === null || typeof right !== "object") {
+    throw new MisoUsageError("spectrum target must be an object");
+  }
+  const leftKind = left.kind;
+  const rightKind = right.kind;
+  if (leftKind !== "trackPostInputBuiltins" && leftKind !== "trackPostMatrix" && leftKind !== "output") {
+    throw new MisoUsageError("target.kind must name a supported spectrum boundary");
+  }
+  if (rightKind !== "trackPostInputBuiltins" && rightKind !== "trackPostMatrix" && rightKind !== "output") {
+    throw new MisoUsageError("target.kind must name a supported spectrum boundary");
+  }
+  if (leftKind !== rightKind) return false;
+  return spectrumTargetId(left) === spectrumTargetId(right);
+}
+
+function spectrumChannelMask(channels: SpectrumQuery["channels"]): number {
+  if (channels === undefined || channels === "both") return 3;
+  if (channels === "left") return 1;
+  if (channels === "right") return 2;
+  throw new MisoUsageError("spectrum channels must be left, right, or both");
+}
+
+function validateSpectrumQuery(request: SpectrumQuery, prepared: SpectrumQuery): SpectrumQuery {
+  if (request === null || typeof request !== "object" || !sameSpectrumTarget(request.target, prepared.target)) {
+    throw new MisoUsageError("spectrum query target does not match the prepared boundary");
+  }
+  const requestedChannels = spectrumChannelMask(request.channels);
+  const preparedChannels = spectrumChannelMask(prepared.channels);
+  if ((requestedChannels & ~preparedChannels) !== 0) {
+    throw new MisoUsageError("spectrum query channels were not prepared");
+  }
+  const maximumCaptureBytes = request.spectrumLimits?.maximumCaptureBytes
+    ?? prepared.spectrumLimits?.maximumCaptureBytes
+    ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
+      || maximumCaptureBytes > (prepared.spectrumLimits?.maximumCaptureBytes
+        ?? ABI_LAYOUT.constants.spectrumCaptureBytes)) {
+    throw new MisoUsageError("spectrum maximumCaptureBytes exceeds the prepared bound");
+  }
+  const deadline = request.spectrumLimits?.requestDeadlineMs;
+  if (deadline !== undefined
+      && (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647)) {
+    throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
+  }
+  return request;
+}
+
+async function awaitSpectrum<T>(
+  promise: Promise<T>,
+  started: number,
+  deadline: number,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  const remaining = deadline - (Date.now() - started);
+  if (remaining <= 0) throw new MisoUsageError("spectrum query exceeded its deadline");
+  signal?.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new MisoUsageError("spectrum query exceeded its deadline")), remaining);
+      onAbort = () => reject(signal?.reason ?? new MisoUsageError("spectrum query was aborted"));
+      signal?.addEventListener("abort", onAbort, { once: true });
+      promise.then(resolve, reject);
+    });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -296,7 +397,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       options: workletBootOptions(policy, {
         sampleRateHz: shape.sampleRateHz,
         quantumFrames: shape.quantumFrames,
-      }),
+      }, options.spectrum),
       simd128ModuleUrl,
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
@@ -306,6 +407,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let trackResponse: BrowserTrackResponse | undefined;
     let trackResponsePromise: Promise<BrowserTrackResponse> | undefined;
     let trackResponsePending = false;
+    let spectrum: BrowserSpectrum | undefined;
+    let spectrumPromise: Promise<BrowserSpectrum> | undefined;
+    let spectrumPending = false;
     let closed = false;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -396,6 +500,109 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         trackResponsePending = false;
       }
     };
+    const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
+      if (closed) throw new MisoUsageError("the browser engine is closed");
+      const prepared = options.spectrum;
+      if (prepared === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
+      if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
+      spectrumPending = true;
+      let armed = false;
+      try {
+        const query = validateSpectrumQuery(request, prepared);
+        const deadline = query.spectrumLimits?.requestDeadlineMs
+          ?? options.requestDeadlineMs
+          ?? 5_000;
+        if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
+          throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
+        }
+        const started = Date.now();
+        if (typeof host.armSpectrum !== "function" || typeof host.readSpectrum !== "function") {
+          throw new MisoUsageError("the browser host does not support spectrum capture");
+        }
+        const arm = await awaitSpectrum(host.armSpectrum(), started, deadline, options.signal);
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        if (arm.result !== constantValue("resultCodes", "ok")) {
+          throw new MisoEngineError("the browser host refused the spectrum capture arm", {
+            phase: arm.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+            code: resultName(arm.result, "call"),
+            result: arm.result,
+          });
+        }
+        armed = true;
+        let capture: Awaited<ReturnType<MisoAudioWorkletHost["readSpectrum"]>>;
+        for (;;) {
+          if (closed) throw new MisoUsageError("the browser engine is closed");
+          capture = await awaitSpectrum(
+            host.readSpectrum({ channels: query.channels ?? "both" }),
+            started,
+            deadline,
+            options.signal,
+          );
+          if (closed) throw new MisoUsageError("the browser engine is closed");
+          if (capture.result === constantValue("resultCodes", "ok")) break;
+          if (capture.result !== constantValue("resultCodes", "backpressure")) {
+            throw new MisoEngineError("the browser host refused the spectrum capture read", {
+              phase: capture.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+              code: resultName(capture.result, "call"),
+              result: capture.result,
+            });
+          }
+          if (Date.now() - started >= deadline) {
+            throw new MisoUsageError("spectrum query exceeded its deadline");
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+        armed = false;
+        if (capture.snapshot.byteLength === 0) {
+          throw new MisoEngineError("the browser host returned an empty spectrum capture", {
+            phase: "output",
+            code: "abiMismatch",
+            result: constantValue("resultCodes", "abiMismatch"),
+          });
+        }
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        spectrumPromise ??= createSpectrum({
+          ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
+          ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
+          ...(options.createResponseWorker === undefined ? {} : { createWorker: options.createResponseWorker }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          ...(query.spectrumLimits === undefined ? {} : { spectrumLimits: query.spectrumLimits }),
+        }).then((client) => {
+          spectrum = client;
+          return client;
+        });
+        const client = spectrum ?? await spectrumPromise;
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        const result = await awaitSpectrum(
+          client.query(query, capture.snapshot),
+          started,
+          deadline,
+          options.signal,
+        );
+        if (closed) {
+          await client.close();
+          throw new MisoUsageError("the browser engine is closed");
+        }
+        const status = await awaitSpectrum(host.status(), started, deadline, options.signal);
+        if (status.result !== constantValue("resultCodes", "ok")
+            || status.state !== constantValue("states", "ready")) {
+          const lifecycleResult = status.result !== constantValue("resultCodes", "ok")
+            ? status.result
+            : constantValue("resultCodes", "wrongState");
+          throw new MisoEngineError("the browser host no longer owns a ready spectrum boundary", {
+            phase: "lifecycle",
+            code: resultName(lifecycleResult, "call"),
+            result: lifecycleResult,
+          });
+        }
+        return result;
+      } finally {
+        if (armed && closed === false) {
+          try { await host.cancelSpectrum?.(); } catch { /* terminal host state is authoritative */ }
+        }
+        spectrumPending = false;
+      }
+    };
     return Object.freeze({
       shape,
       context,
@@ -403,6 +610,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       observationMap,
       readObservations,
       queryTrackResponse,
+      querySpectrum,
       console: () => {
         semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
           ? Promise.reject(new MisoUsageError(
@@ -417,6 +625,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           try {
             if (trackResponsePromise !== undefined) {
               try { await (trackResponse ?? await trackResponsePromise)?.close(); } catch { /* host close remains authoritative */ }
+            }
+            if (spectrumPromise !== undefined) {
+              try { await (spectrum ?? await spectrumPromise)?.close(); } catch { /* host close remains authoritative */ }
             }
             await host.dispose();
           } finally {

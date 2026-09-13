@@ -1,6 +1,7 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { AbiStructureName } from "../generated/abi.ts";
 import { MisoUsageError } from "./errors.ts";
+import type { SpectrumQuery } from "./spectrum.ts";
 
 /**
  * Structure access by field *name*, resolved through the generated layout.
@@ -118,6 +119,8 @@ export interface BootOptions {
     readonly observationTaps?: number;
     readonly masterTrackPlusOne?: number;
   };
+  /** One optional prepared graph boundary for the bounded spectrum query. */
+  readonly spectrum?: SpectrumQuery;
 }
 
 /**
