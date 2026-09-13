@@ -375,6 +375,22 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           await client.close();
           throw new MisoUsageError("the browser engine is closed");
         }
+        const status = await host.status();
+        if (status.result !== constantValue("resultCodes", "ok")
+            || status.state !== constantValue("states", "ready")) {
+          const lifecycleResult = status.result !== constantValue("resultCodes", "ok")
+            ? status.result
+            : constantValue("resultCodes", "wrongState");
+          throw new MisoEngineError("the browser host no longer owns a ready live response boundary", {
+            phase: "lifecycle",
+            code: resultName(lifecycleResult, "call"),
+            result: lifecycleResult,
+          });
+        }
+        if (closed) {
+          await client.close();
+          throw new MisoUsageError("the browser engine is closed");
+        }
         return result;
       } finally {
         trackResponsePending = false;

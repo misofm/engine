@@ -689,13 +689,16 @@ fn run_live_response_capture(
             Ok(value) => value,
             Err(_) => return live_response_failure(staging, RESULT_INVALID_ARGUMENT),
         };
+    let maximum_result_bytes = usize::try_from(request.maximum_result_bytes)
+        .expect("validated live response result bound");
     let captured = {
-        let mut sink = match LiveResponseCaptureSink::new(&mut staging.live_result) {
-            Ok(value) => value,
-            Err(error) => {
-                return live_response_failure(staging, live_response_capture_error_code(error));
-            }
-        };
+        let mut sink =
+            match LiveResponseCaptureSink::new(&mut staging.live_result[..maximum_result_bytes]) {
+                Ok(value) => value,
+                Err(error) => {
+                    return live_response_failure(staging, live_response_capture_error_code(error));
+                }
+            };
         match host.copy_response_snapshot(track_id, &mut sink) {
             Ok(value) => Ok((value, sink.owner_count, sink.excluded_count, sink.next)),
             Err(error) => Err(live_response_capture_error_code(error)),
@@ -708,7 +711,6 @@ fn run_live_response_capture(
     let Some(sequence) = staging.live_token.checked_add(1) else {
         return live_response_failure(staging, RESULT_REFUSED_BUDGET);
     };
-    let maximum_result_bytes = request.maximum_result_bytes as usize;
     if result_bytes > maximum_result_bytes {
         return live_response_failure(staging, RESULT_REFUSED_BUDGET);
     }
@@ -968,11 +970,25 @@ fn run_live_response_analysis(staging: &mut ResponseStaging) -> u32 {
         Ok(value) => value,
         Err(result) => return live_response_failure(staging, result),
     };
+    let points = grid.points();
+    let selected_channels = usize::from(request.channels & crate::RESPONSE_CHANNEL_LEFT != 0)
+        + usize::from(request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0);
+    let Some(required_result_bytes) = points
+        .checked_mul(size_of::<f32>())
+        .and_then(|vector_bytes| vector_bytes.checked_mul(selected_channels + 1))
+        .and_then(|vectors| size_of::<WebLiveResponseResult>().checked_add(vectors))
+    else {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    };
+    let maximum_result_bytes = usize::try_from(request.maximum_result_bytes)
+        .expect("validated live response result bound");
+    if required_result_bytes > maximum_result_bytes {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
     let (snapshot, snapshot_token) = match parse_live_snapshot(staging) {
         Ok(value) => value,
         Err(result) => return live_response_failure(staging, result),
     };
-    let points = grid.points();
     let mut frequencies = vec![0.0_f32; points];
     let mut left = vec![0.0_f32; points];
     let mut right = vec![0.0_f32; points];
@@ -2472,6 +2488,10 @@ mod live_response_ffi_tests {
     }
 
     fn stage_request(track_id: &[u8]) {
+        stage_request_with_limit(track_id, LIVE_RESPONSE_CAPTURE_BYTES as u32);
+    }
+
+    fn stage_request_with_limit(track_id: &[u8], maximum_result_bytes: u32) {
         RESPONSE_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             assert!(track_id.len() <= staging.live_track_id.len());
@@ -2486,7 +2506,7 @@ mod live_response_ffi_tests {
                 points: 5,
                 minimum_hz: 20.0,
                 maximum_hz: 20_000.0,
-                maximum_result_bytes: LIVE_RESPONSE_CAPTURE_BYTES as u32,
+                maximum_result_bytes,
                 reserved: [0; 3],
             };
             staging.live_result_len = 0;
@@ -2519,6 +2539,18 @@ mod live_response_ffi_tests {
         assert_eq!(
             miso_engine_web_v1_track_response_snapshot_capacity(),
             LIVE_RESPONSE_CAPTURE_BYTES as u32
+        );
+        stage_request_with_limit(b"eq0", LIVE_RESPONSE_RESULT_BYTES);
+        let (refused_capture, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(refused_capture, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "an undersized capture refusal allocated");
+        assert_eq!(deallocations, 0, "an undersized capture refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            0,
+            "an undersized capture refusal advanced the snapshot token"
         );
         stage_request(b"eq0");
 
@@ -2572,6 +2604,19 @@ mod live_response_ffi_tests {
                 .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 word")));
             assert!(values.into_iter().all(f32::is_finite));
         });
+
+        let undersized_analysis_bytes =
+            u32::try_from(size_of::<WebLiveResponseResult>() + 5 * size_of::<f32>() * 3 - 1)
+                .expect("small live response bound");
+        RESPONSE_STAGING.with(|slot| {
+            slot.borrow_mut().live_request.maximum_result_bytes = undersized_analysis_bytes;
+        });
+        let (refused_analysis, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_analysis());
+        assert_eq!(refused_analysis, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "an undersized analysis refusal allocated");
+        assert_eq!(deallocations, 0, "an undersized analysis refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
 
         // Closing clears payload length but must not reset the host-scoped sequence identity.
         assert_eq!(miso_engine_web_v1_track_response_close(), RESULT_OK);

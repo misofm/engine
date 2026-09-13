@@ -134,6 +134,53 @@ test("browser engine close invalidates a capture that resolves before its Worker
   assert.equal(worker.requests.length, 0);
 });
 
+test("browser host failure or disposal while the Worker is pending invalidates the result", async () => {
+  for (const lifecycle of ["failed", "disposed"]) {
+    const worker = new FakeWorker();
+    let hostLifecycle = "ready";
+    const context = {
+      sampleRate: 48_000,
+      renderQuantumSize: 128,
+      state: "suspended",
+      audioWorklet: { async addModule() {} },
+      async close() {},
+    };
+    const host = {
+      async captureTrackResponse() {
+        return { result: 0, snapshot: new Uint8Array([1, 2, 3]) };
+      },
+      async status() {
+        if (hostLifecycle === "disposed") {
+          throw new MisoEngineError("host disposed", { phase: "lifecycle", code: "wrongState", result: 3 });
+        }
+        return hostLifecycle === "failed"
+          ? { result: 0, state: 3, lastResult: 0 }
+          : { result: 0, state: 2, lastResult: 0 };
+      },
+      async dispose() { hostLifecycle = "disposed"; },
+    };
+    const engine = await createEngine({
+      document: "opaque",
+      scratchBoot: async () => ({ sampleRateHz: 48_000, quantumFrames: 128 }),
+      createContext: () => context,
+      createHost: async () => host,
+      createResponseWorker: () => worker,
+    });
+    try {
+      const pending = engine.queryTrackResponse(browserQuery);
+      for (let attempt = 0; attempt < 10 && worker.pending.size === 0; attempt += 1) await Promise.resolve();
+      assert.equal(worker.pending.size, 1);
+      hostLifecycle = lifecycle;
+      if (lifecycle === "disposed") await host.dispose();
+      const request = [...worker.pending.values()][0];
+      worker.reply(request.requestId);
+      await assert.rejects(pending, error => error instanceof MisoEngineError && error.phase === "lifecycle");
+    } finally {
+      await engine.close();
+    }
+  }
+});
+
 test("candidate Wasm captures the live boundary, actual owners, edit drain, bounds, and lifecycle", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {

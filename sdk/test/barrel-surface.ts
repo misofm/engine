@@ -108,8 +108,20 @@ type HeadlessTrackResponseResult =
   Assert<Exact<headlessBarrel.TrackResponseResult, liveResponse.TrackResponseResult>>;
 type BrowserTrackResponseResult =
   Assert<Exact<browserBarrel.TrackResponseResult, liveResponse.TrackResponseResult>>;
-type BrowserTrackResponseClass =
-  Assert<Exact<typeof browserBarrel.BrowserTrackResponse, typeof browserResponse.BrowserTrackResponse>>;
+type BrowserResponsePreviewClass =
+  Assert<Exact<typeof browserBarrel.BrowserResponsePreview, typeof browserResponse.BrowserResponsePreview>>;
+type BrowserResponsePreviewCreate =
+  Assert<Exact<typeof browserBarrel.createResponsePreview, typeof browserResponse.createResponsePreview>>;
+
+// Raw snapshot bytes and evaluator/Worker transports stay internal to the engine entry points.
+// @ts-expect-error TrackResponseModule is not a public root evaluator
+type NoRootTrackResponseModule = typeof barrel.TrackResponseModule;
+// @ts-expect-error BrowserTrackResponse is not a public browser transport
+type NoBrowserTrackResponse = typeof browserBarrel.BrowserTrackResponse;
+// @ts-expect-error createTrackResponse is not a public browser transport
+type NoBrowserCreateTrackResponse = typeof browserBarrel.createTrackResponse;
+// @ts-expect-error TrackResponseModule is not a public headless evaluator
+type NoHeadlessTrackResponseModule = typeof headlessBarrel.TrackResponseModule;
 
 // --- the barrels the deep imports already had ---------------------------------------------------
 //
@@ -166,7 +178,12 @@ export type BarrelSurfacePins = [
   RootTrackResponseResult,
   HeadlessTrackResponseResult,
   BrowserTrackResponseResult,
-  BrowserTrackResponseClass,
+  BrowserResponsePreviewClass,
+  BrowserResponsePreviewCreate,
+  NoRootTrackResponseModule,
+  NoBrowserTrackResponse,
+  NoBrowserCreateTrackResponse,
+  NoHeadlessTrackResponseModule,
   RootSessionBuilder,
   HeadlessAsset,
   BrowserPolicy,
