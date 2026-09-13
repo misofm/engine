@@ -1,3 +1,4 @@
+import { constantValue } from "../core/abi.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
@@ -216,6 +217,10 @@ export class OfflineEngine {
 
   /** Cancel the optional pending spectrum capture. */
   cancelSpectrum(): EngineCallResult {
+    if (this.#observationSubscriptions?.managedSpectrumActive()) {
+      const result = constantValue("resultCodes", "wrongState");
+      return Object.freeze({ ok: false, result, code: "wrongState" });
+    }
     return this.#boundary.cancelSpectrum();
   }
 
@@ -304,8 +309,8 @@ export class OfflineEngine {
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
-      spectrumStart: (smoothingMs) => this.#boundary.startSpectrumStream(smoothingMs),
-      spectrumRead: () => this.#boundary.readSpectrumStream(),
+      spectrumStart: (smoothingMs, query) => this.#boundary.startSpectrumStream(smoothingMs, query),
+      spectrumRead: (query) => this.#boundary.readSpectrumStream(query),
       spectrumStop: () => this.#boundary.stopSpectrumStream(),
     }, this.#observationLimits, this.#responseLimits, this.#spectrumLimits);
   }

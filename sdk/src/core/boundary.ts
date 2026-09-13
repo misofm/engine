@@ -634,7 +634,7 @@ export class WasmBoundary {
   }
 
   /** Start the managed continuous spectrum stream for the prepared boundary. */
-  startSpectrumStream(smoothingMs = 100): SpectrumStreamStart {
+  startSpectrumStream(smoothingMs = 100, _query?: SpectrumQuery): SpectrumStreamStart {
     const query = this.#spectrumQuery;
     if (query === undefined) {
       throw new MisoUsageError("this engine has no prepared spectrum boundary");
@@ -652,10 +652,24 @@ export class WasmBoundary {
   }
 
   /** Read and analyze one managed stream window, or return its explicit availability state. */
-  readSpectrumStream(): SpectrumStreamRead {
-    const query = this.#spectrumQuery;
+  readSpectrumStream(queryOverride?: SpectrumQuery): SpectrumStreamRead {
+    const query = queryOverride ?? this.#spectrumQuery;
     if (query === undefined) {
       throw new MisoUsageError("this engine has no prepared spectrum boundary");
+    }
+    const prepared = this.#spectrumQuery;
+    if (prepared !== undefined) {
+      const preparedTarget = JSON.stringify(prepared.target);
+      if (preparedTarget !== JSON.stringify(query.target)
+          || (prepared.channels ?? "both") !== (query.channels ?? "both")) {
+        throw new MisoUsageError("the spectrum stream query differs from the prepared boundary");
+      }
+      const preparedMaximum = prepared.spectrumLimits?.maximumCaptureBytes
+        ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+      const requestedMaximum = query.spectrumLimits?.maximumCaptureBytes ?? preparedMaximum;
+      if (!Number.isSafeInteger(requestedMaximum) || requestedMaximum < 1 || requestedMaximum > preparedMaximum) {
+        throw new MisoUsageError("the spectrum stream capture limit exceeds the prepared bound");
+      }
     }
     const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_read(this.#live()));
     const metadata = this.#spectrumModule().streamMetadata(query);

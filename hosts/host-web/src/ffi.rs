@@ -791,6 +791,10 @@ fn stream_metadata_error(
     }
     if let Some(drops) = dropped_captures {
         staging.stream_metadata.dropped_captures = drops;
+    } else {
+        // Failed windows start a fresh native capture epoch; never carry the prior epoch's
+        // accumulated drops into that publication.
+        staging.stream_metadata.dropped_captures = 0;
     }
     staging.stream_metadata.source_underrun = 0;
     staging.capture_len = 0;
@@ -2669,6 +2673,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
+        if staging.stream_active {
+            staging.stream_metadata.result = RESULT_WRONG_STATE;
+            return RESULT_WRONG_STATE;
+        }
         staging.capture_len = 0;
         with_host_mut(
             handle,
@@ -3916,6 +3924,45 @@ mod spectrum_ffi_tests {
                 ..WebSpectrumRequest::default()
             };
         });
+    }
+
+    #[test]
+    fn failed_stream_metadata_starts_new_epoch_drop_count_at_zero() {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                capture_epoch: 7,
+                dropped_captures: 12,
+                ..WebSpectrumStreamMetadata::default()
+            };
+            stream_metadata_error(
+                &mut staging,
+                SPECTRUM_STREAM_STATUS_FAILED,
+                RESULT_RENDER_REJECTED,
+                Some(8),
+                None,
+            );
+            assert_eq!(staging.stream_metadata.capture_epoch, 8);
+            assert_eq!(staging.stream_metadata.dropped_captures, 0);
+        });
+    }
+
+    #[test]
+    fn manual_spectrum_cancel_refuses_an_active_managed_stream() {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            staging.stream_active = true;
+            staging.capture_len = 32;
+        });
+        assert_eq!(miso_engine_web_v1_spectrum_cancel(0), RESULT_WRONG_STATE);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(staging.stream_active);
+            assert_eq!(staging.capture_len, 32);
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
     }
 
     #[test]

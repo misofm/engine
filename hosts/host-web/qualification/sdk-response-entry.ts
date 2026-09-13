@@ -364,6 +364,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   };
   const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true);
   const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
+  const automaticNotifications = [];
   let callbackCount = 0;
   let callbackGap = false;
   let callbackResolve: (() => void) | undefined;
@@ -387,6 +388,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       smoothingMs: 0,
       cadenceMs: 1,
       onUpdate: (notification) => {
+        automaticNotifications.push(notification);
         callbackCount += 1;
         callbackGap ||= notification.nativeMissedWindows > 0n || notification.skippedPublications > 0n;
         callbackResolve?.();
@@ -409,10 +411,19 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       callbackSeen.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
-    const notifications = [];
+    const notifications = [...automaticNotifications];
+    const notificationKeys = new Set(notifications.map((notification) => [
+      notification.job.toString(), notification.revision.toString(), notification.metadata.sequence.toString(),
+    ].join(":")));
     for (let attempt = 0; attempt < CONTINUOUS_BLOCKS; attempt += 1) {
       const notification = await subscription.pump();
-      if (notification !== undefined) notifications.push(notification);
+      if (notification !== undefined) {
+        const key = [notification.job.toString(), notification.revision.toString(), notification.metadata.sequence.toString()].join(":");
+        if (!notificationKeys.has(key)) {
+          notificationKeys.add(key);
+          notifications.push(notification);
+        }
+      }
       if (notification?.status === "gap") break;
     }
     const first = subscription.readLatest();
@@ -443,6 +454,8 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     const meter = meterFrames.find((frame) => frame.peaks.length >= 4);
     const expectedLeft = PEAK_LEFT_AMPLITUDE * 10 ** (PEAK_EQ_GAIN_DB / 20);
     const expectedRight = PEAK_RIGHT_AMPLITUDE * 10 ** (PEAK_EQ_GAIN_DB / 20);
+    const expectedLeftDb = 20 * Math.log10(PEAK_LEFT_AMPLITUDE) + PEAK_EQ_GAIN_DB;
+    const expectedRightDb = 20 * Math.log10(PEAK_RIGHT_AMPLITUDE) + PEAK_EQ_GAIN_DB;
     return {
       pendingBeforeRender,
       sharedJob,
@@ -463,6 +476,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
         peakBins: [leftPeak.index, rightPeak.index],
         peakHz: [first.frequenciesHz[leftPeak.index], first.frequenciesHz[rightPeak.index]],
         peakDbfs: [leftPeak.value, rightPeak.value],
+        expectedPeakDbfs: [expectedLeftDb, expectedRightDb],
         responseHz: response.frequenciesHz[32],
         responseGainDb: [response.leftDb[32], response.rightDb[32]],
         sampleRateHz: first.sampleRateHz,

@@ -21,7 +21,7 @@ import type {
   SpectrumLimits,
   SpectrumStreamMetadata,
 } from "../core/spectrum.ts";
-import { decodeSpectrumResult } from "../core/spectrum.ts";
+import { cloneSpectrumStreamMetadata, decodeSpectrumResult } from "../core/spectrum.ts";
 import type { ResponseWorker, ResponseWorkerError, ResponseWorkerFactory, ResponseWorkerReply } from "./response-worker.ts";
 
 export interface BrowserResponsePreviewOptions {
@@ -617,7 +617,11 @@ export class BrowserSpectrum {
           reply.metadata.result,
           new Uint8Array(reply.buffer, 0, reply.resultByteLength),
         );
-        pending.resolve({ result, buffer: reply.buffer, metadata: reply.metadata });
+        pending.resolve({
+          result,
+          buffer: reply.buffer,
+          metadata: cloneSpectrumStreamMetadata(reply.metadata),
+        });
       } catch (error) {
         (error as Error & { spectrumBuffer?: ArrayBuffer }).spectrumBuffer = reply.buffer;
         pending.reject(error);

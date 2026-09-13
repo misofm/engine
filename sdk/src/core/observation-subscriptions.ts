@@ -21,7 +21,11 @@ import type {
   TrackResponseRead,
   TrackResponseResult,
 } from "./live-response.ts";
-import { cloneSpectrumQuery } from "./spectrum.ts";
+import {
+  cloneSpectrumQuery,
+  cloneSpectrumStreamMetadata,
+  spectrumCaptureWindowBytes,
+} from "./spectrum.ts";
 import type {
   SpectrumQuery,
   SpectrumResult,
@@ -129,8 +133,8 @@ export interface ObservationSubscriptionTransport {
   ) => MaybePromise<TrackResponseRead>;
   /** Optional managed spectrum stream owned by this same engine lifetime. */
   readonly spectrumPrepared?: () => SpectrumQuery | undefined;
-  readonly spectrumStart?: (smoothingMs: number) => MaybePromise<SpectrumStreamStart>;
-  readonly spectrumRead?: () => MaybePromise<SpectrumStreamRead>;
+  readonly spectrumStart?: (smoothingMs: number, query: SpectrumQuery) => MaybePromise<SpectrumStreamStart>;
+  readonly spectrumRead?: (query: SpectrumQuery) => MaybePromise<SpectrumStreamRead>;
   readonly spectrumStop?: () => MaybePromise<EngineCallResult | void>;
   readonly scheduler?: ObservationSubscriptionScheduler;
 }
@@ -722,6 +726,11 @@ export class ObservationSubscriptionOwner {
     if (disposed) this.#disposed = true;
   }
 
+  /** @internal Whether a managed spectrum handle owns the prepared stream. */
+  managedSpectrumActive(): boolean {
+    return this.#spectrumHandles.size !== 0;
+  }
+
   /** Guard the public console's observation edits while this owner has managed bindings. */
   beforeConsoleSubmit(edits: readonly LaneEdit[], managed = false): void {
     if (managed) return;
@@ -1121,7 +1130,12 @@ export class ObservationSubscriptionOwner {
       try {
         job = await this.#ensureSpectrumJob(normalized.configuration, epoch);
         this.#assertEpoch(epoch);
-        this.#assertSpectrumDeliveryBudget(job, normalized.configuration.cadenceMs);
+        this.#assertSpectrumDeliveryBudget(
+          job,
+          normalized.configuration.cadenceMs,
+          undefined,
+          normalized.configuration.channels,
+        );
       } catch (error) {
         // A first admission may have started a native stream before a returned
         // profile proved unusable. Ensure that refusal cannot leave an orphan.
@@ -1156,10 +1170,19 @@ export class ObservationSubscriptionOwner {
       await this.#waitForPoll();
       this.#assertEpoch(epoch);
       const current = state.job;
-      const desiredKey = spectrumJobKey(normalized.configuration);
+      const desiredQuery = this.#spectrumQuery(normalized.configuration);
+      const desiredKey = spectrumJobKey(normalized.configuration, desiredQuery);
       if (desiredKey !== current.key && current.refs > 1) {
         throw new MisoUsageError("spectrum smoothing conflicts with a shared managed subscriber");
       }
+      // Check the replacement against the current union before stopping the working stream. This
+      // keeps a refused channel/limit/cadence update atomic at the public boundary.
+      this.#assertSpectrumDeliveryBudget(
+        current,
+        normalized.configuration.cadenceMs,
+        state,
+        normalized.configuration.channels,
+      );
       if (desiredKey !== current.key) {
         const stop = await this.#transport.spectrumStop!();
         this.#assertSpectrumStop(stop);
@@ -1168,7 +1191,12 @@ export class ObservationSubscriptionOwner {
         current.refs = 0;
         const replacement = await this.#ensureSpectrumJob(normalized.configuration, epoch);
         this.#assertEpoch(epoch);
-        this.#assertSpectrumDeliveryBudget(replacement, normalized.configuration.cadenceMs, state);
+        this.#assertSpectrumDeliveryBudget(
+          replacement,
+          normalized.configuration.cadenceMs,
+          state,
+          normalized.configuration.channels,
+        );
         replacement.refs = 1;
         state.job = replacement;
       } else {
@@ -1261,7 +1289,8 @@ export class ObservationSubscriptionOwner {
       throw new MisoUsageError("managed spectrum subscriptions are not configured on this owner");
     }
     this.#assertSpectrumPrepared(configuration);
-    const key = spectrumJobKey(configuration);
+    const query = this.#spectrumQuery(configuration);
+    const key = spectrumJobKey(configuration, query);
     const existing = this.#spectrumJob;
     if (existing !== undefined) {
       if (existing.key !== key) {
@@ -1271,7 +1300,7 @@ export class ObservationSubscriptionOwner {
     }
     let nativeStarted = false;
     try {
-      const started = await spectrumStart(configuration.smoothingMs);
+      const started = await spectrumStart(configuration.smoothingMs, query);
       nativeStarted = started.ok;
       this.#assertEpoch(epoch);
       if (!started.ok) {
@@ -1304,10 +1333,9 @@ export class ObservationSubscriptionOwner {
       }
       const job: SpectrumJobState = {
         id: this.#nextSpectrumJob++, key, query: Object.freeze({
-          target: configuration.target,
-          channels: configuration.channels,
-          ...(configuration.spectrumLimits === undefined ? {} : { spectrumLimits: configuration.spectrumLimits }),
-        }), smoothingMs: configuration.smoothingMs, refs: 0, metadata,
+          ...query,
+        }), smoothingMs: configuration.smoothingMs, refs: 0,
+        metadata: cloneSpectrumStreamMetadata(metadata),
         result: undefined, revision: 0n, publicationSequence: 0n,
         retainedBytes: 0, captureCadenceMs, nextCaptureAt: 0,
         publicationStamp: spectrumPublicationStamp(metadata),
@@ -1334,11 +1362,34 @@ export class ObservationSubscriptionOwner {
     }
   }
 
+  #spectrumQuery(configuration: SpectrumSubscriptionConfiguration): SpectrumQuery {
+    const prepared = this.#transport.spectrumPrepared?.();
+    const maximumCaptureBytes = configuration.spectrumLimits?.maximumCaptureBytes
+      ?? prepared?.spectrumLimits?.maximumCaptureBytes
+      ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+    const requestDeadlineMs = configuration.spectrumLimits?.requestDeadlineMs ?? 5_000;
+    return cloneSpectrumQuery({
+      target: configuration.target,
+      channels: configuration.channels,
+      spectrumLimits: { maximumCaptureBytes, requestDeadlineMs },
+    });
+  }
+
   #assertSpectrumAdmission(
     configuration: SpectrumSubscriptionConfiguration,
     replacing?: SpectrumHandleState,
   ): void {
     const subscriptionLimits = this.#spectrumSubscriptionLimits!;
+    const query = this.#spectrumQuery(configuration);
+    const maximumCaptureBytes = query.spectrumLimits!.maximumCaptureBytes!;
+    const preparedMaximumCaptureBytes = this.#transport.spectrumPrepared?.()?.spectrumLimits?.maximumCaptureBytes
+      ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+    if (maximumCaptureBytes > preparedMaximumCaptureBytes) {
+      throw new MisoUsageError("the spectrum capture limit exceeds the prepared bound");
+    }
+    if (maximumCaptureBytes < spectrumCaptureWindowBytes(configuration.channels)) {
+      throw new MisoUsageError("the spectrum capture limit is below one serialized window");
+    }
     const candidateBytes = spectrumVectorBytes(configuration.channels);
     if (candidateBytes > subscriptionLimits.maximumRetainedBytes) {
       throw new MisoUsageError("the spectrum result exceeds the retained-byte bound");
@@ -1368,6 +1419,7 @@ export class ObservationSubscriptionOwner {
     candidate: SpectrumJobState,
     candidateCadenceMs?: number,
     replacing?: SpectrumHandleState,
+    candidateChannels?: SpectrumSubscriptionConfiguration["channels"],
   ): void {
     const maximum = this.#spectrumSubscriptionLimits!.maximumDeliveredBytesPerSecond;
     let delivered = 0;
@@ -1378,8 +1430,8 @@ export class ObservationSubscriptionOwner {
       delivered += spectrumDeliveryRate(bytes, handle.configuration.cadenceMs);
     }
     if (candidateCadenceMs !== undefined) {
-      const bytes = candidate.result === undefined
-        ? spectrumVectorBytes((replacing?.configuration ?? { channels: "both" }).channels)
+      const bytes = candidate.result === undefined || candidateChannels !== undefined
+        ? spectrumVectorBytes(candidateChannels ?? candidate.query.channels ?? "both")
         : spectrumResultVectorBytes(candidate.result);
       delivered += spectrumDeliveryRate(bytes, candidateCadenceMs);
     }
@@ -1401,13 +1453,17 @@ export class ObservationSubscriptionOwner {
     const spectrumRead = this.#transport.spectrumRead;
     if (job === undefined || job.refs === 0 || spectrumRead === undefined) return;
     if (Date.now() < job.nextCaptureAt) return;
-    const read = await spectrumRead();
+    const read = await spectrumRead(job.query);
     this.#assertEpoch(epoch);
     job.nextCaptureAt = Date.now() + job.captureCadenceMs;
-    const metadata = read.metadata;
+    const metadata = cloneSpectrumStreamMetadata(read.metadata);
     const stamp = spectrumPublicationStamp(metadata);
     if (read.result !== undefined) {
       this.#assertSpectrumResultBounds(read.result);
+      const maximumCaptureBytes = job.query.spectrumLimits?.maximumCaptureBytes;
+      if (maximumCaptureBytes !== undefined && read.result.resultBytes > BigInt(maximumCaptureBytes)) {
+        throw new MisoUsageError("the spectrum result exceeded the subscription capture bound");
+      }
       if (metadata.status !== "ready") {
         throw new MisoEngineError("the spectrum stream result has an invalid status", {
           phase: "output", code: "abiMismatch", result: 2,
@@ -2049,11 +2105,14 @@ function normalizedSpectrumSubscription(
   };
 }
 
-function spectrumJobKey(configuration: SpectrumSubscriptionConfiguration): string {
+function spectrumJobKey(configuration: SpectrumSubscriptionConfiguration, query?: SpectrumQuery): string {
+  const effectiveQuery = query ?? configuration;
   return JSON.stringify([
     spectrumTargetKey(configuration.target),
     configuration.channels,
     configuration.smoothingMs,
+    effectiveQuery.spectrumLimits?.maximumCaptureBytes ?? ABI_LAYOUT.constants.spectrumCaptureBytes,
+    effectiveQuery.spectrumLimits?.requestDeadlineMs ?? 5_000,
   ]);
 }
 

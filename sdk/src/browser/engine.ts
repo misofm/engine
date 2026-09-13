@@ -38,7 +38,7 @@ import type {
   TrackResponseResult,
 } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
-import { cloneSpectrumQuery } from "../core/spectrum.ts";
+import { cloneSpectrumQuery, cloneSpectrumStreamMetadata } from "../core/spectrum.ts";
 import type {
   SpectrumQuery,
   SpectrumResult,
@@ -382,7 +382,7 @@ function spectrumStreamMetadata(
       phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
     });
   }
-  return Object.freeze({
+  return cloneSpectrumStreamMetadata(Object.freeze({
     result: raw.result,
     status: status.name as SpectrumStreamStatus,
     target,
@@ -400,7 +400,7 @@ function spectrumStreamMetadata(
     analysisEpoch: raw.analysisEpoch,
     historyStartSample: raw.historyStartSample,
     smoothingMs: raw.smoothingMs,
-  });
+  }));
 }
 
 /**
@@ -569,22 +569,29 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     };
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {
       if (spectrum !== undefined) return Promise.resolve(spectrum);
-      spectrumPromise ??= createSpectrum({
+      if (spectrumPromise !== undefined) return spectrumPromise;
+      let pending: Promise<BrowserSpectrum>;
+      pending = createSpectrum({
         ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
         ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
         ...(options.createResponseWorker === undefined ? {} : { createWorker: options.createResponseWorker }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(query.spectrumLimits === undefined ? {} : { spectrumLimits: query.spectrumLimits }),
       }).then((client) => {
+        if (closed || spectrumPromise !== pending) {
+          void client.close().catch(() => undefined);
+          throw new MisoUsageError("the spectrum Worker was superseded");
+        }
         spectrum = client;
         return client;
       }, (error) => {
-        spectrumPromise = undefined;
+        if (spectrumPromise === pending) spectrumPromise = undefined;
         throw error;
       });
+      spectrumPromise = pending;
       return spectrumPromise;
     };
-    const startSpectrumStream = async (smoothingMs: number): Promise<SpectrumStreamStart> => {
+    const startSpectrumStream = async (smoothingMs: number, query?: SpectrumQuery): Promise<SpectrumStreamStart> => {
       const prepared = preparedSpectrum;
       if (prepared === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
       if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -598,10 +605,22 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         throw new MisoUsageError("the browser host does not support managed spectrum streams");
       }
       spectrumStreamPending = true;
+      const effectiveQuery = query ?? prepared;
+      const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs
+        ?? options.requestDeadlineMs
+        ?? 5_000;
+      const started = Date.now();
+      let startRequest: Promise<Awaited<ReturnType<NonNullable<MisoAudioWorkletHost["startSpectrumStream"]>>>> | undefined;
       try {
-        const reply = await host.startSpectrumStream(smoothingMs);
+        startRequest = host.startSpectrumStream(smoothingMs);
+        const reply = await awaitSpectrum(startRequest, started, deadline, options.signal);
         const metadata = spectrumStreamMetadata(reply.metadata, prepared);
-        if (closed) throw new MisoUsageError("the browser engine is closed");
+        if (closed) {
+          if (reply.result === constantValue("resultCodes", "ok")) {
+              void Promise.resolve(host.stopSpectrumStream?.()).catch(() => undefined);
+          }
+          throw new MisoUsageError("the browser engine is closed");
+        }
         if (reply.result === constantValue("resultCodes", "ok")) spectrumStreamActive = true;
         return Object.freeze({
           ok: reply.result === constantValue("resultCodes", "ok"),
@@ -609,11 +628,23 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           code: resultName(reply.result, "call"),
           metadata,
         });
+      } catch (error) {
+        // A timed-out MessagePort request can still complete after this call returns. If it arms
+        // the native stream late, stop it at completion rather than leaving an unowned stream.
+        if (startRequest !== undefined) {
+          void startRequest.then((reply) => {
+            if (reply.result === constantValue("resultCodes", "ok")) {
+          return host.stopSpectrumStream?.();
+            }
+            return undefined;
+          }, () => undefined).catch(() => undefined);
+        }
+        throw error;
       } finally {
         spectrumStreamPending = false;
       }
     };
-    const readSpectrumStream = async (): Promise<SpectrumStreamRead> => {
+    const readSpectrumStream = async (query?: SpectrumQuery): Promise<SpectrumStreamRead> => {
       const prepared = preparedSpectrum;
       if (prepared === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
       if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -624,12 +655,20 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       const initialBuffer = spectrumStreamBuffer
         ?? new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
+      const expectedBufferBytes = initialBuffer.byteLength;
+      const effectiveQuery = query ?? prepared;
+      const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs
+        ?? options.requestDeadlineMs
+        ?? 5_000;
+      const started = Date.now();
       spectrumStreamBuffer = undefined;
       spectrumStreamPending = true;
       let returned = false;
+      let readRequest: Promise<Awaited<ReturnType<NonNullable<MisoAudioWorkletHost["readSpectrumStream"]>>>> | undefined;
       try {
-        const reply = await host.readSpectrumStream(initialBuffer);
-        if (!(reply.buffer instanceof ArrayBuffer) || reply.buffer.byteLength !== initialBuffer.byteLength) {
+        readRequest = host.readSpectrumStream(initialBuffer);
+        const reply = await awaitSpectrum(readRequest, started, deadline, options.signal);
+        if (!(reply.buffer instanceof ArrayBuffer) || reply.buffer.byteLength !== expectedBufferBytes) {
           throw new MisoEngineError("the browser host returned an invalid spectrum stream buffer", {
             phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
           });
@@ -662,8 +701,35 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         const buffer = spectrumStreamBuffer;
         spectrumStreamBuffer = undefined;
         returned = false;
-        const client = await ensureSpectrumWorker(prepared);
-        const analyzed = await client.queryStream(prepared, buffer!, reply.byteLength, metadata);
+        let client: BrowserSpectrum | undefined;
+        let analyzed: Awaited<ReturnType<BrowserSpectrum["queryStream"]>>;
+        try {
+          client = await ensureSpectrumWorker(effectiveQuery);
+          analyzed = await awaitSpectrum(
+            client.queryStream(effectiveQuery, buffer!, reply.byteLength, metadata),
+            started,
+            deadline,
+            options.signal,
+          );
+        } catch (error) {
+          if (client !== undefined && spectrum === client) spectrum = undefined;
+          spectrumPromise = undefined;
+          if (client !== undefined) {
+            try { await client.close(); } catch { /* the failed Worker is already terminal */ }
+          }
+          if (buffer !== undefined && buffer.byteLength !== 0) {
+            spectrumStreamBuffer = buffer;
+            returned = true;
+          }
+          spectrumStreamActive = false;
+          // The read operation still owns the stream-pending flag, so the shared owner's stop
+          // callback cannot issue its normal serialized stop here. Close the native stream at the
+          // transport seam before invalidating the managed lifetime.
+          spectrumStreamPending = false;
+          await Promise.resolve(host.stopSpectrumStream?.()).catch(() => undefined);
+          if (!closed) observationSubscriptions?.invalidate();
+          throw error;
+        }
         spectrumStreamBuffer = analyzed.buffer;
         returned = true;
         return Object.freeze({ metadata: analyzed.metadata, result: analyzed.result });
@@ -675,6 +741,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         } else if (!returned && initialBuffer.byteLength !== 0) {
           spectrumStreamBuffer = initialBuffer;
           returned = true;
+        }
+        if (!returned && readRequest !== undefined && !closed) {
+          spectrumStreamActive = false;
+          observationSubscriptions?.invalidate();
+          void readRequest.then(() => Promise.resolve(host.stopSpectrumStream?.()), () => undefined).catch(() => undefined);
         }
         throw error;
       } finally {

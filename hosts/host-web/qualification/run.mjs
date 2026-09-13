@@ -444,6 +444,8 @@ function validateSdkResponse(browserName, response) {
     && Math.abs(continuousFirst.meterPeaks[2] - continuousFirst.expectedLinearPeaks[0]) < 0.01
     && Math.abs(continuousFirst.meterPeaks[3] - continuousFirst.expectedLinearPeaks[1]) < 0.01
     && Math.abs(continuousFirst.firstPcmPeak - continuousFirst.expectedLinearPeaks[0]) < 0.01
+    && Math.abs(continuousFirst.peakDbfs?.[0] - continuousFirst.expectedPeakDbfs?.[0]) < 0.02
+    && Math.abs(continuousFirst.peakDbfs?.[1] - continuousFirst.expectedPeakDbfs?.[1]) < 0.02
     && Math.abs(continuousFirst.responseGainDb?.[0] - 6) < 0.02
     && Math.abs(continuousFirst.responseGainDb?.[1] - 6) < 0.02,
   "continuous spectrum did not align the 750 Hz peak with response, meter, and owned PCM");

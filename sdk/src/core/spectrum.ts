@@ -248,6 +248,27 @@ export function cloneSpectrumQuery(query: SpectrumQuery): SpectrumQuery {
   return Object.freeze(copy);
 }
 
+/** Copy stream metadata received across the browser boundary, including its nested target. */
+export function cloneSpectrumStreamMetadata(metadata: SpectrumStreamMetadata): SpectrumStreamMetadata {
+  const target = metadata.target;
+  const targetCopy = target === undefined
+    ? undefined
+    : target.kind === "output"
+      ? Object.freeze({ kind: target.kind, outputId: target.outputId })
+      : Object.freeze({ kind: target.kind, trackId: target.trackId });
+  return Object.freeze({
+    ...metadata,
+    ...(targetCopy === undefined ? {} : { target: targetCopy }),
+  });
+}
+
+/** Minimum serialized raw capture size for one fixed spectrum window. Internal SDK admission aid. */
+export function spectrumCaptureWindowBytes(channels: NonNullable<SpectrumQuery["channels"]>): number {
+  const channelCount = channels === "both" ? 2 : 1;
+  return ABI_LAYOUT.constants.spectrumWindowHeaderBytes
+    + ABI_LAYOUT.constants.spectrumWindowFrames * Float32Array.BYTES_PER_ELEMENT * channelCount;
+}
+
 function contract() {
   return {
     request: structure("spectrumRequest"),
@@ -541,9 +562,15 @@ export class SpectrumModule {
     importedMetadata: SpectrumStreamMetadata,
   ): SpectrumEncodedStreamRead {
     if (this.#closed) throw new MisoUsageError("the spectrum module is closed");
+    const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
+      ?? this.#contract.maximumCaptureBytes;
+    if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
+        || maximumCaptureBytes > this.#contract.maximumCaptureBytes) {
+      throw new MisoUsageError("maximumCaptureBytes exceeds the spectrum bound");
+    }
     if (!(buffer instanceof ArrayBuffer) || !Number.isSafeInteger(byteLength)
         || byteLength < this.#contract.window.bytes || byteLength > buffer.byteLength
-        || byteLength > this.#contract.maximumCaptureBytes) {
+        || byteLength > this.#contract.maximumCaptureBytes || byteLength > maximumCaptureBytes) {
       throw malformed("the reusable spectrum capture buffer is malformed");
     }
     stageSpectrumRequest(this.#exports, query);
@@ -566,7 +593,9 @@ export class SpectrumModule {
     const pointer = Number(this.#resultPtr());
     const length = Number(this.#resultBytes());
     if (pointer <= 0 || !Number.isSafeInteger(length)
-        || length < this.#contract.result.bytes || length > buffer.byteLength) {
+        || length < this.#contract.result.bytes || length > buffer.byteLength
+        || length > maximumCaptureBytes) {
+      if (length > maximumCaptureBytes) throw refusal("the spectrum result exceeded its bound", RESULT_REFUSED_BUDGET);
       throw malformed("invalid reusable spectrum result staging");
     }
     range(bytes, pointer, length, "result");
@@ -579,16 +608,26 @@ export class SpectrumModule {
   }
 
   #decodeCurrent(query: SpectrumQuery, result: number): SpectrumResult {
+    const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
+      ?? this.#contract.maximumCaptureBytes;
+    if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
+        || maximumCaptureBytes > this.#contract.maximumCaptureBytes) {
+      throw new MisoUsageError("maximumCaptureBytes exceeds the spectrum bound");
+    }
     const captureBytes = Number(this.#captureBytes());
     if (!Number.isSafeInteger(captureBytes) || captureBytes < this.#contract.window.bytes
-        || captureBytes > this.#contract.maximumCaptureBytes) {
+        || captureBytes > this.#contract.maximumCaptureBytes || captureBytes > maximumCaptureBytes) {
+      if (captureBytes > maximumCaptureBytes) throw refusal("the spectrum capture exceeded its bound", RESULT_REFUSED_BUDGET);
       throw malformed("invalid spectrum capture length");
     }
     const pointer = Number(this.#resultPtr());
     const length = Number(this.#resultBytes());
     const bytes = bytesView(this.#exports);
     if (pointer <= 0 || !Number.isSafeInteger(length) || length < this.#contract.result.bytes
-        || length > this.#contract.maximumCaptureBytes) throw malformed("invalid spectrum result staging");
+        || length > this.#contract.maximumCaptureBytes || length > maximumCaptureBytes) {
+      if (length > maximumCaptureBytes) throw refusal("the spectrum result exceeded its bound", RESULT_REFUSED_BUDGET);
+      throw malformed("invalid spectrum result staging");
+    }
     range(bytes, pointer, length, "result");
     const payload = bytes.slice(pointer, pointer + length);
     return decodeSpectrumResult(query, result, payload);

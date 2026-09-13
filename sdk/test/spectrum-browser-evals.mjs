@@ -43,10 +43,12 @@ class SpectrumWorker {
   #listeners = new Map();
   messages = [];
   silent;
+  failStream;
   terminated = false;
 
-  constructor({ silent = false } = {}) {
+  constructor({ silent = false, failStream = false } = {}) {
     this.silent = silent;
+    this.failStream = failStream;
   }
 
   addEventListener(type, listener) {
@@ -71,6 +73,10 @@ class SpectrumWorker {
         result: spectrumResult(message.query),
       }));
     } else if (message.type === "spectrum-stream-query") {
+      if (this.failStream) {
+        queueMicrotask(() => this.#emitError("stream Worker failed"));
+        return;
+      }
       const bytes = encodedSpectrumResult(message.buffer);
       queueMicrotask(() => this.#emit({
         type: "spectrum-stream-result",
@@ -88,6 +94,10 @@ class SpectrumWorker {
 
   #emit(data) {
     for (const listener of this.#listeners.get("message") ?? []) listener({ data });
+  }
+
+  #emitError(message) {
+    for (const listener of this.#listeners.get("error") ?? []) listener({ message });
   }
 }
 
@@ -157,13 +167,14 @@ function hostWithCapture(overrides = {}) {
 }
 
 async function browserEngine(host, worker) {
+  const createResponseWorker = typeof worker === "function" ? worker : () => worker;
   return createEngine({
     document: "opaque",
     spectrum: PREPARED,
     scratchBoot: async () => SHAPE,
     createContext: context,
     createHost: async () => host,
-    createResponseWorker: () => worker,
+    createResponseWorker,
   });
 }
 
@@ -218,6 +229,43 @@ test("browser managed spectrum returns and reuses one transfer buffer", async ()
   }
 });
 
+test("browser managed spectrum accepts a structuredClone-transferred capture buffer", async () => {
+  const worker = new SpectrumWorker();
+  let sequence = 0n;
+  const host = hostWithCapture({
+    async startSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(1) };
+    },
+    async readSpectrumStream(buffer) {
+      sequence += 1n;
+      const returned = structuredClone(buffer, { transfer: [buffer] });
+      return {
+        result: 0,
+        byteLength: 8_256,
+        buffer: returned,
+        metadata: streamMetadata(6, sequence),
+      };
+    },
+    async stopSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(5, sequence) };
+    },
+  });
+  const engine = await browserEngine(host, worker);
+  try {
+    const subscription = await engine.subscribeSpectrum({
+      target: { kind: "output", outputId: "out" },
+      channels: "both",
+      cadenceMs: 1,
+    });
+    const notification = await subscription.pump();
+    assert.equal(notification.available, true);
+    assert.equal(subscription.readLatest().leftDb.length, ABI_LAYOUT.constants.spectrumBinCount);
+    await subscription.close();
+  } finally {
+    await engine.close();
+  }
+});
+
 test("browser spectrum admission copies mutable query metadata before Worker dispatch", async () => {
   const worker = new SpectrumWorker();
   const engine = await browserEngine(hostWithCapture(), worker);
@@ -229,6 +277,71 @@ test("browser spectrum admission copies mutable query metadata before Worker dis
     assert.equal(result.target.outputId, "out");
     const message = worker.messages.find((candidate) => candidate.type === "spectrum-query");
     assert.equal(message.query.target.outputId, "out");
+  } finally {
+    await engine.close();
+  }
+});
+
+test("browser spectrum invalidates a dead Worker and permits a fresh managed lifetime", async () => {
+  let workerCount = 0;
+  let sequence = 0n;
+  const host = hostWithCapture({
+    async startSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(1, sequence) };
+    },
+    async readSpectrumStream(buffer) {
+      sequence += 1n;
+      return { result: 0, byteLength: 8_256, buffer, metadata: streamMetadata(6, sequence) };
+    },
+    async stopSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(5, sequence) };
+    },
+  });
+  const engine = await browserEngine(host, () => new SpectrumWorker({ failStream: workerCount++ === 0 }));
+  const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
+  try {
+    const failed = await engine.subscribeSpectrum(request);
+    await assert.rejects(failed.pump(), /Worker failed|stale|closed/);
+    await assert.rejects(failed.pump(), /stale|closed/);
+
+    const recovered = await engine.subscribeSpectrum(request);
+    const notification = await recovered.pump();
+    assert.equal(notification.available, true);
+    await recovered.close();
+  } finally {
+    await engine.close();
+  }
+});
+
+test("browser spectrum stream metadata is frozen through nested target publication", async () => {
+  let sequence = 0n;
+  const host = hostWithCapture({
+    async startSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(1, sequence) };
+    },
+    async readSpectrumStream(buffer) {
+      sequence += 1n;
+      return { result: 0, byteLength: 8_256, buffer, metadata: streamMetadata(6, sequence) };
+    },
+    async stopSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(5, sequence) };
+    },
+  });
+  const engine = await browserEngine(host, new SpectrumWorker());
+  try {
+    const first = await engine.subscribeSpectrum({
+      target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 2,
+    });
+    const second = await engine.subscribeSpectrum({
+      target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 2,
+    });
+    const firstNotification = await first.pump();
+    assert.equal(firstNotification.metadata.target.outputId, "out");
+    assert.throws(() => { firstNotification.metadata.target.outputId = "changed"; }, TypeError);
+    const secondNotification = await second.pump();
+    assert.equal(secondNotification.metadata.target.outputId, "out");
+    await first.close();
+    await second.close();
   } finally {
     await engine.close();
   }

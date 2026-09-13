@@ -221,6 +221,9 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
   let subscription;
   try {
     subscription = await engine.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 1 });
+    const manualCancel = engine.cancelSpectrum();
+    assert.equal(manualCancel.ok, false, "manual cancellation must not steal a managed capture");
+    assert.equal(manualCancel.code, "wrongState");
     assert.equal(subscription.readLatest(), undefined);
     for (let block = 0; block < WINDOW_FRAMES / engine.shape().quantumFrames; block += 1) {
       feedAndRender(engine, block);
@@ -237,6 +240,24 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
     assert.notEqual(result.leftDb, result.rightDb);
   } finally {
     await subscription?.close();
+    engine.dispose();
+  }
+});
+
+test("managed spectrum capture limits refuse before native activation and leave one-shot usable", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const engine = await makeEngine(asset, query);
+  try {
+    await assert.rejects(
+      engine.subscribeSpectrum({ ...query, spectrumLimits: { maximumCaptureBytes: 1 } }),
+      /serialized window|capture limit|spectrum capture/,
+    );
+    assert.equal(engine.armSpectrum().ok, true, "a refused managed admission must not orphan native capture state");
+    assert.equal(engine.cancelSpectrum().ok, true);
+  } finally {
     engine.dispose();
   }
 });
