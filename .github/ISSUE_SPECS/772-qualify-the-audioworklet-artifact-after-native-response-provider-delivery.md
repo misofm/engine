@@ -125,3 +125,7 @@ preserved at `/tmp/issue772-attempt1-discovery-validation.log` with exit
 so the pin file now contains exactly that observed digest plus LF as an **unqualified provisional
 pin**. No ordinary artifact build or qualification gate has run. This tranche stops for the root
 checkpoint before the ordinary build.
+
+## Discovery validation correction before ordinary build
+
+Root found the original diagnostic log printed `digest_record_shape=False` while exiting0, so that log did not establish the claimed shape validation. It is preserved unchanged. Root independently read the original builder stdout and enforced all conditions: exactly65bytes matching lowercase64hex+LF, byte-identical provisional pin, empty probe and actual builder exit0. All checks passed with an enforced zero status; authentic output/exit are `/tmp/issue772-root-discovery-verification.log` and `.exit`. No candidate discovery or build was repeated, and the pin is unchanged. This explicit verification supersedes the original diagnostic's claim; subsequent validation must fail on false predicates.
