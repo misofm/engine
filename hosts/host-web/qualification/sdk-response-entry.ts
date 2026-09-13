@@ -386,7 +386,9 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   );
   const browser = await createEngine({
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+      commandQueueRecords: 64, observationTaps: 4,
+    } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
