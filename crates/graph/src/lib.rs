@@ -1847,6 +1847,15 @@ pub trait GraphRuntimeObserver: Send {
     ///
     /// The default keeps existing meter and observer implementations unchanged.
     fn invalidate(&mut self) {}
+
+    /// Invalidate a capture after a graph render failed at this block's sample boundary.
+    ///
+    /// Observers that can complete during a block may use the boundary to discard a result
+    /// completed by the failed block while preserving an older completed result.
+    #[doc(hidden)]
+    fn invalidate_after_failure(&mut self, _failed_sample: u64) {
+        self.invalidate();
+    }
 }
 /// One immutable prepared observer binding, ordered by its stable meter handle.
 pub struct GraphNodeObserverBinding {
@@ -2015,6 +2024,11 @@ impl PreparedPlanExecutor for GraphExecutor {
             .copy_response_snapshot(track_id, self.sample_rate_hz, sink)
     }
 
+    #[doc(hidden)]
+    fn invalidate_observers(&mut self) {
+        self.runtime.invalidate_observers();
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
@@ -2034,13 +2048,13 @@ impl PreparedPlanExecutor for GraphExecutor {
             if let Err(error) =
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
             {
-                runtime.invalidate_observers();
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
                 return Err(error);
             }
             for &(claim, buffer) in source_input_buffers.iter() {
                 let (left, right) = runtime.buffer_mut(buffer);
                 if let Err(error) = source_set.copy_track_input(claim, left, right) {
-                    runtime.invalidate_observers();
+                    runtime.invalidate_observers_after_failure(time.absolute_sample);
                     return Err(error);
                 }
             }
@@ -2050,7 +2064,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         };
         for unit in 0..runtime.units.len() {
             if let Err(error) = runtime.execute(unit, time.absolute_sample) {
-                runtime.invalidate_observers();
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
@@ -2062,7 +2076,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                 return Err(error);
             }
             if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity) {
-                runtime.invalidate_observers();
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);

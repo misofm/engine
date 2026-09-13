@@ -1790,6 +1790,27 @@ impl Runtime {
             }
         }
     }
+
+    /// Invalidate observers after a failed block while distinguishing a window completed by
+    /// that block from an older result that remains valid for the control-side reader.
+    pub(crate) fn invalidate_observers_after_failure(&mut self, failed_sample: u64) {
+        for unit in &mut self.units {
+            match unit {
+                RuntimeUnit::Op(op) => {
+                    for observer in &mut op.observers {
+                        observer.observer.invalidate_after_failure(failed_sample);
+                    }
+                }
+                RuntimeUnit::Bank { members, .. } => {
+                    for member in members {
+                        for observer in &mut member.observers {
+                            observer.observer.invalidate_after_failure(failed_sample);
+                        }
+                    }
+                }
+            }
+        }
+    }
     // REALTIME_POLICY_END
 }
 
@@ -5218,7 +5239,7 @@ mod tests {
             let expected = [
                 "if let Err(error) = runtime.execute(unit, time.absolute_sample) {",
                 "return Err(error);",
-                "if let Err(error) =\n                runtime.observe_unit(unit, time.absolute_sample, source_validity)\n            {",
+                "if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity) {",
                 "return Err(error);",
             ];
             let mut remaining = loop_body;

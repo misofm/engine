@@ -242,6 +242,9 @@ impl SpectrumCapture {
             },
             ARMED | CAPTURING => Err(SpectrumCaptureReadError::Pending),
             INVALID => {
+                // The failed render may have queued a completed window before its error. The
+                // queue has one slot, so one bounded pop clears that stale result.
+                let _ = self.consumer.try_pop();
                 self.state.store(IDLE, Ordering::Release);
                 Err(SpectrumCaptureReadError::Invalid)
             }
@@ -318,6 +321,7 @@ pub(crate) fn prepare_capture(
         next_sample: 0,
         armed: false,
         source_underrun: false,
+        completed_sample: None,
     };
     Ok((
         GraphNodeObserverBinding::new(node, SPECTRUM_OBSERVER_HANDLE, Box::new(observer)),
@@ -336,6 +340,7 @@ struct SpectrumCaptureObserver {
     next_sample: u64,
     armed: bool,
     source_underrun: bool,
+    completed_sample: Option<u64>,
 }
 
 impl SpectrumCaptureObserver {
@@ -360,6 +365,7 @@ impl SpectrumCaptureObserver {
             self.next_sample = first_sample;
             self.armed = true;
             self.source_underrun = validity.source_underrun;
+            self.completed_sample = None;
         } else if state == CAPTURING {
             if validity.source_generation_changed {
                 self.invalidate();
@@ -404,6 +410,7 @@ impl SpectrumCaptureObserver {
                 source_underrun: self.source_underrun,
             };
             if self.producer.try_push(window).is_ok() {
+                self.completed_sample = Some(self.first_sample);
                 self.state.store(COMPLETE, Ordering::Release);
             } else {
                 self.invalidate();
@@ -544,6 +551,16 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
 
     fn invalidate(&mut self) {
         self.invalidate();
+    }
+
+    fn invalidate_after_failure(&mut self, failed_sample: u64) {
+        let state = self.state.load(Ordering::Acquire);
+        if matches!(state, ARMED | CAPTURING) {
+            self.invalidate();
+        } else if state == COMPLETE && self.completed_sample == Some(failed_sample) {
+            self.armed = false;
+            self.state.store(INVALID, Ordering::Release);
+        }
     }
 }
 
@@ -713,12 +730,13 @@ pub enum SpectrumAnalysisError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARMED, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
+        ARMED, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
         SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCaptureObserver, SpectrumCaptureReadError,
-        SpectrumChannels, SpectrumWindow,
+        SpectrumChannels, SpectrumTarget, SpectrumWindow,
     };
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
     use engine::realtime::{QueueGeneration, bounded_spsc};
+    use graph::GraphRuntimeObserver;
 
     fn window(fill: f32) -> SpectrumWindow {
         SpectrumWindow {
@@ -913,6 +931,7 @@ mod tests {
             next_sample: 0,
             armed: false,
             source_underrun: false,
+            completed_sample: None,
         };
         let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
         let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
@@ -932,6 +951,67 @@ mod tests {
         assert_eq!(window.channels, SpectrumChannels::Left);
         assert!(window.left.iter().all(|value| *value == 0.25));
         assert!(window.right.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn failed_block_invalidates_its_window_and_drains_the_queued_result() {
+        let make_observer = || {
+            let (producer, consumer) = bounded_spsc(
+                core::num::NonZeroUsize::new(1).expect("one capture slot"),
+                QueueGeneration(0x5350_4543),
+            )
+            .expect("capture queue");
+            let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
+            let observer = SpectrumCaptureObserver {
+                producer,
+                state: std::sync::Arc::clone(&state),
+                left: [0.0; SPECTRUM_WINDOW_FRAMES],
+                right: [0.0; SPECTRUM_WINDOW_FRAMES],
+                channels: SpectrumChannels::Left,
+                filled: 0,
+                first_sample: 0,
+                next_sample: 0,
+                armed: false,
+                source_underrun: false,
+                completed_sample: None,
+            };
+            (observer, consumer, state)
+        };
+
+        let (mut older, mut older_consumer, older_state) = make_observer();
+        let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+        let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+        older.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        older.invalidate_after_failure(128);
+        assert_eq!(
+            older_state.load(std::sync::atomic::Ordering::Acquire),
+            COMPLETE,
+            "a later failed block preserves an older completed window"
+        );
+        assert!(older_consumer.try_pop().is_ok());
+
+        let (mut current, consumer, state) = make_observer();
+        current.capture(&left, &right, 2_048, super::GraphObservationValidity::CLEAR);
+        current.invalidate_after_failure(2_048);
+        assert_eq!(
+            state.load(std::sync::atomic::Ordering::Acquire),
+            INVALID,
+            "a failed block cannot publish its completed window"
+        );
+        let mut capture = super::SpectrumCapture {
+            consumer,
+            state,
+            target: SpectrumTarget::Output("main-out".into()),
+        };
+        assert_eq!(
+            capture
+                .try_read()
+                .expect_err("failed block reports invalid"),
+            SpectrumCaptureReadError::Invalid
+        );
+        capture
+            .arm()
+            .expect("draining the invalid result frees the slot");
     }
 
     #[test]

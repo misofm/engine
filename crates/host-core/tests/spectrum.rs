@@ -339,6 +339,65 @@ fn seek_generation_invalidates_a_partial_spectrum_window() {
 }
 
 #[test]
+fn preexecutor_render_refusal_invalidates_a_partial_spectrum_window() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let target = SpectrumTarget::Output("main-out".into());
+    let resources = spectrum_capture_resources_for(&target);
+    let (host, mut capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("capture prepares");
+    capture.arm().expect("arm capture");
+    let (mut session, mut sources, _) = host.start_render_session().expect("start render");
+    for block in 0..8 {
+        let left = [0.25_f32; QUANTUM];
+        let right = [-0.5_f32; QUANTUM];
+        sources
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: (block * QUANTUM) as u64,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        let mut output = [0.0_f32; QUANTUM * 2];
+        session
+            .render_planar(&mut output, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
+            .expect("render block");
+    }
+
+    let mut output = [0.0_f32; QUANTUM * 2];
+    let error = session
+        .render_planar(&mut output, 2, QUANTUM, QUANTUM, 7)
+        .expect_err("discontinuous preexecutor call refuses");
+    assert!(
+        matches!(
+            error,
+            engine::realtime::RenderError::TimeDiscontinuity { .. }
+        ),
+        "unexpected refusal: {error:?}"
+    );
+    assert_eq!(
+        capture
+            .try_read()
+            .expect_err("discontinuous render invalidates partial capture"),
+        SpectrumCaptureReadError::Invalid
+    );
+    capture.arm().expect("invalid result can be re-armed");
+}
+
+#[test]
 fn console_and_meter_preparation_keeps_spectrum_in_one_transaction() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let mut limits = caps();
@@ -378,8 +437,7 @@ fn selected_capture_is_pcm_bit_exact_and_allocation_free_for_idle_and_active_ren
     use engine::realtime::audit;
 
     const NON_DIVIDING_QUANTUM: usize = 192;
-    const BLOCKS: usize =
-        (SPECTRUM_WINDOW_FRAMES + NON_DIVIDING_QUANTUM - 1) / NON_DIVIDING_QUANTUM;
+    const BLOCKS: usize = SPECTRUM_WINDOW_FRAMES.div_ceil(NON_DIVIDING_QUANTUM);
     let document = SESSION.replace("\"quantum_frames\": 128", "\"quantum_frames\": 192");
     let mut test_caps = caps();
     test_caps.source_ring_frames = 1_152;
