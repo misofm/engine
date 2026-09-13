@@ -1,7 +1,7 @@
 {
   "schema": "miso.web.qualification.matrix.v1",
-  "candidateCommit": "a5db34217ff7f656765121463c7acd8247f65e1b",
-  "wasmSha256": "68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee",
+  "candidateCommit": "a51f1be2f6f0a907b7c03797be2e175572d6e669",
+  "wasmSha256": "e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab",
   "playwrightVersion": "1.62.1",
   "platform": "linux-headless",
   "artifact": "single shipped simd128 AudioWorklet artifact",
@@ -18,7 +18,8 @@
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
         "observation": "pass",
-        "mainThreadStall": "pass"
+        "mainThreadStall": "pass",
+        "sdkResponse": "pass"
       }
     },
     {
@@ -31,7 +32,8 @@
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
         "observation": "pass",
-        "mainThreadStall": "pass"
+        "mainThreadStall": "pass",
+        "sdkResponse": "pass"
       }
     },
     {
@@ -44,7 +46,8 @@
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
         "observation": "pass",
-        "mainThreadStall": "pass"
+        "mainThreadStall": "pass",
+        "sdkResponse": "pass"
       }
     }
   ]

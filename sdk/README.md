@@ -349,6 +349,37 @@ effect, and observation operations, locally checks generated domains, and makes 
 `console.submit(...edits)` one atomic engine transaction. `ConsoleWriter` remains useful for a
 high-rate gesture loop whose pending values need latest-wins coalescing.
 
+## Explicit response previews
+
+Response previews are stopped analysis requests over an explicit generated effect or input-filter
+configuration. They do not boot a session or describe a live plan. Node and Bun instantiate the
+verified asset directly; browsers use a dedicated Worker and return owned channel arrays:
+
+```ts
+import { effect } from "@misofm/engine";
+import { createResponsePreview, loadBundledEngineAsset } from "@misofm/engine/headless";
+
+const preview = await createResponsePreview({ asset: await loadBundledEngineAsset() });
+const result = preview.query({
+  configurationId: 7n,
+  sampleRateHz: 48_000,
+  quantumFrames: 128,
+  configuration: effect("miso.parametric-eq", {
+    "band-1-enabled": true, "band-1-kind": "bell", "band-1-frequency": 1_000,
+    "band-1-gain": 3, "band-1-q": 1,
+  }),
+  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
+  channels: "both",
+  fields: "totalAndSections",
+});
+preview.close();
+```
+
+The browser entry exports the same `createResponsePreview` name and accepts a verified
+`MisoEngineAsset`; its one-request Worker can be closed repeatedly and refuses a concurrent query.
+The returned `requestedConfiguration`, `configurationId` (`bigint`), frequencies, totals and
+sections are explicit request results and carry no active-session identity.
+
 ## Tests
 
 The eval suites run under Node's native type stripping, so `sdk/src/**/*.ts` is imported directly

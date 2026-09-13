@@ -603,6 +603,9 @@ export async function runQualification() {
   // Issue #143 E12: the console session plus one compressor, so an armed tap has a real reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
+  const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
+    ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
+    : null;
 
   if (!simd128) {
     return {
@@ -621,6 +624,7 @@ export async function runQualification() {
       console: null,
       observation: null,
       stall: null,
+      sdkResponse,
     };
   }
 
@@ -694,6 +698,7 @@ export async function runQualification() {
     console: live,
     observation,
     stall,
+    sdkResponse,
   };
 }
 

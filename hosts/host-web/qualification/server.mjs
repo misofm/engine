@@ -48,7 +48,7 @@ export async function exactArtifacts(directory) {
   }
 }
 
-function routePath(urlPath, artifactDirectory) {
+function routePath(urlPath, artifactDirectory, sdkBundleDirectory) {
   if (urlPath === "/web/hex-lower.js") return path.join(HOST_WEB, "web", "hex-lower.js");
   const routes = [
     ["/artifacts/", artifactDirectory],
@@ -64,16 +64,21 @@ function routePath(urlPath, artifactDirectory) {
     if (prefix === "/artifacts/" && !ARTIFACT_NAMES.has(name)) return null;
     return path.join(directory, name);
   }
+  if (sdkBundleDirectory !== undefined && urlPath.startsWith("/sdk/")) {
+    const name = urlPath.slice("/sdk/".length);
+    if (name.length === 0 || name.includes("/") || name === "." || name === "..") return null;
+    return path.join(sdkBundleDirectory, name);
+  }
   return null;
 }
 
-export async function startQualificationServer({ artifacts, port = 0 }) {
+export async function startQualificationServer({ artifacts, sdkBundle, port = 0 }) {
   const artifactDirectory = path.resolve(artifacts);
   await exactArtifacts(artifactDirectory);
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
-      const file = routePath(decodeURIComponent(url.pathname), artifactDirectory);
+      const file = routePath(decodeURIComponent(url.pathname), artifactDirectory, sdkBundle);
       if (request.method !== "GET" || file === null) {
         response.writeHead(404).end();
         return;

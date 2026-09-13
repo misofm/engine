@@ -345,7 +345,7 @@ function effectParameter(
 }
 
 /** Normalize one declared parameter into the one or two `params` rows it becomes. */
-function parameterRows(
+export function parameterRows(
   descriptor: EffectDescriptor,
   name: string,
   raw: unknown,

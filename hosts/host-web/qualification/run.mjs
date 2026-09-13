@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
@@ -28,6 +28,7 @@ const MUTATIONS = [
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
+  "sdk-response",
 ];
 
 function option(name) {
@@ -41,6 +42,36 @@ function gate(browserName, name, condition, detail) {
 
 async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
+}
+
+async function buildSdkBundle(sdkRoot) {
+  const esbuildPath = pathToFileURL(path.join(sdkRoot, "node_modules", "esbuild", "lib", "main.js")).href;
+  const { build } = await import(esbuildPath);
+  const bundle = await mkdtemp(path.join(os.tmpdir(), "miso-sdk-response-bundle-"));
+  try {
+    await build({
+      entryPoints: [path.join(HERE, "sdk-response-entry.ts")],
+      outfile: path.join(bundle, "sdk-response-client.js"),
+      bundle: true,
+      format: "esm",
+      platform: "browser",
+      target: "es2022",
+      legalComments: "inline",
+    });
+    await build({
+      entryPoints: [path.join(sdkRoot, "src", "browser", "response-worker.ts")],
+      outfile: path.join(bundle, "response-worker.js"),
+      bundle: true,
+      format: "esm",
+      platform: "browser",
+      target: "es2022",
+      legalComments: "inline",
+    });
+    return bundle;
+  } catch (error) {
+    await rm(bundle, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function validateLineage(checked, artifactDigest) {
@@ -149,8 +180,33 @@ function validate(browserName, result) {
     && stall?.noDropout === true
     && stall?.noDesync === true
     && stall?.renderedDigest === stall?.expectedDigest,
-  "100 ms fault did not preserve exact 5,120-frame output");
+    "100 ms fault did not preserve exact 5,120-frame output");
+  if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
   return "simd128 supported";
+}
+
+function validateSdkResponse(browserName, response) {
+  gate(browserName, "sdk-response", response?.capabilities?.some(
+    (row) => row.owner === "effect" && row.target === "miso.parametric-eq",
+  ) === true, "SDK did not expose the generated EQ capability");
+  gate(browserName, "sdk-response", response?.capabilities?.some(
+    (row) => row.owner === "builtins" && row.target === "inputFilters",
+  ) === true, "SDK did not expose the generated input-filter capability");
+  gate(browserName, "sdk-response", response?.eq?.configurationId === "9007199254740993"
+    && response.eq.mode === "requestedConfiguration"
+    && response.eq.points === 32 && response.eq.sections === 4
+    && response.eq.left.length === 32 && response.eq.right.length === 32
+    && response.eq.frequencies.length === 32
+    && response.eq.enabledLeft.filter(Boolean).length === 1
+    && response.eq.enabledRight.filter(Boolean).length === 1,
+  "SDK EQ Worker result did not preserve the explicit configuration and sections");
+  gate(browserName, "sdk-response", response?.filters?.configurationId === "9007199254740994"
+    && response.filters.points === 16 && response.filters.sections === 2
+    && response.filters.firstFrequency === 0 && response.filters.lastFrequency === 24000
+    && response.filters.left.length === 16 && response.filters.right.length === 16,
+  "SDK input-filter Worker result did not preserve independent arrays and endpoints");
+  gate(browserName, "sdk-response", response?.ownedAfterSecondQuery === true,
+    "SDK response arrays were not stable after a subsequent query");
 }
 
 function mutate(result, mutation) {
@@ -168,11 +224,15 @@ function mutate(result, mutation) {
   if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
+  if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   return copy;
 }
 
 function mutationProofs(browserName, result) {
-  for (const mutation of MUTATIONS) {
+  const mutations = result.sdkResponse === null
+    ? MUTATIONS.filter((mutation) => mutation !== "sdk-response")
+    : MUTATIONS;
+  for (const mutation of mutations) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation)),
       (error) => error instanceof Error && error.message.startsWith(`${browserName}:`),
@@ -263,7 +323,7 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
-async function qualifyBrowser(browserName, engine, origin, proveMutations) {
+async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
     launchOptions.channel = "chromium";
@@ -280,9 +340,9 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations) {
     });
     page.setDefaultTimeout(120000);
     await page.goto(`${origin}/qualification/index.html`);
-    const result = await page.evaluate(async () => {
+    const result = await page.evaluate(async (enabled) => {
       try {
-        const module = await import("/qualification/qualification.js");
+        const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
         return await module.runQualification();
       } catch (error) {
         return {
@@ -293,13 +353,15 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations) {
           },
         };
       }
-    });
+    }, sdkEnabled);
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     process.stdout.write(`${browserName}: all qualification gates passed (${browser.version()})\n`);
-    return normalizedRow(browserName, browser.version(), outcome);
+    const row = normalizedRow(browserName, browser.version(), outcome);
+    if (sdkEnabled) row.gates.sdkResponse = "pass";
+    return row;
   } finally {
     await browser.close();
   }
@@ -351,6 +413,9 @@ async function main() {
     throw new Error("--record-matrix requires --candidate-commit as canonical lowercase 40-hex");
   }
   const artifactDigest = await sha256(path.join(path.resolve(artifacts), WASM_ARTIFACT));
+  const sdkRoot = option("--sdk-root");
+  let sdkBundle;
+  if (sdkRoot !== null) sdkBundle = await buildSdkBundle(path.resolve(sdkRoot));
 
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
@@ -364,11 +429,11 @@ async function main() {
     validateLineage(checked, artifactDigest);
     lineageMutationProofs(checked, artifactDigest);
   }
-  const server = await startQualificationServer({ artifacts });
+  const server = await startQualificationServer({ artifacts, sdkBundle });
   try {
     const rows = [];
     for (const browserName of browserNames) {
-      const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations);
+      const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null);
       rows.push(row);
       if (checked !== null) validateCheckedRow(browserName, row, checked);
     }
@@ -396,6 +461,7 @@ async function main() {
     }
   } finally {
     await server.close();
+    if (sdkBundle !== undefined) await rm(sdkBundle, { recursive: true, force: true });
   }
 }
 

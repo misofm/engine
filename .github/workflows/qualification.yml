@@ -239,6 +239,9 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts
+      - name: Install SDK dependencies for the response Worker bundle
+        working-directory: sdk
+        run: npm ci --no-audit --no-fund --prefer-offline
       - name: Verify the downloaded artifact against its source pin
         run: |
           expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
@@ -257,7 +260,7 @@ jobs:
           npx playwright install-deps "${{ matrix.browser }}"
       - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
         working-directory: hosts/host-web/qualification
-        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
+        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --sdk-root "$GITHUB_WORKSPACE/sdk" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
 
   lint:
     name: fmt, clippy, doc, and hermetic policy gates

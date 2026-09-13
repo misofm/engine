@@ -8,6 +8,7 @@ export * from "./policy.ts";
 export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
 export * from "./pcm-feed.ts";
+export * from "./response.ts";
 
 export { scratchBootWithWorker, prepareBrowserSessionWithWorker } from "./scratch.ts";
 export type { ScratchWorker, ScratchWorkerFactory, ScratchBootWorkerOptions, PreparedBrowserSession } from "./scratch.ts";

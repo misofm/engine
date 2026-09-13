@@ -16,13 +16,21 @@
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
-    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
+    RESPONSE_RESULT_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED,
+    STATE_READY, WebBootOptions, WebResponseParameter, WebResponseRequest, WebResponseResult,
 };
 use core::{
     cell::{Cell, RefCell},
-    mem::MaybeUninit,
+    mem::{MaybeUninit, size_of},
     ptr, slice,
+};
+use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
+use host_core::{
+    ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
+    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, prepare_response_preview,
 };
 
 struct LiveHost {
@@ -36,6 +44,43 @@ struct BootStaging {
     result: u32,
     diagnostic_bytes: u32,
     document_valid: bool,
+}
+
+struct ResponseStaging {
+    request: Box<WebResponseRequest>,
+    effect_id: Box<[u8]>,
+    parameters: Box<[WebResponseParameter]>,
+    result: Vec<u8>,
+    result_header: WebResponseResult,
+}
+
+impl ResponseStaging {
+    fn new() -> Self {
+        Self {
+            request: Box::new(WebResponseRequest {
+                struct_size: RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                ..WebResponseRequest::default()
+            }),
+            effect_id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
+            parameters: vec![
+                WebResponseParameter::default();
+                RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as usize
+            ]
+            .into_boxed_slice(),
+            result: Vec::new(),
+            result_header: WebResponseResult {
+                struct_size: RESPONSE_RESULT_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                ..WebResponseResult::default()
+            },
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 impl BootStaging {
@@ -70,6 +115,7 @@ thread_local! {
     static LIVE_HOST: RefCell<Option<LiveHost>> = const { RefCell::new(None) };
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
     static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
+    static RESPONSE_STAGING: RefCell<ResponseStaging> = RefCell::new(ResponseStaging::new());
 }
 
 fn next_handle() -> u32 {
@@ -163,6 +209,473 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         _ => return 0,
     };
     u32::try_from(bytes).unwrap_or(0)
+}
+
+fn response_error_code(error: ResponsePreviewError) -> u32 {
+    match error {
+        ResponsePreviewError::UnsupportedEffect => RESULT_UNSUPPORTED,
+        ResponsePreviewError::UnknownEffect
+        | ResponsePreviewError::InvalidShape
+        | ResponsePreviewError::InvalidParameter
+        | ResponsePreviewError::DuplicateParameter
+        | ResponsePreviewError::ConflictingChannel
+        | ResponsePreviewError::InvalidGrid
+        | ResponsePreviewError::OutputShape
+        | ResponsePreviewError::Owner(_) => RESULT_INVALID_ARGUMENT,
+    }
+}
+
+fn response_grid(request: WebResponseRequest) -> Result<ResponsePreviewGrid, u32> {
+    let points = usize::try_from(request.points).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    match request.grid {
+        crate::RESPONSE_GRID_LINEAR => Ok(ResponsePreviewGrid::Linear {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        }),
+        crate::RESPONSE_GRID_LOGARITHMIC => Ok(ResponsePreviewGrid::Logarithmic {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        }),
+        _ => Err(RESULT_INVALID_ARGUMENT),
+    }
+}
+
+fn response_quality(raw: u32) -> Result<EffectQuality, u32> {
+    EffectQuality::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
+}
+
+fn response_link_mode(raw: u32) -> Result<LinkMode, u32> {
+    LinkMode::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
+}
+
+fn response_channel(raw: u32) -> Result<ParameterChannel, u32> {
+    ParameterChannel::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
+}
+
+fn append_f32_values(result: &mut Vec<u8>, values: &[f32], maximum: usize) -> Result<u32, u32> {
+    let offset = u32::try_from(result.len()).map_err(|_| RESULT_REFUSED_BUDGET)?;
+    let bytes = values
+        .len()
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let end = result
+        .len()
+        .checked_add(bytes)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    if end > maximum {
+        return Err(RESULT_REFUSED_BUDGET);
+    }
+    result.reserve(bytes);
+    for value in values {
+        result.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(offset)
+}
+
+fn response_header_bytes(header: WebResponseResult) -> Vec<u8> {
+    let pointer = ptr::from_ref(&header).cast::<u8>();
+    // SAFETY: `WebResponseResult` is repr(C), and the exact object is alive for this copy.
+    unsafe { slice::from_raw_parts(pointer, size_of::<WebResponseResult>()) }.to_vec()
+}
+
+fn response_buffer_budget(
+    points: usize,
+    section_count: usize,
+    channels: u32,
+    fields: u32,
+    maximum: usize,
+) -> Result<(), u32> {
+    let frequency_bytes = points
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let section_points = section_count
+        .checked_mul(points)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let section_bytes = section_points
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let working_bytes = frequency_bytes
+        .checked_add(
+            frequency_bytes
+                .checked_mul(2)
+                .ok_or(RESULT_REFUSED_BUDGET)?,
+        )
+        .and_then(|bytes| {
+            if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
+                bytes.checked_add(section_bytes.checked_mul(2)?)
+            } else {
+                Some(bytes)
+            }
+        })
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let mut result_bytes = size_of::<WebResponseResult>()
+        .checked_add(frequency_bytes)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
+        result_bytes = result_bytes
+            .checked_add(frequency_bytes)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+    }
+    if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
+        result_bytes = result_bytes
+            .checked_add(frequency_bytes)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+    }
+    if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
+        if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
+            result_bytes = result_bytes
+                .checked_add(section_bytes)
+                .ok_or(RESULT_REFUSED_BUDGET)?;
+        }
+        if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
+            result_bytes = result_bytes
+                .checked_add(section_bytes)
+                .ok_or(RESULT_REFUSED_BUDGET)?;
+        }
+    }
+    if result_bytes > maximum || working_bytes > maximum {
+        return Err(RESULT_REFUSED_BUDGET);
+    }
+    Ok(())
+}
+
+fn response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
+    staging.result_header = WebResponseResult {
+        struct_size: RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result,
+        ..WebResponseResult::default()
+    };
+    staging.result = response_header_bytes(staging.result_header);
+    result
+}
+
+fn run_response_query(staging: &mut ResponseStaging) -> u32 {
+    let request = *staging.request;
+    if request.struct_size != RESPONSE_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.reserved != [0; 2]
+        || request.channels == 0
+        || request.channels & !crate::RESPONSE_CHANNEL_BOTH != 0
+        || request.fields == 0
+        || request.fields & !(crate::RESPONSE_FIELD_TOTAL | crate::RESPONSE_FIELD_SECTIONS) != 0
+        || request.parameter_count > RESPONSE_MAXIMUM_PARAMETER_OVERRIDES
+        || request.effect_id_bytes > RESPONSE_MAXIMUM_EFFECT_ID_BYTES
+        || request.maximum_result_bytes == 0
+        || u64::from(request.maximum_result_bytes) > RESPONSE_MAXIMUM_RESULT_BYTES
+    {
+        return response_failure(staging, RESULT_INVALID_ARGUMENT);
+    }
+    let grid = match response_grid(request) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
+    };
+    let parameter_count = request.parameter_count as usize;
+    let mut overrides = Vec::with_capacity(parameter_count);
+    for row in &staging.parameters[..parameter_count] {
+        let channel = match response_channel(row.channel) {
+            Ok(value) => value,
+            Err(result) => return response_failure(staging, result),
+        };
+        overrides.push(ResponseParameterOverride {
+            parameter_id: row.parameter_id,
+            channel,
+            value: row.value,
+        });
+    }
+    let target = match request.target {
+        crate::RESPONSE_TARGET_EFFECT => {
+            let id_bytes = &staging.effect_id[..request.effect_id_bytes as usize];
+            let Ok(effect_id) = core::str::from_utf8(id_bytes) else {
+                return response_failure(staging, RESULT_INVALID_ARGUMENT);
+            };
+            let quality = match response_quality(request.quality) {
+                Ok(value) => value,
+                Err(result) => return response_failure(staging, result),
+            };
+            let link_mode = match response_link_mode(request.link_mode) {
+                Ok(value) => value,
+                Err(result) => return response_failure(staging, result),
+            };
+            ResponsePreviewTarget::Effect {
+                effect_id,
+                overrides: &overrides,
+                quality,
+                bypass: request.bypass != 0,
+                link_mode,
+            }
+        }
+        crate::RESPONSE_TARGET_INPUT_FILTERS => {
+            if request.parameter_count != 0 || request.effect_id_bytes != 0 {
+                return response_failure(staging, RESULT_INVALID_ARGUMENT);
+            }
+            ResponsePreviewTarget::InputFilters {
+                left_hpf_hz: request.left_hpf_hz,
+                left_lpf_hz: request.left_lpf_hz,
+                right_hpf_hz: request.right_hpf_hz,
+                right_lpf_hz: request.right_lpf_hz,
+            }
+        }
+        _ => return response_failure(staging, RESULT_INVALID_ARGUMENT),
+    };
+    let limits = ResponsePreviewLimits {
+        maximum_prepared_bytes: match usize::try_from(request.maximum_prepared_bytes) {
+            Ok(value) if value != 0 => value,
+            _ => return response_failure(staging, RESULT_REFUSED_BUDGET),
+        },
+        maximum_total_state_bytes: request.maximum_total_state_bytes,
+        maximum_scratch_bytes: request.maximum_scratch_bytes,
+        maximum_automation_spans_per_block: request.maximum_automation_spans_per_block,
+    };
+    let prepared = match prepare_response_preview(ResponsePreviewRequest {
+        configuration_id: request.configuration_id,
+        sample_rate_hz: request.sample_rate_hz,
+        quantum_frames: request.quantum_frames,
+        target,
+        limits,
+    }) {
+        Ok(value) => value,
+        Err(error) => return response_failure(staging, response_error_code(error)),
+    };
+    let points = grid.points();
+    let section_count = prepared.descriptor().sections.len();
+    let want_left = request.channels & crate::RESPONSE_CHANNEL_LEFT != 0;
+    let want_right = request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0;
+    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
+    let maximum = request.maximum_result_bytes as usize;
+    if let Err(result) = response_buffer_budget(
+        points,
+        section_count,
+        request.channels,
+        request.fields,
+        maximum,
+    ) {
+        return response_failure(staging, result);
+    }
+    let mut frequencies = vec![0.0; points];
+    let mut total_left = vec![0.0; points];
+    let mut total_right = vec![0.0; points];
+    let section_points = match section_count.checked_mul(points) {
+        Some(value) => value,
+        None => return response_failure(staging, RESULT_REFUSED_BUDGET),
+    };
+    let mut sections_left = want_sections.then(|| vec![0.0; section_points]);
+    let mut sections_right = want_sections.then(|| vec![0.0; section_points]);
+    if !want_left {
+        total_left.fill(0.0);
+    }
+    if !want_right {
+        total_right.fill(0.0);
+    }
+    let summary = match prepared.query_into(
+        grid,
+        ResponsePreviewOutput {
+            frequencies_hz: &mut frequencies,
+            total_left_db: &mut total_left,
+            total_right_db: &mut total_right,
+            sections_left_db: sections_left.as_deref_mut(),
+            sections_right_db: sections_right.as_deref_mut(),
+        },
+    ) {
+        Ok(value) => value,
+        Err(error) => return response_failure(staging, response_error_code(error)),
+    };
+    let mut payload = Vec::new();
+    let header_size = size_of::<WebResponseResult>();
+    if header_size > maximum {
+        return response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+    payload.resize(header_size, 0);
+    let frequencies_offset = match append_f32_values(&mut payload, &frequencies, maximum) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
+    };
+    let total_left_offset = if want_left {
+        match append_f32_values(&mut payload, &total_left, maximum) {
+            Ok(value) => value,
+            Err(result) => return response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    let total_right_offset = if want_right {
+        match append_f32_values(&mut payload, &total_right, maximum) {
+            Ok(value) => value,
+            Err(result) => return response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    let sections_left_offset = if want_left && want_sections {
+        match append_f32_values(
+            &mut payload,
+            sections_left.as_deref().unwrap_or(&[]),
+            maximum,
+        ) {
+            Ok(value) => value,
+            Err(result) => return response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    let sections_right_offset = if want_right && want_sections {
+        match append_f32_values(
+            &mut payload,
+            sections_right.as_deref().unwrap_or(&[]),
+            maximum,
+        ) {
+            Ok(value) => value,
+            Err(result) => return response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    let configuration = prepared.configuration();
+    let mask = |values: &[bool]| {
+        values
+            .iter()
+            .enumerate()
+            .fold(0_u32, |mask, (index, enabled)| {
+                mask | (u32::from(*enabled) << index.min(31))
+            })
+    };
+    let header = WebResponseResult {
+        struct_size: RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        target: request.target,
+        channels: request.channels,
+        fields: request.fields,
+        points: request.points,
+        section_count: u32::try_from(section_count).unwrap_or(0),
+        sample_rate_hz: summary.sample_rate_hz,
+        reserved0: 0,
+        configuration_id: summary.configuration_id,
+        floor_db: summary.floor_db,
+        bypass: u32::from(configuration.bypass.unwrap_or(false)),
+        enabled_left: mask(configuration.enabled_left),
+        enabled_right: mask(configuration.enabled_right),
+        retained_bytes: u64::try_from(prepared.retained_bytes()).unwrap_or(u64::MAX),
+        result_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        frequencies_offset,
+        total_left_offset,
+        total_right_offset,
+        sections_left_offset,
+        sections_right_offset,
+        reserved: [0; 3],
+    };
+    let header_bytes = response_header_bytes(header);
+    payload[..header_size].copy_from_slice(&header_bytes);
+    staging.result_header = header;
+    staging.result = payload;
+    RESULT_OK
+}
+
+/// Return a writable request header for one analysis-only response query.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_request_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        staging.result.clear();
+        staging.request.struct_size = RESPONSE_REQUEST_BYTES;
+        staging.request.abi_version = ABI_VERSION;
+        pointer_u32(ptr::from_mut(&mut *staging.request))
+    })
+}
+
+/// Return the fixed request-header byte size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_request_bytes() -> u32 {
+    RESPONSE_REQUEST_BYTES
+}
+
+/// Return a writable effect-ID staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_effect_id_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.effect_id.as_mut_ptr())
+    })
+}
+
+/// Return the maximum effect-ID staging length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_effect_id_capacity() -> u32 {
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES
+}
+
+/// Return a writable numeric-override staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_parameter_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.parameters.as_mut_ptr())
+    })
+}
+
+/// Return the numeric-override record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_parameter_bytes() -> u32 {
+    RESPONSE_PARAMETER_BYTES
+}
+
+/// Return the maximum number of numeric-override records.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_parameter_capacity() -> u32 {
+    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES
+}
+
+/// Prepare and query one explicit response without booting the audio host.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_query() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        run_response_query(&mut staging)
+    })
+}
+
+/// Return the result-header-plus-vectors address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_result_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(staging) = slot.try_borrow() else {
+            return 0;
+        };
+        pointer_u32(staging.result.as_ptr())
+    })
+}
+
+/// Return the current result-header-plus-vectors byte length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_result_bytes() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|staging| u32::try_from(staging.result.len()).ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Close and release the one analysis-only response workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_response_close() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        staging.reset();
+        RESULT_OK
+    })
 }
 
 /// Return the frozen browser-Wasm ABI version.
@@ -679,4 +1192,34 @@ pub(crate) fn test_status_address(handle: u32) -> usize {
 #[cfg(test)]
 pub(crate) fn test_resource_address(handle: u32) -> usize {
     with_host(handle, 0, |host| ptr::from_ref(host.resources()).addr())
+}
+
+#[cfg(test)]
+mod response_budget_tests {
+    use super::*;
+
+    #[test]
+    fn response_budget_rejects_point_storage_before_allocation() {
+        assert_eq!(
+            response_buffer_budget(
+                250_000,
+                2,
+                crate::RESPONSE_CHANNEL_BOTH,
+                crate::RESPONSE_FIELD_TOTAL,
+                16,
+            ),
+            Err(RESULT_REFUSED_BUDGET),
+        );
+        let result_bytes = size_of::<WebResponseResult>() + 8 + 16 + 32;
+        assert_eq!(
+            response_buffer_budget(
+                2,
+                2,
+                crate::RESPONSE_CHANNEL_BOTH,
+                crate::RESPONSE_FIELD_SECTIONS,
+                result_bytes,
+            ),
+            Ok(()),
+        );
+    }
 }

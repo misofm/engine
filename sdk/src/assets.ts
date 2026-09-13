@@ -29,6 +29,7 @@ export const BUNDLED_ENGINE_ASSETS = Object.freeze({
   abiLayout: new URL("./assets/miso-engine-v1-abi-layout.json", import.meta.url),
   manifest: new URL("./assets/miso-engine-v1-sdk-manifest.json", import.meta.url),
   scratchWorkerModule: new URL("./browser/scratch-worker.js", import.meta.url),
+  responseWorkerModule: new URL("./browser/response-worker.js", import.meta.url),
   pcmFeedWorklet: new URL("./assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url),
 });
 

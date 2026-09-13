@@ -82,12 +82,57 @@ COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
 ]
+RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
+RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
+RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
+RESPONSE_FIELDS = [(1, "total"), (2, "sections")]
 
 STAGING_SEQUENCE = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_boot",
+]
+# This is the generator's stable canonical lexical export order.  WebAssembly consumers use names
+# rather than positions, but keeping the document order fixed makes generated diffs and review
+# deterministic.
+EXPORTS = [
+    "miso_engine_web_v1_abi_version",
+    "miso_engine_web_v1_boot",
+    "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_options_ptr",
+    "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_buffer_capacity",
+    "miso_engine_web_v1_buffer_ptr",
+    "miso_engine_web_v1_command_report_ptr",
+    "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_console_track_count",
+    "miso_engine_web_v1_console_track_id",
+    "miso_engine_web_v1_dispose",
+    "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_meter_header_ptr",
+    "miso_engine_web_v1_meter_lease",
+    "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_render",
+    "miso_engine_web_v1_resource_ptr",
+    "miso_engine_web_v1_response_close",
+    "miso_engine_web_v1_response_effect_id_capacity",
+    "miso_engine_web_v1_response_effect_id_ptr",
+    "miso_engine_web_v1_response_parameter_bytes",
+    "miso_engine_web_v1_response_parameter_capacity",
+    "miso_engine_web_v1_response_parameter_ptr",
+    "miso_engine_web_v1_response_query",
+    "miso_engine_web_v1_response_request_bytes",
+    "miso_engine_web_v1_response_request_ptr",
+    "miso_engine_web_v1_response_result_bytes",
+    "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_source_channels",
+    "miso_engine_web_v1_source_count",
+    "miso_engine_web_v1_source_frames",
+    "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_status_ptr",
 ]
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 # The dead two-phase lifecycle's vocabulary. Named so its return is a failure rather than a
@@ -100,6 +145,9 @@ STRUCTURES = {
     "resourceReport": 224,
     "meterHeader": 64,
     "commandReport": 48,
+    "responseRequest": 128,
+    "responseParameter": 16,
+    "responseResult": 112,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
@@ -118,6 +166,20 @@ ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 COMMAND_RECORD_FIELDS = [
     "kind", "rack", "channel", "reserved0", "trackIndex", "effectIndex", "parameterId",
     "smoothingSamples", "reserved1", "values", "reserved2",
+]
+RESPONSE_REQUEST_FIELDS = [
+    "structSize", "abiVersion", "target", "grid", "channels", "fields", "quality", "linkMode",
+    "bypass", "effectIdBytes", "parameterCount", "points", "sampleRateHz", "quantumFrames",
+    "minimumHz", "maximumHz", "leftHpfHz", "leftLpfHz", "rightHpfHz", "rightLpfHz",
+    "configurationId", "maximumPreparedBytes", "maximumTotalStateBytes", "maximumScratchBytes",
+    "maximumAutomationSpansPerBlock", "maximumResultBytes", "reserved",
+]
+RESPONSE_PARAMETER_FIELDS = ["parameterId", "channel", "value", "reserved"]
+RESPONSE_RESULT_FIELDS = [
+    "structSize", "abiVersion", "result", "target", "channels", "fields", "points", "sectionCount",
+    "sampleRateHz", "reserved0", "configurationId", "floorDb", "bypass", "enabledLeft",
+    "enabledRight", "retainedBytes", "resultBytes", "frequenciesOffset", "totalLeftOffset",
+    "totalRightOffset", "sectionsLeftOffset", "sectionsRightOffset", "reserved",
 ]
 
 WIDTHS = {"u8": 1, "u32": 4, "u64": 8}
@@ -199,9 +261,9 @@ def validate(document: object) -> None:
             "errorPhases carries a retired two-phase-lifecycle spelling")
 
     exports = document["exports"]
-    require(isinstance(exports, list) and len(exports) == 25,
-            f"exports names the 25 module functions, not {len(exports)}")
-    require(exports == sorted(exports), "exports is sorted")
+    require(isinstance(exports, list) and len(exports) == len(EXPORTS),
+            f"exports names the {len(EXPORTS)} module functions, not {len(exports)}")
+    require(exports == EXPORTS, "exports are the frozen module function sequence")
     require(len(set(exports)) == len(exports), "exports has no duplicate")
     require("memory" not in exports, "memory is linear memory, not an exported call")
     require(all(name.startswith("miso_engine_web_v1_") for name in exports),
@@ -235,13 +297,23 @@ def validate(document: object) -> None:
     require([row["name"] for row in record["fields"]] == COMMAND_RECORD_FIELDS,
             f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
 
+    for name, expected_fields in (
+        ("responseRequest", RESPONSE_REQUEST_FIELDS),
+        ("responseParameter", RESPONSE_PARAMETER_FIELDS),
+        ("responseResult", RESPONSE_RESULT_FIELDS),
+    ):
+        require([row["name"] for row in structures[name]["fields"]] == expected_fields,
+                f"{name} names exactly {expected_fields}")
+
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes",
         "diagnosticBytes", "defaultCommandQueueRecords", "defaultMeterBlocks",
-        "maximumObservationTaps", "defaultMaximumMemoryBytes", "sourceRing",
+        "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
+        "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
+        "responseGrids", "responseChannels", "responseFields",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -251,6 +323,10 @@ def validate(document: object) -> None:
     check_named(document, "bufferKinds", BUFFER_KINDS)
     check_positional(document, "wireCommandKinds", COMMAND_KINDS)
     check_positional(document, "commandReasons", COMMAND_REASONS)
+    check_named(document, "responseTargets", RESPONSE_TARGETS)
+    check_named(document, "responseGrids", RESPONSE_GRIDS)
+    check_named(document, "responseChannels", RESPONSE_CHANNELS)
+    check_named(document, "responseFields", RESPONSE_FIELDS)
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a
@@ -272,6 +348,9 @@ def validate(document: object) -> None:
         ("defaultCommandQueueRecords", 64),
         ("defaultMeterBlocks", 12),
         ("maximumObservationTaps", 16),
+        ("maximumResponseEffectIdBytes", 127),
+        ("maximumResponseParameterOverrides", 256),
+        ("maximumResponseResultBytes", 16 << 20),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):
         require(constants[name] == expected,
