@@ -691,10 +691,27 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       spectrumStreamPending = true;
       try {
-        const reply = await host.selectSpectrumStream({
+        const selection = host.selectSpectrumStream({
           ...spectrumHostSelection(effectiveQuery),
           smoothingMs,
         });
+        let reply: Awaited<typeof selection>;
+        try {
+          reply = await awaitSpectrum(selection, Date.now(),
+            effectiveQuery.spectrumLimits?.requestDeadlineMs ?? options.requestDeadlineMs ?? 5_000,
+            options.signal);
+        } catch (error) {
+          // A late transaction may have committed after the caller's deadline. Retire this
+          // spectrum lifetime and hold its cleanup before permitting another selection.
+          spectrumStreamActive = false;
+          observationSubscriptions?.invalidateSpectrum();
+          holdSpectrumCleanup(selection.then(
+            () => host.stopSpectrumStream?.(),
+            () => host.stopSpectrumStream?.(),
+          ));
+          throw error;
+        }
+        if (closed) throw new MisoUsageError("the browser engine is closed");
         if (reply.metadata === undefined) {
           throw new MisoEngineError("the browser host returned no spectrum selection metadata", {
             phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
@@ -743,6 +760,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       const started = Date.now();
       let startRequest: Promise<Awaited<ReturnType<NonNullable<MisoAudioWorkletHost["startSpectrumStream"]>>>> | undefined;
       try {
+        await awaitSpectrum(ensureSpectrumWorker(effectiveQuery), started, deadline, options.signal);
+        spectrumStreamBuffer ??= new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
         startRequest = host.startSpectrumStream(smoothingMs);
         const reply = await awaitSpectrum(startRequest, started, deadline, options.signal);
         const metadata = spectrumStreamMetadata(reply.metadata, effectiveQuery);

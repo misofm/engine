@@ -443,3 +443,46 @@ test("browser spectrum Worker initialization uses the total query deadline", asy
     await engine.close();
   }
 });
+
+test("collection selection deadline retires only its stream and holds late cleanup", async () => {
+  const worker = new SpectrumWorker();
+  let finishSelection;
+  let stops = 0;
+  let starts = 0;
+  const host = hostWithCapture({
+    async selectSpectrum() { return { result: 0 }; },
+    async startSpectrumStream() {
+      assert.ok(worker.messages.some((message) => message.type === "spectrum-init"),
+        "the shared Worker is initialized before native activation");
+      starts += 1;
+      return { result: 0, metadata: streamMetadata(1) };
+    },
+    selectSpectrumStream() {
+      return new Promise((resolve) => { finishSelection = resolve; });
+    },
+    async stopSpectrumStream() {
+      stops += 1;
+      return { result: 0, metadata: streamMetadata(5) };
+    },
+  });
+  const engine = await browserEngine(host, worker, {
+    spectrum: undefined,
+    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
+  });
+  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
+  try {
+    const handle = await engine.subscribeSpectrum(request);
+    await assert.rejects(handle.update({ ...request, smoothingMs: 100 }), /deadline/);
+    await assert.rejects(handle.pump(), /closed|stale/);
+    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
+    assert.equal(starts, 1, "late selection still owns the native cleanup boundary");
+    finishSelection({ result: 0, metadata: streamMetadata(1) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stops, 1);
+    const replacement = await engine.subscribeSpectrum(request);
+    assert.equal(worker.messages.filter((message) => message.type === "spectrum-init").length, 1);
+    await replacement.close();
+  } finally {
+    await engine.close();
+  }
+});
