@@ -174,10 +174,24 @@ function u64(value: number | bigint, name: string): bigint {
   return normalized;
 }
 
-function channelBits(channel: Channel): number {
+function channelBits(channel: Channel | undefined): number {
+  if (channel === undefined) return CHANNEL_BOTH;
   if (channel === "left") return CHANNEL_LEFT;
   if (channel === "right") return CHANNEL_RIGHT;
-  return CHANNEL_BOTH;
+  if (channel === "both") return CHANNEL_BOTH;
+  throw new MisoUsageError("channels must be left, right, or both");
+}
+
+function fieldBits(fields: ResponsePreviewQuery["fields"]): number {
+  if (fields === undefined || fields === "totalAndSections") return FIELD_TOTAL | FIELD_SECTIONS;
+  if (fields === "total") return FIELD_TOTAL;
+  throw new MisoUsageError("fields must be total or totalAndSections");
+}
+
+function gridValue(kind: unknown): number {
+  if (kind === "linear") return GRID_LINEAR;
+  if (kind === "logarithmic") return GRID_LOGARITHMIC;
+  throw new MisoUsageError("grid.kind must be linear or logarithmic");
 }
 
 function qualityValue(value: EffectDecl["options"]["quality"]): number {
@@ -325,10 +339,11 @@ export class ResponsePreviewModule {
     finiteInteger(request.sampleRateHz, "sampleRateHz", 1, 0xffff_ffff);
     finiteInteger(request.quantumFrames, "quantumFrames", 1, 0xffff_ffff);
     finiteInteger(request.grid.points, "grid.points", 2, 0xffff_ffff);
+    const grid = gridValue(request.grid.kind);
     if (!Number.isFinite(request.grid.minimumHz) || !Number.isFinite(request.grid.maximumHz)) throw new MisoUsageError("grid endpoints must be finite");
-    if (request.grid.kind === "logarithmic" && request.grid.minimumHz <= 0) throw new MisoUsageError("logarithmic grid minimumHz must be positive");
-    const channels = channelBits(request.channels ?? "both");
-    const fields = request.fields === "total" ? FIELD_TOTAL : FIELD_TOTAL | FIELD_SECTIONS;
+    if (grid === GRID_LOGARITHMIC && request.grid.minimumHz <= 0) throw new MisoUsageError("logarithmic grid minimumHz must be positive");
+    const channels = channelBits(request.channels);
+    const fields = fieldBits(request.fields);
     const configuration = normalizedConfiguration(request.configuration);
     const inputFilters = isInputFilters(configuration);
     const requestPtr = callable(this.#exports, "miso_engine_web_v1_response_request_ptr")();
@@ -340,7 +355,7 @@ export class ResponsePreviewModule {
     setU32("structSize", ABI_LAYOUT.structures.responseRequest.bytes);
     setU32("abiVersion", ABI_LAYOUT.abiVersion);
     setU32("target", inputFilters ? TARGET_INPUT_FILTERS : TARGET_EFFECT);
-    setU32("grid", request.grid.kind === "linear" ? GRID_LINEAR : GRID_LOGARITHMIC);
+    setU32("grid", grid);
     setU32("channels", channels);
     setU32("fields", fields);
     setU32("points", request.grid.points);

@@ -280,6 +280,67 @@ fn response_header_bytes(header: WebResponseResult) -> Vec<u8> {
     unsafe { slice::from_raw_parts(pointer, size_of::<WebResponseResult>()) }.to_vec()
 }
 
+fn response_buffer_budget(
+    points: usize,
+    section_count: usize,
+    channels: u32,
+    fields: u32,
+    maximum: usize,
+) -> Result<(), u32> {
+    let frequency_bytes = points
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let section_points = section_count
+        .checked_mul(points)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let section_bytes = section_points
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let working_bytes = frequency_bytes
+        .checked_add(
+            frequency_bytes
+                .checked_mul(2)
+                .ok_or(RESULT_REFUSED_BUDGET)?,
+        )
+        .and_then(|bytes| {
+            if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
+                bytes.checked_add(section_bytes.checked_mul(2)?)
+            } else {
+                Some(bytes)
+            }
+        })
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let mut result_bytes = size_of::<WebResponseResult>()
+        .checked_add(frequency_bytes)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
+        result_bytes = result_bytes
+            .checked_add(frequency_bytes)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+    }
+    if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
+        result_bytes = result_bytes
+            .checked_add(frequency_bytes)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+    }
+    if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
+        if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
+            result_bytes = result_bytes
+                .checked_add(section_bytes)
+                .ok_or(RESULT_REFUSED_BUDGET)?;
+        }
+        if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
+            result_bytes = result_bytes
+                .checked_add(section_bytes)
+                .ok_or(RESULT_REFUSED_BUDGET)?;
+        }
+    }
+    if result_bytes > maximum || working_bytes > maximum {
+        return Err(RESULT_REFUSED_BUDGET);
+    }
+    Ok(())
+}
+
 fn response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
     staging.result_header = WebResponseResult {
         struct_size: RESPONSE_RESULT_BYTES,
@@ -380,16 +441,26 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
     };
     let points = grid.points();
     let section_count = prepared.descriptor().sections.len();
+    let want_left = request.channels & crate::RESPONSE_CHANNEL_LEFT != 0;
+    let want_right = request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0;
+    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
+    let maximum = request.maximum_result_bytes as usize;
+    if let Err(result) = response_buffer_budget(
+        points,
+        section_count,
+        request.channels,
+        request.fields,
+        maximum,
+    ) {
+        return response_failure(staging, result);
+    }
+    let mut frequencies = vec![0.0; points];
+    let mut total_left = vec![0.0; points];
+    let mut total_right = vec![0.0; points];
     let section_points = match section_count.checked_mul(points) {
         Some(value) => value,
         None => return response_failure(staging, RESULT_REFUSED_BUDGET),
     };
-    let want_left = request.channels & crate::RESPONSE_CHANNEL_LEFT != 0;
-    let want_right = request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0;
-    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
-    let mut frequencies = vec![0.0; points];
-    let mut total_left = vec![0.0; points];
-    let mut total_right = vec![0.0; points];
     let mut sections_left = want_sections.then(|| vec![0.0; section_points]);
     let mut sections_right = want_sections.then(|| vec![0.0; section_points]);
     if !want_left {
@@ -411,7 +482,6 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         Ok(value) => value,
         Err(error) => return response_failure(staging, response_error_code(error)),
     };
-    let maximum = request.maximum_result_bytes as usize;
     let mut payload = Vec::new();
     let header_size = size_of::<WebResponseResult>();
     if header_size > maximum {
@@ -1122,4 +1192,34 @@ pub(crate) fn test_status_address(handle: u32) -> usize {
 #[cfg(test)]
 pub(crate) fn test_resource_address(handle: u32) -> usize {
     with_host(handle, 0, |host| ptr::from_ref(host.resources()).addr())
+}
+
+#[cfg(test)]
+mod response_budget_tests {
+    use super::*;
+
+    #[test]
+    fn response_budget_rejects_point_storage_before_allocation() {
+        assert_eq!(
+            response_buffer_budget(
+                250_000,
+                2,
+                crate::RESPONSE_CHANNEL_BOTH,
+                crate::RESPONSE_FIELD_TOTAL,
+                16,
+            ),
+            Err(RESULT_REFUSED_BUDGET),
+        );
+        let result_bytes = size_of::<WebResponseResult>() + 8 + 16 + 32;
+        assert_eq!(
+            response_buffer_budget(
+                2,
+                2,
+                crate::RESPONSE_CHANNEL_BOTH,
+                crate::RESPONSE_FIELD_SECTIONS,
+                result_bytes,
+            ),
+            Ok(()),
+        );
+    }
 }

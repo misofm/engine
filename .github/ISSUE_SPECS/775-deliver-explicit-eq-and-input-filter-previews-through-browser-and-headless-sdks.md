@@ -142,3 +142,7 @@ Bounded independent reproduction source and output are preserved in `/tmp/issue7
 Correct these three bugs in one bounded revision, with focused discriminating regressions and relevant reruns. The Rust allocation-order correction changes the artifact input, so the corrected deliverable needs a newly identified candidate; the successful attempt-1 logs must remain attributed to their original candidate. No optional abstraction, additional matrix, optimization or unrelated hardening is a blocker in this verdict.
 
 Attempt 2 is limited to these three reproduced bugs and focused regressions. Existing working endpoint evidence is preserved; no new capability, abstraction or qualification framework is added.
+
+## Attempt 2 focused bug-fix checkpoint
+
+Luna corrected only the three review findings: checked result/working-vector budgets before point-sized allocations, runtime SDK selector validation, and terminal Worker timeout/fatal-error cleanup. Focused regressions cover these cases in the existing Rust/SDK tests. Host-web tests pass (79, two existing ignored); focused SDK tests pass (4, one candidate-dependent skipped); types/fmt/Clippy/diff checks pass. Logs `/tmp/issue775-attempt2-{host-web-tests,response-focused-js,sdk-typecheck,fmt,clippy,diff-check}.*` all record exit 0. The real candidate-2 budget/selector test remains pending; candidate-1 evidence is not used for the changed Rust behavior.

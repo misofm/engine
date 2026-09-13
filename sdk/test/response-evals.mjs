@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BrowserResponsePreview } from "../src/browser/response.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { RESPONSE_CAPABILITIES } from "../src/core/response.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { RESPONSE_CAPABILITIES, ResponsePreviewModule } from "../src/core/response.ts";
 import { createResponsePreview as createHeadlessResponsePreview } from "../src/headless/response.ts";
 import { effect } from "../src/core/session.ts";
 import { moduleBytes } from "./support.mjs";
@@ -106,6 +107,42 @@ test("browser response Worker enforces one request, preserves bigint, and closes
   await assert.rejects(preview.query(query), /closed/);
 });
 
+test("browser response Worker timeout is terminal and admits no second job", async () => {
+  const worker = new FakeWorker();
+  const preview = await BrowserResponsePreview.create({
+    asset,
+    limits: { requestDeadlineMs: 10 },
+    createWorker: () => worker,
+  });
+  await assert.rejects(preview.query(query), /deadline/);
+  assert.equal(worker.requests.filter((entry) => entry.type === "response-query").length, 1);
+  assert.equal(worker.terminated, 1);
+  await assert.rejects(preview.query(query), /closed/);
+  await preview.close();
+  assert.equal(worker.terminated, 1);
+});
+
+test("browser response Worker failure messages are terminal", async () => {
+  for (const [type, event] of [
+    ["error", { message: "worker failed" }],
+    ["messageerror", {}],
+  ]) {
+    const worker = new FakeWorker();
+    const preview = await BrowserResponsePreview.create({
+      asset,
+      limits: { requestDeadlineMs: 100 },
+      createWorker: () => worker,
+    });
+    const pending = preview.query(query);
+    worker.emit(type, event);
+    await assert.rejects(pending);
+    assert.equal(worker.requests.filter((entry) => entry.type === "response-query").length, 1);
+    assert.equal(worker.terminated, 1);
+    await assert.rejects(preview.query(query), /closed/);
+    await preview.close();
+  }
+});
+
 test("candidate Wasm answers EQ and input-filter previews headlessly", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
@@ -142,6 +179,27 @@ test("candidate Wasm answers EQ and input-filter previews headlessly", {
     assert.equal(filters.sections.length, 2);
     assert.equal(filters.frequenciesHz[0], 0);
     assert.ok(filters.totalLeftDb?.[0] !== filters.totalLeftDb?.[filters.totalLeftDb.length - 1]);
+
+    for (const [name, invalid] of [
+      ["channels", { ...query, channels: "bogus" }],
+      ["fields", { ...query, fields: "bogus" }],
+      ["grid", { ...query, grid: { ...query.grid, kind: "bogus" } }],
+    ]) {
+      assert.throws(() => preview.query(invalid), MisoUsageError, `${name} selector must refuse`);
+    }
+
+    const boundedInstance = await asset.instantiate();
+    const bounded = new ResponsePreviewModule(boundedInstance, { maximumResultBytes: 16 });
+    const memoryBefore = boundedInstance.exports.memory.buffer.byteLength;
+    assert.throws(
+      () => bounded.query({
+        ...query,
+        grid: { ...query.grid, points: 250_000 },
+      }),
+      (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+    );
+    assert.equal(boundedInstance.exports.memory.buffer.byteLength, memoryBefore);
+    bounded.close();
   } finally {
     await preview.close();
   }

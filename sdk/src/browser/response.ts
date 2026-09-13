@@ -86,8 +86,7 @@ export class BrowserResponsePreview {
     return new Promise<ResponsePreviewResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.#pending?.requestId !== requestId) return;
-        this.#pending = undefined;
-        reject(new MisoUsageError("response query exceeded its deadline"));
+        this.#terminate(new MisoUsageError("response query exceeded its deadline"));
       }, deadline);
       this.#pending = { requestId, resolve, reject, timer };
       try {
@@ -101,13 +100,7 @@ export class BrowserResponsePreview {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#rejectPending(new MisoUsageError("the response preview was closed"));
-    try { this.#worker.postMessage({ type: "response-close" }); } finally {
-      this.#removeListeners();
-      this.#worker.terminate();
-    }
+    this.#terminate(new MisoUsageError("the response preview was closed"));
   }
 
   async initialize(signal: AbortSignal | undefined, deadline: number): Promise<void> {
@@ -152,14 +145,24 @@ export class BrowserResponsePreview {
   readonly #failure = (event: ErrorEvent): void => {
     const error = new MisoUsageError(`response Worker failed: ${event.message || "unknown error"}`);
     this.#rejectReady(error);
-    this.#rejectPending(error);
+    this.#terminate(error);
   };
 
   readonly #messageFailure = (): void => {
     const error = new MisoUsageError("response Worker reply could not be decoded");
     this.#rejectReady(error);
-    this.#rejectPending(error);
+    this.#terminate(error);
   };
+
+  #terminate(error: unknown): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#rejectPending(error);
+    try { this.#worker.postMessage({ type: "response-close" }); } finally {
+      this.#removeListeners();
+      this.#worker.terminate();
+    }
+  }
 
   #rejectPending(error: unknown): void {
     if (this.#pending === undefined) return;
