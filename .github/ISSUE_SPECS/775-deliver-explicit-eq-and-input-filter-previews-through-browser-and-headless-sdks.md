@@ -150,3 +150,49 @@ Luna corrected only the three review findings: checked result/working-vector bud
 Candidate 2 source `559c23a36e6827f715798aa82d9aa498e3205d4f`: official discovery exited 0, with original canonical bytes and empty probe enforced. Provisional unqualified digest `e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab` replaces candidate 1 only because the reviewed allocation-order bug changed Rust source. Candidate 1 logs/artifact remain preserved. Candidate 2 logs are `/tmp/issue775-candidate2-logs`; root checkpoints before ordinary build.
 
 Candidate 2 runtime regression initially compared fresh-instance memory and observed one fixed staging page (1,179,648 to 1,245,184 bytes). Astra medium clarified that fixed control-side setup is allowed; the reviewed bug is point-dependent allocation before admission. The test now first makes a tiny refused request under the same cap, then proves a 250,000-point refused request causes no further memory growth. Both refusals remain typed. An unnecessary proposed error-buffer rewrite was preserved externally and removed before commit; product source remains `559c23a3`, with no candidate rebuild. Corrected real-Wasm focused tests pass 5/5, no skips (`/tmp/issue775-candidate2-response-focused-fix.*`); the original failure remains preserved.
+
+## Attempt 2 verification PASS
+
+# Issue #775 — Astra medium adversarial review, attempt 2
+
+**Verdict: PASS.** The three attempt-1 bugs are corrected in frozen production source `559c23a36e6827f715798aa82d9aa498e3205d4f`, reviewed in `/tmp/miso-engine-775`. The focused regression correction at `3df262d6` changes only the test's treatment of permitted first-use allocation. Subsequent pin, evidence and browser result/matrix updates do not change the reviewed production code.
+
+This is the one coherent attempt-2 verdict against the frozen #775 explicit stopped-configuration utility. It does not claim delivery of the remaining parent #763 telemetry features. No catalog, live-plan binding, new harness, expanded numerical matrix, optimization or unrelated hardening was required.
+
+## Findings resolved
+
+1. **Point-sized storage is admitted before allocation.** `hosts/host-web/src/ffi.rs` now checks the result header/selected vectors and the working frequency/both-total/both-section vector sizes with checked arithmetic before allocating point-sized vectors. The temporary unwanted owner lane is included in working storage. The original 16-byte-cap, 250,000-point request now returns typed `refusedBudget` without point-dependent memory growth.
+
+2. **Invalid SDK selectors refuse.** `sdk/src/core/response.ts` explicitly validates channels, fields and grid kind before encoding. Supported omitted-selector defaults are preserved. The original three `"bogus"` selectors now each raise `MisoUsageError` rather than silently selecting valid analyses.
+
+3. **Timeout and fatal Worker errors are terminal.** `sdk/src/browser/response.ts` routes timeout, error, messageerror and close through terminal cleanup. Admission closes, pending work is rejected, listeners are removed and the Worker is terminated. The original nonreplying-Worker probe posts exactly one query, terminates once and refuses the next query as closed. Existing tests also cover error/messageerror terminal behavior and idempotent close.
+
+These are bounded corrections to the existing implementation. No owner DSP, render path or accepted numerical algorithm is changed by this revision.
+
+## Discriminating evidence
+
+The original review probe was rerun against **candidate 2**, not candidate 1. `/tmp/issue775-review-probe-attempt2.mjs` and `.log` preserve its source/output; Node exited 0. Results:
+
+- All three invalid selectors refused with typed usage errors.
+- The over-budget 250,000-point request returned `refusedBudget`; initialized Wasm memory remained **1,245,184 bytes before and after**.
+- After a deadline, only one Worker query had been posted and the Worker had terminated exactly once; a second query refused as closed.
+
+The first candidate-2 regression compared a fresh instance's memory before its first request and observed a fixed one-page increase, **1,179,648 to 1,245,184 bytes**. That failing test is preserved as historical evidence. #775 is a control-thread utility and does not promise zero first-use metadata/owner/error-header allocation. The test-only correction at `3df262d6` first makes a two-point request with the same tiny cap, verifies `refusedBudget`, records initialized memory, then makes the 250,000-point request and verifies the same typed refusal with no further growth. This discriminates the original point-sized allocation bug without inventing a zero-allocation contract. No new error-buffer architecture or unsafe implementation was accepted or needed.
+
+The corrected real-candidate focused suite passes **5/5 with no skips**, recorded in `/tmp/issue775-candidate2-response-focused-fix.{log,exit}`. Source-focused host-web tests pass **79 with two existing ignored**; Clippy, formatting, SDK types and diff checks have exit 0 in `/tmp/issue775-attempt2-*`. Their earlier candidate-dependent skip is not used as runtime proof.
+
+## Candidate and qualification attribution
+
+Candidate 2 is `/tmp/issue775-candidate2-artifact`, built from reviewed production source `559c23a36e6827f715798aa82d9aa498e3205d4f`, digest:
+
+`e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab`
+
+Root preserved official discovery/ordinary-build and exact shipped-set validation in `/tmp/issue775-candidate2-logs`; build/discovery exit records are 0. The test-only correction does not change this artifact's production inputs. Candidate-1 results retain their original identity and are not substituted for candidate-2 proof.
+
+Actual browser SDK/Worker qualification, including the existing mutation checks, passes in **Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5**. `/tmp/issue775-candidate2-browser-qualification.{log,exit}` records exit 0 and the explicit candidate source identity. This is real browser execution, not fake-Worker substitution.
+
+All six consumer exit records under `/tmp/issue775-candidate2-remaining-gates/` are 0: web AudioWorklet/static qualification, expected resources, SDK types, SDK headless, SDK package and deployment matrix. Full headless reports **198/198 passing with no skips**; package reports **11/11 passing plus publishable-tarball smoke**. Existing unchanged-source owner/host/workspace/policy evidence remains applicable; no expensive already-successful gate was rerun solely for this review.
+
+No remaining blocker was found in the bounded attempt-2 correction. Source/candidate acceptance is PASS; root still owns committing qualification evidence, required CI, merged delivery and GitHub synchronization. Parent #763 stays open. This reviewer made no source edits, commits, GitHub mutations or agent delegations.
+
+Root delivery boundary: accepted production source `559c23a36e6827f715798aa82d9aa498e3205d4f`, test-only correction `3df262d63e208300ef7148a4761e083f745afaf1`, candidate Wasm `e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab`. PR/required CI/merge remain pending; no remote completion is claimed yet.
