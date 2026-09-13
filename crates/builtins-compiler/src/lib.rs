@@ -4391,6 +4391,17 @@ fn track_parameters(
     })
 }
 
+/// Project one session track through the existing builtin parameter validator.
+///
+/// The projection is shared by ordinary builtin preparation and control-plane response queries;
+/// callers must not recreate this mapping or apply a second set of defaults.
+pub fn requested_track_builtin_parameters(
+    track: &Track,
+    maximum_smoothing_samples: u32,
+) -> Result<BuiltinParameters, BuiltinParameterError> {
+    track_parameters(track, maximum_smoothing_samples)
+}
+
 fn stage(tap: MeterTap) -> TrackStage {
     match tap {
         MeterTap::Input => TrackStage::Input,

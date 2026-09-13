@@ -175,3 +175,7 @@ Astra xhigh, 2026-09-13: **APPROVED with the concrete storage/accounting amendme
 ## Numbered start boundary
 
 This child starts from frozen provider delivery head `5b8ecc19`, while PR #773 completes required CI. #770's accepted source is `a5db34217ff7f656765121463c7acd8247f65e1b` (Astra medium attempt2PASS), and #772's artifact acceptance is `9d28680d5a1963c0f5fe74547cf168954f7c9570` (attempt1PASS). Their branch remains frozen. #774 is the sole active feature implementation in its own checkout. The amended API/storage/resource directions below and the appended Astra xhigh scope review are binding; use the final accepted #770 public spellings.
+
+## Attempt 1 first source checkpoint
+
+Luna max implemented the initial standalone native catalog, selected stable target resolution, engine-owned grids, bounded storage and caller-buffer queries. `cargo check --locked -p host-core` and all six frozen `cargo test --locked -p host-core --test response_provider` tests passed. Authentic final focused logs are `/tmp/issue774-attempt1-focused-test-6.{stdout,stderr,exit}` (exit 0); prior compile/test development failures remain preserved. Root verified the recorded test output and `git diff --check`, then checkpoints the four allowed source/test paths. Wrapper projection/internal edge evidence and broader required gates remain pending; no Astra medium verdict or completed capability is claimed. Luna pauses at this coherent checkpoint before further edits.
