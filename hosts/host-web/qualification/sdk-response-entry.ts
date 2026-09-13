@@ -716,6 +716,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   });
   const firstQuery = query(entryA);
   const secondQuery = query(entryB);
+  const readinessTimeoutMs = 10_000;
   const totalFrames = 16 * SPECTRUM_FRAMES;
   const totalBlocks = totalFrames / 128;
   const submitBlocks = async (firstBlock: number, lastBlock: number, endOfRegion: boolean) => {
@@ -745,7 +746,10 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   const waitForResult = async (subscription, entry) => {
     const targetKey = spectrumTargetKey(entry.target);
     let lastNotification;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    const startedAt = performance.now();
+    // A running live context can still be starting its output backend. Poll count
+    // is not rendered progress: use the same bounded readiness budget as resume.
+    while (performance.now() - startedAt < readinessTimeoutMs) {
       const current = subscription.readLatest();
       if (current !== undefined
           && spectrumTargetKey(current.target) === targetKey
@@ -757,6 +761,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
     }
     const status = await browser.host.status();
     throw new Error(`SDK spectrum collection did not publish ${targetKey}: ${JSON.stringify({
+      elapsedMs: performance.now() - startedAt,
       contextState: browser.context.state,
       contextTime: (browser.context as AudioContext).currentTime,
       nativeStatus: status,
@@ -784,7 +789,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
       await new Promise<void>((resolve, reject) => {
         resumeTimer = setTimeout(() => reject(new Error(
           `spectrum collection audio resume timed out (gesture=${resumeGesture}, state=${context.state})`,
-        )), 10_000);
+        )), readinessTimeoutMs);
         resumeButton.addEventListener("click", () => {
           resumeGesture = true;
           void context.resume().then(resolve, reject);

@@ -203,7 +203,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     }
   });
 
-  test("serializes internal edits and reads, honors cadence, and baselines joining loss", async () => {
+  test("serializes internal edits and reads, honors cadence, and baselines joining loss", async (t) => {
     const harness = injectedOwner();
     let releaseSubmit;
     harness.setSubmit(() => new Promise((resolve) => { releaseSubmit = resolve; }));
@@ -251,6 +251,10 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     await updating;
     await managed.close();
 
+    // The scheduler is manual; its cadence clock must also be controlled rather
+    // than assuming three setTimeout(0) turns finish within ten milliseconds.
+    let now = 0;
+    const cadenceClock = t.mock.method(Date, "now", () => now);
     const fastHarness = injectedOwner();
     let fast = 0;
     let slow = 0;
@@ -267,6 +271,24 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     }
     assert.equal(fast, 1);
     assert.equal(slow, 1);
+    now = 9;
+    fastHarness.setSequence(4n);
+    fastHarness.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(fast, 1);
+    assert.equal(slow, 1);
+    now = 10;
+    fastHarness.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(fast, 2);
+    assert.equal(slow, 1);
+    now = 1_000;
+    fastHarness.setSequence(5n);
+    fastHarness.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(fast, 3);
+    assert.equal(slow, 2);
+    cadenceClock.mock.restore();
 
     const lossHarness = injectedOwner();
     const first = (await lossHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
