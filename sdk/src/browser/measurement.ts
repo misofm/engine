@@ -70,7 +70,11 @@ function createHostFeed<Frame, Update>(options: {
   readonly lease: (onFrame: ((frame: Frame) => void) | null) => Promise<LeaseResult>;
   readonly project: (frame: Frame) => Update;
 }): HostFeed<Frame, Update> {
-  const listeners = new Set<(update: Update) => void>();
+  const listeners = new Set<{ readonly listener: (update: Update) => void }>();
+  const pendingAdmissions = new Map<
+    { readonly listener: (update: Update) => void },
+    () => void
+  >();
   let reconciling: Promise<void> | undefined;
   let armed = false;
   let closed = false;
@@ -84,6 +88,20 @@ function createHostFeed<Frame, Update>(options: {
     },
   );
 
+  const lease = async (onFrame: ((frame: Frame) => void) | null): Promise<LeaseResult> => {
+    try {
+      return await options.lease(onFrame);
+    } catch (error) {
+      // The shipped host reports a typed numeric refusal as a rejected MisoWebError for some
+      // lease races (for example local backpressure). Keep that result in the SDK vocabulary.
+      const result = (error as { readonly result?: unknown }).result;
+      if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+        throw refusal(result);
+      }
+      throw error;
+    }
+  };
+
   const reconcile = (): Promise<void> => {
     if (reconciling !== undefined) return reconciling;
     // Do not occupy the transition slot when the desired state already matches the lease.
@@ -93,7 +111,7 @@ function createHostFeed<Frame, Update>(options: {
         const wanted = !closed && listeners.size > 0;
         if (wanted === armed) return;
         if (wanted) {
-          const ack = await options.lease((frame) => {
+          const ack = await lease((frame) => {
             let update: Update;
             try {
               update = options.project(frame);
@@ -102,9 +120,10 @@ function createHostFeed<Frame, Update>(options: {
               // one callback prevent ownership reconciliation or another callback's delivery.
               return;
             }
-            for (const listener of [...listeners]) {
+            for (const subscription of [...listeners]) {
+              if (closed || !listeners.has(subscription)) continue;
               try {
-                listener(update);
+                subscription.listener(update);
               } catch {
                 // Consumer callback failures are isolated from sibling listeners and the lease.
               }
@@ -116,7 +135,7 @@ function createHostFeed<Frame, Update>(options: {
           armed = true;
         } else {
           try {
-            await options.lease(null);
+            await lease(null);
           } catch {
             // A failed release is terminal for this feed; host disposal remains authoritative.
           } finally {
@@ -138,30 +157,44 @@ function createHostFeed<Frame, Update>(options: {
       if (typeof listener !== "function") {
         throw new TypeError(`${options.name} requires a listener function`);
       }
+      if (closed) throw new MisoUsageError("the browser engine is closed");
       if (!options.available) {
         throw new MisoUsageError(
           "this engine booted with no console attached; set policy.console and subscribe again",
         );
       }
-      if (closed) throw new MisoUsageError("the browser engine is closed");
-      listeners.add(listener);
+      const subscription = { listener };
+      listeners.add(subscription);
+      let rejectClosed: (() => void) | undefined;
+      const closedAdmission = new Promise<never>((_resolve, reject) => {
+        rejectClosed = () => reject(new MisoUsageError("the browser engine is closed"));
+      });
+      pendingAdmissions.set(subscription, () => rejectClosed?.());
       try {
-        await reconcile();
+        await Promise.race([reconcile(), closedAdmission]);
+        if (closed) {
+          listeners.delete(subscription);
+          throw new MisoUsageError("the browser engine is closed");
+        }
       } catch (error) {
-        listeners.delete(listener);
+        listeners.delete(subscription);
         throw error;
+      } finally {
+        pendingAdmissions.delete(subscription);
       }
       let live = true;
       return () => {
         if (!live) return;
         live = false;
-        listeners.delete(listener);
+        listeners.delete(subscription);
         void reconcile();
       };
     },
     close(): void {
       closed = true;
       listeners.clear();
+      for (const reject of pendingAdmissions.values()) reject();
+      pendingAdmissions.clear();
       void reconcile();
     },
   };

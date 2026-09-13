@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createMeasurementFeeds } from "../src/browser/measurement.ts";
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
 
 const meterFrame = () => ({
   tag: "miso.meter.v1",
@@ -38,10 +40,12 @@ function fakeHost() {
   let telemetryListener = null;
   let meterResult = 0;
   let telemetryResult = 0;
+  let disposed = false;
   return {
     leases,
     get meterListener() { return meterListener; },
     get telemetryListener() { return telemetryListener; },
+    get disposed() { return disposed; },
     set meterResult(value) { meterResult = value; },
     async meters(request) {
       leases.push(["meters", request.enabled]);
@@ -55,7 +59,35 @@ function fakeHost() {
     },
     emitMeter(frame) { meterListener?.(frame); },
     emitTelemetry(frame) { telemetryListener?.(frame); },
+    async dispose() { disposed = true; },
   };
+}
+
+function browserContext(onClose = () => {}) {
+  return {
+    sampleRate: 48_000,
+    renderQuantumSize: 128,
+    state: "suspended",
+    audioWorklet: { async addModule() {} },
+    async close() { onClose(); },
+  };
+}
+
+function openBrowser(host, policy = { console: { commandQueueRecords: 8, meterBlocks: 1 } }) {
+  return createEngine({
+    document: "opaque",
+    policy,
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: 512,
+      backend: "simd128",
+      sources: [],
+      tracks: ["t"],
+    }),
+    createContext: () => browserContext(),
+    createHost: async () => host,
+  });
 }
 
 test("SDK measurement feeds use one shared lease and preserve copied projections", async () => {
@@ -115,6 +147,22 @@ test("throwing one SDK listener does not suppress another listener", async () =>
   feeds.close();
 });
 
+test("identical listener functions retain independent subscriptions", async () => {
+  const host = fakeHost();
+  const feeds = createMeasurementFeeds(host, ["track"], true);
+  let delivered = 0;
+  const listener = () => { delivered += 1; };
+  const stopFirst = await feeds.meters(listener);
+  const stopSecond = await feeds.meters(listener);
+  stopFirst(); await Promise.resolve();
+  assert.deepEqual(host.leases, [["meters", true]]);
+  host.emitMeter({ ...meterFrame(), trackCount: 1, peaks: new Float32Array([0.1, 0.2, 0.9, 0.8]), trackGrDb: new Float32Array([1]) });
+  assert.equal(delivered, 1, "the second identical registration remains live");
+  stopSecond(); await Promise.resolve();
+  assert.deepEqual(host.leases, [["meters", true], ["meters", false]]);
+  feeds.close();
+});
+
 test("telemetry preserves every host measurement and shares its lease", async () => {
   const host = fakeHost();
   const feeds = createMeasurementFeeds(host, ["track"], true);
@@ -144,9 +192,129 @@ test("a lease refusal is typed and does not reserve a later subscriber", async (
   feeds.close();
 });
 
+test("a rejected numeric lease result is typed and recoverable", async () => {
+  const host = fakeHost();
+  const originalMeters = host.meters;
+  let rejectOnce = true;
+  host.meters = async (request) => {
+    if (request.enabled && rejectOnce) {
+      rejectOnce = false;
+      throw Object.assign(new Error("backpressure"), { result: 6 });
+    }
+    return originalMeters(request);
+  };
+  const feeds = createMeasurementFeeds(host, ["track"], true);
+  await assert.rejects(
+    feeds.meters(() => undefined),
+    (error) => error instanceof MisoEngineError && error.code === "backpressure" && error.result === 6,
+  );
+  const stop = await feeds.meters(() => undefined);
+  assert.deepEqual(host.leases, [["meters", true]]);
+  stop(); await Promise.resolve();
+  assert.deepEqual(host.leases, [["meters", true], ["meters", false]]);
+  feeds.close();
+});
+
 test("measurement admission without a console is a typed SDK refusal", async () => {
   const feeds = createMeasurementFeeds(fakeHost(), ["track"], false);
   await assert.rejects(feeds.meters(() => undefined), (error) => error instanceof MisoUsageError);
   await assert.rejects(feeds.telemetry(() => undefined), (error) => error instanceof MisoUsageError);
   feeds.close();
+});
+
+test("closing an already-armed feed rejects same-turn admission", async () => {
+  const host = fakeHost();
+  const feeds = createMeasurementFeeds(host, ["track"], true);
+  await feeds.meters(() => undefined);
+  const admission = feeds.meters(() => undefined);
+  feeds.close();
+  await assert.rejects(admission, (error) => error instanceof MisoUsageError && /closed/.test(error.message));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(host.leases, [["meters", true], ["meters", false]]);
+});
+
+test("engine close clears measurement callbacks and releases a late successful arm", async () => {
+  const host = fakeHost();
+  let settleArm;
+  let lateListener;
+  const originalMeters = host.meters;
+  host.meters = async (request) => {
+    if (request.enabled) {
+      host.leases.push(["meters", true]);
+      lateListener = request.onFrame;
+      return new Promise((resolve) => { settleArm = () => resolve({ result: 0 }); });
+    }
+    return originalMeters(request);
+  };
+  const engine = await openBrowser(host);
+  let delivered = 0;
+  const admission = engine.subscribeMeters(() => { delivered += 1; });
+  await Promise.resolve();
+  const closing = engine.close();
+  await assert.rejects(engine.subscribeMeters(() => undefined), (error) => error instanceof MisoUsageError);
+  lateListener?.(meterFrame());
+  assert.equal(delivered, 0, "close clears listeners before a late arm can publish");
+  await closing;
+  assert.equal(host.disposed, true);
+  await assert.rejects(admission, (error) => error instanceof MisoUsageError && /closed/.test(error.message));
+  settleArm();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(host.leases, [["meters", true], ["meters", false]]);
+  lateListener?.(meterFrame());
+  assert.equal(delivered, 0, "a late successful lease cannot revive a closed owner");
+  await engine.close();
+});
+
+test("browser console retains the managed observation conflict hook", async () => {
+  const host = fakeHost();
+  const commands = [];
+  Object.assign(host, {
+    async sessionMap() {
+      return {
+        tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,
+      };
+    },
+    async command(request) {
+      commands.push(request.commands);
+      return {
+        tag: "miso.ack.v1", result: 0, reason: 0, rejectedIndex: 0,
+        admitted: request.commands.length, appliedAtSample: 0n,
+      };
+    },
+    async observationMap() {
+      return {
+        tag: "miso.observationmap.v1", result: 0,
+        bindings: [{ trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
+          nativeEffectId: "miso.compressor", tapIds: [1] }],
+      };
+    },
+    async readObservations(request) {
+      return {
+        tag: "miso.observation.v1", result: 0,
+        rows: request.selections.map((selection) => ({ ...selection, status: 2,
+          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
+          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
+      };
+    },
+  });
+  const engine = await openBrowser(host, {
+    console: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
+  });
+  try {
+    const managed = await engine.subscribeObservations({
+      selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+      windowBlocks: 1,
+    });
+    const console = await engine.console();
+    const manual = console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+      .observe("Gain Reduction", false, 1);
+    await assert.rejects(console.submit(manual), /conflict/);
+    assert.equal(commands.length, 1, "the manual conflicting edit is stopped by the existing hook");
+    await managed.close();
+    assert.equal(commands.length, 2, "managed close still uses the owner bypass");
+    assert.equal(commands[0][0].kind, ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeSubscribe").value);
+    assert.equal(commands[1][0].kind, ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeUnsubscribe").value);
+  } finally {
+    await engine.close();
+  }
 });

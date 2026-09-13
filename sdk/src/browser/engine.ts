@@ -1253,6 +1253,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       console: getConsole,
       close: () => {
         closed = true;
+        measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
         closePromise ??= (async () => {
           try {

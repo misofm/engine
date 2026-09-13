@@ -204,3 +204,17 @@ and `/tmp/miso-796-audit/types-checkpoint1.log`. Headless boundary changes were
 removed as outside this issue. This checkpoint is intentionally incomplete:
 engine-close integration, console-owner regression, packed browser proof, final
 independent Astra MEDIUM verdict and merged CI remain required.
+
+
+Second Luna XHIGH checkpoint adds engine-close invalidation, independent
+reservations for duplicate callback functions, pending-admission close refusal,
+typed host-result error translation, public documentation and packed consumer
+coverage. Root reran the current measurement suite (10/10), the locked SDK
+typecheck and diff whitespace check (all PASS); logs are
+`/tmp/miso-796-audit/measurement-checkpoint2.log` and
+`/tmp/miso-796-audit/types-checkpoint2.log`. Fresh Astra MEDIUM read-only feedback
+identified the duplicate-callback and close/admission edges during implementation.
+Root paused implementation at this focused-green recovery boundary before more
+work. Packed-browser/generated/full-SDK results and complete independent verdict
+are not yet claimed; Astra now verifies the stable candidate and may fix only
+concrete bugs within this frozen scope. This remains coherent attempt 1.

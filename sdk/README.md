@@ -238,6 +238,29 @@ All eleven live command kinds are available without numeric rack, channel, param
 the browser and headless acknowledgements carry the same generated result/reason names and exact
 `appliedAtSample`.
 
+With the same console policy, the browser engine owns the shared meter and render-telemetry leases:
+
+```ts
+const stopMeters = await engine.subscribeMeters((update) => {
+  const vocal = update.tracks.get("vocal");
+  if (vocal) drawMeter(vocal.peakLeft, vocal.peakRight);
+});
+const stopTelemetry = await engine.subscribeTelemetry((update) => drawCpu(update.cpuPercent));
+// Each returned function is idempotent.
+stopMeters();
+stopTelemetry();
+```
+
+`TrackMeter` and `MasterMeter` expose left and right peak amplitudes as linear magnitudes and gain
+reduction as a non-negative dB value. `MasterMeter.gainReductionDb` stays `null` when the host has
+no measured master reduction; `0` remains a measured or unobserved zero. `MeterUpdate` preserves
+the host's `generation`, validity bits, and saturating `lossCount`, and its
+`[firstSample, endSample)` span timestamps the peak window only. A track's positional gain
+reduction still conflates an unobserved effect with zero and may fold independently aged effects;
+the SDK does not claim an exact peak/GR join or per-effect GR timing. `TelemetryUpdate` carries the
+host's block, CPU, deadline, budget, clock-resolution, and below-resolution measurements without
+inventing a generation or sample span.
+
 Call `await engine.close()` when the browser session is finished. It disposes the worklet host
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
 host's MessagePort has already failed.
