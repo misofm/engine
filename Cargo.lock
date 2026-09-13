@@ -962,6 +962,7 @@ dependencies = [
  "graph",
  "graph-compiler",
  "lane",
+ "math",
  "protocol",
  "session",
  "source",

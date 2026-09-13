@@ -126,6 +126,118 @@ pub const BUFFER_COMMAND: u32 = 6;
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
 
+/// Explicit stopped-response target kinds.
+#[allow(missing_docs)]
+pub const RESPONSE_TARGET_EFFECT: u32 = 1;
+#[allow(missing_docs)]
+pub const RESPONSE_TARGET_INPUT_FILTERS: u32 = 2;
+/// Explicit frequency-axis kinds.
+#[allow(missing_docs)]
+pub const RESPONSE_GRID_LINEAR: u32 = 1;
+#[allow(missing_docs)]
+pub const RESPONSE_GRID_LOGARITHMIC: u32 = 2;
+/// Response channel-selection bits.
+#[allow(missing_docs)]
+pub const RESPONSE_CHANNEL_LEFT: u32 = 1;
+#[allow(missing_docs)]
+pub const RESPONSE_CHANNEL_RIGHT: u32 = 2;
+#[allow(missing_docs)]
+pub const RESPONSE_CHANNEL_BOTH: u32 = RESPONSE_CHANNEL_LEFT | RESPONSE_CHANNEL_RIGHT;
+/// Response field-selection bits.
+#[allow(missing_docs)]
+pub const RESPONSE_FIELD_TOTAL: u32 = 1;
+#[allow(missing_docs)]
+pub const RESPONSE_FIELD_SECTIONS: u32 = 2;
+/// Maximum request-side variable payload retained by the analysis-only adapter.
+#[allow(missing_docs)]
+pub const RESPONSE_MAXIMUM_EFFECT_ID_BYTES: u32 = 127;
+#[allow(missing_docs)]
+pub const RESPONSE_MAXIMUM_PARAMETER_OVERRIDES: u32 = 256;
+#[allow(missing_docs)]
+pub const RESPONSE_MAXIMUM_RESULT_BYTES: u64 = 16 << 20;
+
+/// Fixed request header for the analysis-only response adapter.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebResponseRequest {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub target: u32,
+    pub grid: u32,
+    pub channels: u32,
+    pub fields: u32,
+    pub quality: u32,
+    pub link_mode: u32,
+    pub bypass: u32,
+    pub effect_id_bytes: u32,
+    pub parameter_count: u32,
+    pub points: u32,
+    pub sample_rate_hz: u32,
+    pub quantum_frames: u32,
+    pub minimum_hz: f32,
+    pub maximum_hz: f32,
+    pub left_hpf_hz: f32,
+    pub left_lpf_hz: f32,
+    pub right_hpf_hz: f32,
+    pub right_lpf_hz: f32,
+    pub configuration_id: u64,
+    pub maximum_prepared_bytes: u64,
+    pub maximum_total_state_bytes: u64,
+    pub maximum_scratch_bytes: u64,
+    pub maximum_automation_spans_per_block: u32,
+    pub maximum_result_bytes: u32,
+    pub reserved: [u32; 2],
+}
+
+/// One fixed-width numeric parameter override following the request header.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebResponseParameter {
+    pub parameter_id: u32,
+    pub channel: u32,
+    pub value: f32,
+    pub reserved: u32,
+}
+
+/// Fixed result header followed by contiguous little-endian `f32` vectors.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebResponseResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub target: u32,
+    pub channels: u32,
+    pub fields: u32,
+    pub points: u32,
+    pub section_count: u32,
+    pub sample_rate_hz: u32,
+    pub reserved0: u32,
+    pub configuration_id: u64,
+    pub floor_db: f32,
+    pub bypass: u32,
+    pub enabled_left: u32,
+    pub enabled_right: u32,
+    pub retained_bytes: u64,
+    pub result_bytes: u64,
+    pub frequencies_offset: u32,
+    pub total_left_offset: u32,
+    pub total_right_offset: u32,
+    pub sections_left_offset: u32,
+    pub sections_right_offset: u32,
+    pub reserved: [u32; 3],
+}
+
+#[allow(missing_docs)]
+pub const RESPONSE_REQUEST_BYTES: u32 = size_of::<WebResponseRequest>() as u32;
+#[allow(missing_docs)]
+pub const RESPONSE_PARAMETER_BYTES: u32 = size_of::<WebResponseParameter>() as u32;
+#[allow(missing_docs)]
+pub const RESPONSE_RESULT_BYTES: u32 = size_of::<WebResponseResult>() as u32;
+
 /// Exact byte size of one staged `miso.command.v1` record.
 pub const COMMAND_RECORD_BYTES: u32 = 48;
 /// Largest number of records one `miso.command.v1` submission may stage.

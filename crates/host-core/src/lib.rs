@@ -96,6 +96,7 @@ pub mod control_provider;
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
+pub mod response;
 #[cfg(feature = "control-provider")]
 pub mod scalar_point_endpoint;
 pub mod shape;
@@ -121,6 +122,11 @@ pub use prepare::{
     prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSession;
+pub use response::{
+    PreparedResponsePreview, ResponseParameterOverride, ResponsePreviewError,
+    ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest,
+    ResponsePreviewTarget, generate_response_grid, prepare_response_preview,
+};
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
