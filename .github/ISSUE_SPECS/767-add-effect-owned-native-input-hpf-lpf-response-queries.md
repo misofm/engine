@@ -159,3 +159,61 @@ This checkpoint contains only the owner-local response module/re-exports, its fo
 approved `bench-support` dev dependency and its single lock edge, plus this evidence record. The
 remaining proportional crate, policy and Wasm gates are intentionally deferred until root
 checkpointing and review authorization.
+
+## Attempt 1 broad gate evidence
+
+After root checkpointed the focused tranche and merged the synchronized main ancestry without
+content changes, all remaining required gates passed on the frozen source. The full builtins
+command `cargo test --locked -p builtins --lib --tests` exited `0`; its authentic stdout, stderr
+and exit status are in `/tmp/miso-engine-767-attempt1-full.stdout`,
+`/tmp/miso-engine-767-attempt1-full.stderr`, and `/tmp/miso-engine-767-attempt1-full.exit`.
+The all-target command `cargo clippy --locked -p builtins --all-targets -- -D warnings` exited
+`0`, with logs in `/tmp/miso-engine-767-attempt1-all-clippy.stdout`,
+`/tmp/miso-engine-767-attempt1-all-clippy.stderr`, and
+`/tmp/miso-engine-767-attempt1-all-clippy.exit`. `cargo fmt --all -- --check` exited `0`, with
+logs in `/tmp/miso-engine-767-attempt1-fmt-broad.stdout`,
+`/tmp/miso-engine-767-attempt1-fmt-broad.stderr`, and
+`/tmp/miso-engine-767-attempt1-fmt-broad.exit`.
+
+`bash scripts/check-builtins-policy.sh` exited `0` (`builtins policy: ok`) and
+`bash scripts/check-realtime-policy.sh` exited `0` (`44 marked regions in 12 files`). Their
+authentic streams and statuses are in `/tmp/miso-engine-767-attempt1-builtins-policy.{stdout,stderr,exit}`
+and `/tmp/miso-engine-767-attempt1-realtime-policy.{stdout,stderr,exit}`. The release Wasm
+checks with `-C target-feature=-simd128` and `+simd128` each exited `0`; their streams and statuses
+are in `/tmp/miso-engine-767-attempt1-wasm-scalar.{stdout,stderr,exit}` and
+`/tmp/miso-engine-767-attempt1-wasm-simd.{stdout,stderr,exit}`. Both used the existing
+`wasm32-unknown-unknown` target and `--locked` resolution.
+
+## Attempt 1 adversarial review: FAIL
+
+Verdict: **FAIL — explicit acceptance cases are missing**.
+
+Reviewed frozen source: `2aa7c26090439b517d5b909a151c78e58f82598a`, `/tmp/miso-engine-767`. Feature checkpoint `ebd3e365` and its ancestry merge have identical file contents; comparison against delivered main shows only the allowed #767 implementation/test/spec and dev-dependency changes. Reviewer: Astra, medium. Read AGENTS.md, the full #767 brief/amendment/evidence, complete new implementation and tests, owner preparation/design/validation and state helpers. No implementation edits, agents, GitHub actions, commits, expensive gate reruns, or legacy-source inspection were performed.
+
+## Required bounded correction
+
+1. **Grid validation coverage does not meet the frozen refusal contract.** `crates/builtins/tests/filter_response.rs:386` tests only a duplicated grid. There is no public-query test for empty, NaN, infinity, negative, above-Nyquist or descending grids. Add those cases to the existing small refusal table with correctly shaped buffers, typed `InvalidFrequencyGrid`, allocation counters and bit-unchanged sentinels. This discriminates the individual checks in `src/filter_response.rs:265`, rather than merely demonstrating the duplicate branch. Existing short/long total and optional-section shape cases and budget cases are useful and should remain.
+
+2. **The cutoff corpus and boundary checks omit named acceptance points.** The configurations at `tests/filter_response.rs:143` never use a 10 Hz cutoff; placing 10 Hz in the response probe grid does not exercise a filter designed at 10 Hz. HPF is never independently oracle-compared at a high ordinary cutoff or the exact maximum; its sole maximum query at line 508 only checks successful return at 48 kHz. LPF maximum is oracle-compared at all rates, but the immediate successor rejection at line 504 tests only 48 kHz. The ordering test covers inversion, not equality. Extend the existing small corpus to cover 10 Hz and high/max cutoff designs for HPF and LPF at all four rates with valid pair ordering, retaining independent total and both-channel section comparisons. Loop the exact-maximum/successor checks over the four rates and include equality refusal. No large corpus or new framework is needed.
+
+3. **Configuration/rate refusals and max correlation identity lack their required assertions.** Most malformed-configuration and unsupported-rate calls at `tests/filter_response.rs:551` onward supply anonymous temporary buffers and never inspect them after refusal. Use retained total/optional-section sentinels and verify no writes (and measured zero allocations for representative preparation/rate refusals) through those early-return paths. `u64::MAX` is supplied by the optional-output calls at lines 253/269 but their successful summaries are discarded; capture a summary and assert that the returned ID is exactly `u64::MAX`, keeping the existing `2^53+1` assertion. Finally, document the safe-slice length bound behind the unreachable `2*len` overflow branch, or isolate/test the checked arithmetic with a small private helper; the current checked multiplication is correct, but the brief's arithmetic evidence/rationale is absent. Do not construct unsafe synthetic oversized slices.
+
+These are gaps against the frozen brief, not demonstrated defects in the current production implementation. Complete them in one coherent test/evidence correction with unchanged DSP and tolerances.
+
+## Source findings supporting the implementation
+
+- `prepared_sections` enforces the four launch rates and calls the existing complete `prepare_sections`, then reads the scalar owner's actual private HPF/LPF words. It does not substitute the parametric-EQ designer or duplicate cutoff/schema validation. The owner preserves validation order: matrix/gain/cutoff/order checks occur before zero normalization and coefficient preparation, so negative-zero cutoff remains rejected. The query does not change extended-rate behavior of ordinary builtin preparation.
+- The state-space coefficients and adjugate/determinant evaluation agree algebraically with the owner SVF recurrence. Rounded production words and mixes are promoted to f64; `math` supplies transcendentals. Disabled sections bypass the removable singularity. Sections compose as unfloored complex responses before the total floor. Successful output is finite; numerical preflight precedes deterministic publication into caller buffers.
+- The API and docs label the result as the HPF/LPF subtotal, excluding trim/polarity/fader/mute/matrix. Tests vary valid excluded fields and obtain unchanged responses; complete supplied configuration still undergoes normal validation. No live object is passed to the query, and all scratch/preparation is bounded, owner-local and allocation-free by inspection and existing measured successful/refusal cases.
+- Existing test-support words feed the independent realized-word oracle. Both left/right totals and both HPF/LPF section positions are asserted separately in the tested corpus, avoiding the missing asymmetric-right assertion from the earlier EQ work. Optional output modes are compared with those independently checked results.
+- The actual PCM test drives unity-trim `InputBuiltins` with an asymmetric cascade at all four rates and compares impulse DFT values at the prescribed 0.05 dB tolerance. It derives measured output from production processing, not from the query.
+- The state test seeds nontrivial filter state, starts trim/polarity changes, renders 16 samples of the 64-sample ramp, and confirms nonzero countdown words 6/7 (verified against the helper's documented layout). Coefficients, trim, integrators, ramp words and elision plan are snapshotted around the query; continued outputs and final snapshots agree with the unqueried twin.
+- Existing `lib.rs` changes are module/reexports only. The preexisting response tests, kernels, state, runtime API and production dependency graph are unchanged. Cargo changes are exactly the authorized existing `bench-support` dev edge and its one lockfile dependency line.
+
+## Executed-gate evidence
+
+Directly read the captured focused result: 7 passed, none failed/ignored. Root forwarded all remaining gates passing, and I inspected the saved exit files plus representative terminal tails: full builtin lib/tests, all-target Clippy, formatting, builtin policy, realtime policy, release Wasm scalar and SIMD checks all exited 0. Logs are `/tmp/miso-engine-767-attempt1-{full,all-clippy,fmt-broad,builtins-policy,realtime-policy,wasm-scalar,wasm-simd}.{stdout,stderr,exit}`. Clippy emits existing configuration warnings about two unreachable math paths but exits 0; no new gate failure is claimed. These are supplied execution logs, not reviewer reruns. Wasm checks establish build portability only.
+
+This is the single attempt-1 verdict. Passing commands do not supply omitted test assertions. No architecture rescope, tolerance change, generic harness, timed run, or revisit of delivered #764/#766 is needed. Parent #763 remains open; do not claim this child delivered until it earns PASS and completes required remote delivery/synchronization.
+
+Root authorizes attempt 2 for these bounded test assertions and checked-length rationale in existing allowed paths. Production arithmetic and all thresholds remain frozen. Run focused tests, all-target Clippy, formatting and diff checks before checkpoint; already-passing unchanged-production gates retain applicability for test-only corrections.
