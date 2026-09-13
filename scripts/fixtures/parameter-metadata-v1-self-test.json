@@ -38,6 +38,7 @@
     "channels": [{ "value": 1, "name": "shared" }, { "value": 2, "name": "perLane" }]
   },
   "builtins": {
+    "response": { "id": 1, "name": "Input Filter Response", "axisUnit": "hz", "unit": "db", "amplitudeReference": "unity", "channels": "independent", "mode": "requestedConfiguration", "cadence": "explicitQuery", "sectionOutput": "totalAndOptionalSections", "cost": "computed", "floorDb": -120.0, "totalScope": "builtinInputFilterSubtotal", "bypass": "noEffectBypass", "sections": [{ "id": 1, "name": "HPF" },{ "id": 2, "name": "LPF" }] },
     "parameters": [
       { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 2, "name": "trim_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
@@ -170,22 +171,6 @@
           "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
-        },
-        {
-          "id": 8,
-          "name": "lookahead",
-          "displayUnit": "ms",
-          "unit": 3, "unitName": "milliseconds",
-          "domain": 1, "domainName": "continuous",
-          "minimum": 0.0, "maximum": 20.0, "default": 5.0,
-          "mapping": 1, "mappingName": "linear",
-          "automationRate": 3, "automationRateName": "none",
-          "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
-          "enumChoices": [],
-          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "ports": [
@@ -195,7 +180,8 @@
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.delay",
@@ -287,12 +273,13 @@
         { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
         { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.gate-expander",
       "displayName": "Gate / Expander",
-      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -405,22 +392,6 @@
           "liveUpdatable": false,
           "enumChoices": [],
           "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
-        },
-        {
-          "id": 8,
-          "name": "lookahead",
-          "displayUnit": "ms",
-          "unit": 3, "unitName": "milliseconds",
-          "domain": 1, "domainName": "continuous",
-          "minimum": 0.0, "maximum": 10.0, "default": 2.0,
-          "mapping": 1, "mappingName": "linear",
-          "automationRate": 3, "automationRateName": "none",
-          "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
-          "enumChoices": [],
-          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "ports": [
@@ -430,12 +401,13 @@
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.multiband-compressor",
       "displayName": "Multiband Compressor",
-      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -452,22 +424,6 @@
           "liveUpdatable": false,
           "enumChoices": [],
           "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
-        },
-        {
-          "id": 2,
-          "name": "lookahead",
-          "displayUnit": "ms",
-          "unit": 3, "unitName": "milliseconds",
-          "domain": 1, "domainName": "continuous",
-          "minimum": 0.0, "maximum": 20.0, "default": 5.0,
-          "mapping": 1, "mappingName": "linear",
-          "automationRate": 3, "automationRateName": "none",
-          "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
-          "enumChoices": [],
-          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -636,12 +592,13 @@
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.parametric-eq",
       "displayName": "Parametric EQ",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -1032,12 +989,13 @@
         { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
         { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
-      "observations": []
+      "observations": [],
+      "response": { "id": 1, "name": "Parametric EQ Response", "axisUnit": "hz", "unit": "db", "amplitudeReference": "unity", "channels": "independent", "mode": "requestedConfiguration", "cadence": "explicitQuery", "sectionOutput": "totalAndOptionalSections", "cost": "computed", "floorDb": -120.0, "totalScope": "parametricEqCascade", "bypass": "effectWideIdentityWithSections", "sections": [{ "id": 1, "name": "Band 1" },{ "id": 2, "name": "Band 2" },{ "id": 3, "name": "Band 3" },{ "id": 4, "name": "Band 4" }] }
     },
     {
       "id": "miso.soft-clip",
       "displayName": "Cubic Soft Clip",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -1092,7 +1050,8 @@
         { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
         { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.transient-shaper",
@@ -1152,12 +1111,13 @@
         { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
         { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.true-peak-limiter",
       "displayName": "True-Peak Limiter",
-      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -1214,7 +1174,8 @@
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 5, "unitName": "linear", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
-      ]
+      ],
+      "response": null
     }
   ]
 }
