@@ -410,7 +410,7 @@ impl SpectrumCaptureObserver {
                 source_underrun: self.source_underrun,
             };
             if self.producer.try_push(window).is_ok() {
-                self.completed_sample = Some(self.first_sample);
+                self.completed_sample = Some(first_sample);
                 self.state.store(COMPLETE, Ordering::Release);
             } else {
                 self.invalidate();
@@ -955,6 +955,7 @@ mod tests {
 
     #[test]
     fn failed_block_invalidates_its_window_and_drains_the_queued_result() {
+        const BLOCK_FRAMES: usize = 128;
         let make_observer = || {
             let (producer, consumer) = bounded_spsc(
                 core::num::NonZeroUsize::new(1).expect("one capture slot"),
@@ -979,9 +980,16 @@ mod tests {
         };
 
         let (mut older, mut older_consumer, older_state) = make_observer();
-        let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
-        let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
-        older.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        let left = [0.25_f32; BLOCK_FRAMES];
+        let right = [-0.5_f32; BLOCK_FRAMES];
+        for block in 0..(SPECTRUM_WINDOW_FRAMES / BLOCK_FRAMES) {
+            older.capture(
+                &left,
+                &right,
+                (block * BLOCK_FRAMES) as u64,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
         older.invalidate_after_failure(128);
         assert_eq!(
             older_state.load(std::sync::atomic::Ordering::Acquire),
@@ -991,8 +999,17 @@ mod tests {
         assert!(older_consumer.try_pop().is_ok());
 
         let (mut current, consumer, state) = make_observer();
-        current.capture(&left, &right, 2_048, super::GraphObservationValidity::CLEAR);
-        current.invalidate_after_failure(2_048);
+        for block in 0..(SPECTRUM_WINDOW_FRAMES / BLOCK_FRAMES) {
+            current.capture(
+                &left,
+                &right,
+                2_048 + (block * BLOCK_FRAMES) as u64,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let completing_sample = 2_048 + (SPECTRUM_WINDOW_FRAMES - BLOCK_FRAMES) as u64;
+        assert_eq!(current.completed_sample, Some(completing_sample));
+        current.invalidate_after_failure(completing_sample);
         assert_eq!(
             state.load(std::sync::atomic::Ordering::Acquire),
             INVALID,
