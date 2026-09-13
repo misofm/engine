@@ -17,6 +17,11 @@ import type {
   MisoAudioWorkletHost,
   MisoSpectrumStreamMetadata,
 } from "./shipped-host.d.ts";
+import { createMeasurementFeeds } from "./measurement.ts";
+import type {
+  MeterListener,
+  TelemetryListener,
+} from "./measurement.ts";
 import type { EngineConsole } from "../core/console.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
@@ -186,6 +191,10 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readonly shape: SessionShape;
   readonly context: Context;
   readonly host: MisoAudioWorkletHost;
+  /** One shared decimated meter lease for all SDK listeners. */
+  subscribeMeters(listener: MeterListener): Promise<() => void>;
+  /** One shared render-telemetry lease for all SDK listeners. */
+  subscribeTelemetry(listener: TelemetryListener): Promise<() => void>;
   /** Read the current prepared owner's stable resident-observation bindings. */
   observationMap(): Promise<ObservationMap>;
   /** Read one bounded non-consuming batch from the current prepared owner. */
@@ -568,6 +577,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumStreamBuffer: ArrayBuffer | undefined;
     let spectrumActiveQuery: SpectrumQuery | undefined = preparedSpectrum;
     let closed = false;
+    const measurementFeeds = createMeasurementFeeds(
+      host,
+      shape.tracks,
+      policy.console !== undefined,
+    );
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -1224,6 +1238,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       shape,
       context,
       host,
+      subscribeMeters: (listener: MeterListener) => measurementFeeds.meters(listener),
+      subscribeTelemetry: (listener: TelemetryListener) => measurementFeeds.telemetry(listener),
       observationMap,
       readObservations,
       subscribeObservations: (request: ObservationSubscriptionRequest) => observationOwner().subscribe(request)

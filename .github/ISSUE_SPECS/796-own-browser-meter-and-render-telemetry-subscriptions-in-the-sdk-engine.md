@@ -182,3 +182,25 @@ unrelated dirty primary app untouched. The completed spectrum feature worktree
 has been removed after all commits were merged/pushed and evidence preserved;
 no old temporary worktree or audio daemon is a prerequisite. Each repo's current
 AGENTS and issue bodies remain the implementation authority.
+
+
+## Execution evidence — first checkpoint
+
+Fresh coordinator audit on 2026-09-13: all seven local issue bodies and titles
+match their OPEN GitHub issues; every numbered local spec has a remote issue.
+Refreshed main remains engine `69c268f240bf30b2a43b43dd521120cd89dcc0b9`,
+adapter `f833303f146de7cbe1705fe88ae68a6d6e0d4e45`, app
+`7d876e2569b3f40c416663e4bf780fe41e2ee328`. Registry latest is SDK 0.2.4 and
+adapter 0.5.4; SDK 0.2.5 is unused. Handoff branches include current main;
+eight unpushed app scope commits and unrelated dirty work are preserved.
+Audit inventory is retained outside the worktrees at `/tmp/miso-796-audit`.
+
+Luna XHIGH implemented the first browser-only checkpoint: canonical owned meter
+and telemetry projections, public exports/methods and shared lease reconciliation.
+Root reran `node --experimental-strip-types --test sdk/test/measurement-evals.mjs`
+(5/5), `bash scripts/check-sdk-types.sh` (PASS, locked SDK dependencies), and
+`git diff --check` (PASS). Logs: `/tmp/miso-796-audit/measurement-checkpoint1.log`
+and `/tmp/miso-796-audit/types-checkpoint1.log`. Headless boundary changes were
+removed as outside this issue. This checkpoint is intentionally incomplete:
+engine-close integration, console-owner regression, packed browser proof, final
+independent Astra MEDIUM verdict and merged CI remain required.
