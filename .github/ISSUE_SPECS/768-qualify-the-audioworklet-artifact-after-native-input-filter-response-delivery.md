@@ -233,3 +233,7 @@ No correction is required. This evidence qualifies the existing representative c
 ## Delivery boundary
 
 Combined #767/#768 PR delivery, required exact-head qualification, successful main qualification after merge, GitHub synchronization/closure and cleanup remain root's outstanding workflow. This PASS does not claim those actions already completed. Parent #763 remains open for its remaining native provider, SDK, live-analysis and integration milestones.
+
+## CI comment correction #771
+
+PR #769's original CI `34729987518` rejected an incidental lexical token in the test-only slice-bound comment. #771 rephrased exactly two comment lines without changing executable tests, production code, policy or artifact inputs. Luna max's correction passed all six focused/policy gates; Astra medium's sole verdict is PASS at `7f18c2cfc72bf7f8cc99d6939c4558187e4857bf`. Existing #767 source and #768 artifact evidence retain their original attribution; no artifact rerun or lineage change occurred. Updated required PR/main CI and delivery remain pending.

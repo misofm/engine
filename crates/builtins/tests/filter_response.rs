@@ -401,8 +401,8 @@ fn malformed_grids_shapes_and_budgets_are_atomic_and_allocation_free() {
     // A safe `&[f32]` has an allocation whose byte length is at most `isize::MAX`; therefore
     // `2 * frequencies_hz.len()` is far below `usize::MAX` for this two-section API. The
     // production checked multiplication remains a defensive boundary for future callers, but
-    // reaching its overflow arm would require an invalid synthetic slice, so no unsafe fixture is
-    // appropriate here.
+    // reaching its overflow arm would require an invalid synthetic slice. Constructing such a
+    // slice would violate Rust validity requirements, so that fixture is inappropriate here.
     let empty: [f32; 0] = [];
     let duplicate = [100.0_f32, 100.0];
     let nan = [100.0_f32, f32::NAN];
