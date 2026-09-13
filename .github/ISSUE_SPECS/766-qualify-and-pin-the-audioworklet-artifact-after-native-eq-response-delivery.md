@@ -116,3 +116,44 @@ Continue the existing PR #765 if it still accurately describes the combined nati
 #764 earned Astra medium SOURCE PASS on attempt 3 at `c125794add17bc60f044bcaeb5f2907a4fdc359d`, after Luna max implementation. That exact source/test checkpoint is upstream. Production response source is unchanged from `79fc3ba1`; the final attempt changes tests only. Source baseline remains `77cbde0a3dc90e5ffb385e0bf39ac87a8f2e218c`. #764 is now a passive accepted-source dependency; #766 owns the active qualification tranche. No feature completion or browser response capability is claimed.
 
 Root installed locked SDK and qualification dependencies with `npm ci --ignore-scripts`, and installed the pinned Chromium/Firefox/WebKit prerequisites; all three setup commands exited 0. Authentic setup logs are `/tmp/issue766-sdk-setup.log`, `/tmp/issue766-browser-setup.log`, and `/tmp/issue766-playwright-setup.log`. Node is v22.23.2, npm10.9.8; wasm-objdump is available at `/usr/bin/wasm-objdump`. Candidate discovery/qualification has not started at this checkpoint.
+
+## Attempt 1 candidate discovery checkpoint — Luna
+
+Identity and tool versions were recorded before discovery in `/tmp/issue766-attempt1-logs/identity.txt`:
+
+- accepted artifact source: `c125794add17bc60f044bcaeb5f2907a4fdc359d`;
+- current worktree head: `4a0ae0ffad2b722ec6d5cfc64426396befc077e4` (later docs/evidence commits only);
+- current `origin/main`: `77cbde0a3dc90e5ffb385e0bf39ac87a8f2e218c`;
+- source-to-head changes are limited to the #764/#766 issue specs, and no build-input path differs;
+- Rust/Cargo `1.97.1`, Node `v22.23.2`, npm `10.9.8`, and `/usr/bin/wasm-objdump` `1.0.34`.
+
+Fresh external directories were created and remained available at `/tmp/issue766-attempt1-logs`,
+`/tmp/issue766-attempt1-probe`, and `/tmp/issue766-attempt1-artifact`. The unchanged official
+builder was invoked once in report mode:
+
+```
+EQ_ARTIFACT_SOURCE=c125794add17bc60f044bcaeb5f2907a4fdc359d
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue766-attempt1-probe
+```
+
+It exited `0` and wrote exactly one lowercase 64-hex digest plus newline to stdout. The observed
+unqualified candidate is:
+
+```
+b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69
+```
+
+The prior pin was `0c633b091457c4ab9ec17f08327802f423874124182bc794a7988ed1c536fa73`, so the
+allowed pin file now contains the candidate digest plus LF as a provisional pin. The probe output
+directory was empty; the ordinary six-file output directory also remains empty. Exact invocation,
+stdout, stderr, exit, canonical-output verification, and the full build identity are preserved at
+`/tmp/issue766-attempt1-logs/candidate.invocation`,
+`/tmp/issue766-attempt1-logs/candidate.stdout`,
+`/tmp/issue766-attempt1-logs/candidate.stderr`,
+`/tmp/issue766-attempt1-logs/candidate.exit`,
+`/tmp/issue766-attempt1-logs/candidate.verification`, and
+`/tmp/issue766-attempt1-logs/identity.txt`.
+
+This is an unqualified candidate only. No ordinary artifact was built, no six-file output or
+results/matrix update was produced, and no qualification command ran. The provisional pin and this
+evidence are paused for root's exact-path checkpoint and push audit before the next tranche.
