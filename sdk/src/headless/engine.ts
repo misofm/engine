@@ -15,6 +15,7 @@ import type {
   ObservationSelection,
 } from "../core/observation.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
+import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -94,8 +95,10 @@ export class OfflineEngine {
     options: OfflineEngineOptions = {},
   ): Promise<OfflineEngine> {
     const { asset: suppliedAsset, ...boot } = options;
+    const spectrumQuery = boot.spectrum === undefined ? undefined : cloneSpectrumQuery(boot.spectrum);
+    const bootOptions = spectrumQuery === undefined ? boot : { ...boot, spectrum: spectrumQuery };
     const asset = suppliedAsset ?? await defaultBundledAsset();
-    return new OfflineEngine(asset, await WasmBoundary.boot(asset, documentBytes(document), boot));
+    return new OfflineEngine(asset, await WasmBoundary.boot(asset, documentBytes(document), bootOptions));
   }
 
   /** The asset this engine booted from, including its compile count and provenance. */

@@ -13,7 +13,12 @@ import { MisoEngineAsset } from "./asset.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 import { TrackResponseModule } from "./live-response.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
-import { SpectrumModule, spectrumChannelsRaw, stageSpectrumRequest } from "./spectrum.ts";
+import {
+  SpectrumModule,
+  cloneSpectrumQuery,
+  spectrumChannelsRaw,
+  stageSpectrumRequest,
+} from "./spectrum.ts";
 import type { SpectrumQuery, SpectrumResult } from "./spectrum.ts";
 import {
   decodeObservationRows,
@@ -191,14 +196,16 @@ export class WasmBoundary {
     document: Uint8Array,
     options: BootOptions = {},
   ): Promise<WasmBoundary> {
+    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
+    const bootOptions = spectrumQuery === undefined ? options : { ...options, spectrum: spectrumQuery };
     const exports = exportsOf(await asset.instantiate());
-    const staged = stage(exports, document, options);
+    const staged = stage(exports, document, bootOptions);
     return new WasmBoundary(
       exports,
       staged.handle,
       staged.optionBytes,
-      (options.console?.meterBlocks ?? 0) > 0,
-      options.spectrum,
+      (bootOptions.console?.meterBlocks ?? 0) > 0,
+      spectrumQuery,
     );
   }
 
@@ -214,12 +221,14 @@ export class WasmBoundary {
    * boot v1 has no verb that mutates a live session's document.
    */
   reboot(document: Uint8Array, options: BootOptions = {}): void {
+    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
+    const bootOptions = spectrumQuery === undefined ? options : { ...options, spectrum: spectrumQuery };
     this.dispose();
-    const staged = stage(this.#exports, document, options);
+    const staged = stage(this.#exports, document, bootOptions);
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
-    this.#metersAttached = (options.console?.meterBlocks ?? 0) > 0;
-    this.#spectrumQuery = options.spectrum;
+    this.#metersAttached = (bootOptions.console?.meterBlocks ?? 0) > 0;
+    this.#spectrumQuery = spectrumQuery;
   }
 
   /** The exact bytes written to the options block, for the scratch/worklet equality rule. */

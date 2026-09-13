@@ -134,11 +134,59 @@ function targetId(target: SpectrumTarget): string {
   return id;
 }
 
+function copyTarget(target: SpectrumTarget): SpectrumTarget {
+  const id = targetId(target);
+  if (new TextEncoder().encode(id).byteLength > ABI_LAYOUT.constants.maximumSpectrumIdBytes) {
+    throw new MisoUsageError("spectrum target identity exceeds its bound");
+  }
+  return target.kind === "output"
+    ? Object.freeze({ kind: target.kind, outputId: id })
+    : Object.freeze({ kind: target.kind, trackId: id });
+}
+
 function checkedInteger(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new MisoUsageError(`${name} must be an integer in ${minimum}..=${maximum}`);
   }
   return value;
+}
+
+/** Copy caller-owned spectrum metadata before it crosses a boot or async boundary. */
+export function cloneSpectrumQuery(query: SpectrumQuery): SpectrumQuery {
+  if (query === null || typeof query !== "object") {
+    throw new MisoUsageError("spectrum query must be an object");
+  }
+  channelValue(query.channels);
+  const sourceLimits = query.spectrumLimits;
+  let spectrumLimits: SpectrumLimits | undefined;
+  if (sourceLimits !== undefined) {
+    if (sourceLimits === null || typeof sourceLimits !== "object") {
+      throw new MisoUsageError("spectrumLimits must be an object");
+    }
+    if (sourceLimits.maximumCaptureBytes !== undefined) {
+      checkedInteger(
+        sourceLimits.maximumCaptureBytes,
+        "maximumCaptureBytes",
+        1,
+        ABI_LAYOUT.constants.spectrumCaptureBytes,
+      );
+    }
+    if (sourceLimits.requestDeadlineMs !== undefined) {
+      checkedInteger(sourceLimits.requestDeadlineMs, "requestDeadlineMs", 1, 2_147_483_647);
+    }
+    spectrumLimits = Object.freeze({
+      ...(sourceLimits.maximumCaptureBytes === undefined
+        ? {} : { maximumCaptureBytes: sourceLimits.maximumCaptureBytes }),
+      ...(sourceLimits.requestDeadlineMs === undefined
+        ? {} : { requestDeadlineMs: sourceLimits.requestDeadlineMs }),
+    });
+  }
+  const copy: SpectrumQuery = {
+    target: copyTarget(query.target),
+    ...(query.channels === undefined ? {} : { channels: query.channels }),
+    ...(spectrumLimits === undefined ? {} : { spectrumLimits }),
+  };
+  return Object.freeze(copy);
 }
 
 function contract() {

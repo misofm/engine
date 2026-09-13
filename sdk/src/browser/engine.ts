@@ -25,6 +25,7 @@ import { createSpectrum } from "./response.ts";
 import type { BrowserSpectrum } from "./response.ts";
 import type { TrackResponseHostRequest, TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
+import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
 import {
   decodeObservationRows,
@@ -248,15 +249,16 @@ function spectrumChannelMask(channels: SpectrumQuery["channels"]): number {
 }
 
 function validateSpectrumQuery(request: SpectrumQuery, prepared: SpectrumQuery): SpectrumQuery {
-  if (request === null || typeof request !== "object" || !sameSpectrumTarget(request.target, prepared.target)) {
+  const query = cloneSpectrumQuery(request);
+  if (!sameSpectrumTarget(query.target, prepared.target)) {
     throw new MisoUsageError("spectrum query target does not match the prepared boundary");
   }
-  const requestedChannels = spectrumChannelMask(request.channels);
+  const requestedChannels = spectrumChannelMask(query.channels);
   const preparedChannels = spectrumChannelMask(prepared.channels);
   if ((requestedChannels & ~preparedChannels) !== 0) {
     throw new MisoUsageError("spectrum query channels were not prepared");
   }
-  const maximumCaptureBytes = request.spectrumLimits?.maximumCaptureBytes
+  const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
     ?? prepared.spectrumLimits?.maximumCaptureBytes
     ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
   if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
@@ -264,12 +266,12 @@ function validateSpectrumQuery(request: SpectrumQuery, prepared: SpectrumQuery):
         ?? ABI_LAYOUT.constants.spectrumCaptureBytes)) {
     throw new MisoUsageError("spectrum maximumCaptureBytes exceeds the prepared bound");
   }
-  const deadline = request.spectrumLimits?.requestDeadlineMs;
+  const deadline = query.spectrumLimits?.requestDeadlineMs;
   if (deadline !== undefined
       && (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647)) {
     throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
   }
-  return request;
+  return query;
 }
 
 async function awaitSpectrum<T>(
@@ -278,6 +280,10 @@ async function awaitSpectrum<T>(
   deadline: number,
   signal: AbortSignal | undefined,
 ): Promise<T> {
+  // A request may still reject after the total deadline has elapsed before this wrapper is called.
+  // Observe it even when there is no time left, so deadline refusal never creates an unhandled
+  // host/Worker rejection.
+  void promise.catch(() => undefined);
   const remaining = deadline - (Date.now() - started);
   if (remaining <= 0) throw new MisoUsageError("spectrum query exceeded its deadline");
   signal?.throwIfAborted();
@@ -324,6 +330,7 @@ export function createEngine(
 ): Promise<BrowserEngine<DefaultAudioContext>>;
 export function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>>;
 export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>> {
+  const preparedSpectrum = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
   const document = documentBytes(options.document);
   const policy = { ...options.policy, ...(typeof options.policy?.console === "object" ? { console: { ...options.policy.console } } : {}) };
   const preparedModule = options.preparedModule;
@@ -397,7 +404,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       options: workletBootOptions(policy, {
         sampleRateHz: shape.sampleRateHz,
         quantumFrames: shape.quantumFrames,
-      }, options.spectrum),
+      }, preparedSpectrum),
       simd128ModuleUrl,
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
@@ -410,6 +417,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrum: BrowserSpectrum | undefined;
     let spectrumPromise: Promise<BrowserSpectrum> | undefined;
     let spectrumPending = false;
+    let spectrumCleanup: Promise<void> | undefined;
     let closed = false;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -444,6 +452,21 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         reply.rows as readonly RawObservationRow[],
         shape.sampleRateHz,
       );
+    };
+    const cancelSpectrumCapture = (): Promise<void> => {
+      try {
+        return Promise.resolve(host.cancelSpectrum?.()).then(() => undefined, () => undefined);
+      } catch {
+        return Promise.resolve();
+      }
+    };
+    const holdSpectrumCleanup = (cleanup: Promise<unknown>): void => {
+      const safe = Promise.resolve(cleanup).then(() => undefined, () => undefined);
+      let held: Promise<void>;
+      held = safe.finally(() => {
+        if (spectrumCleanup === held) spectrumCleanup = undefined;
+      });
+      spectrumCleanup = held;
     };
     const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -502,11 +525,18 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     };
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
-      const prepared = options.spectrum;
+      const prepared = preparedSpectrum;
       if (prepared === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
-      if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
+      if (spectrumPending || spectrumCleanup !== undefined) {
+        throw new MisoUsageError("a spectrum query is already in flight");
+      }
       spectrumPending = true;
       let armed = false;
+      let armSettled = true;
+      let armNeedsCancel = false;
+      let armCompletion: Promise<void> | undefined;
+      let readSettled = true;
+      let readCompletion: Promise<void> | undefined;
       try {
         const query = validateSpectrumQuery(request, prepared);
         const deadline = query.spectrumLimits?.requestDeadlineMs
@@ -519,7 +549,28 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         if (typeof host.armSpectrum !== "function" || typeof host.readSpectrum !== "function") {
           throw new MisoUsageError("the browser host does not support spectrum capture");
         }
-        const arm = await awaitSpectrum(host.armSpectrum(), started, deadline, options.signal);
+        armSettled = false;
+        let armRequest: Promise<Awaited<ReturnType<MisoAudioWorkletHost["armSpectrum"]>>>;
+        try {
+          armRequest = host.armSpectrum();
+        } catch (error) {
+          armSettled = true;
+          throw error;
+        }
+        armCompletion = armRequest.then(
+          (reply) => {
+            armSettled = true;
+            armNeedsCancel = reply.result === constantValue("resultCodes", "ok");
+          },
+          () => {
+            armSettled = true;
+            // A rejected transport request may have reached the Worklet before the reply failed.
+            armNeedsCancel = true;
+          },
+        );
+        const arm = await awaitSpectrum(armRequest, started, deadline, options.signal);
+        armSettled = true;
+        armNeedsCancel = arm.result === constantValue("resultCodes", "ok");
         if (closed) throw new MisoUsageError("the browser engine is closed");
         if (arm.result !== constantValue("resultCodes", "ok")) {
           throw new MisoEngineError("the browser host refused the spectrum capture arm", {
@@ -532,12 +583,25 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         let capture: Awaited<ReturnType<MisoAudioWorkletHost["readSpectrum"]>>;
         for (;;) {
           if (closed) throw new MisoUsageError("the browser engine is closed");
+          readSettled = false;
+          let readRequest: Promise<Awaited<ReturnType<MisoAudioWorkletHost["readSpectrum"]>>>;
+          try {
+            readRequest = host.readSpectrum({ channels: query.channels ?? "both" });
+          } catch (error) {
+            readSettled = true;
+            throw error;
+          }
+          readCompletion = readRequest.then(
+            () => { readSettled = true; },
+            () => { readSettled = true; },
+          );
           capture = await awaitSpectrum(
-            host.readSpectrum({ channels: query.channels ?? "both" }),
+            readRequest,
             started,
             deadline,
             options.signal,
           );
+          readSettled = true;
           if (closed) throw new MisoUsageError("the browser engine is closed");
           if (capture.result === constantValue("resultCodes", "ok")) break;
           if (capture.result !== constantValue("resultCodes", "backpressure")) {
@@ -571,7 +635,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           spectrum = client;
           return client;
         });
-        const client = spectrum ?? await spectrumPromise;
+        const client = spectrum ?? await awaitSpectrum(spectrumPromise, started, deadline, options.signal);
         if (closed) throw new MisoUsageError("the browser engine is closed");
         const result = await awaitSpectrum(
           client.query(query, capture.snapshot),
@@ -597,8 +661,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         }
         return result;
       } finally {
-        if (armed && closed === false) {
-          try { await host.cancelSpectrum?.(); } catch { /* terminal host state is authoritative */ }
+        if (armCompletion !== undefined && !armSettled) {
+          holdSpectrumCleanup(armCompletion.then(() => armNeedsCancel ? cancelSpectrumCapture() : undefined));
+        } else if (armNeedsCancel && !armed) {
+          holdSpectrumCleanup(cancelSpectrumCapture());
+        } else if (readCompletion !== undefined && !readSettled) {
+          holdSpectrumCleanup(readCompletion.then(() => cancelSpectrumCapture()));
+        } else if (armed) {
+          holdSpectrumCleanup(cancelSpectrumCapture());
         }
         spectrumPending = false;
       }
