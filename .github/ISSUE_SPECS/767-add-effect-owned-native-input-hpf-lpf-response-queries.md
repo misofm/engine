@@ -125,3 +125,37 @@ The existing builtin crate suite includes preserved historical extended-rate evi
 ## Completion and review
 
 Luna pauses at the first coherent compiling/focused-green tranche and reports exact changed paths; root commits and performs status/upstream audit before further implementation. Astra medium checks owner-local coefficient use and validation, negative-zero/rate boundaries, filter-only meaning, floor/endpoint handling, independent expectations, atomic buffers, and state noninterference. Preserve one verdict per attempt. Root synchronizes local/GitHub evidence and closes this child only after PASS evidence is upstream and remote state is verified. #763 remains open and its required successor scopes remain intact.
+
+## Attempt 1 dependency clarification
+
+The focused allocation gates use the repository's existing audited `bench-support` allocator from
+dev tests. Root authorizes the corresponding minimal `Cargo.lock` edge for `builtins`: add only
+the already-resolved `bench-support` workspace dependency under the builtins package entry, with
+no package, version, source, or transitive resolution changes. This is the direct lock consequence
+of the already approved `Cargo.toml` dev-dependency and is required for all final `--locked` gates.
+
+## Attempt 1 focused checkpoint evidence
+
+The initial `cargo check -p builtins` completed with exit `0`; its authentic output is in
+`/tmp/miso-engine-767-attempt1-lock-check.stdout`, with stderr in
+`/tmp/miso-engine-767-attempt1-lock-check.stderr` and the recorded status in
+`/tmp/miso-engine-767-attempt1-lock-check.exit`. Cargo initially reordered two pre-existing
+`native-pcm-runner` dependency lines while adding the authorized edge; that unrelated ordering was
+restored, leaving the final `Cargo.lock` diff with only `builtins -> bench-support`.
+
+The focused implementation tranche is green. `cargo test --locked -p builtins --test
+filter_response -- --test-threads=1` exited `0` with 7 tests passing; exact stdout, stderr and exit
+status are in `/tmp/miso-engine-767-attempt1-focused.stdout`,
+`/tmp/miso-engine-767-attempt1-focused.stderr`, and
+`/tmp/miso-engine-767-attempt1-focused.exit`. The focused `cargo clippy --locked -p builtins
+--test filter_response -- -D warnings` exited `0`; its authentic logs are in
+`/tmp/miso-engine-767-attempt1-focused-clippy.stdout`,
+`/tmp/miso-engine-767-attempt1-focused-clippy.stderr`, and
+`/tmp/miso-engine-767-attempt1-focused-clippy.exit`. `cargo fmt --all -- --check` exited `0`,
+with its captured streams in `/tmp/miso-engine-767-attempt1-fmt.stdout`,
+`/tmp/miso-engine-767-attempt1-fmt.stderr`, and `/tmp/miso-engine-767-attempt1-fmt.exit`.
+
+This checkpoint contains only the owner-local response module/re-exports, its focused tests, the
+approved `bench-support` dev dependency and its single lock edge, plus this evidence record. The
+remaining proportional crate, policy and Wasm gates are intentionally deferred until root
+checkpointing and review authorization.
