@@ -58,3 +58,5 @@ After this child the ledger still requires: actual-graph EQ/filter composition a
 ## Attempt 1 checkpoints
 
 Luna max first tranche: bounded host stable-tuple resolution and non-consuming selected reads, preserving the reader window and owner descriptor/native identity with typed availability/refusals. Focused `selected_observation_reads_are_bounded_stable_and_non_consuming`, host-web all-feature lib Clippy with warnings denied, and workspace formatting pass. Root diff/status audit is clean apart from the two intended host files. FFI/SDK and remaining lifecycle/qualification acceptance are pending; no feature completion is claimed.
+
+Luna max second tranche, `092605d7`: additive bounded observation discovery/read staging exports and generated ABI records, with matching strict whitelist/fixture updates. Seven focused exit records in `/tmp/issue777-ffi-*` are 0 (host observation, parameter-metadata ABI tests, host Clippy, ABI mutation self-test, fmt, SDK codegen and generated check). Root audited exact paths/diff; SDK endpoints, re-arm freshness, lifetime checks and actual artifact/browser acceptance remain pending.
