@@ -242,10 +242,16 @@ def worklet_posted_source_fields(literal: str) -> list[str]:
 
 def host_js_map_fields(text: str) -> list[str]:
     """The field set the acknowledgement validator demands of a `sessionMap` response."""
-    marker = 'pending.response === "sessionMap"\n'
-    at = text.find(marker)
-    require(at >= 0, "the host no longer branches its expected fields on the sessionMap response")
-    block = balanced(text, text.index("[", at + len(marker)), "[", "]")
+    # The release host also mentions `sessionMap` while releasing the in-flight lease. Anchor the
+    # search inside the expected-fields expression so a newly added response branch cannot make
+    # this parser silently inspect an unrelated validator array.
+    match = re.search(
+        r'const expectedFields = .*?pending\.response === "sessionMap"\s*\?\s*(\[[^\]]*\])',
+        text,
+        re.DOTALL,
+    )
+    require(match is not None, "the host no longer branches its expected fields on the sessionMap response")
+    block = match.group(1)
     return re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
 
 

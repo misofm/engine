@@ -36,7 +36,13 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
     }),
-    createContext: () => new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
+      // OfflineAudioContext has no close() lifecycle method; BrowserEngine's injected-context
+      // seam still requires one so the host can use the same cleanup path as a live context.
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
     createHost: (request) => createDefaultHost({
       ...request,
       hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",

@@ -80,7 +80,8 @@ describe("issue 777 -- selected resident observations", () => {
         ["ready", "both"], ["ready", "left"],
       ]);
       assert.equal(first[0].descriptor.displayUnit, "dB");
-      assert.equal(first[0].left, first[0].right);
+      assert.ok(Number.isFinite(first[0].left) && Number.isFinite(first[0].right));
+      assert.notEqual(first[0].left, first[0].right, "the two compressor lanes remain independent");
       assert.equal(first[1].right, undefined);
       assert.ok(first[0].window && first[1].window);
       assert.equal(first[0].window.blocks, 2);

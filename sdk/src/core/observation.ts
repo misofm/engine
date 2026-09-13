@@ -296,8 +296,11 @@ export function decodeObservationRows(
         diagnostics: [{ code: "sdk.observation.row", path: String(index) }],
       });
     }
-    const expectedLeft = address.channels === 1 || address.channels === 3 ? 1 : 0;
-    const expectedRight = address.channels === 2 || address.channels === 3 ? 1 : 0;
+    const status = statusName(row.status);
+    const expectedLeft = status === "ready"
+      && (address.channels === 1 || address.channels === 3) ? 1 : 0;
+    const expectedRight = status === "ready"
+      && (address.channels === 2 || address.channels === 3) ? 1 : 0;
     if (row.leftPresent !== expectedLeft || row.rightPresent !== expectedRight) {
       throw new MisoEngineError("the engine returned an invalid observation channel projection", {
         phase: "output",
@@ -307,7 +310,6 @@ export function decodeObservationRows(
       });
     }
     const descriptor = descriptorFor(binding.nativeEffectId, selection.tapId);
-    const status = statusName(row.status);
     let window: ObservationWindow | undefined;
     if (status === "ready") {
       if (row.firstSample < 0n || row.endSample <= row.firstSample || row.sequence <= 0n
