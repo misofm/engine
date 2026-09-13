@@ -420,9 +420,7 @@ impl SpectrumCapture {
                 Ok(record)
                     if self.shared.invalidated.load(Ordering::Acquire) != 0
                         && record.stream_epoch
-                            == self.shared.invalidated_epoch.load(Ordering::Acquire)
-                        && record.sequence
-                            == self.shared.invalidated_sequence.load(Ordering::Acquire) =>
+                            <= self.shared.invalidated_epoch.load(Ordering::Acquire) =>
                 {
                     self.shared.invalidated.store(0, Ordering::Release);
                 }
@@ -623,7 +621,6 @@ struct SpectrumContinuousShared {
     hop_frames: AtomicU64,
     invalidated: AtomicU8,
     invalidated_epoch: AtomicU64,
-    invalidated_sequence: AtomicU64,
 }
 
 impl SpectrumContinuousShared {
@@ -641,7 +638,6 @@ impl SpectrumContinuousShared {
             hop_frames: AtomicU64::new(0),
             invalidated: AtomicU8::new(0),
             invalidated_epoch: AtomicU64::new(0),
-            invalidated_sequence: AtomicU64::new(0),
         })
     }
 }
@@ -1210,13 +1206,11 @@ fn continuous_finish(
     state.completed_sample = Some(first_sample);
     state.completed_sequence = Some(sequence);
     let Some(next_sequence) = sequence.checked_add(1) else {
-        continuous_mark_invalidated_record(state, first_sample);
         continuous_fail(state);
         return;
     };
     let Some(hop_frames) = u32::try_from(state.shared.hop_frames.load(Ordering::Acquire)).ok()
     else {
-        continuous_mark_invalidated_record(state, first_sample);
         continuous_fail(state);
         return;
     };
@@ -1383,6 +1377,11 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
         return;
     }
     let current_epoch = state.shared.epoch.load(Ordering::Acquire);
+    state
+        .shared
+        .invalidated_epoch
+        .store(current_epoch, Ordering::Release);
+    state.shared.invalidated.store(1, Ordering::Release);
     let Some(next_epoch) = current_epoch.checked_add(1) else {
         state.shared.active.store(0, Ordering::Release);
         return;
@@ -1420,28 +1419,6 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
         .store(CONTINUOUS_WARMING, Ordering::Release);
 }
 
-fn continuous_mark_invalidated_record(state: &mut SpectrumContinuousState, failed_sample: u64) {
-    if state.completed_sample == Some(failed_sample)
-        && let Some(sequence) = state.completed_sequence
-    {
-        let epoch = state.shared.epoch.load(Ordering::Acquire);
-        state
-            .shared
-            .invalidated_epoch
-            .store(epoch, Ordering::Release);
-        state
-            .shared
-            .invalidated_sequence
-            .store(sequence, Ordering::Release);
-        state.shared.invalidated.store(1, Ordering::Release);
-    }
-}
-
-fn continuous_fail_after_render(state: &mut SpectrumContinuousState, failed_sample: u64) {
-    continuous_mark_invalidated_record(state, failed_sample);
-    continuous_fail(state);
-}
-
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.capture(
@@ -1476,7 +1453,7 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
 
     fn invalidate_after_failure(&mut self, failed_sample: u64) {
         if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
-            continuous_fail_after_render(&mut self.continuous, failed_sample);
+            continuous_fail(&mut self.continuous);
         } else {
             one_shot_invalidate_after_failure(&mut self.one_shot, failed_sample);
         }
@@ -2196,6 +2173,87 @@ mod tests {
         assert_eq!(recovered.stream_epoch, 2);
         assert_eq!(recovered.sequence, 0);
         assert_eq!(recovered.first_sample, 2_048);
+    }
+
+    #[test]
+    fn repeated_failed_completions_discard_the_old_epoch_queue_once() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        let left = [0.5_f32; 128];
+        let right = [0.0_f32; 128];
+        for block in 0..16 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        observer.invalidate_after_failure(1_920);
+        for block in 16..32 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        observer.invalidate_after_failure(3_968);
+        assert!(matches!(
+            capture.try_read_continuous(),
+            Err(SpectrumContinuousReadError::Failed { stream_epoch: 3 })
+        ));
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("old epoch queue is discarded once"),
+            SpectrumContinuousReadError::Warming
+        );
+        for block in 0..16 {
+            observer.capture(
+                &left,
+                &right,
+                4_096 + block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        let recovered = capture
+            .try_read_continuous()
+            .expect("new epoch after repeated failure");
+        assert_eq!(recovered.stream_epoch, 3);
+        assert_eq!(recovered.sequence, 0);
+        assert_eq!(recovered.dropped_captures, 0);
+    }
+
+    #[test]
+    fn next_hop_overflow_discards_the_published_window() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+        capture
+            .start_continuous(96_000, 128)
+            .expect("continuous activation");
+        let left = [0.5_f32; 128];
+        let right = [-0.25_f32; 128];
+        let first_sample = u64::MAX - 2_500;
+        for block in 0..16 {
+            observer.capture(
+                &left,
+                &right,
+                first_sample + block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        assert!(matches!(
+            capture.try_read_continuous(),
+            Err(SpectrumContinuousReadError::Failed { stream_epoch: 2 })
+        ));
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("overflowed window is discarded"),
+            SpectrumContinuousReadError::Warming
+        );
     }
 
     #[test]
