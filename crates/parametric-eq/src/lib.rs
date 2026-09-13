@@ -60,8 +60,8 @@ use lane::{Backend, Lane, Simd4, Simd8};
 mod response;
 
 pub use response::{
-    EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest, EqResponseSummary,
-    query_response_into,
+    EqResponseConfiguration, EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest,
+    EqResponseSummary, query_response_into,
 };
 
 /// Fixed cascade length in V1.

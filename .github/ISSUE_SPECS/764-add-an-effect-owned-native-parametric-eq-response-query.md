@@ -167,3 +167,28 @@ Add `EqResponseConfiguration::prepare(PrepareEffectRequest) -> Result<Self, EqRe
 Change `EqResponseRequest.configuration` to `&EqResponseConfiguration`. `query_response_into` validates grid, shapes and budgets before writes and evaluates those immutable words with zero allocations/frees, including its first invocation and refused query inputs. All configuration correlation, requested-versus-applied timing, floor/composition, bypass/enable, numerical and buffer guarantees remain. No effect-contract changes, duplicate validator, static/lazy cache or dependencies are authorized.
 
 Move invalid preparation/domain/channel/order/rate tests to the constructor. Prove it retains full existing request validation and the exact four-launch-rate guard. Prove mutation of the original caller parameter slice after construction cannot change responses. Measure query allocation immediately after preparation with no warm-up query; include refused grid/shape/budget calls. Remaining original oracle/PCM/state/portability and review gates are unchanged.
+
+### Amendment implementation result
+
+The approved two-phase correction is implemented within the same three implementation paths. Public
+`EqResponseConfiguration::prepare` runs the complete existing preparation validator and owns the
+sample rate, bypass/enable flags, and fixed left/right rounded coefficient words. The query now
+borrows only that immutable configuration; it does not retain or inspect the source parameter
+slice, instantiate an effect, read render state, or call the allocating validator.
+
+The focused command was captured with real stdout/stderr and exited 0:
+
+```
+cargo test --locked -p parametric-eq --test response -- --test-threads=1
+```
+
+Captured logs: `/tmp/miso-engine-763-response-attempt1-focused.stdout` and
+`/tmp/miso-engine-763-response-attempt1-focused.stderr`.
+
+Observed result: 8 passed, 0 failed. The suite now also proves first-call query allocation/frees are
+zero immediately after preparation, refused grid/shape/budget queries preserve outputs, constructor
+rejection of short/reordered/wrong-channel/NaN/zero-capacity/extended-rate requests, source-slice
+mutation independence, one-sided and total-only outputs, a deep-null-plus-gain case that
+distinguishes unfloored cascade composition from summing public floors, and measured one-second
+production impulse DFT agreement at all four launch rates within 0.05 dB. No broad checks,
+benchmarks, or Wasm checks ran after the amendment; root runs those after checkpoint authorization.

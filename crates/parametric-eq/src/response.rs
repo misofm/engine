@@ -18,13 +18,58 @@ const EQ_RESPONSE_FLOOR_DB: f32 = -120.0;
 pub struct EqResponseRequest<'a> {
     /// Opaque caller-assigned correlation token, echoed by [`query_response_into`].
     pub configuration_id: u64,
-    /// The ordinary effect preparation configuration to evaluate.
-    pub configuration: PrepareEffectRequest<'a>,
+    /// An immutable, already validated effect-owned response configuration.
+    pub configuration: &'a EqResponseConfiguration,
     /// Frequencies in Hz, in the order to return. The grid must be finite, strictly increasing,
     /// and inside the inclusive `[0, sample_rate / 2]` interval.
     pub frequencies_hz: &'a [f32],
     /// Caller-owned point budget. No compiled point ceiling is imposed by this API.
     pub maximum_points: usize,
+}
+
+/// An immutable response configuration prepared from an ordinary EQ preparation request.
+///
+/// Preparation runs on the control/worker plane and owns the sample-rate, bypass/enable flags,
+/// and the exact rounded coefficient words. The source parameter slice is not retained, so later
+/// caller mutation cannot change a query. Preparation may use the existing descriptor validator's
+/// transient allocations; querying this owned value never validates descriptors or allocates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EqResponseConfiguration {
+    sample_rate_hz: u32,
+    bypass: bool,
+    enabled_left: [bool; EQ_SECTION_COUNT],
+    enabled_right: [bool; EQ_SECTION_COUNT],
+    left_words: [EqSvfWords; EQ_SECTION_COUNT],
+    right_words: [EqSvfWords; EQ_SECTION_COUNT],
+}
+
+impl EqResponseConfiguration {
+    /// Validates and prepares an immutable response configuration from the ordinary effect request.
+    ///
+    /// This does not instantiate or process a prepared effect. Its full request validation is the
+    /// same `expected_prepared_metadata` path used by the effect factory.
+    pub fn prepare(request: PrepareEffectRequest<'_>) -> Result<Self, EqResponseError> {
+        let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request)
+            .map_err(EqResponseError::Configuration)?;
+        let sample_rate = SampleRateHz(metadata.sample_rate);
+        if !is_launch_sample_rate(sample_rate) {
+            return Err(EqResponseError::Configuration(EffectPrepareError {
+                code: "effect.quality.unsupported",
+            }));
+        }
+        let left_targets = band_targets(request.initial_values, 0, sample_rate)
+            .map_err(EqResponseError::Configuration)?;
+        let right_targets = band_targets(request.initial_values, 1, sample_rate)
+            .map_err(EqResponseError::Configuration)?;
+        Ok(Self {
+            sample_rate_hz: metadata.sample_rate,
+            bypass: metadata.bypass,
+            enabled_left: core::array::from_fn(|section| left_targets[section].enabled),
+            enabled_right: core::array::from_fn(|section| right_targets[section].enabled),
+            left_words: realized_words(&left_targets, sample_rate)?,
+            right_words: realized_words(&right_targets, sample_rate)?,
+        })
+    }
 }
 
 /// Caller-owned buffers for one response query.
@@ -311,36 +356,22 @@ pub fn query_response_into(
     request: EqResponseRequest<'_>,
     output: EqResponseOutput<'_>,
 ) -> Result<EqResponseSummary, EqResponseError> {
-    let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request.configuration)
-        .map_err(EqResponseError::Configuration)?;
-    let sample_rate = SampleRateHz(metadata.sample_rate);
-    if !is_launch_sample_rate(sample_rate) {
-        return Err(EqResponseError::Configuration(EffectPrepareError {
-            code: "effect.quality.unsupported",
-        }));
-    }
-    let points = validate_grid_and_output(request, &output, metadata.sample_rate)?;
-    let left_targets = band_targets(request.configuration.initial_values, 0, sample_rate)
-        .map_err(EqResponseError::Configuration)?;
-    let right_targets = band_targets(request.configuration.initial_values, 1, sample_rate)
-        .map_err(EqResponseError::Configuration)?;
-    let left_words = realized_words(&left_targets, sample_rate)?;
-    let right_words = realized_words(&right_targets, sample_rate)?;
+    let points = validate_grid_and_output(request, &output, request.configuration.sample_rate_hz)?;
 
     // Preflight the complete grid before mutating any caller buffer. The fixed-size point result
     // is intentionally recomputed during publication instead of retaining a point-sized cache.
     for &frequency_hz in request.frequencies_hz {
         point_response(
-            &left_words,
+            &request.configuration.left_words,
             frequency_hz,
-            metadata.sample_rate,
-            metadata.bypass,
+            request.configuration.sample_rate_hz,
+            request.configuration.bypass,
         )?;
         point_response(
-            &right_words,
+            &request.configuration.right_words,
             frequency_hz,
-            metadata.sample_rate,
-            metadata.bypass,
+            request.configuration.sample_rate_hz,
+            request.configuration.bypass,
         )?;
     }
 
@@ -352,16 +383,16 @@ pub fn query_response_into(
     } = output;
     for (point, &frequency_hz) in request.frequencies_hz.iter().enumerate() {
         let left = point_response(
-            &left_words,
+            &request.configuration.left_words,
             frequency_hz,
-            metadata.sample_rate,
-            metadata.bypass,
+            request.configuration.sample_rate_hz,
+            request.configuration.bypass,
         )?;
         let right = point_response(
-            &right_words,
+            &request.configuration.right_words,
             frequency_hz,
-            metadata.sample_rate,
-            metadata.bypass,
+            request.configuration.sample_rate_hz,
+            request.configuration.bypass,
         )?;
         total_left_db[point] = left.total_db;
         total_right_db[point] = right.total_db;
@@ -380,11 +411,11 @@ pub fn query_response_into(
     Ok(EqResponseSummary {
         configuration_id: request.configuration_id,
         mode: EqResponseMode::RequestedConfiguration,
-        sample_rate_hz: metadata.sample_rate,
+        sample_rate_hz: request.configuration.sample_rate_hz,
         points,
         floor_db: EQ_RESPONSE_FLOOR_DB,
-        bypass: metadata.bypass,
-        enabled_left: core::array::from_fn(|section| left_targets[section].enabled),
-        enabled_right: core::array::from_fn(|section| right_targets[section].enabled),
+        bypass: request.configuration.bypass,
+        enabled_left: request.configuration.enabled_left,
+        enabled_right: request.configuration.enabled_right,
     })
 }
