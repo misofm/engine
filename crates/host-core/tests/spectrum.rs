@@ -3,9 +3,13 @@
 use host_core::{
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
+    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionReadError,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
     compile_host_session, prepare_host_runtime, prepare_host_runtime_with_console_and_spectrum,
-    prepare_host_runtime_with_spectrum, spectrum_capture_resources, spectrum_capture_resources_for,
+    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
+    spectrum_capture_collection_resources, spectrum_capture_resources,
+    spectrum_capture_resources_for,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -639,4 +643,238 @@ fn selected_capture_is_pcm_bit_exact_and_allocation_free_for_idle_and_active_ren
     assert_eq!(window.end_sample(), Some(SPECTRUM_WINDOW_FRAMES as u64));
     assert!(window.left.iter().any(|value| *value != 0.0));
     assert!(window.right.iter().all(|value| *value == 0.0));
+}
+
+#[test]
+fn prepared_collection_switches_exact_taps_without_audio_or_render_allocation() {
+    use bench_support::alloc as bench_alloc;
+    use engine::realtime::audit;
+
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let track_a = SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostInputBuiltins("eq0".into()),
+        channels: SpectrumChannels::Left,
+    };
+    let track_b = SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostInputBuiltins("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+    };
+    let entries = vec![track_b.clone(), track_a.clone()];
+    let resources = spectrum_capture_collection_resources(&entries).expect("collection resources");
+
+    let duplicate = prepare_host_runtime_with_spectrum_collection(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureCollectionRequest {
+            entries: vec![track_b.clone(), track_b.clone()],
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .err()
+    .expect("duplicate target and mask accepted");
+    assert!(String::from_utf8_lossy(duplicate.as_bytes()).contains("host.spectrum.duplicate"));
+
+    let unknown = prepare_host_runtime_with_spectrum_collection(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureCollectionRequest {
+            entries: vec![SpectrumCaptureCollectionEntry {
+                target: SpectrumTarget::TrackPostInputBuiltins("missing".into()),
+                channels: SpectrumChannels::Stereo,
+            }],
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .err()
+    .expect("unknown collection target accepted");
+    assert!(String::from_utf8_lossy(unknown.as_bytes()).contains("host.spectrum.target"));
+
+    let under_budget = prepare_host_runtime_with_spectrum_collection(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureCollectionRequest {
+            entries: entries.clone(),
+            maximum_capture_bytes: resources.retained_bytes - 1,
+        },
+    )
+    .err()
+    .expect("aggregate capture budget was not enforced");
+    assert!(
+        String::from_utf8_lossy(under_budget.as_bytes()).contains("host.spectrum.capture_budget")
+    );
+
+    let (empty_host, empty) = prepare_host_runtime_with_spectrum_collection(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureCollectionRequest {
+            entries: Vec::new(),
+            maximum_capture_bytes: 0,
+        },
+    )
+    .expect("empty collection prepares without capture storage");
+    assert!(empty.is_empty());
+    assert_eq!(empty_host.report.spectrum_capture_retained_bytes, 0);
+    assert_eq!(empty.selected_index(), None);
+    drop(empty_host);
+
+    let baseline_host = prepare_host_runtime(&compiled, &caps()).expect("baseline prepares");
+    let (collection_host, mut collection_capture) = prepare_host_runtime_with_spectrum_collection(
+        &compiled,
+        &caps(),
+        &SpectrumCaptureCollectionRequest {
+            entries,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("collection prepares");
+    assert_eq!(
+        collection_host.report.spectrum_capture_retained_bytes,
+        resources.retained_bytes
+    );
+    assert_eq!(collection_capture.len(), 2);
+    assert_eq!(collection_capture.entry(0), Some(track_b.clone()));
+    assert_eq!(collection_capture.entry(1), Some(track_a.clone()));
+
+    let invalid_target = SpectrumTarget::TrackPostInputBuiltins("not-prepared".into());
+    assert_eq!(
+        collection_capture
+            .select(&invalid_target, SpectrumChannels::Stereo)
+            .expect_err("unknown selection accepted"),
+        SpectrumCaptureCollectionSelectionError::UnknownEntry
+    );
+    assert_eq!(collection_capture.selected_index(), None);
+
+    collection_capture
+        .select(&track_a.target, track_a.channels)
+        .expect("first prepared tap selects");
+    assert_eq!(collection_capture.selected_index(), Some(1));
+    assert_eq!(
+        collection_capture
+            .select(&track_b.target, SpectrumChannels::Right)
+            .expect_err("unprepared channel mask accepted"),
+        SpectrumCaptureCollectionSelectionError::UnknownEntry
+    );
+    assert_eq!(collection_capture.selected_index(), Some(1));
+
+    let (mut baseline, mut baseline_sources, _) = baseline_host
+        .start_render_session()
+        .expect("baseline render starts");
+    let (mut selected, mut selected_sources, _) = collection_host
+        .start_render_session()
+        .expect("collection render starts");
+    audit::warm_up();
+    bench_alloc::assert_installed();
+
+    let mut track_a_window = None;
+    let mut track_b_window = None;
+    for block in 0..=40 {
+        let left = [0.25_f32; QUANTUM];
+        let right = [-0.5_f32; QUANTUM];
+        let start = (block * QUANTUM) as u64;
+        for sources in [&mut baseline_sources, &mut selected_sources] {
+            sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: start,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
+
+        let mut baseline_pcm = [f32::from_bits(0x7fc0_3990); QUANTUM * 2];
+        let mut selected_pcm = [f32::from_bits(0x7fc0_3990); QUANTUM * 2];
+        audit::reset();
+        let thread_mark = bench_alloc::current_thread_counters();
+        let reports = audit::in_render_scope(|| {
+            let baseline_report =
+                baseline.render_planar(&mut baseline_pcm, 2, QUANTUM, QUANTUM, start);
+            let selected_report =
+                selected.render_planar(&mut selected_pcm, 2, QUANTUM, QUANTUM, start);
+            (baseline_report, selected_report, audit::snapshot())
+        });
+        let thread_delta = bench_alloc::current_thread_delta_since(thread_mark);
+        assert!(reports.0.is_ok(), "baseline render: {:?}", reports.0);
+        assert!(reports.1.is_ok(), "selected render: {:?}", reports.1);
+        assert_eq!((reports.2.allocations, reports.2.deallocations), (0, 0));
+        assert_eq!(
+            (
+                thread_delta.allocations,
+                thread_delta.reallocations,
+                thread_delta.deallocations
+            ),
+            (0, 0, 0),
+            "collection render allocated or freed on the render owner"
+        );
+        for (baseline_sample, selected_sample) in baseline_pcm.iter().zip(selected_pcm.iter()) {
+            assert_eq!(
+                baseline_sample.to_bits(),
+                selected_sample.to_bits(),
+                "collection selection changed rendered PCM at block {block}"
+            );
+        }
+
+        match block {
+            4 => {
+                collection_capture
+                    .select(&track_b.target, track_b.channels)
+                    .expect("second prepared tap selects");
+                assert_eq!(collection_capture.selected_index(), Some(0));
+            }
+            8 => {
+                collection_capture
+                    .select(&track_a.target, track_a.channels)
+                    .expect("selection returns to first tap");
+                assert_eq!(collection_capture.selected_index(), Some(1));
+            }
+            24 => {
+                track_a_window = Some(
+                    collection_capture
+                        .try_read()
+                        .expect("fresh first tap window completes"),
+                );
+                assert_eq!(
+                    track_a_window.as_ref().map(|window| window.channels),
+                    Some(track_a.channels)
+                );
+                collection_capture
+                    .select(&track_b.target, track_b.channels)
+                    .expect("second tap re-arms after first result is consumed");
+            }
+            40 => {
+                track_b_window = Some(
+                    collection_capture
+                        .try_read()
+                        .expect("second tap window completes"),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let track_a_window = track_a_window.expect("first tap was read");
+    assert_eq!(track_a_window.first_sample, 9 * QUANTUM as u64);
+    assert_eq!(
+        track_a_window.end_sample(),
+        Some(9 * QUANTUM as u64 + SPECTRUM_WINDOW_FRAMES as u64)
+    );
+    assert!(track_a_window.left.iter().any(|value| *value != 0.0));
+    assert!(track_a_window.right.iter().all(|value| *value == 0.0));
+
+    let track_b_window = track_b_window.expect("second tap was read");
+    assert_eq!(track_b_window.first_sample, 25 * QUANTUM as u64);
+    assert_eq!(track_b_window.channels, track_b.channels);
+    assert!(track_b_window.left.iter().any(|value| *value != 0.0));
+    assert!(track_b_window.right.iter().any(|value| *value != 0.0));
+    assert_eq!(
+        collection_capture
+            .try_read()
+            .expect_err("no third selected window should be pending"),
+        SpectrumCaptureCollectionReadError::Capture(SpectrumCaptureReadError::NotArmed)
+    );
 }

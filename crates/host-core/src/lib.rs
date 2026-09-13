@@ -123,8 +123,10 @@ pub use prepare::{
     compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_with_console, prepare_host_runtime_with_console_and_spectrum,
+    prepare_host_runtime_with_console_and_spectrum_collection,
     prepare_host_runtime_with_selected_meters_between_render_calls,
-    prepare_host_runtime_with_spectrum, prepare_host_session, prepare_host_session_with_console,
+    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
+    prepare_host_session, prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -143,11 +145,14 @@ pub use source::{
 pub use spectrum::{
     SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
     SpectrumAnalysisHistory, SpectrumAnalysisHistoryResources, SpectrumAnalysisMetadata,
-    SpectrumAnalyzer, SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureError,
-    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumChannels,
-    SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumOutput, SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError,
-    SpectrumTarget, SpectrumWindow, spectrum_analysis_history_resources,
+    SpectrumAnalyzer, SpectrumCadence, SpectrumCadenceError, SpectrumCapture,
+    SpectrumCaptureCollection, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionReadError,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
+    SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest,
+    SpectrumCaptureResources, SpectrumChannels, SpectrumContinuousCaptureError,
+    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumOutput, SpectrumPrepareError,
+    SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
+    spectrum_analysis_history_resources, spectrum_capture_collection_resources,
     spectrum_capture_resources, spectrum_capture_resources_for,
 };
 

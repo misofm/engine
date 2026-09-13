@@ -449,6 +449,43 @@ function validateSdkResponse(browserName, response) {
     && Math.abs(continuousFirst.responseGainDb?.[0] - 6) < 0.02
     && Math.abs(continuousFirst.responseGainDb?.[1] - 6) < 0.02,
   "continuous spectrum did not align the 750 Hz peak with response, meter, and owned PCM");
+  const collection = spectrum?.collection;
+  const collectionFirstCaptured = canonicalU64(collection?.firstCapturedSample);
+  const collectionFirstEnd = canonicalU64(collection?.firstEndSample);
+  const collectionSecondCaptured = canonicalU64(collection?.secondCapturedSample);
+  const collectionSecondEnd = canonicalU64(collection?.secondEndSample);
+  const collectionCaptured = canonicalU64(collection?.capturedSample);
+  const collectionEnd = canonicalU64(collection?.endSample);
+  gate(browserName, "sdk-spectrum-collection", JSON.stringify(collection?.selections) === JSON.stringify([
+      "trackPostMatrix:track-a", "trackPostMatrix:track-b", "trackPostMatrix:track-a",
+    ])
+    && JSON.stringify(collection?.masks) === JSON.stringify(["both", "left"])
+    && collection?.toBOk === true && collection?.toAOks === true
+    && collection?.toBTarget === "trackPostMatrix:track-b"
+    && collection?.toBChannels === "left"
+    && collection?.bCleared === true && collection?.aCleared === true
+    && collection?.switchedWithoutRestart === true,
+  "spectrum collection did not atomically switch the existing owner A-to-B-to-A with fresh results");
+  gate(browserName, "sdk-spectrum-collection", collection?.firstTarget === "trackPostMatrix:track-a"
+    && collection?.firstChannels === "both"
+    && collectionFirstCaptured === 0n
+    && collectionFirstEnd === 2_048n
+    && collection?.secondTarget === "trackPostMatrix:track-b"
+    && collection?.secondChannels === "left"
+    && collectionSecondCaptured !== undefined && collectionSecondEnd !== undefined
+    && collectionSecondEnd > collectionSecondCaptured
+    && Math.abs(collection?.firstPeakHz - 750) < 0.01
+    && Math.abs(collection?.secondPeakHz - 750) < 0.01
+    && collection?.distinctSelectedSignal === true
+    && collection?.resultTarget === "trackPostMatrix:track-a"
+    && collection?.resultChannels === "both"
+    && collectionCaptured !== undefined && collectionEnd !== undefined
+    && collectionSecondEnd !== undefined && collectionCaptured > collectionSecondEnd
+    && collectionEnd > collectionCaptured
+    && collection?.peakBin === 32 && Math.abs(collection?.peakHz - 750) < 0.01
+    && collection?.finite === true && collection?.owned === true
+    && collection?.audioContinued === true,
+  `spectrum collection did not return distinct owned A/B/A known-signal spans while audio continued: ${JSON.stringify(collection)}`);
 }
 
 function mutate(result, mutation) {
@@ -605,7 +642,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     });
     page.setDefaultTimeout(120000);
     await page.goto(`${origin}/qualification/index.html`);
-    const result = await page.evaluate(async (enabled) => {
+    const execution = page.evaluate(async (enabled) => {
       try {
         const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
         return await module.runQualification();
@@ -614,11 +651,17 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
           qualificationError: {
             message: error?.message ?? String(error),
             name: error?.name ?? typeof error,
+            stack: error?.stack,
             value: error !== null && typeof error === "object" ? { ...error } : error,
           },
         };
       }
     }, sdkEnabled);
+    if (sdkEnabled) {
+      // Resume the real collection AudioContext with a trusted gesture across browsers.
+      await Promise.race([execution, page.locator("#spectrum-collection-resume").click()]);
+    }
+    const result = await execution;
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);

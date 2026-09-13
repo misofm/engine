@@ -33,7 +33,22 @@ use source::{
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
-use crate::spectrum::{SpectrumCapture, SpectrumCaptureRequest, SpectrumPrepareError};
+use crate::spectrum::{
+    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
+    SpectrumCaptureRequest, SpectrumPrepareError, prepare_capture_collection,
+    spectrum_capture_collection_resources,
+};
+
+#[derive(Clone, Copy)]
+enum SpectrumPreparationRequest<'a> {
+    Single(&'a SpectrumCaptureRequest),
+    Collection(&'a SpectrumCaptureCollectionRequest),
+}
+
+enum PreparedSpectrumCapture {
+    Single(SpectrumCapture),
+    Collection(SpectrumCaptureCollection),
+}
 
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
@@ -523,9 +538,37 @@ pub fn prepare_host_runtime_with_console_and_spectrum(
         None,
         false,
         Backend::current(),
-        Some(spectrum),
+        Some(SpectrumPreparationRequest::Single(spectrum)),
     )?;
-    let capture = capture.ok_or_else(|| resource("host.spectrum.capture"))?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Single(capture) => capture,
+        PreparedSpectrumCapture::Collection(_) => {
+            return Err(resource("host.spectrum.capture"));
+        }
+    };
+    Ok((prepared, handles, capture))
+}
+
+/// Prepare a host with live-console handles and several atomically selectable spectrum observers.
+pub fn prepare_host_runtime_with_console_and_spectrum_collection(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    spectrum: &SpectrumCaptureCollectionRequest,
+) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCaptureCollection), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        None,
+        false,
+        Backend::current(),
+        Some(SpectrumPreparationRequest::Collection(spectrum)),
+    )?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Collection(capture) => capture,
+        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+    };
     Ok((prepared, handles, capture))
 }
 
@@ -627,10 +670,30 @@ pub fn prepare_host_runtime_with_spectrum(
         None,
         false,
         Backend::current(),
-        Some(request),
+        Some(SpectrumPreparationRequest::Single(request)),
     )?;
     debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
-    let capture = capture.ok_or_else(|| resource("host.spectrum.capture"))?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Single(capture) => capture,
+        PreparedSpectrumCapture::Collection(_) => {
+            return Err(resource("host.spectrum.capture"));
+        }
+    };
+    Ok((prepared, capture))
+}
+
+/// Prepare the normal host path with several atomically selectable spectrum observers.
+pub fn prepare_host_runtime_with_spectrum_collection(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    request: &SpectrumCaptureCollectionRequest,
+) -> Result<(PreparedHost, SpectrumCaptureCollection), PrepareDiagnostics> {
+    let (prepared, _handles, capture) = prepare_host_runtime_with_console_and_spectrum_collection(
+        compiled,
+        caps,
+        &HostConsoleRequest::default(),
+        request,
+    )?;
     Ok((prepared, capture))
 }
 
@@ -642,8 +705,15 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
     backend: Backend,
-    spectrum_request: Option<&SpectrumCaptureRequest>,
-) -> Result<(PreparedHost, HostConsoleHandles, Option<SpectrumCapture>), PrepareDiagnostics> {
+    spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+) -> Result<
+    (
+        PreparedHost,
+        HostConsoleHandles,
+        Option<PreparedSpectrumCapture>,
+    ),
+    PrepareDiagnostics,
+> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -937,8 +1007,16 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let graph_report = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
     let session_resources = compiled.resource_estimate();
-    let spectrum_resources = spectrum_request
-        .map(|request| crate::spectrum::spectrum_capture_resources_for(&request.target));
+    let spectrum_resources = match spectrum_request {
+        None => None,
+        Some(SpectrumPreparationRequest::Single(request)) => Some(
+            crate::spectrum::spectrum_capture_resources_for(&request.target),
+        ),
+        Some(SpectrumPreparationRequest::Collection(request)) => Some(
+            spectrum_capture_collection_resources(&request.entries)
+                .map_err(spectrum_diagnostics)?,
+        ),
+    };
     let spectrum_capture_retained_bytes =
         spectrum_resources.map_or(0, |resources| resources.retained_bytes);
     let admitted_graph_and_model = graph_resources
@@ -972,7 +1050,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
 
     let (spectrum_observers, spectrum_capture) = match spectrum_request {
         None => (Vec::new(), None),
-        Some(request) => {
+        Some(SpectrumPreparationRequest::Single(request)) => {
             let graph_nodes: Vec<GraphNodeId> = artifact
                 .graph()
                 .spec
@@ -986,7 +1064,29 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                 caps.maximum_named_allocation_bytes,
             )
             .map_err(spectrum_diagnostics)?;
-            (vec![observer], Some(capture))
+            (
+                vec![observer],
+                Some(PreparedSpectrumCapture::Single(capture)),
+            )
+        }
+        Some(SpectrumPreparationRequest::Collection(request)) => {
+            let graph_nodes: Vec<GraphNodeId> = artifact
+                .graph()
+                .spec
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect();
+            let (observers, capture) = prepare_capture_collection(
+                request,
+                &graph_nodes,
+                caps.maximum_named_allocation_bytes,
+            )
+            .map_err(spectrum_diagnostics)?;
+            (
+                observers,
+                Some(PreparedSpectrumCapture::Collection(capture)),
+            )
         }
     };
 
@@ -1189,6 +1289,8 @@ fn spectrum_diagnostics(error: SpectrumPrepareError) -> PrepareDiagnostics {
         SpectrumPrepareError::AllocationBudget => resource("host.spectrum.allocation_budget"),
         SpectrumPrepareError::QueueCapacity => resource("host.spectrum.queue"),
         SpectrumPrepareError::NoChannels => shape("host.spectrum.channels"),
+        SpectrumPrepareError::DuplicateEntry => shape("host.spectrum.duplicate"),
+        SpectrumPrepareError::CollectionCapacity => resource("host.spectrum.collection"),
     }
 }
 

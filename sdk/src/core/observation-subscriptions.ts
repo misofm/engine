@@ -1,4 +1,5 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
+import { constantValue } from "./abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
 import { EngineConsole } from "./console.ts";
@@ -27,10 +28,12 @@ import {
   spectrumCaptureWindowBytes,
 } from "./spectrum.ts";
 import type {
+  SpectrumCollection,
   SpectrumQuery,
   SpectrumResult,
   SpectrumStreamMetadata,
   SpectrumStreamRead,
+  SpectrumStreamSelection,
   SpectrumStreamStart,
   SpectrumStreamStatus,
 } from "./spectrum.ts";
@@ -133,6 +136,15 @@ export interface ObservationSubscriptionTransport {
   ) => MaybePromise<TrackResponseRead>;
   /** Optional managed spectrum stream owned by this same engine lifetime. */
   readonly spectrumPrepared?: () => SpectrumQuery | undefined;
+  /** Optional collection of exact targets available to the same managed spectrum owner. */
+  readonly spectrumPreparedCollection?: () => SpectrumCollection | undefined;
+  /** Atomically select one exact prepared collection entry without stopping its stream. */
+  readonly spectrumSelect?: (query: SpectrumQuery) => MaybePromise<EngineCallResult>;
+  /** Atomically update an active collection entry, including its smoothing profile. */
+  readonly spectrumStreamSelect?: (
+    query: SpectrumQuery,
+    smoothingMs: number,
+  ) => MaybePromise<SpectrumStreamSelection>;
   readonly spectrumStart?: (smoothingMs: number, query: SpectrumQuery) => MaybePromise<SpectrumStreamStart>;
   readonly spectrumRead?: (query: SpectrumQuery) => MaybePromise<SpectrumStreamRead>;
   readonly spectrumStop?: () => MaybePromise<EngineCallResult | void>;
@@ -1191,7 +1203,76 @@ export class ObservationSubscriptionOwner {
         state,
         normalized.configuration.channels,
       );
-      if (desiredKey !== current.key) {
+      const selectionChanged = spectrumCaptureKey(current.query) !== spectrumCaptureKey(desiredQuery);
+      const smoothingChanged = normalized.configuration.smoothingMs !== current.smoothingMs;
+      const collection = this.#transport.spectrumPreparedCollection?.();
+      if (collection !== undefined && (selectionChanged || smoothingChanged)) {
+        // The native collection selection is one transaction. Do not implement a target or
+        // smoothing change as a stop + fallible start: the active stream and its shared Worker
+        // must remain owned by this handle throughout the update.
+        const spectrumStreamSelect = this.#transport.spectrumStreamSelect;
+        if (spectrumStreamSelect === undefined) {
+          throw new MisoUsageError("the spectrum transport cannot update a prepared collection entry");
+        }
+        const selected = await spectrumStreamSelect(
+          desiredQuery,
+          normalized.configuration.smoothingMs,
+        );
+        this.#assertEpoch(epoch);
+        if (!selected.ok) {
+          throw new MisoEngineError("the engine refused the prepared spectrum selection", {
+            phase: selected.code === "wrongState" ? "lifecycle" : "output",
+            code: selected.code as never,
+            result: selected.result,
+          });
+        }
+        const selectedMetadata = selected.metadata;
+        if (selectedMetadata === undefined) {
+          throw new MisoEngineError("the spectrum selection returned no committed metadata", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.status !== "warming" && selectedMetadata.status !== "pending") {
+          throw new MisoEngineError("the spectrum selection returned an invalid warming state", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.target !== undefined
+            && spectrumTargetKey(selectedMetadata.target) !== spectrumTargetKey(normalized.configuration.target)) {
+          throw new MisoEngineError("the spectrum selection returned the wrong target", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.channels !== undefined && selectedMetadata.channels !== normalized.configuration.channels) {
+          throw new MisoEngineError("the spectrum selection returned the wrong channels", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        if (selectedMetadata.smoothingMs !== normalized.configuration.smoothingMs) {
+          throw new MisoEngineError("the spectrum selection returned the wrong smoothing profile", {
+            phase: "output", code: "abiMismatch", result: 2,
+          });
+        }
+        const metadata = cloneSpectrumStreamMetadata(selectedMetadata);
+        const replacement: SpectrumJobState = {
+          ...current,
+          id: this.#nextSpectrumJob++,
+          key: desiredKey,
+          query: Object.freeze({ ...desiredQuery }),
+          smoothingMs: normalized.configuration.smoothingMs,
+          metadata,
+          result: undefined,
+          revision: current.revision + 1n,
+          publicationSequence: current.publicationSequence + 1n,
+          retainedBytes: 0,
+          nextCaptureAt: 0,
+          publicationStamp: spectrumPublicationStamp(metadata),
+        };
+        this.#spectrumJob = replacement;
+        current.refs = 0;
+        replacement.refs = 1;
+        state.job = replacement;
+      } else if (desiredKey !== current.key) {
         const stop = await this.#transport.spectrumStop!();
         this.#assertSpectrumStop(stop);
         this.#assertEpoch(epoch);
@@ -1239,6 +1320,9 @@ export class ObservationSubscriptionOwner {
   closeSpectrum(state: SpectrumHandleState): Promise<void> {
     if (state.closing !== undefined) return state.closing;
     const pending = this.#enqueue(async () => {
+      if (state.closed) return;
+      this.#assertSpectrumHandle(state);
+      await this.#waitForPoll();
       if (state.closed) return;
       this.#assertSpectrumHandle(state);
       const job = state.job;
@@ -1312,6 +1396,21 @@ export class ObservationSubscriptionOwner {
     }
     let nativeStarted = false;
     try {
+      const preparedCollection = this.#transport.spectrumPreparedCollection?.();
+      if (preparedCollection !== undefined) {
+        const spectrumSelect = this.#transport.spectrumSelect;
+        if (spectrumSelect === undefined) {
+          throw new MisoUsageError("the spectrum transport cannot select a prepared collection entry");
+        }
+        const selected = await spectrumSelect(query);
+        if (!selected.ok) {
+          throw new MisoEngineError("the engine refused the prepared spectrum selection", {
+            phase: selected.code === "wrongState" ? "lifecycle" : "output",
+            code: selected.code as never,
+            result: selected.result,
+          });
+        }
+      }
       const started = await spectrumStart(configuration.smoothingMs, query);
       nativeStarted = started.ok;
       this.#assertEpoch(epoch);
@@ -1364,6 +1463,16 @@ export class ObservationSubscriptionOwner {
   }
 
   #assertSpectrumPrepared(configuration: SpectrumSubscriptionConfiguration): void {
+    const collection = this.#transport.spectrumPreparedCollection?.();
+    if (collection !== undefined) {
+      const wantedTarget = spectrumTargetKey(configuration.target);
+      if (!collection.entries.some((entry) =>
+        spectrumTargetKey(entry.target) === wantedTarget
+        && (entry.channels ?? "both") === configuration.channels)) {
+        throw new MisoUsageError("the spectrum stream target and channels were not prepared");
+      }
+      return;
+    }
     const prepared = this.#transport.spectrumPrepared?.();
     if (prepared === undefined) return;
     if (spectrumTargetKey(prepared.target) !== spectrumTargetKey(configuration.target)) {
@@ -2135,6 +2244,15 @@ function spectrumJobKey(configuration: SpectrumSubscriptionConfiguration, query?
     configuration.smoothingMs,
     effectiveQuery.spectrumLimits?.maximumCaptureBytes ?? ABI_LAYOUT.constants.spectrumCaptureBytes,
     effectiveQuery.spectrumLimits?.requestDeadlineMs ?? 5_000,
+  ]);
+}
+
+function spectrumCaptureKey(query: SpectrumQuery): string {
+  return JSON.stringify([
+    spectrumTargetKey(query.target),
+    query.channels ?? "both",
+    query.spectrumLimits?.maximumCaptureBytes ?? ABI_LAYOUT.constants.spectrumCaptureBytes,
+    query.spectrumLimits?.requestDeadlineMs ?? 5_000,
   ]);
 }
 

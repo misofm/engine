@@ -24,6 +24,19 @@ export interface SpectrumQuery {
   readonly spectrumLimits?: SpectrumLimits;
 }
 
+/** One exact graph boundary and channel mask in a prepared spectrum collection. */
+export interface SpectrumCollectionEntry {
+  readonly target: SpectrumTarget;
+  readonly channels?: Channel;
+}
+
+/** Several fixed spectrum boundaries prepared for one atomic managed selection owner. */
+export interface SpectrumCollection {
+  readonly entries: readonly SpectrumCollectionEntry[];
+  /** Aggregate retained capture budget for all prepared entries. Empty collections use zero. */
+  readonly maximumCaptureBytes: number;
+}
+
 /** The owned result of one completed spectrum query. */
 export interface SpectrumResult {
   readonly target: SpectrumTarget;
@@ -94,6 +107,15 @@ export interface SpectrumStreamStart {
   readonly metadata: SpectrumStreamMetadata;
 }
 
+/** Result of an atomic managed-stream target/channel/smoothing update. */
+export interface SpectrumStreamSelection {
+  readonly ok: boolean;
+  readonly result: number;
+  readonly code: string;
+  /** Present only after a native selection commit; it is the host's copied profile. */
+  readonly metadata?: SpectrumStreamMetadata;
+}
+
 type SpectrumExport = (...args: number[]) => number | bigint;
 type SpectrumExports = Record<string, unknown> & { readonly memory: WebAssembly.Memory };
 type AbiField = Readonly<{ readonly name: string; readonly offset: number; readonly type?: string }>;
@@ -102,7 +124,8 @@ type AbiStructure = Readonly<{ readonly bytes: number; readonly fields: readonly
 const TARGETS = ABI_LAYOUT.constants.spectrumTargets;
 const CHANNELS = ABI_LAYOUT.constants.spectrumChannels;
 
-function structure(name: "spectrumRequest" | "spectrumWindow" | "spectrumResult" | "spectrumStreamMetadata"): AbiStructure {
+function structure(name: "spectrumRequest" | "spectrumCollectionRequest" | "spectrumCollectionEntry"
+  | "spectrumWindow" | "spectrumResult" | "spectrumStreamMetadata"): AbiStructure {
   const value = ABI_LAYOUT.structures[name];
   if (value === undefined || !Number.isSafeInteger(value.bytes) || !Array.isArray(value.fields)) {
     throw new MisoUsageError(`the generated ABI layout has no valid ${name} structure`);
@@ -171,6 +194,11 @@ function targetValue(target: SpectrumTarget): number {
   }
 }
 
+/** Numeric target kind used by the generated host bridge. Internal SDK transport helper. */
+export function spectrumTargetRaw(target: SpectrumTarget): number {
+  return targetValue(target);
+}
+
 function targetId(target: SpectrumTarget): string {
   if (target === null || typeof target !== "object") {
     throw new MisoUsageError("spectrum target must be an object");
@@ -191,6 +219,11 @@ function targetId(target: SpectrumTarget): string {
     throw new MisoUsageError("spectrum target identity must be a nonempty string");
   }
   return id;
+}
+
+/** Stable target identity used by the generated host bridge. Internal SDK transport helper. */
+export function spectrumTargetId(target: SpectrumTarget): string {
+  return targetId(target);
 }
 
 function copyTarget(target: SpectrumTarget): SpectrumTarget {
@@ -248,6 +281,52 @@ export function cloneSpectrumQuery(query: SpectrumQuery): SpectrumQuery {
   return Object.freeze(copy);
 }
 
+function spectrumEntryKey(entry: SpectrumCollectionEntry): string {
+  const target = copyTarget(entry.target);
+  const channels = entry.channels ?? "both";
+  channelValue(channels);
+  return `${target.kind}\u0000${target.kind === "output" ? target.outputId : target.trackId}\u0000${channels}`;
+}
+
+/** Copy and validate every exact entry before a collection crosses a boot or async boundary. */
+export function cloneSpectrumCollection(collection: SpectrumCollection): SpectrumCollection {
+  if (collection === null || typeof collection !== "object") {
+    throw new MisoUsageError("spectrum collection must be an object");
+  }
+  if (!Array.isArray(collection.entries)) {
+    throw new MisoUsageError("spectrum collection entries must be an array");
+  }
+  if (!Number.isSafeInteger(collection.maximumCaptureBytes)
+      || collection.maximumCaptureBytes < 0) {
+    throw new MisoUsageError("spectrum collection maximumCaptureBytes must be a non-negative safe integer");
+  }
+  if (collection.entries.length === 0 && collection.maximumCaptureBytes !== 0) {
+    throw new MisoUsageError("an empty spectrum collection must use maximumCaptureBytes 0");
+  }
+  if (collection.entries.length > 0 && collection.maximumCaptureBytes === 0) {
+    throw new MisoUsageError("a non-empty spectrum collection needs a positive capture budget");
+  }
+  const seen = new Set<string>();
+  const entries = collection.entries.map((entry, index) => {
+    if (entry === null || typeof entry !== "object") {
+      throw new MisoUsageError(`spectrum collection entry ${index} must be an object`);
+    }
+    const target = copyTarget(entry.target);
+    const channels = entry.channels ?? "both";
+    channelValue(channels);
+    const copy = Object.freeze({ target, channels });
+    const key = spectrumEntryKey(copy);
+    if (!seen.add(key)) {
+      throw new MisoUsageError(`spectrum collection entry ${index} duplicates an earlier target and mask`);
+    }
+    return copy;
+  });
+  return Object.freeze({
+    entries: Object.freeze(entries),
+    maximumCaptureBytes: collection.maximumCaptureBytes,
+  });
+}
+
 /** Copy stream metadata received across the browser boundary, including its nested target. */
 export function cloneSpectrumStreamMetadata(metadata: SpectrumStreamMetadata): SpectrumStreamMetadata {
   const target = metadata.target;
@@ -272,6 +351,8 @@ export function spectrumCaptureWindowBytes(channels: NonNullable<SpectrumQuery["
 function contract() {
   return {
     request: structure("spectrumRequest"),
+    collectionRequest: structure("spectrumCollectionRequest"),
+    collectionEntry: structure("spectrumCollectionEntry"),
     window: structure("spectrumWindow"),
     result: structure("spectrumResult"),
     streamMetadata: structure("spectrumStreamMetadata"),
@@ -360,6 +441,69 @@ export function stageSpectrumRequest(
   requestView.setUint32(requestPtr + requestOffset("channels"), channels, true);
   requestView.setUint32(requestPtr + requestOffset("targetIdBytes"), id.length, true);
   requestView.setBigUint64(requestPtr + requestOffset("maximumCaptureBytes"), BigInt(maximum), true);
+}
+
+/** Stage several exact spectrum collection entries before a host boot. */
+export function stageSpectrumCollectionRequest(
+  exports: SpectrumExports,
+  collection: SpectrumCollection | undefined,
+): void {
+  const shape = contract();
+  const requestPtr = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_request_ptr")());
+  const requestBytes = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_request_bytes")());
+  if (requestPtr <= 0 || requestBytes !== shape.collectionRequest.bytes) {
+    throw malformed("invalid spectrum collection request staging");
+  }
+  let bytes = bytesView(exports);
+  range(bytes, requestPtr, shape.collectionRequest.bytes, "collection request");
+  const requestView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const requestOffset = (name: string) => field(shape.collectionRequest, name).offset;
+  for (let index = 0; index < shape.collectionRequest.bytes; index += 1) bytes[requestPtr + index] = 0;
+  requestView.setUint32(requestPtr + requestOffset("structSize"), shape.collectionRequest.bytes, true);
+  requestView.setUint32(requestPtr + requestOffset("abiVersion"), shape.abiVersion, true);
+  if (collection === undefined) return;
+  const entries = collection.entries;
+  requestView.setUint32(requestPtr + requestOffset("entryCount"), entries.length, true);
+  requestView.setBigUint64(
+    requestPtr + requestOffset("maximumCaptureBytes"),
+    BigInt(collection.maximumCaptureBytes),
+    true,
+  );
+
+  // Both collection pointer calls may grow Wasm memory. Re-read the backing view after each
+  // allocator boundary; a view retained across growth is detached and would corrupt staging.
+  const entryPtr = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_entry_ptr")());
+  const entryBytes = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_entry_bytes")());
+  const entryCapacity = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_entry_capacity")());
+  if (entryPtr <= 0 || entryBytes !== shape.collectionEntry.bytes || entryCapacity !== entries.length) {
+    throw malformed("invalid spectrum collection entry staging");
+  }
+  bytes = bytesView(exports);
+  range(bytes, entryPtr, entries.length * entryBytes, "collection entries");
+  const entriesView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entryOffset = (name: string) => field(shape.collectionEntry, name).offset;
+  const encodedIds = entries.map((entry) => new TextEncoder().encode(targetId(entry.target)));
+  encodedIds.forEach((id, index) => {
+    const offset = entryPtr + index * entryBytes;
+    for (let byte = 0; byte < entryBytes; byte += 1) bytes[offset + byte] = 0;
+    entriesView.setUint32(offset + entryOffset("target"), targetValue(entries[index]!.target), true);
+    entriesView.setUint32(offset + entryOffset("channels"), channelValue(entries[index]!.channels), true);
+    entriesView.setUint32(offset + entryOffset("targetIdBytes"), id.byteLength, true);
+  });
+
+  const idPtr = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_target_ids_ptr")());
+  const idCapacity = Number(exportFunction(exports, "miso_engine_web_v1_spectrum_collection_target_ids_capacity")());
+  const totalIdBytes = encodedIds.reduce((total, id) => total + id.byteLength, 0);
+  if (idPtr <= 0 || idCapacity !== totalIdBytes) {
+    throw malformed("invalid spectrum collection target identity staging");
+  }
+  bytes = bytesView(exports);
+  range(bytes, idPtr, totalIdBytes, "collection target identities");
+  let idOffset = idPtr;
+  encodedIds.forEach((id) => {
+    bytes.set(id, idOffset);
+    idOffset += id.byteLength;
+  });
 }
 
 function writeStreamMetadata(

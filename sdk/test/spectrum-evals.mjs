@@ -244,6 +244,120 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
   }
 });
 
+test("managed spectrum collection updates target and smoothing atomically", async () => {
+  const firstQuery = queryFor({ kind: "trackPostMatrix", trackId: "t" });
+  const secondQuery = queryFor({ kind: "output", outputId: "out" });
+  const collection = {
+    entries: [
+      { target: firstQuery.target, channels: "both" },
+      { target: secondQuery.target, channels: "both" },
+    ],
+    maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+  };
+  let activeQuery = firstQuery;
+  let activeSmoothing = 0;
+  let streamSelects = 0;
+  let starts = 0;
+  let stops = 0;
+  let sequence = 0n;
+  const metadata = (query, status = "warming") => Object.freeze({
+    result: 0,
+    status,
+    target: query.target,
+    channels: query.channels,
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 2_048,
+    sourceUnderrun: false,
+    captureEpoch: activeQuery === firstQuery ? 1n : 2n,
+    sequence,
+    droppedCaptures: 0n,
+    windows: sequence,
+    capturedSample: sequence * 2_048n,
+    endSample: (sequence + 1n) * 2_048n,
+    analysisEpoch: activeQuery === firstQuery ? 1n : 2n,
+    historyStartSample: 0n,
+    smoothingMs: activeSmoothing,
+  });
+  const spectrumResult = (query) => ({
+    target: query.target,
+    channels: query.channels,
+    sampleRateHz: 48_000,
+    windowFrames: 2_048,
+    binCount: 1,
+    floorDb: -120,
+    frequenciesHz: new Float32Array([100]),
+    leftDb: new Float32Array([sequence === 0n ? -3 : -6]),
+    rightDb: new Float32Array([sequence === 0n ? -4 : -7]),
+    capturedSample: sequence * 2_048n,
+    endSample: (sequence + 1n) * 2_048n,
+    snapshotToken: sequence + 1n,
+    graphSourceUnderrun: false,
+    resultBytes: 37n,
+  });
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }),
+    readObservations: () => [],
+    console: () => { throw new Error("unused"); },
+    spectrumPreparedCollection: () => collection,
+    spectrumSelect: async () => ({ ok: true, result: 0, code: "ok" }),
+    spectrumStreamSelect: async (query, smoothingMs) => {
+      streamSelects += 1;
+      activeQuery = query;
+      activeSmoothing = smoothingMs;
+      return { ok: true, result: 0, code: "ok", metadata: metadata(query) };
+    },
+    spectrumStart: async (smoothingMs, query) => {
+      starts += 1;
+      activeQuery = query;
+      activeSmoothing = smoothingMs;
+      return { ok: true, result: 0, code: "ok", metadata: metadata(query) };
+    },
+    spectrumRead: async (query) => {
+      sequence += 1n;
+      return { metadata: metadata(query, "ready"), result: spectrumResult(query) };
+    },
+    spectrumStop: async () => {
+      stops += 1;
+      return { ok: true, result: 0, code: "ok" };
+    },
+  }, undefined, undefined, { maximumDeliveredBytesPerSecond: 64 * 1024 * 1024 });
+
+  const first = (await owner.subscribeSpectrum({ ...firstQuery, smoothingMs: 0, cadenceMs: 1 })).handle;
+  const shared = (await owner.subscribeSpectrum({ ...firstQuery, smoothingMs: 0, cadenceMs: 1 })).handle;
+  await assert.rejects(
+    shared.update({ ...secondQuery, smoothingMs: 250.5, cadenceMs: 1 }),
+    /shared managed subscriber/,
+  );
+  assert.equal(streamSelects, 0, "a shared refusal must not call native selection");
+  assert.equal(starts, 1);
+  await shared.close();
+
+  const firstNotification = await first.pump();
+  assert.equal(firstNotification.available, true);
+  const oldResult = first.readLatest();
+  const oldLeft = oldResult.leftDb.slice();
+  const update = await first.update({ ...secondQuery, smoothingMs: 250.5, cadenceMs: 1 });
+  assert.equal(streamSelects, 1);
+  assert.equal(stops, 0, "a target+smoothing update must not stop the native stream");
+  assert.deepEqual(update.configuration.target, secondQuery.target);
+  assert.equal(update.configuration.smoothingMs, 250.5);
+  assert.equal(first.readLatest(), undefined, "a changed selection starts with no old result");
+
+  const secondNotification = await first.pump();
+  assert.equal(secondNotification.available, true);
+  assert.deepEqual(secondNotification.metadata.target, secondQuery.target);
+  assert.equal(secondNotification.metadata.smoothingMs, 250.5);
+  assert.deepEqual(first.readLatest().target, secondQuery.target);
+  assert.deepEqual(oldResult.leftDb, oldLeft, "the old owned result remains unchanged after switching");
+  assert.equal(stops, 0);
+
+  await first.update({ ...secondQuery, smoothingMs: 250.5, cadenceMs: 1 });
+  assert.equal(streamSelects, 1, "an exact effective no-op must preserve the active stream");
+  await first.close();
+  assert.equal(stops, 1);
+});
+
 test("managed spectrum capture limits refuse before native activation and leave one-shot usable", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {

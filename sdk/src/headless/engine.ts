@@ -16,7 +16,7 @@ import type {
   ObservationSelection,
 } from "../core/observation.ts";
 import type { TrackResponseObservedState, TrackResponseQuery, TrackResponseRead, TrackResponseResult } from "../core/live-response.ts";
-import { cloneSpectrumQuery } from "../core/spectrum.ts";
+import { cloneSpectrumCollection, cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
@@ -136,7 +136,18 @@ export class OfflineEngine {
       ...boot
     } = options;
     const spectrumQuery = boot.spectrum === undefined ? undefined : cloneSpectrumQuery(boot.spectrum);
-    const bootOptions = spectrumQuery === undefined ? boot : { ...boot, spectrum: spectrumQuery };
+    const spectrumCollection = boot.spectrumCollection === undefined
+      ? undefined : cloneSpectrumCollection(boot.spectrumCollection);
+    if (spectrumQuery !== undefined && spectrumCollection !== undefined) {
+      throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
+    }
+    const bootOptions = spectrumQuery === undefined && spectrumCollection === undefined
+      ? boot
+      : {
+        ...boot,
+        ...(spectrumQuery === undefined ? {} : { spectrum: spectrumQuery }),
+        ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
+      };
     const asset = suppliedAsset ?? await defaultBundledAsset();
     return new OfflineEngine(
       asset,
@@ -307,6 +318,10 @@ export class OfflineEngine {
       readObservations: (selections) => this.readObservations(selections),
       console: () => this.console(),
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
+      spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
+      spectrumSelect: (query) => this.#boundary.selectSpectrum(query),
+      spectrumStreamSelect: (query, smoothingMs) =>
+        this.#boundary.selectSpectrumStream(query, smoothingMs),
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
       spectrumStart: (smoothingMs, query) => this.#boundary.startSpectrumStream(smoothingMs, query),

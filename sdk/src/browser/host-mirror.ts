@@ -2,7 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
-import type { SpectrumQuery } from "../core/spectrum.ts";
+import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 
 /**
  * The bridge from the SDK's `BootOptions` to the shipped host factory's `MisoWebBootOptions`.
@@ -74,6 +74,10 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   if (options.spectrum !== undefined) {
     spectrum = toWebSpectrumOptions(options.spectrum);
   }
+  let spectrumCollection: MisoWebBootOptions["spectrumCollection"] = null;
+  if (options.spectrumCollection !== undefined) {
+    spectrumCollection = toWebSpectrumCollectionOptions(options.spectrumCollection);
+  }
 
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
@@ -83,6 +87,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     consoleObservationTaps: observationTaps,
     consoleMasterTrackPlusOne: masterTrackPlusOne,
     spectrum,
+    spectrumCollection,
   };
 }
 
@@ -114,4 +119,34 @@ function toWebSpectrumOptions(query: SpectrumQuery): NonNullable<MisoWebBootOpti
     channels,
     maximumCaptureBytes,
   };
+}
+
+function toWebSpectrumCollectionOptions(
+  collection: SpectrumCollection,
+): NonNullable<MisoWebBootOptions["spectrumCollection"]> {
+  if (!Number.isSafeInteger(collection.maximumCaptureBytes) || collection.maximumCaptureBytes < 1) {
+    throw new MisoUsageError("spectrum collection maximumCaptureBytes must be a positive safe integer");
+  }
+  if (!Array.isArray(collection.entries) || collection.entries.length === 0) {
+    throw new MisoUsageError("spectrum collection entries must be a nonempty array");
+  }
+  const entries = collection.entries.map((entry, index) => {
+    const id = entry.target.kind === "output" ? entry.target.outputId : entry.target.trackId;
+    if (typeof id !== "string" || id.length === 0) {
+      throw new MisoUsageError(`spectrum collection entry ${index} has an empty target identity`);
+    }
+    if (new TextEncoder().encode(id).byteLength > ABI_LAYOUT.constants.maximumSpectrumIdBytes) {
+      throw new MisoUsageError(`spectrum collection entry ${index} target identity exceeds its bound`);
+    }
+    const channels = entry.channels ?? "both";
+    if (channels !== "left" && channels !== "right" && channels !== "both") {
+      throw new MisoUsageError(`spectrum collection entry ${index} has invalid channels`);
+    }
+    return {
+      target: entry.target.kind,
+      targetId: id,
+      channels,
+    };
+  });
+  return { entries, maximumCaptureBytes: collection.maximumCaptureBytes };
 }

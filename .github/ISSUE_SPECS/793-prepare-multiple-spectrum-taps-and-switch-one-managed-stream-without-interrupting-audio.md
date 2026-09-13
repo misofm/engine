@@ -1,0 +1,163 @@
+# Prepare multiple spectrum taps and switch one managed stream without interrupting audio
+
+Parent: #763. Builds on accepted #789/#791 source
+`1749b05fe7c06548e18b92bda30b0cad51d4828e`. Astra xhigh scopes; Luna implements;
+fresh Astra medium verifies concrete bugs, at most five attempts. Root creates
+and synchronizes this numbered issue before implementation, after PR #792's
+required checks/merged delivery and the preceding issue-boundary audit. Accepted
+#789/#791 behavior and evidence are the baseline, not reopened review work.
+
+## Smallest closable outcome
+
+Prepare several explicitly selected graph taps when opening one engine, then
+use `subscribeSpectrum` and the existing handle's `update` to select one of them
+without stopping playback, rebuilding the plan, seeking sources or recreating
+the AudioContext. This enables the app's single expanded EQ panel to follow
+arbitrary focused-track changes. The app uses `trackPostMatrix`; preserve all
+three existing tap kinds.
+
+This child supports multiple **prepared** entries and one **active** spectrum
+job with identical-consumer sharing. Simultaneous jobs and atomic multi-target
+batches remain required #763 successors. Keep the current FFT, smoothing,
+subscription owner, timer, Worker and pooled transport; no general framework,
+SAB implementation, benchmark or new test harness.
+
+## Requirements
+
+1. **Bounded preparation.** Add an optional collection input with semantic shape
+   `{ entries: [{ target, channels }], maximumCaptureBytes }`, mutually exclusive
+   with the existing singular `spectrum` option. An entry is an exact supported
+   tap kind + stable track/output ID + `left`/`right`/`both` mask. Reject duplicate
+   exact entries. Different masks may be separately prepared; runtime requests
+   require an exact prepared mask, preserving the accepted managed contract.
+   The old singular form remains a one-entry compatibility path.
+2. Resolve and admit the **entire** collection against the prepared graph before
+   publishing the host. Use checked aggregate capture-byte and existing
+   graph/host/largest-allocation limits; reject unknown entries and insufficient
+   budgets atomically. No implicit all-track preparation or compiled track limit.
+   Expose the accepted entries and effective profile/resource facts through the
+   host/SDK. This small preparation report is not a new discovery framework.
+3. Reuse the existing `SpectrumCaptureRequest`, `prepare_capture`, observer and
+   one-slot queue per entry, with unique observer identities and one prepared
+   collection. Target lookup stays off render. Charge actual observer, queue,
+   control, ID and collection bytes, including both currently reserved PCM
+   arrays for a single-lane entry. Report capture separately from analysis and
+   transport. Empty preparation retains no capture observers; inactive entries
+   do no PCM copying, FFT or traffic. Memory cannot grow with duration or focus
+   changes. Do not claim that inactive observer checks cost zero CPU.
+4. **Atomic selection.** Add one native host operation to replace the selected
+   capture under exclusive ownership between render calls; the browser executes
+   it in one Worklet message handler outside `process()`. Validate the target,
+   exact mask, configuration, budgets and epoch arithmetic before retiring the
+   working selection. A refusal preserves the old native capture and SDK
+   configuration/references/result. A successful commit disarms and clears the
+   old partial/queued capture, arms the selected entry and acknowledges its
+   effective configuration, unambiguous selection identity and earliest eligible
+   sample boundary. First captured sample remains pending until actually known.
+   Two separately fallible SDK stop/start requests do not satisfy this contract.
+5. Reuse the shared SDK owner's serialization and in-flight gate. Wait for the
+   bounded previous read/analysis to settle under the existing deadline before
+   replacement; commit handle state after native success. Old replies/results
+   cannot be attributed to a new target. A changed selection begins warming
+   with fresh capture/smoothing history; A -> B -> A cannot recover A's stale
+   partial window. Returned owned arrays keep their original identity/span.
+   Identical effective updates preserve history and #791's monotonic loss
+   baseline. Incompatible updates while other handles share the active job
+   refuse before disturbing them; existing cadence/callback/close behavior stays.
+6. Reuse one spectrum analyzer/history, Worker and transfer credit per engine,
+   initialized once off render before first subscription acceptance. Size
+   staging/transport for the largest admitted entry so switching from one lane
+   to both cannot allocate a replacement pipeline. Native capture allocations
+   happen at preparation. Keep current result-copy ownership and separately
+   bounded returned arrays; no Worker or FFT instance per prepared entry/handle.
+   N, Hann, normalization, floor, H and smoothing domain stay as accepted in #789.
+   Generated records/exports are additive V1; frozen layouts remain compatible.
+7. A selection update while paused may succeed but remains warming until real
+   rendering resumes. It never resumes/renders audio to obtain a spectrum.
+   Existing response selection and actual captured-state timing remain intact.
+   The app's immediate paused edits can use the delivered requested-configuration
+   preview; no response DSP or command-scheduling change belongs in this child.
+
+## Three checkpoints and proportional evidence
+
+1. **Prepared collection and native switch.** Extend the existing spectrum
+   fixture at 48 kHz with two differently identified/tuned tracks and request
+   order different from compiled order. Cover A -> B -> A during partial capture,
+   unknown-entry and aggregate-budget refusal, one unsupported mask, and fresh
+   history/span/selection association. The same fixture proves one active
+   capture, bit-identical audio, zero render allocations/frees, empty/idle costs
+   and fixed memory through repeated switches. Reuse existing rate/Q192,
+   numerical and failure tests; do not expand their matrices. Root checkpoints
+   the focused-green native tranche before bridge work.
+2. **Host/SDK selection over the existing pipeline.** Extend current managed
+   spectrum tests for successful update, refused shared/invalid update preserving
+   the old stream, a delayed old reply across switching, and paused switch/resume.
+   Verify the same Worker/buffer is reused across different prepared masks and
+   existing close/reload/loss tests remain green. Do not add a second lifecycle
+   harness. Root checkpoints the focused-green bridge/SDK tranche.
+3. **Combined acceptance.** Extend the existing known-signal SDK/browser probe to
+   switch the selected track and compare its tone/gain/meter evidence at the
+   correct target/sample span while audio continues. Run the existing browser
+   qualification and proportional SDK/generated ABI/package/artifact/resource/
+   realtime gates on the stopped candidate. Carry #789/#791's unchanged DSP,
+   transport-failure and loss evidence; no new listening, timing campaign,
+   numerical corpus or paused-preview matrix. One fresh adversarial verdict
+   follows the coherent attempt; root delivers and synchronizes on PASS.
+
+## Downstream and parent boundary
+
+App/adapter changes are a separate delivery slice. The adapter must forward the
+prepared collection and managed SDK analysis methods without another analyzer
+or subscription owner; publish matching SDK/adapter packages and prove packed
+Worker/Worklet consumption. The last verified app main `00f77713` pins SDK 0.2.4
+and adapter 0.5.0 (`0564511d`, codec 0.1.1). Fetch their latest main again before
+scoping/implementation, work outside the dirty primary checkout, and integrate
+latest app main again before landing with relevant gates rerun. Preserve BLAKE3
+identities/cache migration, sparse decoding/concurrency/progress and existing UI.
+
+#763 remains open for simultaneous multiple targets/configurations and their
+sharing; atomic multi-target batch subscribe/update; full effect/graph discovery
+and response fields/bands; complete clock/plan/state/content/publication identity
+and bounded joins; SAB; native/remote packed-vector parity/compatibility; remaining
+integrated examples/resource evidence and the frozen descriptive comparison.
+This child neither deletes those requirements nor reopens accepted #789/#791.
+
+Milestone 1 native checkpoint: Luna max adds a bounded prepared collection by reusing existing captures/observers, transactional collection preparation, and exact-entry native selection. Existing spectrum integration suite passes 9/9, including a two-track selection/PCM/allocation fixture; host-core check, all-feature Clippy and formatting pass (/tmp/issue793-milestone1-*). This is a native checkpoint, not endpoint acceptance: complete host configuration/selection identity admission and bridge/SDK operation remain in milestone 2.
+
+Latest downstream baseline refresh: app main 53d9b069c4c5d9fc09856c2fdf3030fb20079fb3 (PR209), SDK0.2.4/adapter0.5.1; adapter main cced684beb84f2152cd237beeecd40e4d9a68ab6. Preserve 512KiB warm verification reads separately from128KiB ingest caps, integrity/cancellation/progress semantics and existing latest app behavior. Refresh again before final app implementation and landing. Primary app checkout remains untouched.
+
+Milestone 2 host bridge checkpoint: Luna max adds bounded collection staging, native exact-target/configuration transaction with selection-epoch preflight, collection one-shot/stream lifecycle, fixed staging/resource accounting and additive V1 ABI exports/layouts. The FFI regression proves a rejected selection leaves the active capture intact. Host-core spectrum tests9/9, host-web91 passed/2 ignored, metadata10 tests, Clippy, formatting and ABI/codegen checks pass (/tmp/issue793-milestone2-*). SDK/Worklet message wiring, actual artifact qualification and single whole-endpoint Astra medium verdict remain required.
+
+App integration requirements are now recorded in misofm/app#210, based on fresh main53d9b069 with SDK0.2.4/adapter0.5.1. Its isolated spec worktree preserves the dirty primary. Implementation waits for this issue acceptance and compatible published SDK/adapter; user-specified Luna xhigh implementation then Astra medium verification remain binding.
+
+Root actual-Wasm resource check of native581842 fails the old resource pin: bridgeMetadata1113143→1151831 and bridgeRetained1133652→1172340 (/tmp/issue793-native581842-resources.log). Inspection identifies an original-contract violation: fixed256 prepared-target staging and a collection aggregate budget capped by the unrelated one-window1MiB staging cap. Do not repin or accept this shape. SDK layering pauses while the bridge is corrected to caller-configured bounded collection staging/admission, allocated off render before cached views, with aggregate capture resources separate from one-window staging. This is correction within the first coherent endpoint attempt, not a new feature or waived gate; prior buildable checkpoint remains preserved.
+
+The native staging correction is focused-green: caller-count entry storage and packed ID storage replace fixed256 allocation; aggregate capture admission is separate from the one-window buffer. Compatibility metadata0 denotes caller-sized capacity, with actual capacity returned after staging. Focused FFI8/8 includes257 entries and2MiB aggregate budget; host check, metadata/ABI validator/self-test, generated SDK surface, formatting and diff checks pass (/tmp/issue793-native-dynamic-*). Fresh actual-Wasm resource evidence remains required before SDK layering resumes.
+
+Root fresh Wasm0b6d3 artifact SHA256056fee8760ae955e813060c424238945a18bd7cd7fe630c905b4923c0aeeb711 is preserved at /tmp/issue793-native0b6d3-artifact. Actual resource accounting and native witness now agree, with26 mutations rejected (/tmp/issue793-native0b6d3-resources-corrected.log). Unconfigured bridge overhead is only the additive32-byte WebSpectrumCollectionRequest: metadata1113143→1113175, retained1133652→1133684. Caller-sized empty entry/ID tables retain no payload. The earlier38688-byte fixed-table increase is removed. SDK wiring may resume on the corrected native candidate; final hostJS/browser/package qualification remains pending.
+
+SDK/headless vertical checkpoint compiles and keeps the existing singular spectrum suite7/7 green. The real collection probe found stale target metadata after selection (/tmp/issue793-sdk-collection-headless.log). Native FFI now refreshes selected target/channels and gates reset on an actual selection-epoch change; focused switch/idempotency regression and formatting pass (/tmp/issue793-native-switch-*). Fresh Wasm revalidation is pending. This checkpoint is explicitly incomplete: SDK currently refuses valid combined target+smoothing changes, which violates the frozen sole-owner update contract and must be corrected by a complete native transaction, not accepted as a limitation. Clippy also identifies too-many-arguments in project_buffers introduced by this branch staging-resource plumbing; fix it locally without a broad refactor. Preserve the compiling checkpoint; no endpoint PASS is claimed.
+
+Native complete stream-selection checkpoint: target, exact channel mask and smoothing are admitted together through the additive V1 stream-select operation. Same-entry smoothing changes restart the existing capture at a fresh epoch and discard queued old windows without a stop/start failure gap. Target-only switches also reset existing history; exact effective no-ops preserve it. No analyzer/history is allocated on the Worklet host merely to start or switch a stream. Host-core library30/30, host-web FFI8/8, ABI7/7, validators/self-test, all-feature Clippy, formatting and diff checks pass (/tmp/issue793-native-history-*). The earlier ab2484 real-Wasm basic collection switch also passed (/tmp/issue793-sdk-collection-ab2484.log). Complete SDK/browser transaction wiring and whole-endpoint verification remain pending; no endpoint acceptance is claimed.
+
+SDK complete-update checkpoint: the shared owner now sends target/channel/smoothing changes through one native transaction and uses its copied warming metadata. Existing tests cover shared refusal before mutation, no stop/start during combined updates, preserved owned old arrays and exact no-op behavior. Spectrum suite8/8 with the real artifact enabled, TypeScript and ABI codegen pass (/tmp/issue793-sdk-focused-artifact.*). Root actual-Wasm combined target/channel/smoothing smoke passes (/tmp/issue793-sdk-combined-update-root.log). Native743081 artifact SHA256c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4 is preserved at /tmp/issue793-native743081-artifact and its actual resource/native-witness/26-mutation check passes. Browser collection forwarding and full acceptance remain pending.
+
+Browser pipeline checkpoint: collection preparation and atomic stream selection now cross the existing host/Worklet/SDK interfaces. The existing browser fixture captures distinct A/B/A results with both/left/both masks in a running AudioContext; Chromium151.0.7922.34 qualification and self-test mutations pass (/tmp/issue793-browser-collection-chromium.log). TypeScript, syntax and diff checks pass. Root full headless gate also passes228/228 (/tmp/issue793-sdk80fe-headless.log). This is a useful compiling checkpoint, not endpoint acceptance: root inspection finds no explicit selected-target identity fence in the analysis Worker history. Rust currently resets on config/epoch/sequence changes, and per-entry capture counters are not global selection identity. Astra medium must verify and correct same-mask/smoothing target-history behavior, along with ordinary endpoint verification, without scope expansion. Final all-browser qualification and package/static gates remain required.
+
+Astra medium verification correction tranche: first managed-stream admission now initializes the existing Worker and reusable buffer before native start. Collection selection uses the existing deadline; ambiguous timeout retires only the spectrum lifetime and holds cleanup until the late transaction settles/stops before replacement. Focused regression proves preflight, timeout, stale-handle refusal, blocked early replacement, one late stop and fresh lifetime with the same Worker;8/8 browser-focused tests and types pass (/tmp/issue793-review-browser-focused.log, /tmp/issue793-review-types.log). Astra disproved the ordinary dropped-B history concern: a new entry starts at sequence0 and its one-slot queue preserves that first record, forcing the existing history reset. No speculative target fence was added. Whole-endpoint review and final qualification continue within attempt1; no PASS yet.
+
+Astra medium same-seam correction: initial collection selection also uses the request deadline and in-flight guard. Worker/buffer preflight occurs before selecting/arming; an ambiguous late initial selection holds one-shot cancellation before retry. Existing-suite regression proves timeout, no stream start, blocked replacement, one late cancel and fresh accepted retry. Browser-focused9/9, types and diff checks pass (/tmp/issue793-review-initial-selection-focused.log, /tmp/issue793-review-initial-selection-types.log). Candidate stops for final qualification; review still attempt1 with no final verdict yet.
+
+Browser-environment correction: the first all-browser run stopped because this headless host lacked an audio output; standalone Firefox remained suspended even after a trusted click. Firefox also lacks OfflineAudioContext.suspend, so that experimental method was discarded. Astra xhigh approved one ordinary test-dependency correction: a task-owned PulseAudio null sink, unchanged live Worklet qualification, and minimal existing CI setup. Standalone Firefox now reaches running with advancing time (/tmp/issue793-firefox-audio-pulse-probe.log). CI uses an isolated socket/D-Bus address with a real pactl handshake and task-owned cleanup (/tmp/issue793-browser-ci-audio-isolated.log); the earlier socket-only D-Bus-conflict check was insufficient and is preserved.
+
+The live fixture now begins suspended, preloads its fixed32768-frame synthetic signal, uses a trusted click with a bounded resume wait, and keeps existing target/span/signal assertions. A queued first spectrum is read before exiting on a gap. Firefox153 and WebKit26.5 pass all qualification gates/mutations (/tmp/issue793-review-firefox-pulse5.log, /tmp/issue793-review-webkit-pulse.log). This is virtual-output live browser evidence, not physical-device qualification. This compiling checkpoint still contains temporary fixture pump-before-close waits: Astra identified a real SDK close-versus-poll race and will replace those waits with the existing owner serialization seam before final acceptance. No final PASS yet.
+
+Astra medium close correction: closeSpectrum now waits on the existing automatic poll before native stop and rechecks handle/closed state afterward. The regression uses a delayed automatic read, no explicit pump, and proves native close waits without reviving a failed/closed lifetime. All four temporary fixture pump-before-close waits are removed. Focused browser10/10, types and diff checks pass (/tmp/issue793-review-close-focused.log, /tmp/issue793-review-close-types.log). Product correction is three lines in the existing owner; final combined qualification now resumes.
+
+Final combined run after the close fix passed231SDK tests and package checks but Chromium timed out awaiting its first collection result (/tmp/issue793-final-browser.log). No root cause is claimed. Astra added context/native/notification state to the existing bounded wait error without changing assertions or runtime; Chromium alone then passed all gates/mutations (/tmp/issue793-review-chromium-final-diagnostic.log). The original failure remains preserved. A stopped sequential three-browser run is required for the final verdict, with actionable diagnostics if it recurs.
+
+Final independent verdict: Astra medium PASS, coherent attempt1, reviewed endpoint f13b7647dcf2bc49e3b7a31d3584709e1a74aeb3 (production correction4b362c6c). Report preserved outside the worktree at /tmp/issue793-astra-medium-review-attempt1.md. Final sequential Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 qualification/mutations exit0; recorded matrix names the exact candidate (/tmp/issue793-final-sequential-browser.log). SDK231/231, package/generated, static/object/ABI/realtime/high-water and current-native actual resource/26-mutation gates pass. Artifact /tmp/issue793-candidate1-artifact has Wasm SHA256c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4. Earlier unexplained Chromium timeout remains documented; no scheduling root cause or speculative fix is claimed.
+
+Delivery proceeds with release issue794's metadata-only checkpoint after this PASS, one coherent PR/main merge and required CI, then existing exact-main qualify/publish workflow. This verdict accepts793 only; parent763, adapter95, app210 and registry publication remain separate obligations.
+
+PR #795 bounded CI correction: Astra medium PASS. The no-capture browser fixture now declares `spectrumCollection: undefined`; release-mode fixtures use0.2.5 and normalize only the approved version/pin changes back to the original workflow hashes. Wrong-version/wrong-pin cases still reject; production, artifact, resource expectations and trust checks are unchanged. Actual resource/native comparison and separate26-mutation self-test pass (`/tmp/issue795-resources-actual-correction.log`, `/tmp/issue795-resources-self-test-correction.log`); release-mode/trust tests pass (`/tmp/issue795-publish-policy-correction-final.log`). Full231SDK tests pass after the clock correction. Earlier attribution of final-tree resource completion to `/tmp/issue793-native743081-resources.log` was insufficient and is superseded by these actual final-tree runs. Review: `/tmp/issue795-ci-correction-review.md`. Exact-head required CI, main delivery and publication remain pending.

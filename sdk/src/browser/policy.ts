@@ -8,7 +8,7 @@ import type { BootOptions } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { MisoEngineError } from "../core/errors.ts";
 import type { SourceSpec } from "../core/types.ts";
-import type { SpectrumQuery } from "../core/spectrum.ts";
+import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 
 /**
  * The browser choreography's decidable half (issue #243 S3, #240 S5).
@@ -64,6 +64,7 @@ function withRequiredShape(
   requireSampleRateHz: number,
   requireQuantumFrames: number,
   spectrum?: SpectrumQuery,
+  spectrumCollection?: SpectrumCollection,
 ): BootOptions {
   const options: {
     -readonly [Key in keyof BootOptions]?: BootOptions[Key];
@@ -74,6 +75,7 @@ function withRequiredShape(
   }
   if (policy.console !== undefined) options.console = policy.console;
   if (spectrum !== undefined) options.spectrum = spectrum;
+  if (spectrumCollection !== undefined) options.spectrumCollection = spectrumCollection;
   return options;
 }
 
@@ -89,8 +91,15 @@ export function workletBootOptions(
   policy: BrowserBootPolicy,
   physical: { readonly sampleRateHz: number; readonly quantumFrames: number },
   spectrum?: SpectrumQuery,
+  spectrumCollection?: SpectrumCollection,
 ): BootOptions {
-  return withRequiredShape(policy, physical.sampleRateHz, physical.quantumFrames, spectrum);
+  return withRequiredShape(
+    policy,
+    physical.sampleRateHz,
+    physical.quantumFrames,
+    spectrum,
+    spectrumCollection,
+  );
 }
 
 /**

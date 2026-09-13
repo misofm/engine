@@ -443,3 +443,116 @@ test("browser spectrum Worker initialization uses the total query deadline", asy
     await engine.close();
   }
 });
+
+test("collection selection deadline retires only its stream and holds late cleanup", async () => {
+  const worker = new SpectrumWorker();
+  let finishSelection;
+  let stops = 0;
+  let starts = 0;
+  const host = hostWithCapture({
+    async selectSpectrum() { return { result: 0 }; },
+    async startSpectrumStream() {
+      assert.ok(worker.messages.some((message) => message.type === "spectrum-init"),
+        "the shared Worker is initialized before native activation");
+      starts += 1;
+      return { result: 0, metadata: streamMetadata(1) };
+    },
+    selectSpectrumStream() {
+      return new Promise((resolve) => { finishSelection = resolve; });
+    },
+    async stopSpectrumStream() {
+      stops += 1;
+      return { result: 0, metadata: streamMetadata(5) };
+    },
+  });
+  const engine = await browserEngine(host, worker, {
+    spectrum: undefined,
+    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
+  });
+  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
+  try {
+    const handle = await engine.subscribeSpectrum(request);
+    await assert.rejects(handle.update({ ...request, smoothingMs: 100 }), /deadline/);
+    await assert.rejects(handle.pump(), /closed|stale/);
+    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
+    assert.equal(starts, 1, "late selection still owns the native cleanup boundary");
+    finishSelection({ result: 0, metadata: streamMetadata(1) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stops, 1);
+    const replacement = await engine.subscribeSpectrum(request);
+    assert.equal(worker.messages.filter((message) => message.type === "spectrum-init").length, 1);
+    await replacement.close();
+  } finally {
+    await engine.close();
+  }
+});
+
+test("initial collection selection has a deadline and cancels its late arm before retry", async () => {
+  let finishSelection;
+  let calls = 0;
+  let cancellations = 0;
+  let starts = 0;
+  const host = hostWithCapture({
+    selectSpectrum() {
+      calls += 1;
+      return calls === 1 ? new Promise((resolve) => { finishSelection = resolve; })
+        : Promise.resolve({ result: 0 });
+    },
+    async cancelSpectrum() { cancellations += 1; return { result: 0 }; },
+    async startSpectrumStream() { starts += 1; return { result: 0, metadata: streamMetadata(1) }; },
+    async stopSpectrumStream() { return { result: 0, metadata: streamMetadata(5) }; },
+  });
+  const engine = await browserEngine(host, new SpectrumWorker(), {
+    spectrum: undefined,
+    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
+  });
+  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
+  try {
+    await assert.rejects(engine.subscribeSpectrum(request), /deadline/);
+    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
+    assert.equal(starts, 0);
+    assert.equal(calls, 1);
+    finishSelection({ result: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancellations, 1);
+    const handle = await engine.subscribeSpectrum(request);
+    assert.equal(starts, 1);
+    await handle.close();
+  } finally {
+    await engine.close();
+  }
+});
+
+test("last spectrum close waits for the owner's automatic in-flight read", async () => {
+  let completeRead;
+  let markRead;
+  const readStarted = new Promise((resolve) => { markRead = resolve; });
+  let stops = 0;
+  const host = hostWithCapture({
+    async startSpectrumStream() { return { result: 0, metadata: streamMetadata(1) }; },
+    readSpectrumStream(buffer) {
+      markRead();
+      return new Promise((resolve) => {
+        completeRead = () => resolve({ result: 6, byteLength: 0, buffer, metadata: streamMetadata(2) });
+      });
+    },
+    async stopSpectrumStream() { stops += 1; return { result: 0, metadata: streamMetadata(5) }; },
+  });
+  const engine = await browserEngine(host, new SpectrumWorker());
+  try {
+    const handle = await engine.subscribeSpectrum({ ...PREPARED, smoothingMs: 0 });
+    await readStarted;
+    let closed = false;
+    const closing = handle.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stops, 0, "close must not race native cancellation with an owned read");
+    assert.equal(closed, false);
+    completeRead();
+    await closing;
+    assert.equal(stops, 1);
+    await assert.rejects(handle.pump(), /closed|stale/);
+  } finally {
+    completeRead?.();
+    await engine.close();
+  }
+});
