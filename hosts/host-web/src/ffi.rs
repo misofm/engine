@@ -16,11 +16,16 @@
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
+    MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
+    OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
+    ObservationAddress, ObservationReadChannels, ObservationReadError, ObservationReadValues,
     RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
-    RESPONSE_RESULT_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED,
-    STATE_READY, WebBootOptions, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    RESPONSE_RESULT_BYTES, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
+    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    RESULT_UNSUPPORTED, RESULT_WRONG_STATE, STATE_READY, WebBootOptions, WebObservationResult,
+    WebObservationSelection, WebResponseParameter, WebResponseRequest, WebResponseResult,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -52,6 +57,67 @@ struct ResponseStaging {
     parameters: Box<[WebResponseParameter]>,
     result: Vec<u8>,
     result_header: WebResponseResult,
+}
+
+struct ObservationStaging {
+    selections: Box<[WebObservationSelection]>,
+    addresses: Vec<ObservationAddress>,
+    rows: Box<[ObservationReadValues]>,
+    results: Vec<WebObservationResult>,
+    id: Box<[u8]>,
+}
+
+impl ObservationStaging {
+    fn new() -> Self {
+        Self {
+            selections: vec![WebObservationSelection::default(); MAXIMUM_OBSERVATION_READS]
+                .into_boxed_slice(),
+            addresses: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
+            rows: vec![ObservationReadValues::default(); MAXIMUM_OBSERVATION_READS]
+                .into_boxed_slice(),
+            results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
+            id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
+        }
+    }
+
+    fn reset_results(&mut self) {
+        self.addresses.clear();
+        self.results.clear();
+    }
+}
+
+/// Heap payload retained by the fixed selected-observation staging area.
+pub(crate) const fn observation_staging_retained_bytes() -> u64 {
+    let count = MAXIMUM_OBSERVATION_READS as u64;
+    count * size_of::<WebObservationSelection>() as u64
+        + count * size_of::<ObservationAddress>() as u64
+        + count * size_of::<ObservationReadValues>() as u64
+        + count * size_of::<WebObservationResult>() as u64
+        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
+}
+
+/// Largest one allocation in the fixed selected-observation staging area.
+pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
+    let count = MAXIMUM_OBSERVATION_READS as u64;
+    let selections = count * size_of::<WebObservationSelection>() as u64;
+    let addresses = count * size_of::<ObservationAddress>() as u64;
+    let rows = count * size_of::<ObservationReadValues>() as u64;
+    let results = count * size_of::<WebObservationResult>() as u64;
+    let ids = RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+    let mut largest = selections;
+    if addresses > largest {
+        largest = addresses;
+    }
+    if rows > largest {
+        largest = rows;
+    }
+    if results > largest {
+        largest = results;
+    }
+    if ids > largest {
+        largest = ids;
+    }
+    largest
 }
 
 impl ResponseStaging {
@@ -116,6 +182,7 @@ thread_local! {
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
     static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
     static RESPONSE_STAGING: RefCell<ResponseStaging> = RefCell::new(ResponseStaging::new());
+    static OBSERVATION_STAGING: RefCell<ObservationStaging> = RefCell::new(ObservationStaging::new());
 }
 
 fn next_handle() -> u32 {
@@ -209,6 +276,49 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         _ => return 0,
     };
     u32::try_from(bytes).unwrap_or(0)
+}
+
+fn observation_rack(raw: u32) -> Result<host_core::EffectRack, u32> {
+    match raw {
+        0 => Ok(host_core::EffectRack::Simd1),
+        1 => Ok(host_core::EffectRack::Dynamic),
+        2 => Ok(host_core::EffectRack::Simd2),
+        _ => Err(RESULT_INVALID_ARGUMENT),
+    }
+}
+
+fn observation_channels(raw: u32) -> Result<ObservationReadChannels, u32> {
+    match raw {
+        OBSERVATION_CHANNEL_LEFT => Ok(ObservationReadChannels::Left),
+        OBSERVATION_CHANNEL_RIGHT => Ok(ObservationReadChannels::Right),
+        OBSERVATION_CHANNEL_BOTH => Ok(ObservationReadChannels::Both),
+        _ => Err(RESULT_INVALID_ARGUMENT),
+    }
+}
+
+fn observation_rack_raw(rack: host_core::EffectRack) -> u32 {
+    match rack {
+        host_core::EffectRack::Simd1 => 0,
+        host_core::EffectRack::Dynamic => 1,
+        host_core::EffectRack::Simd2 => 2,
+    }
+}
+
+fn observation_status_raw(status: crate::ObservationReadStatus) -> u32 {
+    match status {
+        crate::ObservationReadStatus::Pending => OBSERVATION_STATUS_PENDING,
+        crate::ObservationReadStatus::Unarmed => OBSERVATION_STATUS_UNARMED,
+        crate::ObservationReadStatus::Ready => OBSERVATION_STATUS_READY,
+    }
+}
+
+fn observation_error_code(error: ObservationReadError) -> u32 {
+    match error {
+        ObservationReadError::WrongState => RESULT_WRONG_STATE,
+        ObservationReadError::InvalidSelection => RESULT_INVALID_ARGUMENT,
+        ObservationReadError::Unsupported => RESULT_UNSUPPORTED,
+        ObservationReadError::BufferTooSmall => RESULT_BUFFER_TOO_SMALL,
+    }
 }
 
 fn response_error_code(error: ResponsePreviewError) -> u32 {
@@ -1015,6 +1125,272 @@ pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_console_track_id(index))
+}
+
+/// Return the number of prepared resident observation effects in the current owner map.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_count(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.observation_binding_count()).unwrap_or(0)
+    })
+}
+
+/// Return the stable observation-ID staging address used by binding introspection.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_id_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.id.as_mut_ptr())
+    })
+}
+
+/// Return the maximum stable observation-ID staging length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_id_capacity() -> u32 {
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES
+}
+
+fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        with_host(handle, 0, |host| {
+            let Some(binding) = host.observation_binding(index) else {
+                return 0;
+            };
+            let bytes = if native {
+                binding.native_effect_id.as_bytes()
+            } else {
+                binding.effect_slot_id.as_bytes()
+            };
+            if bytes.len() > staging.id.len() {
+                return 0;
+            }
+            staging.id[..bytes.len()].copy_from_slice(bytes);
+            u32::try_from(bytes.len()).unwrap_or(0)
+        })
+    })
+}
+
+/// Copy one bound observation effect's stable local slot ID into the observation-ID staging area.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_effect_slot_id(handle: u32, index: u32) -> u32 {
+    copy_observation_id(handle, index, false)
+}
+
+/// Copy one bound observation effect's native contract ID into the observation-ID staging area.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, index: u32) -> u32 {
+    copy_observation_id(handle, index, true)
+}
+
+/// Return one bound observation effect's track index, or zero when out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.observation_binding(index)
+            .map_or(0, |binding| binding.address.track_index)
+    })
+}
+
+/// Return one bound observation effect's rack (`0`, `1` or `2`), or zero when out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.observation_binding(index)
+            .map_or(0, |binding| observation_rack_raw(binding.address.rack))
+    })
+}
+
+/// Return one bound observation effect's position within its rack, or zero when out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_effect_index(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.observation_binding(index)
+            .map_or(0, |binding| binding.address.effect_index)
+    })
+}
+
+/// Return one bound observation effect's declared tap count, or zero when out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_tap_count(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.observation_binding(index)
+            .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Return one bound observation effect's declared tap ID, or zero when out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_tap_id(
+    handle: u32,
+    index: u32,
+    tap_index: u32,
+) -> u32 {
+    with_host(handle, 0, |host| {
+        host.observation_binding(index)
+            .and_then(|binding| binding.descriptors.get(tap_index as usize))
+            .map_or(0, |tap| tap.id.0)
+    })
+}
+
+/// Return a writable bounded selected-observation input staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_selection_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.selections.as_mut_ptr())
+    })
+}
+
+/// Return the fixed selected-observation input record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_selection_bytes() -> u32 {
+    OBSERVATION_SELECTION_BYTES
+}
+
+/// Return the maximum selected-observation input record count.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
+    MAXIMUM_OBSERVATION_READS as u32
+}
+
+/// Read one complete bounded batch of selected resident observations.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        staging.reset_results();
+        let count = match usize::try_from(count) {
+            Ok(count) if count <= MAXIMUM_OBSERVATION_READS => count,
+            _ => return RESULT_BUFFER_TOO_SMALL,
+        };
+        for index in 0..count {
+            let selection = staging.selections[index];
+            if selection.struct_size != OBSERVATION_SELECTION_BYTES
+                || selection.abi_version != ABI_VERSION
+                || selection.reserved != 0
+            {
+                return RESULT_INVALID_ARGUMENT;
+            }
+            let rack = match observation_rack(selection.rack) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+            let channels = match observation_channels(selection.channels) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+            staging.addresses.push(ObservationAddress {
+                track_index: selection.track_index,
+                rack,
+                effect_index: selection.effect_index,
+                tap_id: selection.tap_id,
+                channels,
+            });
+        }
+        let read = {
+            let ObservationStaging {
+                addresses, rows, ..
+            } = &mut *staging;
+            with_host(
+                handle,
+                Err(ObservationReadError::InvalidSelection),
+                |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
+            )
+        };
+        if let Err(error) = read {
+            return observation_error_code(error);
+        }
+        let ObservationStaging {
+            addresses,
+            rows,
+            results,
+            ..
+        } = &mut *staging;
+        for (address, row) in addresses.iter().zip(rows.iter()).take(count) {
+            let Some(window) = row.window else {
+                results.push(WebObservationResult {
+                    struct_size: OBSERVATION_RESULT_BYTES,
+                    abi_version: ABI_VERSION,
+                    status: observation_status_raw(row.status),
+                    track_index: address.track_index,
+                    rack: observation_rack_raw(address.rack),
+                    effect_index: address.effect_index,
+                    tap_id: address.tap_id,
+                    channels: selection_channels_raw(address.channels),
+                    sample_rate_hz: row.sample_rate_hz,
+                    ..WebObservationResult::default()
+                });
+                continue;
+            };
+            results.push(WebObservationResult {
+                struct_size: OBSERVATION_RESULT_BYTES,
+                abi_version: ABI_VERSION,
+                status: observation_status_raw(row.status),
+                track_index: address.track_index,
+                rack: observation_rack_raw(address.rack),
+                effect_index: address.effect_index,
+                tap_id: address.tap_id,
+                channels: selection_channels_raw(address.channels),
+                sample_rate_hz: row.sample_rate_hz,
+                first_sample: window.first_sample,
+                end_sample: window.end_sample,
+                sequence: window.sequence,
+                blocks: window.blocks,
+                left_present: u32::from(row.left.is_some()),
+                right_present: u32::from(row.right.is_some()),
+                left: row.left.unwrap_or(0.0),
+                right: row.right.unwrap_or(0.0),
+                ..WebObservationResult::default()
+            });
+        }
+        RESULT_OK
+    })
+}
+
+fn selection_channels_raw(channels: ObservationReadChannels) -> u32 {
+    match channels {
+        ObservationReadChannels::Left => OBSERVATION_CHANNEL_LEFT,
+        ObservationReadChannels::Right => OBSERVATION_CHANNEL_RIGHT,
+        ObservationReadChannels::Both => OBSERVATION_CHANNEL_BOTH,
+    }
+}
+
+/// Return the selected-observation result-record address, or zero before a successful read.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_result_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(staging) = slot.try_borrow() else {
+            return 0;
+        };
+        pointer_u32(staging.results.as_ptr())
+    })
+}
+
+/// Return the selected-observation result byte length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_result_bytes() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|staging| {
+                staging
+                    .results
+                    .len()
+                    .checked_mul(OBSERVATION_RESULT_BYTES as usize)
+                    .and_then(|bytes| u32::try_from(bytes).ok())
+            })
+            .unwrap_or(0)
+    })
 }
 
 /// Return the number of sources the compiled session declares, or zero before compilation.

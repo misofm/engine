@@ -9,6 +9,11 @@ import type {
   SessionMap,
   SessionShape,
 } from "../core/boundary.ts";
+import type {
+  ObservationMap,
+  ObservationReadResult,
+  ObservationSelection,
+} from "../core/observation.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -117,6 +122,16 @@ export class OfflineEngine {
 
   sessionMap(): SessionMap {
     return this.#boundary.sessionMap();
+  }
+
+  /** Read the current prepared owner's stable resident-observation bindings. */
+  observationMap(): ObservationMap {
+    return this.#boundary.observationMap();
+  }
+
+  /** Read one bounded non-consuming batch from selected resident observation taps. */
+  readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
+    return this.#boundary.readObservations(selections);
   }
 
   /** A semantic console bound to the currently loaded session. */

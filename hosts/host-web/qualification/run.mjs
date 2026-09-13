@@ -28,7 +28,7 @@ const MUTATIONS = [
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
-  "sdk-response",
+  "sdk-response", "sdk-observation",
 ];
 
 function option(name) {
@@ -207,6 +207,24 @@ function validateSdkResponse(browserName, response) {
   "SDK input-filter Worker result did not preserve independent arrays and endpoints");
   gate(browserName, "sdk-response", response?.ownedAfterSecondQuery === true,
     "SDK response arrays were not stable after a subsequent query");
+  const observations = response?.observations;
+  gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
+    && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
+    && observations.pendingBeforeArm?.every((status) => status === "unarmed")
+    && observations.pendingAfterArm?.every((status) => status === "pending"),
+  "SDK observation map or availability statuses were not current-owner answers");
+  gate(browserName, "sdk-observation", observations.readyStatuses?.every((status) => status === "ready")
+    && observations.readyChannels?.[0] === "both"
+    && observations.projectedChannels?.[0] === "left"
+    && observations.readyValuesFinite === true
+    && observations.distinctChannelProjection === true
+    && observations.ownedAfterSecondQuery === true,
+  "SDK observation endpoint did not preserve exact owned data and channel projection");
+  gate(browserName, "sdk-observation", Array.isArray(observations.windows)
+    && observations.windows.length === 1
+    && observations.windows[0]?.endSample > observations.windows[0]?.firstSample
+    && observations.windows[0]?.blocks === 2,
+  "SDK observation endpoint did not return an actual resident window");
 }
 
 function mutate(result, mutation) {
@@ -225,6 +243,7 @@ function mutate(result, mutation) {
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
+  if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   return copy;
 }
 

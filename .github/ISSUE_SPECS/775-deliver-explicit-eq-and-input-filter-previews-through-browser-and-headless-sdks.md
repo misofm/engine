@@ -243,3 +243,7 @@ Fresh candidate-3 browser qualification passes in Chromium 151.0.7922.34, Firefo
 The narrow validator correction resolves the remaining known local integration failure. Earlier accepted response correctness, resource and lifecycle fixes remain unchanged. Root still owns committing the pending spec/result/matrix evidence, exact-head required CI, merge and GitHub synchronization; this verdict does not assert remote completion or close parent #763.
 
 No source edits, commits, GitHub mutations, agent delegation or expensive qualification reruns were performed by this reviewer. This report is the sole file written.
+
+## Merged delivery
+
+PR #776 merged at `fbfce55b4c0441128ea513162bfe016c6a624935` after required qualification `34738424659` succeeded on final head `27ed73f4c7622aab2843232edfbb624311d886ae`. Post-merge main qualification `34738707640` also passed. GitHub #775 is verified CLOSED. The completed clean/pushed #775 worktree was removed; source/history and `/tmp/issue775-*` artifacts/logs are preserved. Parent #763 remains OPEN; #777 is the next bounded SDK capability.

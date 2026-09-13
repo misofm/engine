@@ -636,7 +636,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     let mut document = one_track_session(128);
     // Keep this specifically a parser-projection boundary after JSON's denser model changed the
     // representative fixture ratio: insignificant trailing whitespace raises only parser input.
-    document.extend(core::iter::repeat_n(' ', 4_096));
+    document.extend(core::iter::repeat_n(' ', 8_192));
     let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,
@@ -4102,9 +4102,332 @@ fn observation_host(
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
 }
 
+/// One owner track with two resident effects. The gate is copied from the existing three-track
+/// observation fixture so this test exercises two effect owners without introducing a second
+/// session corpus.
+fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture");
+    let mut second_effect = model.tracks[2].dynamic.effects[0].clone();
+    // Remove the fixture's long hold so the quieter right lane closes during this short test
+    // window and publishes a distinct, nonzero pair of resident values.
+    second_effect.params[5].value = 0.0;
+    second_effect.params[6].value = 5.0;
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 8;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.tracks[0].dynamic.effects.push(second_effect);
+    let document = canonical_session_json(&model).expect("canonical two-effect session");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_observation_taps: 4,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
+}
+
+#[test]
+fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 2, None);
+    let selection = ObservationSelection {
+        track_id: "t0",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "comp",
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+
+    let unarmed = host
+        .read_observations(&[selection])
+        .expect("unarmed selected read");
+    assert_eq!(unarmed[0].status, ObservationReadStatus::Unarmed);
+    assert_eq!(unarmed[0].window, None);
+
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 1, 2, true),
+        RESULT_OK,
+        "the existing observe command remains the only arming path"
+    );
+    let pending = host
+        .read_observations(&[selection])
+        .expect("pending selected read");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, ObservationReadStatus::Pending);
+    assert_eq!(pending[0].window, None);
+    assert_eq!(pending[0].native_effect_id, "miso.compressor");
+    assert_eq!(pending[0].descriptor.display_unit, "dB");
+
+    for block in 0..2 {
+        feed_and_render_tracks(&mut host, block, 0.0);
+    }
+    let expected = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(ready, &selection).expect("resolved selection");
+        ready.effect_observations[effect]
+            .as_ref()
+            .expect("observation handle")
+            .readers[tap]
+            .read()
+            .expect("published window")
+    };
+    let rows = host
+        .read_observations(&[selection])
+        .expect("ready selected read");
+    assert_eq!(rows[0].status, ObservationReadStatus::Ready);
+    assert_eq!(rows[0].window, Some(expected));
+    assert_eq!(rows[0].left, Some(expected.left));
+    assert_eq!(rows[0].right, Some(expected.right));
+    assert_eq!(
+        rows[0].window.expect("row window").sequence,
+        expected.sequence
+    );
+    assert_eq!(
+        rows[0].window.expect("row window").first_sample,
+        expected.first_sample
+    );
+
+    // A re-arm is admitted before the next render block, but the reader still retains the prior
+    // resident cell. That old publication is before the admitted application sample and must not
+    // look ready while a replacement window is being built.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    let rearmed_pending = host
+        .read_observations(&[selection])
+        .expect("re-arm pending selected read");
+    assert_eq!(rearmed_pending[0].status, ObservationReadStatus::Pending);
+    assert_eq!(rearmed_pending[0].window, None);
+
+    // A second observed effect is read in the same caller-ordered batch. Both rows are sourced
+    // from their own resident cells, and neither selected read consumes the publication.
+    let gate_selection = ObservationSelection {
+        track_id: "t2",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "gate",
+        tap_id: 1,
+        channels: ObservationReadChannels::Left,
+    };
+    assert_eq!(observe(&mut host, 2, 1, 0, 1, 2, true), RESULT_OK);
+    for block in 2..4 {
+        feed_and_render_tracks(&mut host, block, 0.0);
+    }
+    let expected_gate = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(ready, &gate_selection).expect("resolved gate");
+        ready.effect_observations[effect]
+            .as_ref()
+            .expect("gate observation handle")
+            .readers[tap]
+            .read()
+            .expect("gate published window")
+    };
+    let pair = host
+        .read_observations(&[selection, gate_selection])
+        .expect("two-effect selected read");
+    assert_eq!(pair.len(), 2);
+    assert_eq!(pair[0].track_id.as_ref(), "t0");
+    assert_eq!(pair[0].window.map(|window| window.first_sample), Some(256));
+    assert_eq!(pair[1].track_id.as_ref(), "t2");
+    assert_eq!(pair[1].window, Some(expected_gate));
+    assert_eq!(pair[1].left, Some(expected_gate.left));
+    assert_eq!(pair[1].right, None);
+    let pair_again = host
+        .read_observations(&[selection, gate_selection])
+        .expect("repeat two-effect selected read");
+    assert_eq!(pair_again[0].window, pair[0].window);
+    assert_eq!(pair_again[1].window, pair[1].window);
+    let expected_rearmed = pair[0].window.expect("re-armed compressor window");
+
+    // A selected read does not acknowledge the shared reader. The same exact publication is
+    // returned again, while a different requested channel only changes the owned projection.
+    let right = host
+        .read_observations(&[ObservationSelection {
+            channels: ObservationReadChannels::Right,
+            ..selection
+        }])
+        .expect("repeat selected read");
+    assert_eq!(right[0].window, Some(expected_rearmed));
+    assert_eq!(right[0].left, None);
+    assert_eq!(right[0].right, Some(expected_rearmed.right));
+
+    let invalid = [
+        selection,
+        ObservationSelection {
+            effect_slot_id: "missing",
+            ..selection
+        },
+    ];
+    assert_eq!(
+        host.read_observations(&invalid).unwrap_err(),
+        ObservationReadError::InvalidSelection,
+        "the complete batch is validated before any row is returned"
+    );
+    assert_eq!(
+        host.read_observations(&[selection, selection]).unwrap_err(),
+        ObservationReadError::InvalidSelection
+    );
+}
+
+#[test]
+fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
+    const QUANTUM: u32 = 128;
+    let mut host = same_track_observation_host(QUANTUM);
+    let compressor = ObservationSelection {
+        track_id: "t0",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "comp",
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    let gate = ObservationSelection {
+        track_id: "t0",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "gate",
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 1, 1, 3, true), RESULT_OK);
+    for block in 0..3 {
+        feed_and_render_channels(&mut host, block, 0.75, 0.125);
+    }
+
+    let (compressor_window, compressor_consumed) = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(ready, &compressor).expect("compressor address");
+        let reader = &ready.effect_observations[effect]
+            .as_ref()
+            .expect("compressor observation handle")
+            .readers[tap];
+        (
+            reader.read().expect("compressor published window"),
+            reader.consumed_sequence(),
+        )
+    };
+    let (gate_window, gate_consumed) = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(ready, &gate).expect("gate address");
+        let reader = &ready.effect_observations[effect]
+            .as_ref()
+            .expect("gate observation handle")
+            .readers[tap];
+        (
+            reader.read().expect("gate published window"),
+            reader.consumed_sequence(),
+        )
+    };
+    assert_eq!(compressor_window.blocks, 2);
+    assert_eq!(gate_window.blocks, 3);
+    assert_ne!(compressor_window.left, compressor_window.right);
+    assert_ne!(gate_window.left, gate_window.right);
+    assert_eq!(compressor_consumed, 0);
+    assert_eq!(gate_consumed, 0);
+
+    let rows = host
+        .read_observations(&[compressor, gate])
+        .expect("same-track two-effect selected read");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].effect_slot_id.as_ref(), "comp");
+    assert_eq!(rows[1].effect_slot_id.as_ref(), "gate");
+    assert_eq!(rows[0].window, Some(compressor_window));
+    assert_eq!(rows[1].window, Some(gate_window));
+    assert_eq!(rows[0].left, Some(compressor_window.left));
+    assert_eq!(rows[0].right, Some(compressor_window.right));
+    assert_eq!(rows[1].left, Some(gate_window.left));
+    assert_eq!(rows[1].right, Some(gate_window.right));
+
+    let (compressor_after, gate_after) = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (compressor_effect, compressor_tap) =
+            resolve_observation(ready, &compressor).expect("compressor address");
+        let (gate_effect, gate_tap) = resolve_observation(ready, &gate).expect("gate address");
+        (
+            ready.effect_observations[compressor_effect]
+                .as_ref()
+                .expect("compressor observation handle")
+                .readers[compressor_tap]
+                .consumed_sequence(),
+            ready.effect_observations[gate_effect]
+                .as_ref()
+                .expect("gate observation handle")
+                .readers[gate_tap]
+                .consumed_sequence(),
+        )
+    };
+    assert_eq!(compressor_after, compressor_consumed);
+    assert_eq!(gate_after, gate_consumed);
+}
+
+#[test]
+fn selected_observation_numeric_read_refuses_failed_host_without_touching_output() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 0, None);
+    host.status.next_absolute_sample = u64::MAX;
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(host.status().state, STATE_FAILED);
+    let address = ObservationAddress {
+        track_index: 0,
+        rack: EffectRack::Dynamic,
+        effect_index: 0,
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    let sentinel = ObservationReadValues {
+        status: ObservationReadStatus::Ready,
+        sample_rate_hz: 48_000,
+        left: Some(3.5),
+        right: Some(-2.0),
+        ..ObservationReadValues::default()
+    };
+    let mut output = [sentinel];
+    assert_eq!(
+        host.read_observation_addresses_into(&[address], &mut output),
+        Err(ObservationReadError::WrongState)
+    );
+    assert_eq!(
+        output,
+        [sentinel],
+        "a failed read cannot overwrite caller output"
+    );
+    assert!(
+        host.ready.is_some(),
+        "the failed host retains its prepared owner"
+    );
+}
+
 /// Feed one quantum of a constant to every track's shared source and render it.
 fn feed_and_render_tracks(host: &mut AudioWorkletEngineHost, block: u64, value: f32) {
     feed_and_render(host, 1, block, value);
+}
+
+/// Feed distinct nonzero owner lanes to the shared source and render one quantum.
+fn feed_and_render_channels(
+    host: &mut AudioWorkletEngineHost,
+    block: u64,
+    left_value: f32,
+    right_value: f32,
+) {
+    let quantum = host.status().quantum_frames as usize;
+    let left = vec![left_value; quantum];
+    let right = vec![right_value; quantum];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            block * quantum as u64,
+            host.status().sample_rate_hz,
+            &planes,
+            quantum as u32,
+            false,
+        ),
+        RESULT_OK,
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
 }
 
 /// Stage and submit one observation subscribe/unsubscribe for one addressed effect.

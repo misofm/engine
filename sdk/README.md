@@ -242,6 +242,32 @@ Call `await engine.close()` when the browser session is finished. It disposes th
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
 host's MessagePort has already failed.
 
+To read an already armed resident tap, name the current owner with stable session IDs and choose
+the lanes explicitly. The headless call is synchronous; the browser call returns a Promise. Both
+return the owner's native value and its actual resident window, and a read does not consume that
+window:
+
+```ts
+const selection = {
+  trackId: "vocal", rack: "dynamic", effectSlotId: "compressor", tapId: 1, channels: "both",
+} as const;
+const console = offline.console();
+await console.submit(
+  console.edit.track("vocal").effect("dynamic", 0, "miso.compressor")
+    .observe("Gain Reduction", true, 2),
+);
+offline.render();
+const nativeRows = offline.readObservations([selection]);
+const browserRows = await browser.readObservations([selection]);
+console.log(nativeRows[0].status, nativeRows[0].window?.firstSample, nativeRows[0].left);
+console.log(browserRows[0].window?.sequence, browserRows[0].descriptor.displayUnit);
+```
+
+`pending` means the arm has no complete window yet and `unarmed` means the tap is disarmed. A
+re-arm suppresses the prior resident window until a fresh one closes. The map is resolved against
+the current prepared owner on every read, so a reload or closed browser host cannot reuse an old
+numeric position.
+
 For input-source spectrum, `Msb1RingObserver` from `@misofm/engine/browser` reads an
 existing feed ring without consuming audio or changing shared bytes:
 

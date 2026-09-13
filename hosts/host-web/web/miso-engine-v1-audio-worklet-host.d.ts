@@ -379,6 +379,56 @@ export interface MisoSessionMap {
   readonly metersAttached: boolean;
 }
 
+/** Numeric current-owner address used by the additive selected-observation request. */
+export interface MisoObservationAddress {
+  readonly trackIndex: number;
+  readonly rack: number;
+  readonly effectIndex: number;
+  readonly tapId: number;
+  /** `1` left, `2` right or `3` both. */
+  readonly channels: number;
+}
+
+/** One resident observation binding, in the prepared owner's stable map order. */
+export interface MisoObservationMapBinding {
+  readonly trackIndex: number;
+  readonly rack: number;
+  readonly effectIndex: number;
+  readonly effectSlotId: string;
+  readonly nativeEffectId: string;
+  readonly tapIds: number[];
+}
+
+/** The current owner's observation map. */
+export interface MisoObservationMap {
+  readonly tag: "miso.observationmap.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly bindings: MisoObservationMapBinding[];
+}
+
+/** One numeric row copied from the fixed observation-result records. */
+export interface MisoObservationReadRow extends MisoObservationAddress {
+  readonly status: number;
+  readonly sampleRateHz: number;
+  readonly firstSample: bigint;
+  readonly endSample: bigint;
+  readonly sequence: bigint;
+  readonly blocks: number;
+  readonly leftPresent: number;
+  readonly rightPresent: number;
+  readonly left: number;
+  readonly right: number;
+}
+
+/** One bounded selected-observation reply. */
+export interface MisoObservationReadReply {
+  readonly tag: "miso.observation.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly rows: MisoObservationReadRow[];
+}
+
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -638,6 +688,10 @@ export interface MisoAudioWorkletHost {
   /// `MisoMeterFrame.trackGrDb` array structurally cannot: which tracks have an observed effect
   /// at all. See `MisoObservationAck` for what a refusal settles as.
   observe(request: MisoObservationRequest): Promise<MisoObservationAck>;
+  /// Read the current prepared owner's stable observation bindings.
+  observationMap(): Promise<MisoObservationMap>;
+  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
+  readObservations(request: { selections: MisoObservationAddress[] }): Promise<MisoObservationReadReply>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
   /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,

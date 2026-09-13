@@ -59,6 +59,19 @@ const OBSERVE_UNSUBSCRIBE_KIND = 8;
 const SUBSCRIPTION_FIELDS = [
   "trackIndex", "rack", "effectIndex", "tapId", "windowBlocks", "armed",
 ];
+const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
+const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
+const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
+const OBSERVATION_STATUSES = new Set([1, 2, 3]);
+const OBSERVATION_SELECTION_BYTES = 32;
+const OBSERVATION_RESULT_BYTES = 96;
+const OBSERVATION_MAP_FIELDS = [
+  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
+];
+const OBSERVATION_ROW_FIELDS = [
+  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
+  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
+];
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
@@ -72,6 +85,42 @@ function validSubscription(subscription) {
     && validU32(subscription.tapId) && subscription.tapId > 0
     && validU32(subscription.windowBlocks)
     && typeof subscription.armed === "boolean";
+}
+
+function validObservationAddress(address) {
+  return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
+    && validU32(address.trackIndex)
+    && validU32(address.rack) && address.rack <= 2
+    && validU32(address.effectIndex)
+    && validU32(address.tapId) && address.tapId > 0
+    && validU32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
+}
+
+function validObservationMapBinding(binding) {
+  return hasExactFields(binding, OBSERVATION_MAP_FIELDS)
+    && validU32(binding.trackIndex)
+    && validU32(binding.rack) && binding.rack <= 2
+    && validU32(binding.effectIndex)
+    && typeof binding.effectSlotId === "string" && binding.effectSlotId.length > 0
+    && typeof binding.nativeEffectId === "string" && binding.nativeEffectId.length > 0
+    && Array.isArray(binding.tapIds) && binding.tapIds.length > 0
+    && binding.tapIds.every((tapId) => validU32(tapId) && tapId > 0);
+}
+
+function validObservationRow(row) {
+  return hasExactFields(row, OBSERVATION_ROW_FIELDS)
+    && validU32(row.trackIndex)
+    && validU32(row.rack) && row.rack <= 2
+    && validU32(row.effectIndex)
+    && validU32(row.tapId) && row.tapId > 0
+    && validU32(row.channels) && OBSERVATION_CHANNELS.has(row.channels)
+    && validU32(row.status) && OBSERVATION_STATUSES.has(row.status)
+    && validU32(row.sampleRateHz) && validU64(row.firstSample)
+    && validU64(row.endSample) && validU64(row.sequence)
+    && validU32(row.blocks) && validU32(row.leftPresent) && row.leftPresent <= 1
+    && validU32(row.rightPresent) && row.rightPresent <= 1
+    && typeof row.left === "number" && Number.isFinite(row.left)
+    && typeof row.right === "number" && Number.isFinite(row.right);
 }
 // Issue #143 froze reasons 10 and 11; issue #151 found that this file still wrote the bound as
 // the literal `<= 9`, so the only two reasons the observation path ever returns read as malformed
@@ -313,6 +362,7 @@ class MisoAudioWorkletHost {
   #inFlightSeeks = new Map();
   #inFlightStatus = 0;
   #inFlightCommands = 0;
+  #inFlightObservationReads = 0;
   #inFlightLease = new Set();
   #commandQueueRecords;
   #consoleMeterBlocks;
@@ -384,7 +434,10 @@ class MisoAudioWorkletHost {
       this.#inFlightStatus -= 1;
     } else if (pending.response === "command") {
       this.#inFlightCommands -= 1;
-    } else if (pending.response === "lease" || pending.response === "sessionMap") {
+    } else if (pending.response === "observationRead") {
+      this.#inFlightObservationReads -= 1;
+    } else if (pending.response === "lease" || pending.response === "sessionMap"
+      || pending.response === "observationMap") {
       this.#inFlightLease.delete(pending.leaseKind);
     }
   }
@@ -477,6 +530,10 @@ class MisoAudioWorkletHost {
         ]
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached"]
+          : pending.response === "observationMap"
+            ? ["tag", "requestId", "result", "bindings"]
+            : pending.response === "observationRead"
+              ? ["tag", "requestId", "result", "rows"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -487,6 +544,10 @@ class MisoAudioWorkletHost {
       ? "miso.status.v1"
       : pending.response === "sessionMap"
         ? "miso.sessionmap.v1"
+        : pending.response === "observationMap"
+          ? "miso.observationmap.v1"
+          : pending.response === "observationRead"
+            ? "miso.observation.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -512,6 +573,16 @@ class MisoAudioWorkletHost {
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
     );
+    const validObservationMap = pending.response !== "observationMap" || (
+      message.result === RESULT_OK && Array.isArray(message.bindings)
+      && message.bindings.every(validObservationMapBinding)
+    );
+    const validObservationRead = pending.response !== "observationRead" || (
+      Array.isArray(message.rows)
+      && (message.result !== RESULT_OK || message.rows.length === pending.observationCount)
+      && (message.result === RESULT_OK || message.rows.length === 0)
+      && message.rows.every(validObservationRow)
+    );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
       && validResult(message.lastResult) && message.backend === this.#numericBackend
@@ -522,7 +593,8 @@ class MisoAudioWorkletHost {
     );
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validCommandAck || !validSessionMap) {
+        || !validSourcePlanes || !validStatus || !validCommandAck || !validSessionMap
+        || !validObservationMap || !validObservationRead) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -543,6 +615,7 @@ class MisoAudioWorkletHost {
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
     this.#inFlightStatus = 0;
+    this.#inFlightObservationReads = 0;
     for (const pending of unsettled) pending.reject(error);
   }
 
@@ -558,7 +631,8 @@ class MisoAudioWorkletHost {
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
     // authority; this one only avoids paying a message round trip to be told so.
     if (response === "command") return this.#inFlightCommands >= this.#commandQueueRecords;
-    if (response === "lease" || response === "sessionMap") {
+    if (response === "observationRead") return this.#inFlightObservationReads >= 1;
+    if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       return this.#inFlightLease.has(sourceId);
     }
     return false; // dispose is terminal and waits for nothing
@@ -573,7 +647,9 @@ class MisoAudioWorkletHost {
       this.#inFlightStatus += 1;
     } else if (response === "command") {
       this.#inFlightCommands += 1;
-    } else if (response === "lease" || response === "sessionMap") {
+    } else if (response === "observationRead") {
+      this.#inFlightObservationReads += 1;
+    } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       this.#inFlightLease.add(sourceId);
     }
   }
@@ -602,6 +678,7 @@ class MisoAudioWorkletHost {
         sourceId,
         leaseKind: sourceId,
         commandCount: stamped.count ?? 0,
+        observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         resolve,
         reject,
         response,
@@ -768,6 +845,34 @@ class MisoAudioWorkletHost {
   /// sends a string on the command path.
   sessionMap() {
     return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
+  }
+
+  /// Read the current prepared owner's stable observation bindings.
+  observationMap() {
+    return this.#request(
+      { tag: "miso.observationmap.v1" },
+      [],
+      "observationMap",
+      false,
+      undefined,
+      "observationMap",
+    );
+  }
+
+  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
+  readObservations(request) {
+    if (!hasExactFields(request, ["selections"])
+        || !Array.isArray(request.selections)
+        || request.selections.length === 0
+        || request.selections.length > MAXIMUM_OBSERVATION_READS
+        || !request.selections.every(validObservationAddress)) {
+      return Promise.reject(webError(1));
+    }
+    return this.#request(
+      { tag: "miso.observation.v1", selections: request.selections },
+      [],
+      "observationRead",
+    );
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).

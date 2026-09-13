@@ -1,8 +1,115 @@
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { effect } from "../../../sdk/src/core/session.ts";
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
+import { createEngine } from "../../../sdk/src/browser/engine.ts";
+import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
 
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
+const OBSERVATION_FRAMES = 2_048;
+
+function observationSelection(effectSlotId: string, channels: "left" | "right" | "both" = "both") {
+  return { trackId: "track", rack: "dynamic" as const, effectSlotId, tapId: 1, channels };
+}
+
+function observationPlanes(block: number): Float32Array[] {
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  left.fill(0.5 + block * 0.001);
+  right.fill(0.5 + block * 0.001);
+  return [left, right];
+}
+
+async function runSdkObservationQualification(): Promise<Record<string, unknown>> {
+  const document = new TextEncoder().encode(
+    await (await fetch("/qualification/observation-session.json")).text(),
+  );
+  const browser = await createEngine({
+    document,
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+      commandQueueRecords: 64, observationTaps: 4,
+    } },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: OBSERVATION_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      tracks: ["track"],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
+      // OfflineAudioContext has no close() lifecycle method; BrowserEngine's injected-context
+      // seam still requires one so the host can use the same cleanup path as a live context.
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  try {
+    const selections = [observationSelection("comp")];
+    const map = await browser.observationMap();
+    const pendingBeforeArm = await browser.readObservations(selections);
+    const subscriptions = await browser.host.observe({ subscriptions: [
+      { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 2, armed: true },
+    ] });
+    const pendingAfterArm = await browser.readObservations(selections);
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const planes = observationPlanes(block);
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "console-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes,
+        frames: 128,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("SDK observation source submission refused");
+    }
+    await browser.context.startRendering();
+    const ready = await browser.readObservations(selections);
+    const projected = await browser.readObservations([observationSelection("comp", "left")]);
+    const repeated = await browser.readObservations(selections);
+    const first = ready[0];
+    const projectedRow = projected[0];
+    return {
+      mapBindings: map.bindings.map((binding) => binding.effectSlotId),
+      subscribeResult: subscriptions.result,
+      pendingBeforeArm: pendingBeforeArm.map((row) => row.status),
+      pendingAfterArm: pendingAfterArm.map((row) => row.status),
+      readyStatuses: ready.map((row) => row.status),
+      readyChannels: ready.map((row) => row.channels),
+      readyValuesFinite: ready.every((row) =>
+        (row.left === undefined || Number.isFinite(row.left))
+        && (row.right === undefined || Number.isFinite(row.right))),
+      windows: ready.map((row) => row.window === undefined ? null : {
+        firstSample: row.window.firstSample.toString(),
+        endSample: row.window.endSample.toString(),
+        sequence: row.window.sequence.toString(),
+        blocks: row.window.blocks,
+      }),
+      ownedAfterSecondQuery: ready.length === repeated.length && ready.every((row, index) => {
+        const other = repeated[index];
+        return row.left === other?.left && row.right === other?.right
+          && row.window?.firstSample === other?.window?.firstSample
+          && row.window?.endSample === other?.window?.endSample
+          && row.window?.sequence === other?.window?.sequence
+          && row.window?.blocks === other?.window?.blocks;
+      }),
+      projectedChannels: projected.map((row) => row.channels),
+      distinctChannelProjection: first?.left !== undefined && first?.right !== undefined
+        && projectedRow?.left !== undefined && projectedRow?.right === undefined,
+    };
+  } finally {
+    await browser.close();
+  }
+}
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
   const bytes = new Uint8Array(await (await fetch("/artifacts/miso-engine-v1-audio-worklet.simd128.wasm")).arrayBuffer());
@@ -61,6 +168,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
         right: Array.from(filters.totalRightDb ?? []),
       },
       ownedAfterSecondQuery: eqLeft.every((value, index) => value === eq.totalLeftDb?.[index]),
+      observations: await runSdkObservationQualification(),
     };
   } finally {
     await preview.close();

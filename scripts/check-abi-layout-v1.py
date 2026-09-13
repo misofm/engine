@@ -113,6 +113,22 @@ EXPORTS = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_effect_index",
+    "miso_engine_web_v1_observation_effect_slot_id",
+    "miso_engine_web_v1_observation_id_capacity",
+    "miso_engine_web_v1_observation_id_ptr",
+    "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_rack",
+    "miso_engine_web_v1_observation_read",
+    "miso_engine_web_v1_observation_result_bytes",
+    "miso_engine_web_v1_observation_result_ptr",
+    "miso_engine_web_v1_observation_selection_bytes",
+    "miso_engine_web_v1_observation_selection_capacity",
+    "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_tap_count",
+    "miso_engine_web_v1_observation_tap_id",
+    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_close",
@@ -145,6 +161,8 @@ STRUCTURES = {
     "resourceReport": 224,
     "meterHeader": 64,
     "commandReport": 48,
+    "observationSelection": 32,
+    "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
     "responseResult": 112,
@@ -180,6 +198,15 @@ RESPONSE_RESULT_FIELDS = [
     "sampleRateHz", "reserved0", "configurationId", "floorDb", "bypass", "enabledLeft",
     "enabledRight", "retainedBytes", "resultBytes", "frequenciesOffset", "totalLeftOffset",
     "totalRightOffset", "sectionsLeftOffset", "sectionsRightOffset", "reserved",
+]
+OBSERVATION_SELECTION_FIELDS = [
+    "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
+    "reserved",
+]
+OBSERVATION_RESULT_FIELDS = [
+    "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
+    "channels", "sampleRateHz", "reserved0", "firstSample", "endSample", "sequence", "blocks",
+    "leftPresent", "rightPresent", "left", "right", "reserved",
 ]
 
 WIDTHS = {"u8": 1, "u32": 4, "u64": 8}
@@ -304,6 +331,12 @@ def validate(document: object) -> None:
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
+    for name, expected_fields in (
+        ("observationSelection", OBSERVATION_SELECTION_FIELDS),
+        ("observationResult", OBSERVATION_RESULT_FIELDS),
+    ):
+        require([row["name"] for row in structures[name]["fields"]] == expected_fields,
+                f"{name} names exactly {expected_fields}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
@@ -313,7 +346,8 @@ def validate(document: object) -> None:
         "diagnosticBytes", "defaultCommandQueueRecords", "defaultMeterBlocks",
         "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
         "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
-        "responseGrids", "responseChannels", "responseFields",
+        "responseGrids", "responseChannels", "responseFields", "observationChannels",
+        "observationStatuses",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -327,6 +361,8 @@ def validate(document: object) -> None:
     check_named(document, "responseGrids", RESPONSE_GRIDS)
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
     check_named(document, "responseFields", RESPONSE_FIELDS)
+    check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
+    check_named(document, "observationStatuses", [(1, "pending"), (2, "unarmed"), (3, "ready")])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a

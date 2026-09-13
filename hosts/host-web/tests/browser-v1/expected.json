@@ -59,9 +59,9 @@
         "idStagingBytes": "14",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "4339",
-        "bridgeRetainedBytes": "24848",
-        "largestBridgeAllocationBytes": "16384",
+        "bridgeMetadataBytes": "59770",
+        "bridgeRetainedBytes": "80279",
+        "largestBridgeAllocationBytes": "24576",
         "sourceTotalBytes": "2206",
         "sourceOverheadBytes": "1182",
         "effectScalarStateBytes": "0",
@@ -71,7 +71,7 @@
         "graphIncrementalPlanBytes": "29578",
         "graphMetadataBytes": "3739",
         "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "16384",
+        "largestNamedAllocationBytes": "24576",
         "observationRetainedBytes": "0"
       },
       "results": {

@@ -47,6 +47,22 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_effect_index",
+    "miso_engine_web_v1_observation_effect_slot_id",
+    "miso_engine_web_v1_observation_id_capacity",
+    "miso_engine_web_v1_observation_id_ptr",
+    "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_rack",
+    "miso_engine_web_v1_observation_read",
+    "miso_engine_web_v1_observation_result_bytes",
+    "miso_engine_web_v1_observation_result_ptr",
+    "miso_engine_web_v1_observation_selection_bytes",
+    "miso_engine_web_v1_observation_selection_capacity",
+    "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_tap_count",
+    "miso_engine_web_v1_observation_tap_id",
+    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_close",
@@ -431,6 +447,151 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 32,
           "type": "u64[2]"
+        }
+      ]
+    },
+    "observationSelection": {
+      "bytes": 32,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "trackIndex",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "rack",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "effectIndex",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "tapId",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "reserved",
+          "offset": 28,
+          "type": "u32"
+        }
+      ]
+    },
+    "observationResult": {
+      "bytes": 96,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "trackIndex",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "rack",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "effectIndex",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "tapId",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "sampleRateHz",
+          "offset": 32,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 36,
+          "type": "u32"
+        },
+        {
+          "name": "firstSample",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "endSample",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "sequence",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "blocks",
+          "offset": 64,
+          "type": "u32"
+        },
+        {
+          "name": "leftPresent",
+          "offset": 68,
+          "type": "u32"
+        },
+        {
+          "name": "rightPresent",
+          "offset": 72,
+          "type": "u32"
+        },
+        {
+          "name": "left",
+          "offset": 76,
+          "type": "f32"
+        },
+        {
+          "name": "right",
+          "offset": 80,
+          "type": "f32"
+        },
+        {
+          "name": "reserved",
+          "offset": 84,
+          "type": "u32[3]"
         }
       ]
     },
@@ -986,6 +1147,34 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
+      }
+    ],
+    "observationChannels": [
+      {
+        "value": 1,
+        "name": "left"
+      },
+      {
+        "value": 2,
+        "name": "right"
+      },
+      {
+        "value": 3,
+        "name": "both"
+      }
+    ],
+    "observationStatuses": [
+      {
+        "value": 1,
+        "name": "pending"
+      },
+      {
+        "value": 2,
+        "name": "unarmed"
+      },
+      {
+        "value": 3,
+        "name": "ready"
       }
     ],
     "responseTargets": [
