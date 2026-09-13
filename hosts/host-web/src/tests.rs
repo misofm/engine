@@ -4163,6 +4163,57 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         expected.first_sample
     );
 
+    // A re-arm is admitted before the next render block, but the reader still retains the prior
+    // resident cell. That old publication is before the admitted application sample and must not
+    // look ready while a replacement window is being built.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    let rearmed_pending = host
+        .read_observations(&[selection])
+        .expect("re-arm pending selected read");
+    assert_eq!(rearmed_pending[0].status, ObservationReadStatus::Pending);
+    assert_eq!(rearmed_pending[0].window, None);
+
+    // A second observed effect is read in the same caller-ordered batch. Both rows are sourced
+    // from their own resident cells, and neither selected read consumes the publication.
+    let gate_selection = ObservationSelection {
+        track_id: "t2",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "gate",
+        tap_id: 1,
+        channels: ObservationReadChannels::Left,
+    };
+    assert_eq!(observe(&mut host, 2, 1, 0, 1, 2, true), RESULT_OK);
+    for block in 2..4 {
+        feed_and_render_tracks(&mut host, block, 0.0);
+    }
+    let expected_gate = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(&ready, &gate_selection).expect("resolved gate");
+        ready.effect_observations[effect]
+            .as_ref()
+            .expect("gate observation handle")
+            .readers[tap]
+            .read()
+            .expect("gate published window")
+    };
+    let pair = host
+        .read_observations(&[selection, gate_selection])
+        .expect("two-effect selected read");
+    assert_eq!(pair.len(), 2);
+    assert_eq!(pair[0].track_id.as_ref(), "t0");
+    assert_eq!(pair[0].window.map(|window| window.first_sample), Some(256));
+    assert_eq!(pair[1].track_id.as_ref(), "t2");
+    assert_eq!(pair[1].window, Some(expected_gate));
+    assert_eq!(pair[1].left, Some(expected_gate.left));
+    assert_eq!(pair[1].right, None);
+    let pair_again = host
+        .read_observations(&[selection, gate_selection])
+        .expect("repeat two-effect selected read");
+    assert_eq!(pair_again[0].window, pair[0].window);
+    assert_eq!(pair_again[1].window, pair[1].window);
+    let expected_rearmed = pair[0].window.expect("re-armed compressor window");
+
     // A selected read does not acknowledge the shared reader. The same exact publication is
     // returned again, while a different requested channel only changes the owned projection.
     let right = host
@@ -4171,9 +4222,9 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
             ..selection
         }])
         .expect("repeat selected read");
-    assert_eq!(right[0].window, Some(expected));
+    assert_eq!(right[0].window, Some(expected_rearmed));
     assert_eq!(right[0].left, None);
-    assert_eq!(right[0].right, Some(expected.right));
+    assert_eq!(right[0].right, Some(expected_rearmed.right));
 
     let invalid = [
         selection,

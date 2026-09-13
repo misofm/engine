@@ -933,6 +933,11 @@ struct ReadyOwnership {
     /// it forgot its last value. The subscription state is control-plane state, so it lives on the
     /// control plane, updated by the one function that admits the record.
     observation_armed: Box<[u32]>,
+    /// Admission sample at which each tap's current arm was acknowledged. A resident cell keeps
+    /// its previous window forever, so a read is fresh for a re-arm only when the whole returned
+    /// window starts at or after this sample. The nested index is the dense effect slot followed
+    /// by that descriptor's tap index; zero means no command has changed the tap yet.
+    observation_arm_samples: Box<[Box<[u64]>]>,
     /// The designated master track, or `None` (issue #143 D6).
     master_track: Option<u32>,
     /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R, track0 GR, .., trackN GR,
@@ -1103,7 +1108,12 @@ impl ReadyOwnership {
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
     /// free-room pass has already ruled out.
-    fn push(&mut self, slot: usize, record: AdmittedCommand) -> Result<(), ()> {
+    fn push(
+        &mut self,
+        slot: usize,
+        record: AdmittedCommand,
+        applied_at_sample: u64,
+    ) -> Result<(), ()> {
         let tracks = self.tracks.len();
         match record {
             AdmittedCommand::Matrix(record) => {
@@ -1130,6 +1140,11 @@ impl ReadyOwnership {
                 {
                     let bit = 1_u32 << tap_index;
                     *mask = if armed { *mask | bit } else { *mask & !bit };
+                    if let Some(samples) = self.observation_arm_samples.get_mut(effect)
+                        && let Some(sample) = samples.get_mut(tap_index as usize)
+                    {
+                        *sample = applied_at_sample;
+                    }
                 }
                 let producer = self
                     .effect_controls
@@ -1480,10 +1495,17 @@ impl AudioWorkletEngineHost {
                 & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
             let window = (armed != 0)
                 .then(|| {
+                    let arm_sample = ready
+                        .observation_arm_samples
+                        .get(effect)
+                        .and_then(|samples| samples.get(tap_index))
+                        .copied()
+                        .unwrap_or(0);
                     handle
                         .readers
                         .get(tap_index)
                         .and_then(|reader| reader.read())
+                        .filter(|window| window.first_sample >= arm_sample)
                 })
                 .flatten();
             let status = if armed == 0 {
@@ -1993,7 +2015,7 @@ impl AudioWorkletEngineHost {
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
-        match admit_commands(ready, bytes, count as usize) {
+        match admit_commands(ready, bytes, count as usize, applied_at_sample) {
             Ok(()) => {
                 self.command_report.applied_at_sample = applied_at_sample;
                 self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
@@ -2821,8 +2843,9 @@ fn admit_commands(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
     count: usize,
+    applied_at_sample: u64,
 ) -> Result<(), CommandRejection> {
-    match admit_commands_staged(ready, bytes, count) {
+    match admit_commands_staged(ready, bytes, count, applied_at_sample) {
         Ok(()) => {
             ready.solo.commit();
             Ok(())
@@ -2839,6 +2862,7 @@ fn admit_commands_staged(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
     count: usize,
+    applied_at_sample: u64,
 ) -> Result<(), CommandRejection> {
     let record_bytes = COMMAND_RECORD_BYTES as usize;
     let track_count = ready.tracks.len();
@@ -3044,7 +3068,7 @@ fn admit_commands_staged(
     for entry in 0..lowered {
         let (slot, record) = ready.command_decoded[entry];
         let slot = slot as usize;
-        if ready.push(slot, record).is_err() {
+        if ready.push(slot, record, applied_at_sample).is_err() {
             return Err(CommandRejection {
                 result: RESULT_INTERNAL,
                 reason: COMMAND_REASON_BACKPRESSURE,
@@ -3760,6 +3784,11 @@ fn compile_ready(
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     effect_observations.resize_with(total_effects as usize, || None);
+    let mut observation_arm_samples: Vec<Box<[u64]>> = Vec::new();
+    observation_arm_samples
+        .try_reserve_exact(total_effects as usize)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    observation_arm_samples.resize_with(total_effects as usize, || Box::new([]));
     // `observation_tracks[slot]` is the track index of that effect slot's observed instance, or
     // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
     let mut observation_tracks = vec![u32::MAX; total_effects as usize];
@@ -3786,8 +3815,44 @@ fn compile_ready(
         // points at that track and the poll folds them max-magnitude into the one slot.
         observation_tracks[slot] =
             u32::try_from(track).map_err(|_| fixed_diagnostic("web.console.observation"))?;
+        let tap_count = handle.descriptor.observations.len();
+        let mut arm_samples = Vec::new();
+        arm_samples
+            .try_reserve_exact(tap_count)
+            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+        arm_samples.resize(tap_count, 0);
+        observation_arm_samples[slot] = arm_samples.into_boxed_slice();
         *entry = Some(handle);
     }
+    let observation_arm_sample_bytes = observation_arm_samples
+        .iter()
+        .try_fold(0_u64, |total, samples| {
+            total.checked_add(
+                u64::try_from(samples.len())
+                    .ok()?
+                    .checked_mul(size_of::<u64>() as u64)?,
+            )
+        })
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let observation_arm_sample_largest = observation_arm_samples
+        .iter()
+        .map(|samples| samples.len().saturating_mul(size_of::<u64>()))
+        .max()
+        .unwrap_or(0);
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(observation_arm_sample_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(observation_arm_sample_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes = report
+        .largest_bridge_allocation_bytes
+        .max(u64::try_from(observation_arm_sample_largest).unwrap_or(u64::MAX));
+    report.largest_named_allocation_bytes = report
+        .largest_named_allocation_bytes
+        .max(report.largest_bridge_allocation_bytes);
     let mut meter_header = empty_meter_header();
     meter_header.track_count =
         u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.console.effects"))?;
@@ -3832,6 +3897,7 @@ fn compile_ready(
         observation_tracks: observation_tracks.into_boxed_slice(),
         observation_present: observation_present.into_boxed_slice(),
         observation_armed: boxed_zero_u32(total_effects as usize)?,
+        observation_arm_samples: observation_arm_samples.into_boxed_slice(),
         master_track: handles.master_track,
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
