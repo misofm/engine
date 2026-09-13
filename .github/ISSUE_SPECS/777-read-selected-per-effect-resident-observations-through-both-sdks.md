@@ -54,3 +54,7 @@ Astra medium verifies this frozen contract, actionable bugs and false claims. Fi
 ## Parent remains open
 
 After this child the ledger still requires: actual-graph EQ/filter composition and applied-target snapshots/live updates; common selective subscribe/update/read/close with identical-job sharing, full plan/clock/state/content/publication identities and loss accounting; required engine-tapped spectrum with correct FFT/smoothing/gap/underrun behavior, browser SAB/qualified pooled fallback and native/headless pump; packed remote vectors, bounded joins, integrated examples/docs/resource evidence and the one frozen descriptive comparison. Preserve #775's delivered explicit preview. Parent-authorized later items remain frozen mode, arbitrary effect taps, phase/group delay/nonlinear estimates, optional device-clock mapping and extended research/optimization. This child exposes existing per-effect data and does not falsely complete the generic stream or synchronization milestone.
+
+## Attempt 1 checkpoints
+
+Luna max first tranche: bounded host stable-tuple resolution and non-consuming selected reads, preserving the reader window and owner descriptor/native identity with typed availability/refusals. Focused `selected_observation_reads_are_bounded_stable_and_non_consuming`, host-web all-feature lib Clippy with warnings denied, and workspace formatting pass. Root diff/status audit is clean apart from the two intended host files. FFI/SDK and remaining lifecycle/qualification acceptance are pending; no feature completion is claimed.

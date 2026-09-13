@@ -4102,6 +4102,97 @@ fn observation_host(
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
 }
 
+#[test]
+fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 2, None);
+    let selection = ObservationSelection {
+        track_id: "t0",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "comp",
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+
+    let unarmed = host
+        .read_observations(&[selection])
+        .expect("unarmed selected read");
+    assert_eq!(unarmed[0].status, ObservationReadStatus::Unarmed);
+    assert_eq!(unarmed[0].window, None);
+
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 1, 2, true),
+        RESULT_OK,
+        "the existing observe command remains the only arming path"
+    );
+    let pending = host
+        .read_observations(&[selection])
+        .expect("pending selected read");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, ObservationReadStatus::Pending);
+    assert_eq!(pending[0].window, None);
+    assert_eq!(pending[0].native_effect_id, "miso.compressor");
+    assert_eq!(pending[0].descriptor.display_unit, "dB");
+
+    for block in 0..2 {
+        feed_and_render_tracks(&mut host, block, 0.0);
+    }
+    let expected = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(&ready, &selection).expect("resolved selection");
+        ready.effect_observations[effect]
+            .as_ref()
+            .expect("observation handle")
+            .readers[tap]
+            .read()
+            .expect("published window")
+    };
+    let rows = host
+        .read_observations(&[selection])
+        .expect("ready selected read");
+    assert_eq!(rows[0].status, ObservationReadStatus::Ready);
+    assert_eq!(rows[0].window, Some(expected));
+    assert_eq!(rows[0].left, Some(expected.left));
+    assert_eq!(rows[0].right, Some(expected.right));
+    assert_eq!(
+        rows[0].window.expect("row window").sequence,
+        expected.sequence
+    );
+    assert_eq!(
+        rows[0].window.expect("row window").first_sample,
+        expected.first_sample
+    );
+
+    // A selected read does not acknowledge the shared reader. The same exact publication is
+    // returned again, while a different requested channel only changes the owned projection.
+    let right = host
+        .read_observations(&[ObservationSelection {
+            channels: ObservationReadChannels::Right,
+            ..selection
+        }])
+        .expect("repeat selected read");
+    assert_eq!(right[0].window, Some(expected));
+    assert_eq!(right[0].left, None);
+    assert_eq!(right[0].right, Some(expected.right));
+
+    let invalid = [
+        selection,
+        ObservationSelection {
+            effect_slot_id: "missing",
+            ..selection
+        },
+    ];
+    assert_eq!(
+        host.read_observations(&invalid).unwrap_err(),
+        ObservationReadError::InvalidSelection,
+        "the complete batch is validated before any row is returned"
+    );
+    assert_eq!(
+        host.read_observations(&[selection, selection]).unwrap_err(),
+        ObservationReadError::InvalidSelection
+    );
+}
+
 /// Feed one quantum of a constant to every track's shared source and render it.
 fn feed_and_render_tracks(host: &mut AudioWorkletEngineHost, block: u64, value: f32) {
     feed_and_render(host, 1, block, value);
