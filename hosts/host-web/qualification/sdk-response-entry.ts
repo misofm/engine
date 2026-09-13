@@ -744,6 +744,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   };
   const waitForResult = async (subscription, entry) => {
     const targetKey = spectrumTargetKey(entry.target);
+    let lastNotification;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const current = subscription.readLatest();
       if (current !== undefined
@@ -751,10 +752,17 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
           && current.channels === (entry.channels ?? "both")) {
         return current;
       }
-      await subscription.pump();
+      lastNotification = await subscription.pump() ?? lastNotification;
       await new Promise((resolve) => globalThis.setTimeout(resolve, 10));
     }
-    throw new Error(`SDK spectrum collection did not publish ${targetKey}`);
+    const status = await browser.host.status();
+    throw new Error(`SDK spectrum collection did not publish ${targetKey}: ${JSON.stringify({
+      contextState: browser.context.state,
+      contextTime: (browser.context as AudioContext).currentTime,
+      nativeStatus: status,
+      lastStatus: lastNotification?.status,
+      lastMetadata: lastNotification?.metadata,
+    }, (_, value) => typeof value === "bigint" ? value.toString() : value)}`);
   };
   try {
     const subscription = (await browser.subscribeSpectrum({
