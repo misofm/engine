@@ -956,6 +956,7 @@ dependencies = [
  "builtins",
  "builtins-compiler",
  "compressor",
+ "dsp-reference",
  "effect-compiler",
  "effect-contract",
  "engine",

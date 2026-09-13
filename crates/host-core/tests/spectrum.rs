@@ -4,7 +4,7 @@ use host_core::{
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
     SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
-    compile_host_session, prepare_host_runtime_with_console_and_spectrum,
+    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_spectrum, spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
@@ -370,4 +370,159 @@ fn console_and_meter_preparation_keeps_spectrum_in_one_transaction() {
         resources.retained_bytes
     );
     assert_eq!(capture.target(), &SpectrumTarget::Output("main-out".into()));
+}
+
+#[test]
+fn selected_capture_is_pcm_bit_exact_and_allocation_free_for_idle_and_active_renders() {
+    use bench_support::alloc as bench_alloc;
+    use engine::realtime::audit;
+
+    const NON_DIVIDING_QUANTUM: usize = 192;
+    const BLOCKS: usize =
+        (SPECTRUM_WINDOW_FRAMES + NON_DIVIDING_QUANTUM - 1) / NON_DIVIDING_QUANTUM;
+    let document = SESSION.replace("\"quantum_frames\": 128", "\"quantum_frames\": 192");
+    let mut test_caps = caps();
+    test_caps.source_ring_frames = 1_152;
+    let compiled =
+        compile_host_session(&document, &test_caps).expect("nondividing session compiles");
+    let target = SpectrumTarget::Output("main-out".into());
+    let resources = spectrum_capture_resources_for(&target);
+    let baseline_host = prepare_host_runtime(&compiled, &test_caps).expect("baseline prepares");
+    let (idle_host, mut idle_capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &test_caps,
+        &SpectrumCaptureRequest {
+            target: target.clone(),
+            channels: SpectrumChannels::Left,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("idle capture prepares");
+    let (active_host, mut active_capture) = prepare_host_runtime_with_spectrum(
+        &compiled,
+        &test_caps,
+        &SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Left,
+            maximum_capture_bytes: resources.retained_bytes,
+        },
+    )
+    .expect("active capture prepares");
+    active_capture.arm().expect("active capture arms");
+
+    let (mut baseline, mut baseline_sources, _) = baseline_host
+        .start_render_session()
+        .expect("baseline starts");
+    let (mut idle, mut idle_sources, _) = idle_host.start_render_session().expect("idle starts");
+    let (mut active, mut active_sources, _) =
+        active_host.start_render_session().expect("active starts");
+    audit::warm_up();
+    bench_alloc::assert_installed();
+
+    for block in 0..BLOCKS {
+        let left = [0.25_f32; NON_DIVIDING_QUANTUM];
+        let right = [-0.5_f32; NON_DIVIDING_QUANTUM];
+        let start = (block * NON_DIVIDING_QUANTUM) as u64;
+        for sources in [
+            &mut baseline_sources,
+            &mut idle_sources,
+            &mut active_sources,
+        ] {
+            sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: start,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: NON_DIVIDING_QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
+
+        let mut baseline_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+        let mut idle_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+        let mut active_pcm = [f32::from_bits(0x7fc0_3990); NON_DIVIDING_QUANTUM * 2];
+        audit::reset();
+        let thread_mark = bench_alloc::current_thread_counters();
+        let reports = audit::in_render_scope(|| {
+            let baseline_report = baseline.render_planar(
+                &mut baseline_pcm,
+                2,
+                NON_DIVIDING_QUANTUM,
+                NON_DIVIDING_QUANTUM,
+                start,
+            );
+            let idle_report = idle.render_planar(
+                &mut idle_pcm,
+                2,
+                NON_DIVIDING_QUANTUM,
+                NON_DIVIDING_QUANTUM,
+                start,
+            );
+            let active_report = active.render_planar(
+                &mut active_pcm,
+                2,
+                NON_DIVIDING_QUANTUM,
+                NON_DIVIDING_QUANTUM,
+                start,
+            );
+            (
+                baseline_report,
+                idle_report,
+                active_report,
+                audit::snapshot(),
+            )
+        });
+        let thread_delta = bench_alloc::current_thread_delta_since(thread_mark);
+        assert!(reports.0.is_ok(), "baseline render: {:?}", reports.0);
+        assert!(reports.1.is_ok(), "idle render: {:?}", reports.1);
+        assert!(reports.2.is_ok(), "active render: {:?}", reports.2);
+        assert_eq!(
+            (reports.3.allocations, reports.3.deallocations),
+            (0, 0),
+            "spectrum render touched the realtime allocator audit"
+        );
+        assert_eq!(
+            (
+                thread_delta.allocations,
+                thread_delta.reallocations,
+                thread_delta.deallocations
+            ),
+            (0, 0, 0),
+            "spectrum render allocated or freed on the render owner"
+        );
+        for (baseline, idle) in baseline_pcm.iter().zip(idle_pcm.iter()) {
+            assert_eq!(
+                baseline.to_bits(),
+                idle.to_bits(),
+                "idle capture changed PCM"
+            );
+        }
+        for (baseline, active) in baseline_pcm.iter().zip(active_pcm.iter()) {
+            assert_eq!(
+                baseline.to_bits(),
+                active.to_bits(),
+                "active capture changed PCM"
+            );
+        }
+    }
+
+    assert_eq!(
+        idle_capture
+            .try_read()
+            .expect_err("idle observer never arms"),
+        SpectrumCaptureReadError::NotArmed
+    );
+    let window = active_capture
+        .try_read()
+        .expect("nondividing quantum completes exact window");
+    assert_eq!(window.channels, SpectrumChannels::Left);
+    assert_eq!(window.first_sample, 0);
+    assert_eq!(window.end_sample(), Some(SPECTRUM_WINDOW_FRAMES as u64));
+    assert!(window.left.iter().any(|value| *value != 0.0));
+    assert!(window.right.iter().all(|value| *value == 0.0));
 }

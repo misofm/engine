@@ -713,9 +713,12 @@ pub enum SpectrumAnalysisError {
 #[cfg(test)]
 mod tests {
     use super::{
-        SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
-        SpectrumAnalyzer, SpectrumCaptureReadError, SpectrumChannels, SpectrumWindow,
+        ARMED, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
+        SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCaptureObserver, SpectrumCaptureReadError,
+        SpectrumChannels, SpectrumWindow,
     };
+    use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
+    use engine::realtime::{QueueGeneration, bounded_spsc};
 
     fn window(fill: f32) -> SpectrumWindow {
         SpectrumWindow {
@@ -733,14 +736,16 @@ mod tests {
         let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
         let mut left = [0.0; SPECTRUM_BIN_COUNT];
         let mut right = [0.0; SPECTRUM_BIN_COUNT];
-        let mut output = super::SpectrumOutput {
-            frequencies_hz: &mut frequencies,
-            left_dbfs: Some(&mut left),
-            right_dbfs: Some(&mut right),
-        };
-        analyzer
-            .analyze(&window(0.0), 48_000, &mut output)
-            .expect("silence analyzes");
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze(&window(0.0), 48_000, &mut output)
+                .expect("silence analyzes");
+        }
         assert_eq!(frequencies[0], 0.0);
         assert_eq!(frequencies[SPECTRUM_WINDOW_FRAMES / 2], 24_000.0);
         assert!(frequencies.iter().enumerate().all(|(index, value)| {
@@ -751,6 +756,11 @@ mod tests {
 
         let mut invalid = window(0.0);
         invalid.left[12] = f32::NAN;
+        let mut output = super::SpectrumOutput {
+            frequencies_hz: &mut frequencies,
+            left_dbfs: Some(&mut left),
+            right_dbfs: Some(&mut right),
+        };
         assert_eq!(
             analyzer
                 .analyze(&invalid, 48_000, &mut output)
@@ -776,6 +786,152 @@ mod tests {
             .expect("half-amplitude window analyzes");
         assert!((left[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", left[0]);
         assert!((right[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", right[0]);
+    }
+
+    #[test]
+    fn analyzer_matches_independent_dft_at_selected_bins_for_launch_rates() {
+        let analyzer = SpectrumAnalyzer::new();
+        let mut left = [0.0_f32; SPECTRUM_WINDOW_FRAMES];
+        let mut right = [0.0_f32; SPECTRUM_WINDOW_FRAMES];
+        for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+            let phase = core::f64::consts::TAU * index as f64 / SPECTRUM_WINDOW_FRAMES as f64;
+            *left = (0.25 + 0.70 * math::sin(37.0 * phase) + 0.15 * math::cos(91.0 * phase)) as f32;
+            *right =
+                (-0.10 + 0.50 * math::sin(73.0 * phase) + 0.25 * math::cos(511.0 * phase)) as f32;
+        }
+        let mut windowed_left = [0.0_f64; SPECTRUM_WINDOW_FRAMES];
+        let mut windowed_right = [0.0_f64; SPECTRUM_WINDOW_FRAMES];
+        let mut weight_sum = 0.0_f64;
+        for index in 0..SPECTRUM_WINDOW_FRAMES {
+            let phase = core::f64::consts::TAU * index as f64 / SPECTRUM_WINDOW_FRAMES as f64;
+            let weight = (0.5 - 0.5 * math::cos(phase)) as f32;
+            weight_sum += f64::from(weight);
+            windowed_left[index] = f64::from(left[index]) * f64::from(weight);
+            windowed_right[index] = f64::from(right[index]) * f64::from(weight);
+        }
+        let window = SpectrumWindow {
+            left,
+            right,
+            first_sample: 17,
+            channels: SpectrumChannels::Stereo,
+            source_underrun: false,
+        };
+        let bins = [0, 37, 73, 91, 511, SPECTRUM_WINDOW_FRAMES / 2];
+        for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+            let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+            let mut left_dbfs = [0.0; SPECTRUM_BIN_COUNT];
+            let mut right_dbfs = [0.0; SPECTRUM_BIN_COUNT];
+            {
+                let mut output = super::SpectrumOutput {
+                    frequencies_hz: &mut frequencies,
+                    left_dbfs: Some(&mut left_dbfs),
+                    right_dbfs: Some(&mut right_dbfs),
+                };
+                analyzer
+                    .analyze(&window, sample_rate_hz, &mut output)
+                    .expect("launch rate analyzes");
+            }
+            for &bin in &bins {
+                let expected_frequency =
+                    bin as f32 * sample_rate_hz as f32 / SPECTRUM_WINDOW_FRAMES as f32;
+                assert_eq!(frequencies[bin], expected_frequency);
+                let factor = if bin == 0 || bin == SPECTRUM_WINDOW_FRAMES / 2 {
+                    1.0
+                } else {
+                    2.0
+                };
+                let left_dft = direct_dft_bin(&windowed_left, bin).expect("left DFT");
+                let right_dft = direct_dft_bin(&windowed_right, bin).expect("right DFT");
+                let left_expected = magnitude_db(
+                    Complex64 {
+                        re: left_dft.re * factor / weight_sum,
+                        im: left_dft.im * factor / weight_sum,
+                    },
+                    f64::from(SPECTRUM_FLOOR_DB),
+                )
+                .expect("left dB");
+                let right_expected = magnitude_db(
+                    Complex64 {
+                        re: right_dft.re * factor / weight_sum,
+                        im: right_dft.im * factor / weight_sum,
+                    },
+                    f64::from(SPECTRUM_FLOOR_DB),
+                )
+                .expect("right dB");
+                assert!(
+                    (f64::from(left_dbfs[bin]) - left_expected).abs() <= 0.02,
+                    "left rate {sample_rate_hz}, bin {bin}: {} vs {left_expected}",
+                    left_dbfs[bin]
+                );
+                assert!(
+                    (f64::from(right_dbfs[bin]) - right_expected).abs() <= 0.02,
+                    "right rate {sample_rate_hz}, bin {bin}: {} vs {right_expected}",
+                    right_dbfs[bin]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn analyzer_accepts_selected_left_channel_at_a_large_sample_time() {
+        let analyzer = SpectrumAnalyzer::new();
+        let mut window = window(0.0);
+        window.first_sample = (1_u64 << 53) + 123;
+        window.channels = SpectrumChannels::Left;
+        window.left[37] = 1.0;
+        assert_eq!(window.end_sample(), Some((1_u64 << 53) + 2_171));
+        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut output = super::SpectrumOutput {
+            frequencies_hz: &mut frequencies,
+            left_dbfs: Some(&mut left),
+            right_dbfs: None,
+        };
+        analyzer
+            .analyze(&window, 96_000, &mut output)
+            .expect("large absolute sample analyzes");
+        assert!(left.iter().all(|value| value.is_finite()));
+        assert_eq!(frequencies[1], 96_000.0 / SPECTRUM_WINDOW_FRAMES as f32);
+    }
+
+    #[test]
+    fn capture_preserves_a_large_absolute_sample_without_allocating() {
+        let (producer, mut consumer) = bounded_spsc(
+            core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            QueueGeneration(0x5350_4543),
+        )
+        .expect("capture queue");
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
+        let mut observer = SpectrumCaptureObserver {
+            producer,
+            state: std::sync::Arc::clone(&state),
+            left: [0.0; SPECTRUM_WINDOW_FRAMES],
+            right: [0.0; SPECTRUM_WINDOW_FRAMES],
+            channels: SpectrumChannels::Left,
+            filled: 0,
+            first_sample: 0,
+            next_sample: 0,
+            armed: false,
+            source_underrun: false,
+        };
+        let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+        let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+        let first_sample = (1_u64 << 53) + 123;
+        observer.capture(
+            &left,
+            &right,
+            first_sample,
+            super::GraphObservationValidity::CLEAR,
+        );
+        let window = consumer.try_pop().expect("large-sample capture");
+        assert_eq!(window.first_sample, first_sample);
+        assert_eq!(
+            window.end_sample(),
+            Some(first_sample + SPECTRUM_WINDOW_FRAMES as u64)
+        );
+        assert_eq!(window.channels, SpectrumChannels::Left);
+        assert!(window.left.iter().all(|value| *value == 0.25));
+        assert!(window.right.iter().all(|value| *value == 0.0));
     }
 
     #[test]
