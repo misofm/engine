@@ -263,3 +263,7 @@ The correction changes tests and issue records only. Production response/designe
 Directly read the captured evidence: 8 focused tests passed, none failed/ignored; all-target Clippy, formatting and diff-check exited 0. Logs are `/tmp/miso-engine-767-attempt2-{focused,all-clippy,fmt,diff}.{stdout,stderr,exit}`. Prior full builtin tests, builtin/realtime policy and Wasm scalar/SIMD build passes apply to unchanged production as authorized by root; they were not rerun or claimed as current-head executions. Wasm build checks do not prove portable-query runtime parity.
 
 This SOURCE PASS does not establish integrated artifact/CI delivery. Proceed with the separately briefed artifact qualification successor and required delivery gates; synchronize evidence and GitHub status before declaring #767 delivered. Parent #763 remains open and its engine/SDK/live-analysis milestones remain outstanding.
+
+## CI comment correction #771
+
+PR #769's original CI `34729987518` rejected an incidental lexical token in the test-only slice-bound comment. #771 rephrased exactly two comment lines without changing executable tests, production code, policy or artifact inputs. Luna max's correction passed all six focused/policy gates; Astra medium's sole verdict is PASS at `7f18c2cfc72bf7f8cc99d6939c4558187e4857bf`. Existing #767 source and #768 artifact evidence retain their original attribution; no artifact rerun or lineage change occurred. Updated required PR/main CI and delivery remain pending.

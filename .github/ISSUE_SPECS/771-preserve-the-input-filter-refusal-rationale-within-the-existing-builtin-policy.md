@@ -53,3 +53,17 @@ exited 0; each command's unedited stdout/stderr and exit status is preserved out
 - `git diff --check` — `/tmp/issue771-git-diff-check.log`, exit `/tmp/issue771-git-diff-check.exit` (`0`)
 
 The working diff contains only the approved comment lines in `crates/builtins/tests/filter_response.rs`.
+
+# Issue #771 sole-attempt adversarial review
+
+Verdict: **PASS**.
+
+Reviewed frozen checkpoint `7f18c2cfc72bf7f8cc99d6939c4558187e4857bf` against `6b9632cd` in `/tmp/miso-engine-767`. Reviewer: Astra, medium. Read the full brief and authentic six-command logs/exit files; worktree was clean. No code changes, agents, rebuilds or additional gates were performed by the reviewer.
+
+The exact diff contains only the approved two-line comment replacement in `crates/builtins/tests/filter_response.rs` and #771 evidence. The valid-slice byte-bound explanation and retained checked multiplication rationale are preserved. The new words accurately explain that an overflow fixture would require an invalid Rust slice, without the incidental token that triggers the unchanged lexical policy. All executable test tokens, assertions, cases, production code and policy enforcement are unchanged.
+
+Directly read the six stored exits: all are 0. The response suite reports 8 passed, none failed/ignored; formatting and diff checks pass; builtin policy and its mutation suite report success; realtime policy passes. Evidence resides in `/tmp/issue771-{cargo-test-filter-response,cargo-fmt,check-builtins-policy,test-builtins-policy,check-realtime-policy,git-diff-check}.{log,exit}`. The checker/allowlist/mutation inputs were not modified to obtain those passes.
+
+No shipped artifact input, pin, result lineage, browser matrix, dependency or workflow changed. #767's substantive source PASS and #768's artifact qualification remain applicable; no artifact rebuild or browser rerun is justified for this correction, and the historical candidate identity must remain unchanged.
+
+Root may synchronize the corrected basis and resume #770. This PASS does not claim PR #769's final exact-head qualification, merge/main qualification, or GitHub delivery closure is complete. Those delivery steps remain required; parent #763 stays open.
