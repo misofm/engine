@@ -12,8 +12,8 @@ use effect_contract::{
     PreparedResponseAnalysis, ResponseAmplitudeReference, ResponseAnalysisDescriptor,
     ResponseAnalysisError, ResponseAnalysisMode, ResponseBypassSemantics, ResponseChannelLayout,
     ResponseConfigurationView, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
-    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
-    ResponseTotalScope, expected_prepared_metadata,
+    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput,
+    ResponseSnapshotSection, ResponseSummary, ResponseTotalScope, expected_prepared_metadata,
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
 
@@ -468,6 +468,100 @@ pub fn query_response_into(
         enabled_left: request.configuration.enabled_left,
         enabled_right: request.configuration.enabled_right,
     })
+}
+
+/// Evaluate one copied live EQ target without redesigning its coefficients.
+///
+/// The returned values are positive, unfloored magnitudes.  This is the composition seam used by
+/// `host-core`: a caller can multiply several independent linear owners in log space and apply
+/// the public floor once, after the complete subtotal is known.  All validation and numerical
+/// work happens before the first output word is written.
+pub fn query_snapshot_magnitudes_into(
+    sample_rate_hz: u32,
+    bypassed: bool,
+    left: &[ResponseSnapshotSection],
+    right: &[ResponseSnapshotSection],
+    frequencies_hz: &[f32],
+    maximum_points: usize,
+    output_left: &mut [f64],
+    output_right: &mut [f64],
+) -> Result<(), EqResponseError> {
+    if !is_launch_sample_rate(SampleRateHz(sample_rate_hz)) {
+        return Err(EqResponseError::Configuration(EffectPrepareError {
+            code: "effect.quality.unsupported",
+        }));
+    }
+    let points = frequencies_hz.len();
+    if points == 0
+        || frequencies_hz.iter().any(|frequency| {
+            !frequency.is_finite() || *frequency < 0.0 || *frequency > sample_rate_hz as f32 * 0.5
+        })
+        || frequencies_hz.windows(2).any(|pair| pair[1] <= pair[0])
+    {
+        return Err(EqResponseError::InvalidFrequencyGrid);
+    }
+    if maximum_points == 0 || points > maximum_points {
+        return Err(EqResponseError::Capacity);
+    }
+    if left.len() != EQ_SECTION_COUNT
+        || right.len() != EQ_SECTION_COUNT
+        || output_left.len() != points
+        || output_right.len() != points
+    {
+        return Err(EqResponseError::OutputShape);
+    }
+    let decode = |sections: &[ResponseSnapshotSection]| {
+        let mut words = [EqSvfWords::IDENTITY; EQ_SECTION_COUNT];
+        for (index, section) in sections.iter().enumerate() {
+            if section.word_count != 6 {
+                return Err(EqResponseError::InvalidFrequencyGrid);
+            }
+            let decoded = core::array::from_fn(|word| f32::from_bits(section.words[word]));
+            if decoded.iter().any(|word| !word.is_finite()) {
+                return Err(EqResponseError::Numerical);
+            }
+            words[index] = if section.enabled {
+                EqSvfWords::from_array(decoded)
+            } else {
+                EqSvfWords::IDENTITY
+            };
+        }
+        Ok(words)
+    };
+    let left_words = decode(left)?;
+    let right_words = decode(right)?;
+
+    for (index, &frequency_hz) in frequencies_hz.iter().enumerate() {
+        output_left[index] =
+            snapshot_point_magnitude(&left_words, frequency_hz, sample_rate_hz, bypassed)?;
+        output_right[index] =
+            snapshot_point_magnitude(&right_words, frequency_hz, sample_rate_hz, bypassed)?;
+    }
+    Ok(())
+}
+
+fn snapshot_point_magnitude(
+    words: &[EqSvfWords; EQ_SECTION_COUNT],
+    frequency_hz: f32,
+    sample_rate_hz: u32,
+    bypassed: bool,
+) -> Result<f64, EqResponseError> {
+    if bypassed {
+        return Ok(1.0);
+    }
+    let angle = core::f64::consts::TAU * f64::from(frequency_hz) / f64::from(sample_rate_hz);
+    let z = Complex::new(math::cos(angle), math::sin(angle));
+    let mut product = Complex::new(1.0, 0.0);
+    for section in words.iter().copied() {
+        product = product.mul(section_response(section, z)?);
+        if !product.is_finite() {
+            return Err(EqResponseError::Numerical);
+        }
+    }
+    let magnitude = product.magnitude();
+    (magnitude.is_finite())
+        .then_some(magnitude)
+        .ok_or(EqResponseError::Numerical)
 }
 
 fn common_response_error(error: EqResponseError) -> ResponseAnalysisError {

@@ -267,6 +267,12 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
     pub runtime_owner_field_bytes: u64,
     pub runtime_owner_allocation_bytes: u64,
+    /// Boxed response-owner binding table retained by the prepared runtime.
+    pub response_binding_table_bytes: u64,
+    /// Payload bytes retained by the per-owner stable-id and track-id strings.
+    pub response_binding_string_bytes: u64,
+    /// Largest individual cloned identity allocation.
+    pub largest_response_binding_string_bytes: u64,
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
@@ -274,6 +280,18 @@ pub struct GraphRuntimeMetadataResourceEstimate {
 impl GraphRuntimeMetadataResourceEstimate {
     /// Computes the checked retained field and conservative mixed op/unit allocation bound.
     pub fn checked_for(emitted_op_count: u64) -> Option<Self> {
+        Self::checked_for_with_response_bindings(emitted_op_count, 0, 0, 0)
+    }
+
+    /// Computes runtime metadata plus the retained response-owner table and its cloned identity
+    /// strings. The binding count/string payloads are supplied by the graph compiler because the
+    /// lowered runtime owns those values after the semantic model is consumed.
+    pub fn checked_for_with_response_bindings(
+        emitted_op_count: u64,
+        response_binding_count: u64,
+        response_binding_string_bytes: u64,
+        largest_response_binding_string_bytes: u64,
+    ) -> Option<Self> {
         let (_, runtime_field_bytes) = runtime::scalar_split_runtime_layout();
         let (op_layout_delta_bytes, runtime_unit_layout_delta_bytes) =
             runtime::scalar_split_op_layout();
@@ -288,7 +306,15 @@ impl GraphRuntimeMetadataResourceEstimate {
         let emitted_op_delta_bytes = emitted_op_layout_delta_bytes.checked_mul(emitted_op_count)?;
         let runtime_op_containing_bytes = runtime_op_bytes.checked_mul(emitted_op_count)?;
         let runtime_unit_containing_bytes = runtime_unit_bytes.checked_mul(emitted_op_count)?;
+        let response_binding_entry_bytes =
+            u64::try_from(core::mem::size_of::<runtime::ResponseOwnerBinding>())
+                .expect("response binding layout fits u64");
+        let response_binding_table_bytes =
+            response_binding_entry_bytes.checked_mul(response_binding_count)?;
         let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
+        let total_bytes = total_bytes
+            .checked_add(response_binding_table_bytes)?
+            .checked_add(response_binding_string_bytes)?;
         Some(Self {
             emitted_op_count,
             runtime_field_bytes,
@@ -299,10 +325,15 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime_unit_containing_bytes,
             runtime_owner_field_bytes,
             runtime_owner_allocation_bytes,
+            response_binding_table_bytes,
+            response_binding_string_bytes,
+            largest_response_binding_string_bytes,
             total_bytes,
             largest_allocation_bytes: runtime_owner_allocation_bytes
                 .max(runtime_op_containing_bytes)
-                .max(runtime_unit_containing_bytes),
+                .max(runtime_unit_containing_bytes)
+                .max(response_binding_table_bytes)
+                .max(largest_response_binding_string_bytes),
         })
     }
 }

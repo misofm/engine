@@ -39,8 +39,9 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ArenaLease, ArenaLeaseSetBuilder, RenderError, ResponseSnapshotError,
-    ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+    ArenaLease, ArenaLeaseSetBuilder, RenderError, ResponseSnapshotAvailability,
+    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection,
+    ResponseSnapshotSink,
 };
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
@@ -186,8 +187,7 @@ fn test_only_record_selected_split_fader(node: GraphNodeId, buffer: u32) {
 use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect, ResponseAnalysisError,
-    ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest,
-    ResponseSnapshotSection as OwnerSnapshotSection, ResponseSnapshotSummary,
+    ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest, ResponseSnapshotSummary,
 };
 use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
@@ -679,16 +679,6 @@ fn response_snapshot_error(error: ResponseAnalysisError) -> ResponseSnapshotErro
     }
 }
 
-const fn empty_response_snapshot_section() -> ResponseSnapshotSection {
-    ResponseSnapshotSection {
-        id: 0,
-        kind: 0,
-        enabled: false,
-        word_count: 0,
-        words: [0; 7],
-    }
-}
-
 fn response_snapshot_kind_code(kind: ResponseSnapshotKind) -> u32 {
     match kind {
         ResponseSnapshotKind::ParametricEq => 1,
@@ -700,8 +690,8 @@ fn emit_response_snapshot_owner(
     binding: &ResponseOwnerBinding,
     sample_rate_hz: u32,
     summary: ResponseSnapshotSummary,
-    left: &[OwnerSnapshotSection; 4],
-    right: &[OwnerSnapshotSection; 4],
+    left: &[ResponseSnapshotSection; 4],
+    right: &[ResponseSnapshotSection; 4],
     sink: &mut dyn ResponseSnapshotSink,
 ) -> Result<(), ResponseSnapshotError> {
     if summary.sample_rate_hz != sample_rate_hz {
@@ -712,8 +702,6 @@ fn emit_response_snapshot_owner(
     if sections == 0 || sections > left.len() || sections > right.len() {
         return Err(ResponseSnapshotError::InvalidShape);
     }
-    let mut copied_left = [empty_response_snapshot_section(); 4];
-    let mut copied_right = [empty_response_snapshot_section(); 4];
     for index in 0..sections {
         let source_left = left[index];
         let source_right = right[index];
@@ -722,20 +710,6 @@ fn emit_response_snapshot_owner(
         {
             return Err(ResponseSnapshotError::InvalidShape);
         }
-        copied_left[index] = ResponseSnapshotSection {
-            id: source_left.id,
-            kind: source_left.kind,
-            enabled: source_left.enabled,
-            word_count: source_left.word_count,
-            words: source_left.words,
-        };
-        copied_right[index] = ResponseSnapshotSection {
-            id: source_right.id,
-            kind: source_right.kind,
-            enabled: source_right.enabled,
-            word_count: source_right.word_count,
-            words: source_right.words,
-        };
     }
     sink.copy_owner(
         ResponseSnapshotOwnerInfo {
@@ -745,9 +719,30 @@ fn emit_response_snapshot_owner(
             slot: binding.slot,
             kind: response_snapshot_kind_code(summary.kind),
             bypassed: summary.bypassed,
+            availability: ResponseSnapshotAvailability::Provided,
         },
-        &copied_left[..sections],
-        &copied_right[..sections],
+        &left[..sections],
+        &right[..sections],
+    )
+}
+
+fn emit_unavailable_response_snapshot_owner(
+    binding: &ResponseOwnerBinding,
+    bypassed: bool,
+    sink: &mut dyn ResponseSnapshotSink,
+) -> Result<(), ResponseSnapshotError> {
+    sink.copy_owner(
+        ResponseSnapshotOwnerInfo {
+            track_id: &binding.track_id,
+            stable_id: &binding.stable_id,
+            rack: binding.rack,
+            slot: binding.slot,
+            kind: 0,
+            bypassed,
+            availability: ResponseSnapshotAvailability::DeclaredUnavailable,
+        },
+        &[],
+        &[],
     )
 }
 
@@ -757,7 +752,7 @@ fn copy_scalar_response_snapshot(
     sample_rate_hz: u32,
     sink: &mut dyn ResponseSnapshotSink,
 ) -> Result<(), ResponseSnapshotError> {
-    let mut left = [OwnerSnapshotSection {
+    let mut left = [ResponseSnapshotSection {
         id: 0,
         kind: 0,
         enabled: false,
@@ -765,36 +760,63 @@ fn copy_scalar_response_snapshot(
         words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
     }; 4];
     let mut right = left;
-    let summary = match &op.kind {
-        NodeKind::Bound(processor) => processor
-            .copy_response_snapshot(
-                sample_rate_hz,
-                OwnerSnapshotRequest {
-                    bypassed: false,
-                    left: &mut left,
-                    right: &mut right,
-                },
-            )
-            .map_err(response_snapshot_error)?,
-        NodeKind::Effect(effect) => effect
-            .processor
-            .copy_response_snapshot(OwnerSnapshotRequest {
-                bypassed: effect.metadata.bypass,
-                left: &mut left,
-                right: &mut right,
-            })
-            .map_err(response_snapshot_error)?,
-        NodeKind::ConsoleEffect(console) => console
-            .effect
-            .processor
-            .copy_response_snapshot(OwnerSnapshotRequest {
-                bypassed: console.control.bypassed(),
-                left: &mut left,
-                right: &mut right,
-            })
-            .map_err(response_snapshot_error)?,
-        _ => return Err(ResponseSnapshotError::Unsupported),
+    let section_capacity = if binding.rack == 0 { 2 } else { 4 };
+    let (summary, bypassed) = match &op.kind {
+        NodeKind::Bound(processor) => match processor.copy_response_snapshot(
+            sample_rate_hz,
+            OwnerSnapshotRequest {
+                bypassed: false,
+                left: &mut left[..section_capacity],
+                right: &mut right[..section_capacity],
+            },
+        ) {
+            Ok(summary) => (summary, false),
+            Err(ResponseAnalysisError::UnsupportedMode)
+            | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                return emit_unavailable_response_snapshot_owner(binding, false, sink);
+            }
+            Err(error) => return Err(response_snapshot_error(error)),
+        },
+        NodeKind::Effect(effect) => {
+            let bypassed = effect.metadata.bypass;
+            match effect
+                .processor
+                .copy_response_snapshot(OwnerSnapshotRequest {
+                    bypassed,
+                    left: &mut left[..section_capacity],
+                    right: &mut right[..section_capacity],
+                }) {
+                Ok(summary) => (summary, bypassed),
+                Err(ResponseAnalysisError::UnsupportedMode)
+                | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                    return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
+                }
+                Err(error) => return Err(response_snapshot_error(error)),
+            }
+        }
+        NodeKind::ConsoleEffect(console) => {
+            let bypassed = console.control.bypassed();
+            match console
+                .effect
+                .processor
+                .copy_response_snapshot(OwnerSnapshotRequest {
+                    bypassed,
+                    left: &mut left[..section_capacity],
+                    right: &mut right[..section_capacity],
+                }) {
+                Ok(summary) => (summary, bypassed),
+                Err(ResponseAnalysisError::UnsupportedMode)
+                | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                    return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
+                }
+                Err(error) => return Err(response_snapshot_error(error)),
+            }
+        }
+        _ => return emit_unavailable_response_snapshot_owner(binding, false, sink),
     };
+    if summary.bypassed != bypassed {
+        return Err(ResponseSnapshotError::Owner);
+    }
     emit_response_snapshot_owner(binding, sample_rate_hz, summary, &left, &right, sink)
 }
 
@@ -818,7 +840,7 @@ impl RuntimeUnit {
                 }
                 let slot = binding.member / *lanes;
                 let lane = binding.member % *lanes;
-                let mut left = [OwnerSnapshotSection {
+                let mut left = [ResponseSnapshotSection {
                     id: 0,
                     kind: 0,
                     enabled: false,
@@ -826,18 +848,28 @@ impl RuntimeUnit {
                     words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
                 }; 4];
                 let mut right = left;
-                let summary = chain
-                    .copy_response_snapshot_lane(
-                        slot,
-                        lane,
-                        sample_rate_hz,
-                        OwnerSnapshotRequest {
-                            bypassed: false,
-                            left: &mut left,
-                            right: &mut right,
-                        },
-                    )
-                    .map_err(response_snapshot_error)?;
+                let bypassed = chain.response_snapshot_bypassed(slot, lane);
+                let section_capacity = if binding.rack == 0 { 2 } else { 4 };
+                let summary = match chain.copy_response_snapshot_lane(
+                    slot,
+                    lane,
+                    sample_rate_hz,
+                    OwnerSnapshotRequest {
+                        bypassed,
+                        left: &mut left[..section_capacity],
+                        right: &mut right[..section_capacity],
+                    },
+                ) {
+                    Ok(summary) => summary,
+                    Err(ResponseAnalysisError::UnsupportedMode)
+                    | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                        return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
+                    }
+                    Err(error) => return Err(response_snapshot_error(error)),
+                };
+                if summary.bypassed != bypassed {
+                    return Err(ResponseSnapshotError::Owner);
+                }
                 emit_response_snapshot_owner(binding, sample_rate_hz, summary, &left, &right, sink)
             }
         }
@@ -4674,7 +4706,7 @@ mod tests {
                 assert!(!request.bypassed);
                 assert_eq!(request.left.len(), 4);
                 assert_eq!(request.right.len(), 4);
-                request.left[0] = OwnerSnapshotSection {
+                request.left[0] = ResponseSnapshotSection {
                     id: 9,
                     kind: 3,
                     enabled: true,

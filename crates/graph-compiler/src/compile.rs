@@ -524,8 +524,58 @@ impl GraphCompiler {
                 )],
             ));
         };
+        // The prepared runtime retains one ordered response owner for each input-filter stage
+        // and prepared effect. Charge the table and both cloned identity strings here, while the
+        // semantic model is still borrowed; the runtime itself is deliberately opaque to this
+        // compiler after lowering.
+        let Some(response_binding_count) = u64::try_from(model.tracks.len())
+            .ok()
+            .and_then(|tracks| tracks.checked_add(u64::try_from(effects.entries.len()).ok()?))
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.runtime_metadata.response_bindings",
+                )],
+            ));
+        };
+        let Some((response_binding_string_bytes, largest_response_binding_string_bytes)) = model
+            .tracks
+            .iter()
+            .try_fold((0_u64, 0_u64), |(total, largest), track| {
+                let track_bytes = u64::try_from(track.id.as_str().len()).ok()?;
+                let stable_bytes = u64::try_from("input-filters".len()).ok()?;
+                let total = total.checked_add(track_bytes)?.checked_add(stable_bytes)?;
+                Some((total, largest.max(track_bytes).max(stable_bytes)))
+            })
+            .and_then(|(total, largest)| {
+                effects
+                    .entries
+                    .iter()
+                    .try_fold((total, largest), |(total, largest), entry| {
+                        let track_bytes = u64::try_from(entry.track_id.len()).ok()?;
+                        let stable_bytes = u64::try_from(entry.effect_id.len()).ok()?;
+                        let total = total.checked_add(track_bytes)?.checked_add(stable_bytes)?;
+                        Some((total, largest.max(track_bytes).max(stable_bytes)))
+                    })
+            })
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.runtime_metadata.response_bindings",
+                )],
+            ));
+        };
         let Some(runtime_resource) =
-            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
+                emitted_op_count,
+                response_binding_count,
+                response_binding_string_bytes,
+                largest_response_binding_string_bytes,
+            )
         else {
             return Err(failure(
                 effects,

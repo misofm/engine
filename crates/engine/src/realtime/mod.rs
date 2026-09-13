@@ -26,8 +26,9 @@ pub use observe::{
 pub use plan::{
     ExecutorHandover, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
     PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
-    RenderTime, ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
-    ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSink,
+    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSink,
 };
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
@@ -70,6 +71,7 @@ mod tests {
                     slot: 0,
                     kind: 1,
                     bypassed: false,
+                    availability: ResponseSnapshotAvailability::Provided,
                 },
                 &[section],
                 &[section],

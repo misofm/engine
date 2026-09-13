@@ -21,6 +21,19 @@ pub enum ResponseSnapshotError {
     Owner,
 }
 
+/// Whether an owner supplied a response snapshot at this boundary.
+///
+/// A declared owner can be present in the graph while having no native response provider.  That
+/// is an ordered exclusion in the returned snapshot, rather than a failed capture.  Other
+/// failures remain [`ResponseSnapshotError`]s so a required provider cannot silently disappear.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseSnapshotAvailability {
+    /// The owner copied one or more response sections.
+    Provided,
+    /// The owner is present but declares no response provider for this query.
+    DeclaredUnavailable,
+}
+
 /// Stable metadata for one owner emitted into a response snapshot sink.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponseSnapshotOwnerInfo<'a> {
@@ -36,6 +49,8 @@ pub struct ResponseSnapshotOwnerInfo<'a> {
     pub kind: u32,
     /// Bypass state at the same boundary as the copied words.
     pub bypassed: bool,
+    /// Whether this owner supplied response sections or was retained as an ordered exclusion.
+    pub availability: ResponseSnapshotAvailability,
 }
 
 /// One bounded section in an opaque response snapshot copy.

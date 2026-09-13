@@ -2546,9 +2546,41 @@ mod tests {
             .iter()
             .map(|level| u64::try_from(level.nodes.len()).expect("fixture level fits u64"))
             .sum::<u64>();
+        let (response_binding_count, response_binding_string_bytes, largest_response_string) =
+            live.graph().spec.nodes.iter().fold(
+                (0_u64, 0_u64, 0_u64),
+                |(count, bytes, largest), node| match &node.id {
+                    GraphNodeId::TrackStage {
+                        track_id,
+                        stage: TrackStage::PostInputBuiltins,
+                    } => {
+                        let track_bytes = track_id.as_str().len() as u64;
+                        (
+                            count + 1,
+                            bytes + track_bytes + "input-filters".len() as u64,
+                            largest.max(track_bytes).max("input-filters".len() as u64),
+                        )
+                    }
+                    GraphNodeId::Effect(effect) => {
+                        let track_bytes = effect.track_id.as_str().len() as u64;
+                        let stable_bytes = effect.effect_id.as_str().len() as u64;
+                        (
+                            count + 1,
+                            bytes + track_bytes + stable_bytes,
+                            largest.max(track_bytes).max(stable_bytes),
+                        )
+                    }
+                    _ => (count, bytes, largest),
+                },
+            );
         let runtime_metadata =
-            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
-                .expect("runtime metadata estimate");
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
+                emitted_op_count,
+                response_binding_count,
+                response_binding_string_bytes,
+                largest_response_string,
+            )
+            .expect("runtime metadata estimate");
         assert_eq!(
             plain.report().estimate.graph_metadata_bytes
                 - plain.report().semantic_estimate.graph_metadata_bytes,

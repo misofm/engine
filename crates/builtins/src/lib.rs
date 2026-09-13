@@ -33,6 +33,7 @@ pub use filter_response::{
     InputFilterResponseError, InputFilterResponseMode, InputFilterResponseOutput,
     InputFilterResponseRequest, InputFilterResponseSummary, input_filter_response_descriptor,
     prepare_input_filter_response, query_input_filter_response_into,
+    query_input_filter_snapshot_magnitudes_into,
 };
 
 use effect_contract::{

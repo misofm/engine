@@ -400,6 +400,11 @@ pub trait BankStage: Send {
     {
         Err(effect_contract::ResponseAnalysisError::UnsupportedCapability)
     }
+    /// Bypass state used when a lane has no native response provider.  It is read at the same
+    /// control boundary as the ordered unavailable-owner marker.
+    fn response_snapshot_bypassed(&self, _lane: usize) -> bool {
+        false
+    }
     /// Cumulative `[process_calls, kernel_calls]`, read only after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
@@ -618,6 +623,10 @@ impl BankStage for EffectBankStage {
                 right,
             },
         )
+    }
+
+    fn response_snapshot_bypassed(&self, _lane: usize) -> bool {
+        self.processor.metadata().program_key.bypass
     }
 
     /// A console-free bank has no live channel at all, so the two live terms cannot be false and
@@ -944,6 +953,13 @@ impl BankStage for ConsoleEffectBankStage {
                 right,
             },
         )
+    }
+
+    fn response_snapshot_bypassed(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .is_some_and(EffectControlLane::bypassed)
     }
 
     /// The designed-word comparison, conjoined with the lane's own live terms.
@@ -2092,6 +2108,14 @@ impl BankChain {
         prepared
             .stage
             .copy_response_snapshot_lane(lane, sample_rate_hz, request)
+    }
+
+    /// Read the lane's prepared/live bypass bit without touching render state.
+    pub fn response_snapshot_bypassed(&self, slot: usize, lane: usize) -> bool {
+        self.slots
+            .get(slot)
+            .filter(|prepared| prepared.lane_active(lane))
+            .is_some_and(|prepared| prepared.stage.response_snapshot_bypassed(lane))
     }
 
     fn run_with_input<M: BankMembers + ?Sized>(

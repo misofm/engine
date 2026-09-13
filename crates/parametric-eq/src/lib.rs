@@ -63,7 +63,7 @@ mod response;
 
 pub use response::{
     EqResponseConfiguration, EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest,
-    EqResponseSummary, query_response_into,
+    EqResponseSummary, query_response_into, query_snapshot_magnitudes_into,
 };
 
 /// Fixed cascade length in V1.

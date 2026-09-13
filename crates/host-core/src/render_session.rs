@@ -33,6 +33,7 @@ use core::marker::PhantomData;
 
 use engine::realtime::{
     PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
+    ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotSink,
 };
 use lane::CanonicalFpEnv;
 use lane::fpenv::FpEnvironmentRejection;
@@ -155,6 +156,19 @@ impl StartedRenderSession {
     #[must_use]
     pub fn next_absolute_sample(&self) -> u64 {
         self.plan.next_absolute_sample()
+    }
+
+    /// Copy one selected track's response owners after a successful render boundary.
+    ///
+    /// The callback is exclusive with rendering because this handle owns the plan on the render
+    /// thread. It never evaluates DSP or allocates on behalf of the engine.
+    pub fn copy_response_snapshot(
+        &mut self,
+        track_id: &str,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<ResponseSnapshotCapture, ResponseSnapshotError> {
+        self.plan
+            .copy_response_snapshot(engine::realtime::ResponseSnapshotRequest { track_id, sink })
     }
 
     /// Stop the session and hand the plan back for control-thread teardown or replacement.

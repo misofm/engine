@@ -6,6 +6,7 @@
 //! the frequency and output buffers passed to a query.
 
 use super::{EffectPrepareError, ObservationCost, ParameterUnit, PrepareEffectRequest};
+pub use engine::realtime::ResponseSnapshotSection;
 
 /// The owner kinds that can currently provide a live target snapshot.
 ///
@@ -22,21 +23,6 @@ pub enum ResponseSnapshotKind {
 
 /// Maximum number of words carried by one response section snapshot.
 pub const RESPONSE_SNAPSHOT_WORDS: usize = 7;
-
-/// One immutable owner section copied into caller-provided snapshot storage.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResponseSnapshotSection {
-    /// Stable section identity in the owner's descriptor order.
-    pub id: u32,
-    /// Owner-specific section family, such as an EQ band kind.
-    pub kind: u32,
-    /// Whether this section contributes to its owner's subtotal.
-    pub enabled: bool,
-    /// Number of meaningful words in [`Self::words`].
-    pub word_count: u8,
-    /// Rounded owner words in a fixed bounded transfer record.
-    pub words: [u32; RESPONSE_SNAPSHOT_WORDS],
-}
 
 /// Caller-owned storage and boundary metadata for one owner snapshot copy.
 #[derive(Debug)]

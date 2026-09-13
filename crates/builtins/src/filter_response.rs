@@ -13,8 +13,8 @@ use effect_contract::{
     ResponseAmplitudeReference, ResponseAnalysisDescriptor, ResponseAnalysisError,
     ResponseAnalysisMode, ResponseBypassSemantics, ResponseChannelLayout,
     ResponseConfigurationView, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
-    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
-    ResponseTotalScope,
+    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput,
+    ResponseSnapshotSection, ResponseSummary, ResponseTotalScope,
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
 
@@ -399,6 +399,106 @@ pub fn query_input_filter_response_into(
         enabled_left: [sections[0][0].enabled, sections[0][1].enabled],
         enabled_right: [sections[1][0].enabled, sections[1][1].enabled],
     })
+}
+
+/// Evaluate copied live HPF/LPF words as unfloored positive magnitudes.
+///
+/// This is intentionally a word consumer rather than a parameter designer.  It lets a host
+/// compose the input subtotal with other linear owners in one f64 log-space pass and apply the
+/// public response floor only after all owners have been included.
+pub fn query_input_filter_snapshot_magnitudes_into(
+    sample_rate_hz: u32,
+    bypassed: bool,
+    left: &[ResponseSnapshotSection],
+    right: &[ResponseSnapshotSection],
+    frequencies_hz: &[f32],
+    maximum_points: usize,
+    output_left: &mut [f64],
+    output_right: &mut [f64],
+) -> Result<(), InputFilterResponseError> {
+    if !is_launch_sample_rate(SampleRateHz(sample_rate_hz)) {
+        return Err(InputFilterResponseError::UnsupportedSampleRate);
+    }
+    let points = frequencies_hz.len();
+    let nyquist = sample_rate_hz as f32 * 0.5;
+    if points == 0
+        || frequencies_hz
+            .iter()
+            .any(|frequency| !frequency.is_finite() || *frequency < 0.0 || *frequency > nyquist)
+        || frequencies_hz.windows(2).any(|pair| pair[1] <= pair[0])
+    {
+        return Err(InputFilterResponseError::InvalidFrequencyGrid);
+    }
+    if maximum_points == 0 || points > maximum_points {
+        return Err(InputFilterResponseError::Capacity);
+    }
+    if left.len() != SECTION_COUNT
+        || right.len() != SECTION_COUNT
+        || output_left.len() != points
+        || output_right.len() != points
+    {
+        return Err(InputFilterResponseError::OutputShape);
+    }
+    let decode = |sections: &[ResponseSnapshotSection]| {
+        let mut decoded = [SvfSection::IDENTITY; SECTION_COUNT];
+        for (index, section) in sections.iter().enumerate() {
+            if section.word_count != 7 {
+                return Err(InputFilterResponseError::OutputShape);
+            }
+            let words: [f32; 7] = core::array::from_fn(|word| f32::from_bits(section.words[word]));
+            if words.iter().any(|word| !word.is_finite()) {
+                return Err(InputFilterResponseError::Numerical);
+            }
+            decoded[index] = if section.enabled {
+                SvfSection {
+                    c1: words[0],
+                    a2: words[1],
+                    a3: words[2],
+                    k: words[3],
+                    m0: words[4],
+                    m1: words[5],
+                    m2: words[6],
+                    enabled: true,
+                }
+            } else {
+                SvfSection::IDENTITY
+            };
+        }
+        Ok(decoded)
+    };
+    let left_sections = decode(left)?;
+    let right_sections = decode(right)?;
+    for (index, &frequency_hz) in frequencies_hz.iter().enumerate() {
+        output_left[index] =
+            snapshot_point_magnitude(left_sections, frequency_hz, sample_rate_hz, bypassed)?;
+        output_right[index] =
+            snapshot_point_magnitude(right_sections, frequency_hz, sample_rate_hz, bypassed)?;
+    }
+    Ok(())
+}
+
+fn snapshot_point_magnitude(
+    sections: [SvfSection; SECTION_COUNT],
+    frequency_hz: f32,
+    sample_rate_hz: u32,
+    bypassed: bool,
+) -> Result<f64, InputFilterResponseError> {
+    if bypassed {
+        return Ok(1.0);
+    }
+    let angle = core::f64::consts::TAU * f64::from(frequency_hz) / f64::from(sample_rate_hz);
+    let z = Complex::new(math::cos(angle), math::sin(angle));
+    let mut product = Complex::ONE;
+    for section in sections {
+        product = product.mul(section_response(section, z)?);
+        if !product.is_finite() {
+            return Err(InputFilterResponseError::Numerical);
+        }
+    }
+    let magnitude = product.magnitude();
+    (magnitude.is_finite())
+        .then_some(magnitude)
+        .ok_or(InputFilterResponseError::Numerical)
 }
 
 /// Returns the builtin owner's immutable native response declaration.
