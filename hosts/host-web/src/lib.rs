@@ -389,7 +389,7 @@ pub struct WebObservationResult {
     pub struct_size: u32,
     /// Browser ABI version.
     pub abi_version: u32,
-    /// One of the [`OBSERVATION_STATUS_*`] values.
+    /// One of the `OBSERVATION_STATUS_*` values.
     pub status: u32,
     /// Canonical normalized track index.
     pub track_index: u32,
