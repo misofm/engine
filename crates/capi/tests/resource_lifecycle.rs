@@ -470,6 +470,16 @@ fn scratch_slot_reservation() -> (u64, u64) {
 /// carry it upward.
 fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
     let (slot_coexistence, slot_largest) = scratch_slot_reservation();
+    let effect_bank_descriptor_delta = effect_bank_descriptor_layout_delta();
+    let (response_binding_table_bytes, response_binding_string_bytes) =
+        response_owner_metadata_rows();
+    let response_owner_metadata_bytes =
+        response_binding_table_bytes + response_binding_string_bytes;
+    assert_eq!(
+        (effect_bank_descriptor_delta, response_owner_metadata_bytes),
+        (24, 1_908),
+        "#779 response-owner graph accounting"
+    );
     assert!(slot_largest < 49_167);
     PlanResourceReport {
         struct_size: PLAN_RESOURCE_REPORT_SIZE,
@@ -531,13 +541,28 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // potentially pairable fader banks. The owners are graph-plan payload.
         // #470 adds 1,328 bytes to each single-plan graph total: the 16-byte runtime owner-table
         // field plus the accepted 82 emitted-op/unit reservation at 16 bytes per operation.
-        graph_session_plus_plan_bytes: 226_196 + slot_coexistence + 1_328,
-        graph_incremental_plan_bytes: 226_196 + slot_coexistence + 1_328,
-        graph_metadata_bytes: 50_295 + slot_coexistence + 1_328,
+        // #779 adds the response-owner binding table/identity strings and grows the prepared
+        // effect-bank descriptor; both are retained by this plan and therefore belong in all
+        // three graph totals. The independent rows are restated below in `graph_owners`.
+        graph_session_plus_plan_bytes: 226_196
+            + slot_coexistence
+            + 1_328
+            + response_owner_metadata_bytes
+            + effect_bank_descriptor_delta,
+        graph_incremental_plan_bytes: 226_196
+            + slot_coexistence
+            + 1_328
+            + response_owner_metadata_bytes
+            + effect_bank_descriptor_delta,
+        graph_metadata_bytes: 50_295
+            + slot_coexistence
+            + 1_328
+            + response_owner_metadata_bytes
+            + effect_bank_descriptor_delta,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
-        effect_bank_metadata_bytes: 648,
+        effect_bank_metadata_bytes: 648 + effect_bank_descriptor_delta,
         builtin_bank_bytes: 9_369,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
@@ -696,6 +721,21 @@ struct PublishedPlanMirror {
 struct RetiredPlanMirror {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
+}
+
+/// Mirror of graph's retained response-owner binding. The runtime keeps the three identity boxes
+/// and the compact lookup fields in each prepared plan; this row lets the CAPI oracle charge that
+/// allocation independently of graph's report.
+#[allow(dead_code)]
+struct ResponseOwnerBindingMirror {
+    track_id: Box<str>,
+    native_id: Box<str>,
+    stable_id: Box<str>,
+    response_snapshot_declared: bool,
+    rack: u8,
+    slot: u32,
+    unit: usize,
+    member: usize,
 }
 
 /// Mirror of `host_core`'s private control-source endpoint (audit #103 W4-2 moved it
@@ -1136,6 +1176,31 @@ fn bytes<T>(count: usize) -> u64 {
     Layout::array::<T>(count).expect("primitive layout").size() as u64
 }
 
+fn response_owner_metadata_rows() -> (u64, u64) {
+    let tracks = 9_u64;
+    let effects = 9_u64;
+    let binding_bytes = bytes::<ResponseOwnerBindingMirror>((tracks + effects) as usize);
+    let string_bytes = tracks
+        * (3 + "input-filters".len() + "miso.builtin.input-filters".len()) as u64
+        + effects * (3 + "soft-clip".len() + "miso.soft-clip".len()) as u64;
+    assert_eq!(
+        (
+            bytes::<ResponseOwnerBindingMirror>(1),
+            binding_bytes,
+            string_bytes
+        ),
+        (72, 1_296, 612),
+        "#779 response-owner retained layout"
+    );
+    (binding_bytes, string_bytes)
+}
+
+fn effect_bank_descriptor_layout_delta() -> u64 {
+    bytes::<graph::GraphPreparedEffectBank>(1)
+        .checked_sub(96)
+        .expect("#779 effect-bank descriptor grew from the pre-response layout")
+}
+
 fn spsc<T>(capacity: usize, name: &'static str) -> [PrimitiveOwner; 2] {
     [
         PrimitiveOwner {
@@ -1374,7 +1439,10 @@ fn complete_capi_owners(
     // #338: canonical JSON adds 8,082 retained bytes to the active session model.
     // #369: the production provider retains the fixture's 864 descriptor/state rows and its
     // descriptor-owned strings/enumerations, plus two bounded render-diagnostic projections.
-    assert_effective_owner_mutations(&active, 160_933, "active CAPI");
+    // #779's response boundary validity flag grows `PreparedRenderPlan` by 16 bytes on this
+    // pinned ABI. One publication slot, one retirement slot, and the active `Plan` handle retain
+    // that plan layout, so these independently sized rows add 48 bytes to active CAPI storage.
+    assert_effective_owner_mutations(&active, 160_981, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1649,6 +1717,8 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     // independent primitive rows so the double-live oracle charges both plans exactly once.
     let split_owner_table_field = bytes::<[usize; 2]>(1);
     let split_runtime_op_unit_reservation = bytes::<[usize; 2]>(82);
+    let (response_binding_table_bytes, response_binding_string_bytes) =
+        response_owner_metadata_rows();
     assert_eq!(
         (split_owner_table_field, split_runtime_op_unit_reservation),
         (16, 1_312),
@@ -1781,6 +1851,14 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "split-owner runtime op/unit reservation",
             bytes: split_runtime_op_unit_reservation,
+        },
+        PrimitiveOwner {
+            name: "response-owner binding table",
+            bytes: response_binding_table_bytes,
+        },
+        PrimitiveOwner {
+            name: "response-owner identity strings",
+            bytes: response_binding_string_bytes,
         },
     ]
 }
@@ -1963,10 +2041,19 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
     // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
     // #338: canonical JSON adds 8,082 retained bytes to each of the two live models. #470's
-    // split-owner runtime metadata rows above add 2,656 across the two live plans.
+    // split-owner runtime metadata rows above add 2,656 across the two live plans. #779 adds
+    // 1,932 per plan: 24 for the grown effect-bank descriptor and 1,908 for the response-owner
+    // binding table plus its cloned identity strings.
+    let response_owner_graph_delta = effect_bank_descriptor_layout_delta()
+        + response_owner_metadata_rows().0
+        + response_owner_metadata_rows().1;
+    assert_eq!(
+        response_owner_graph_delta, 1_932,
+        "#779 graph response delta"
+    );
     assert_effective_owner_mutations(
         &graph,
-        502_228 + 2 * scratch_slot_reservation().0 + 2_656,
+        502_228 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta,
         "double-live graph/model",
     );
 
@@ -2062,7 +2149,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         },
     ];
     // #338: canonical JSON adds 8,082 retained bytes to each live session model.
-    assert_effective_owner_mutations(&capi_rows, 204_375, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 204_423, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2361,6 +2448,9 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_document, &prospective_document);
+    let response_owner_graph_delta = effect_bank_descriptor_layout_delta()
+        + response_owner_metadata_rows().0
+        + response_owner_metadata_rows().1;
     // Issue #181: `size_of::<GraphPreparedEffectBank>()` went 88 -> 96, the fixture binds one
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
@@ -2371,10 +2461,11 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // `primitive_replacement_oracle` for the per-bank arithmetic.
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744. #470 adds
     // 2,656 bytes to the double-live graph peak: the runtime owner-table field and the accepted
-    // 82 emitted-op/unit reservation are both live for each of the two plans.
+    // 82 emitted-op/unit reservation are both live for each of the two plans. #779 adds the
+    // independently mirrored response-owner graph delta to each live plan.
     assert_eq!(
         oracle.graph,
-        502_228 + 2 * scratch_slot_reservation().0 + 2_656
+        502_228 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta
     );
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
@@ -2382,7 +2473,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_scratch, 432);
     // #210 phase 3: 2 x 9_963 (see `builtin_owners`). The #430 outer allowance is graph-owned.
     assert_eq!(oracle.builtin, 19_926);
-    assert_eq!(oracle.capi, 204_375);
+    assert_eq!(oracle.capi, 204_423);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2414,7 +2505,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_933));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_981));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2433,7 +2524,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_933 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_981 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2478,7 +2569,9 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
         miso_engine_v1_plan_destroy(plan);
         required
     };
-    assert_eq!(required, 178_466, "tiny-frame retained authority");
+    // #779's response boundary validity flag adds 16 bytes to each retained publication,
+    // retirement, and active-plan handle layout; the exact three-owner total is therefore +48.
+    assert_eq!(required, 178_514, "tiny-frame retained authority");
     let mut exact = roomy;
     exact.maximum_capi_retained_bytes = required;
     // SAFETY: Exact admission returns two uniquely owned children.
