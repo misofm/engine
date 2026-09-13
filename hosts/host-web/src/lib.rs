@@ -1725,9 +1725,13 @@ impl AudioWorkletEngineHost {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes),
             options,
-            spectrum_request.is_some(),
-            spectrum_collection_entry_bytes,
-            spectrum_collection_target_id_bytes,
+            (
+                spectrum_request.is_some(),
+                (
+                    spectrum_collection_entry_bytes,
+                    spectrum_collection_target_id_bytes,
+                ),
+            ),
         )?;
         let retained_projection = projected_retained_bytes(
             &session,
@@ -1987,6 +1991,30 @@ impl AudioWorkletEngineHost {
             })
     }
 
+    /// Restart the active managed stream at a fresh capture epoch without a fallible stop/start
+    /// pair. The caller has already prevalidated the replacement analysis configuration.
+    pub fn restart_spectrum_stream(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return RESULT_UNSUPPORTED;
+        };
+        let result = match capture {
+            PreparedSpectrumCapture::Single(capture) => capture.restart_continuous(),
+            PreparedSpectrumCapture::Collection(capture) => capture.restart_continuous(),
+        };
+        match result {
+            Ok(()) => RESULT_OK,
+            Err(SpectrumContinuousCaptureError::Busy) => RESULT_BACKPRESSURE,
+            Err(SpectrumContinuousCaptureError::Cadence(_)) => RESULT_WRONG_STATE,
+            Err(SpectrumContinuousCaptureError::EpochOverflow) => RESULT_REFUSED_BUDGET,
+        }
+    }
+
     /// Read one independently scheduled managed stream window or its explicit availability state.
     pub fn read_spectrum_stream(
         &mut self,
@@ -2095,6 +2123,36 @@ impl AudioWorkletEngineHost {
             Err(SpectrumCaptureCollectionSelectionError::UnknownEntry) => RESULT_INVALID_ARGUMENT,
             Err(SpectrumCaptureCollectionSelectionError::Busy) => RESULT_BACKPRESSURE,
             Err(SpectrumCaptureCollectionSelectionError::EpochOverflow) => RESULT_REFUSED_BUDGET,
+        }
+    }
+
+    /// Validate a collection selection and report whether it would replace the current entry.
+    pub fn spectrum_selection_would_change(
+        &self,
+        target: &SpectrumTarget,
+        channels: SpectrumChannels,
+    ) -> Result<bool, u32> {
+        if self.status.state != STATE_READY {
+            return Err(RESULT_WRONG_STATE);
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(RESULT_WRONG_STATE);
+        };
+        let Some(capture) = ready.spectrum_capture.as_ref() else {
+            return Err(RESULT_UNSUPPORTED);
+        };
+        let PreparedSpectrumCapture::Collection(capture) = capture else {
+            return Err(RESULT_UNSUPPORTED);
+        };
+        match capture.selection_would_change(target, channels) {
+            Ok(value) => Ok(value),
+            Err(SpectrumCaptureCollectionSelectionError::UnknownEntry) => {
+                Err(RESULT_INVALID_ARGUMENT)
+            }
+            Err(SpectrumCaptureCollectionSelectionError::Busy) => Err(RESULT_BACKPRESSURE),
+            Err(SpectrumCaptureCollectionSelectionError::EpochOverflow) => {
+                Err(RESULT_REFUSED_BUDGET)
+            }
         }
     }
 
@@ -4125,10 +4183,12 @@ fn project_buffers(
     maximum_source_channels: u32,
     id_staging_bytes: u64,
     options: WebBootOptions,
-    spectrum_configured: bool,
-    spectrum_collection_entry_bytes: u64,
-    spectrum_collection_target_id_bytes: u64,
+    spectrum_staging: (bool, (u64, u64)),
 ) -> Result<PreparedBufferProjection, BootFailure> {
+    let (
+        spectrum_configured,
+        (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes),
+    ) = spectrum_staging;
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let source_samples = u64::from(maximum_source_channels)
         .checked_mul(u64::from(quantum_frames))

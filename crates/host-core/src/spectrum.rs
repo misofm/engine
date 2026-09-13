@@ -453,6 +453,29 @@ impl SpectrumCapture {
         };
         // Every fallible admission check is complete before the selected one-shot state is
         // cleared. Collection mode uses this path for an atomic mode replacement.
+        self.commit_continuous(cadence, epoch);
+        Ok(())
+    }
+
+    /// Restart the active continuous capture at one fresh epoch without a fallible stop/start
+    /// pair. The caller has already validated the replacement configuration.
+    pub fn restart_continuous(&mut self) -> Result<(), SpectrumContinuousCaptureError> {
+        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE
+            || self.shared.active.load(Ordering::Acquire) == 0
+        {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        }
+        let Some(epoch) = self.shared.epoch.load(Ordering::Acquire).checked_add(1) else {
+            return Err(SpectrumContinuousCaptureError::EpochOverflow);
+        };
+        let Some(cadence) = self.cadence() else {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        };
+        self.commit_continuous(cadence, epoch);
+        Ok(())
+    }
+
+    fn commit_continuous(&mut self, cadence: SpectrumCadence, epoch: u64) {
         while self.consumer.try_pop().is_ok() {}
         self.state.store(IDLE, Ordering::Release);
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -476,7 +499,6 @@ impl SpectrumCapture {
         self.seen_failures = 0;
         self.seen_drops = 0;
         self.mode.store(CONTINUOUS_MODE, Ordering::Release);
-        Ok(())
     }
 
     /// Stop scheduled windows and discard queued continuous results.
@@ -726,6 +748,28 @@ impl SpectrumCaptureCollection {
             .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
     }
 
+    /// Validate a selection and report whether it would replace the current entry.
+    pub fn selection_would_change(
+        &self,
+        target: &SpectrumTarget,
+        channels: SpectrumChannels,
+    ) -> Result<bool, SpectrumCaptureCollectionSelectionError> {
+        let Some(index) = self
+            .captures
+            .iter()
+            .position(|capture| capture.target == *target && capture.channels == channels)
+        else {
+            return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+        };
+        if self.selected == Some(index) {
+            return Ok(false);
+        }
+        self.selection_epoch
+            .checked_add(1)
+            .ok_or(SpectrumCaptureCollectionSelectionError::EpochOverflow)?;
+        Ok(true)
+    }
+
     /// Start continuous capture on the currently selected entry.
     pub fn start_continuous(
         &mut self,
@@ -749,6 +793,14 @@ impl SpectrumCaptureCollection {
         if let Some(index) = self.selected {
             self.captures[index].stop_continuous();
         }
+    }
+
+    /// Restart the selected entry at a fresh continuous capture epoch.
+    pub fn restart_continuous(&mut self) -> Result<(), SpectrumContinuousCaptureError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        };
+        self.captures[index].restart_continuous()
     }
 
     /// Return the selected entry's active managed cadence, if any.

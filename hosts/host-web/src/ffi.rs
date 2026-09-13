@@ -2574,21 +2574,24 @@ pub extern "C" fn miso_engine_web_v1_spectrum_arm(handle: u32) -> u32 {
     )
 }
 
-/// Atomically select one exact prepared collection entry.
-///
-/// The target identity is read from the fixed selection-ID staging buffer. The host validates the
-/// entry and its epoch before retiring the current capture, so every refusal preserves it.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_spectrum_select(
+fn select_spectrum_internal(handle: u32, target: u32, channels: u32, target_id_bytes: u32) -> u32 {
+    select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, None)
+}
+
+fn select_spectrum_with_smoothing(
     handle: u32,
     target: u32,
     channels: u32,
     target_id_bytes: u32,
+    smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
+        if smoothing.is_some() && !staging.stream_active {
+            return RESULT_WRONG_STATE;
+        }
         let id_bytes = match usize::try_from(target_id_bytes) {
             Ok(value) if value > 0 && value <= staging.target_id.len() => value,
             _ => return RESULT_INVALID_ARGUMENT,
@@ -2605,6 +2608,22 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
             Ok(value) => value,
             Err(result) => return result,
         };
+        let smoothing_changed = smoothing.is_some() && staging.stream_smoothing != smoothing;
+        let selection_would_change = match with_host(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
+            host.spectrum_selection_would_change(&target, channels)
+        }) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+        if staging.stream_active
+            && (selection_would_change || smoothing_changed)
+            && staging
+                .stream_history
+                .as_ref()
+                .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+        {
+            return RESULT_REFUSED_BUDGET;
+        }
         let selection_epoch_before =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
         let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
@@ -2612,33 +2631,103 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
         });
         let selection_epoch_after =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
-        if result == RESULT_OK
-            && staging.stream_active
-            && selection_epoch_after != selection_epoch_before
-        {
+        if result != RESULT_OK {
+            return result;
+        }
+        let selection_changed = selection_epoch_after != selection_epoch_before;
+        debug_assert_eq!(selection_changed, selection_would_change);
+        if staging.stream_active && smoothing_changed && !selection_changed {
+            let restart = with_host_mut(
+                handle,
+                RESULT_INVALID_ARGUMENT,
+                AudioWorkletEngineHost::restart_spectrum_stream,
+            );
+            if restart != RESULT_OK {
+                return restart;
+            }
+        }
+        if staging.stream_active && (selection_changed || smoothing_changed) {
+            if selection_changed || smoothing_changed {
+                // The epoch check above makes this reset infallible at the commit point. The
+                // native capture selection and analysis configuration therefore change as one
+                // bounded control operation, without a fallible stop/start pair.
+                let reset = staging.reset_stream_analysis();
+                debug_assert!(reset.is_ok(), "smoothing reset was preflighted");
+                if reset.is_err() {
+                    return RESULT_INTERNAL;
+                }
+            }
             // Selection commits on the host side, so refresh the copied stream profile in the
             // same control operation. The next read may be warming, but it must never publish
             // the old target after a successful switch.
-            let selected_target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-            let selected_channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
-            staging.stream_metadata.target = selected_target;
-            staging.stream_metadata.channels = selected_channels;
+            if selection_changed {
+                let selected_target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+                let selected_channels =
+                    with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+                staging.stream_metadata.target = selected_target;
+                staging.stream_metadata.channels = selected_channels;
+            }
+            if selection_changed || smoothing_changed {
+                staging.stream_metadata.capture_epoch =
+                    with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
+                staging.stream_metadata.sequence = 0;
+                staging.stream_metadata.dropped_captures = 0;
+                staging.stream_metadata.windows = 0;
+                staging.stream_metadata.captured_sample = 0;
+                staging.stream_metadata.end_sample = 0;
+                staging.stream_metadata.source_underrun = 0;
+                staging.stream_metadata.analysis_epoch = staging
+                    .stream_history
+                    .as_ref()
+                    .map_or(0, |history| history.analysis_epoch());
+                staging.stream_metadata.history_start_sample = 0;
+            }
             staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_WARMING;
             staging.stream_metadata.result = RESULT_OK;
-            staging.stream_metadata.capture_epoch =
-                with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
-            staging.stream_metadata.sequence = 0;
-            staging.stream_metadata.dropped_captures = 0;
-            staging.stream_metadata.windows = 0;
-            staging.stream_metadata.captured_sample = 0;
-            staging.stream_metadata.end_sample = 0;
-            staging.stream_metadata.source_underrun = 0;
+            if let Some(smoothing) = smoothing {
+                staging.stream_smoothing = Some(smoothing);
+                staging.stream_metadata.smoothing_ms = smoothing.smoothing_ms();
+            }
             staging.capture_len = 0;
             staging.result_len = 0;
             staging.stream_window = None;
         }
         result
     })
+}
+
+/// Atomically select one exact prepared collection entry.
+///
+/// The target identity is read from the fixed selection-ID staging buffer. The host validates the
+/// entry and its epoch before retiring the current capture, so every refusal preserves it.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_select(
+    handle: u32,
+    target: u32,
+    channels: u32,
+    target_id_bytes: u32,
+) -> u32 {
+    select_spectrum_internal(handle, target, channels, target_id_bytes)
+}
+
+/// Atomically select one prepared stream entry and commit its smoothing configuration.
+///
+/// Smoothing and target admission happen before the host selection is committed. A changed
+/// configuration resets the preallocated worker history at the same control boundary; no
+/// fallible stream stop/start pair can leave a partially switched owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
+    handle: u32,
+    target: u32,
+    channels: u32,
+    target_id_bytes: u32,
+    smoothing_ms: f64,
+) -> u32 {
+    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
+        Ok(value) => value,
+        Err(_) => return RESULT_INVALID_ARGUMENT,
+    };
+    select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, Some(smoothing))
 }
 
 /// Return the monotonic identity of the currently committed collection selection.
@@ -2698,6 +2787,17 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothin
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
+        // An existing history is reset at this control boundary. The analysis owner initializes a
+        // missing history when it first evaluates a window, so stream start itself never creates a
+        // second host-side analyzer allocation.
+        if staging
+            .stream_history
+            .as_ref()
+            .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+        {
+            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+            return RESULT_REFUSED_BUDGET;
+        }
         let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
             host.start_spectrum_stream()
         });
@@ -2726,6 +2826,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothin
         staging.capture_len = 0;
         staging.result_len = 0;
         staging.stream_window = None;
+        let analysis_epoch = staging
+            .stream_history
+            .as_ref()
+            .map_or(0, |history| history.analysis_epoch());
         staging.stream_metadata = WebSpectrumStreamMetadata::default();
         stream_metadata_profile(
             &mut staging,
@@ -2740,6 +2844,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothin
             abi_version: ABI_VERSION,
             result: RESULT_OK,
             capture_epoch: epoch,
+            analysis_epoch,
             smoothing_ms: smoothing.smoothing_ms(),
             ..staging.stream_metadata
         };
@@ -4558,6 +4663,7 @@ mod spectrum_ffi_tests {
             SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
             SPECTRUM_TARGET_TRACK_POST_MATRIX
         );
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
         for block in 16..32_u64 {
             assert_eq!(
                 miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
@@ -4597,6 +4703,29 @@ mod spectrum_ffi_tests {
         assert_eq!(after_noop.channels, before_noop.channels);
         assert_eq!(after_noop.sequence, before_noop.sequence);
         assert_eq!(after_noop.windows, before_noop.windows);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
+
+        // Smoothing is part of the same transaction. An invalid configuration must leave both
+        // the selected entry and the ready stream untouched.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_select(
+                handle,
+                SPECTRUM_TARGET_OUTPUT,
+                SPECTRUM_CHANNEL_LEFT,
+                8,
+                f64::NAN,
+            ),
+            RESULT_INVALID_ARGUMENT
+        );
+        let after_refusal = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(after_refusal.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(after_refusal.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+        assert_eq!(after_refusal.channels, SPECTRUM_CHANNEL_BOTH);
+        assert_eq!(after_refusal.smoothing_ms, 0.0);
+        assert_eq!(
+            with_host(handle, 0, AudioWorkletEngineHost::spectrum_target),
+            SPECTRUM_TARGET_TRACK_POST_MATRIX
+        );
 
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
@@ -4605,11 +4734,12 @@ mod spectrum_ffi_tests {
             staging.target_id[..id.len()].copy_from_slice(id);
         });
         assert_eq!(
-            miso_engine_web_v1_spectrum_select(
+            miso_engine_web_v1_spectrum_stream_select(
                 handle,
                 SPECTRUM_TARGET_OUTPUT,
                 SPECTRUM_CHANNEL_LEFT,
                 8,
+                250.5,
             ),
             RESULT_OK
         );
@@ -4617,6 +4747,8 @@ mod spectrum_ffi_tests {
         assert_eq!(selected.status, SPECTRUM_STREAM_STATUS_WARMING);
         assert_eq!(selected.target, SPECTRUM_TARGET_OUTPUT);
         assert_eq!(selected.channels, SPECTRUM_CHANNEL_LEFT);
+        assert_eq!(selected.smoothing_ms, 250.5);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
         for block in 32..48_u64 {
             assert_eq!(
                 miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
@@ -4630,6 +4762,82 @@ mod spectrum_ffi_tests {
         assert_eq!(switched.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(switched.target, SPECTRUM_TARGET_OUTPUT);
         assert_eq!(switched.channels, SPECTRUM_CHANNEL_LEFT);
+
+        // The first analysis creates the sole worker-side history. A same-entry smoothing update
+        // must restart the native window and clear a queued old result while retaining the new
+        // history epoch; it must not allocate another analyzer on the host side.
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let analyzed = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(analyzed.analysis_epoch, 0);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_some()));
+        for block in 48..64_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "queued old stream source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        let before_smoothing_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_select(
+                handle,
+                SPECTRUM_TARGET_OUTPUT,
+                SPECTRUM_CHANNEL_LEFT,
+                8,
+                500.25,
+            ),
+            RESULT_OK
+        );
+        let after_smoothing_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(
+            after_smoothing_restart.status,
+            SPECTRUM_STREAM_STATUS_WARMING
+        );
+        assert_eq!(after_smoothing_restart.target, SPECTRUM_TARGET_OUTPUT);
+        assert_eq!(after_smoothing_restart.channels, SPECTRUM_CHANNEL_LEFT);
+        assert_eq!(after_smoothing_restart.smoothing_ms, 500.25);
+        assert_eq!(after_smoothing_restart.sequence, 0);
+        assert_eq!(after_smoothing_restart.windows, 0);
+        assert_eq!(
+            after_smoothing_restart.capture_epoch,
+            before_smoothing_restart.capture_epoch + 1
+        );
+        assert_eq!(after_smoothing_restart.analysis_epoch, 1);
+        assert_eq!(miso_engine_web_v1_spectrum_capture_bytes(), 0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.status),
+            SPECTRUM_STREAM_STATUS_WARMING
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let id = b"eq0";
+            staging.target_id.fill(0);
+            staging.target_id[..id.len()].copy_from_slice(id);
+        });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(
+                handle,
+                SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                SPECTRUM_CHANNEL_BOTH,
+                3,
+            ),
+            RESULT_OK
+        );
+        let after_target_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(after_target_restart.status, SPECTRUM_STREAM_STATUS_WARMING);
+        assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 4);
+        assert_eq!(after_target_restart.analysis_epoch, 2);
+        assert_eq!(
+            after_target_restart.target,
+            SPECTRUM_TARGET_TRACK_POST_MATRIX
+        );
+        assert_eq!(after_target_restart.channels, SPECTRUM_CHANNEL_BOTH);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_some()));
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
