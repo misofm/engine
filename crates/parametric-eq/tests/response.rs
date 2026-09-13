@@ -132,7 +132,7 @@ fn rounded_words_match_independent_oracle_for_all_families_and_launch_rates() {
             assert_eq!(summary.mode, EqResponseMode::RequestedConfiguration);
             assert_eq!(summary.sample_rate_hz, rate);
             assert_eq!(summary.points, frequencies.len());
-            assert_eq!(summary.enabled_left[0], true);
+            assert!(summary.enabled_left[0]);
             assert!(summary.enabled_left[1..].iter().all(|enabled| !enabled));
             for (point, frequency) in frequencies.into_iter().enumerate() {
                 let expected = oracle_db(kind, rate, 1_000.0, gain, q, slope, frequency);
