@@ -115,6 +115,23 @@ fn prepared_nonprovider_session() -> EffectPreparedSession {
         .expect("effects prepare")
 }
 
+fn prepared_session_with_effect_slot(slot: &str) -> EffectPreparedSession {
+    let mut model = session::parse_session_json(SESSION).expect("fixture parses");
+    model.sample_rate_hz = 48_000;
+    let track = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq0")
+        .expect("fixture track");
+    let mut effect = track.simd1.effects.pop().expect("fixture EQ");
+    effect.id = stable(slot);
+    track.dynamic.effects.push(effect);
+    let compiled = session::compile_session(&model, compile_caps()).expect("session compiles");
+    let registry = effect_compiler::launch_native_effect_registry().expect("launch registry");
+    effect_compiler::prepare_native_session_effects(&compiled, &registry, effect_caps())
+        .expect("effects prepare")
+}
+
 fn stable(value: &str) -> StableId {
     StableId::parse(value).expect("stable id")
 }
@@ -165,6 +182,17 @@ fn provider(
         )
         .expect("catalog prepares"),
     )
+}
+
+fn assert_bits(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+}
+
+fn assert_unchanged(actual: &[f32], before: &[f32]) {
+    assert_bits(actual, before);
 }
 
 #[test]
@@ -267,7 +295,29 @@ fn target_resolution_uses_stable_tuples() {
                 effect_slot_id: stable("comp"),
             }
         ),
-        Err(SessionResponseError::UnsupportedResponse)
+        Ok(ResponseAvailability::Unsupported)
+    );
+    assert_eq!(
+        PreparedSessionResponseCatalog::prepare(
+            &unsupported,
+            identity(),
+            &[SessionResponseSelection {
+                target: ResponseTarget::Effect {
+                    track_id: stable("comp0"),
+                    rack: EffectRack::Dynamic,
+                    effect_slot_id: stable("comp"),
+                },
+                analysis_id: 1,
+                grid: ResponseFrequencyGrid::Linear {
+                    points: 2,
+                    minimum_hz: 0.0,
+                    maximum_hz: 24_000.0,
+                },
+            }],
+            limits(),
+        )
+        .err(),
+        Some(SessionResponseError::UnsupportedResponse)
     );
 
     let mut malformed = prepared_session(48_000, false, false);

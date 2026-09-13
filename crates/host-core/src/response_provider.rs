@@ -289,6 +289,10 @@ impl PreparedSessionResponseCatalog {
             total_points = total_points
                 .checked_add(grid.points())
                 .ok_or(SessionResponseError::Capacity)?;
+            let grid_bytes = grid
+                .points()
+                .checked_mul(size_of::<f32>())
+                .ok_or(SessionResponseError::Capacity)?;
             Layout::array::<f32>(grid.points()).map_err(|_| SessionResponseError::Capacity)?;
             if total_points > limits.maximum_total_grid_points {
                 return Err(SessionResponseError::Capacity);
@@ -296,6 +300,11 @@ impl PreparedSessionResponseCatalog {
             lower_owned_id_bytes = lower_owned_id_bytes
                 .checked_add(target_id_bytes(&selection.target)?)
                 .ok_or(SessionResponseError::Capacity)?;
+            if target_id_largest_bytes(&selection.target)? > limits.maximum_single_allocation_bytes
+                || grid_bytes > limits.maximum_single_allocation_bytes
+            {
+                return Err(SessionResponseError::ResourceLimit);
+            }
             if duplicate_selection(&selections[..index], &selection.target) {
                 return Err(SessionResponseError::DuplicateSelection);
             }
@@ -316,15 +325,6 @@ impl PreparedSessionResponseCatalog {
         {
             return Err(SessionResponseError::ResourceLimit);
         }
-        if selections.iter().any(|selection| {
-            let id_bytes = target_id_bytes(&selection.target).unwrap_or(usize::MAX);
-            let points_bytes = selection.grid.points().saturating_mul(size_of::<f32>());
-            id_bytes > limits.maximum_single_allocation_bytes
-                || points_bytes > limits.maximum_single_allocation_bytes
-        }) {
-            return Err(SessionResponseError::ResourceLimit);
-        }
-
         let mut bindings = Vec::new();
         bindings
             .try_reserve_exact(selections.len())
@@ -341,6 +341,8 @@ impl PreparedSessionResponseCatalog {
         let mut owned_id_bytes = 0usize;
         let mut owner_prepared_bytes = 0usize;
         let mut largest_allocation_bytes = metadata_bytes;
+        let mut remaining_grid_lower = grid_lower;
+        let mut remaining_owned_id_lower = lower_owned_id_bytes;
 
         for selection in selections {
             let resolved = resolve_target(effects, &selection.target)?;
@@ -356,7 +358,7 @@ impl PreparedSessionResponseCatalog {
             let frequencies = generate_grid(normalized_grid)?;
             validate_generated_grid(&frequencies, normalized_grid)?;
             let generated_grid_bytes = frequencies
-                .len()
+                .capacity()
                 .checked_mul(size_of::<f32>())
                 .ok_or(SessionResponseError::Capacity)?;
             if generated_grid_bytes > limits.maximum_single_allocation_bytes {
@@ -364,20 +366,47 @@ impl PreparedSessionResponseCatalog {
             }
 
             let target = own_target(&selection.target)?;
-            let target_bytes = target.owned_bytes();
-            if target_bytes > limits.maximum_single_allocation_bytes {
+            let target_bytes = target.owned_bytes()?;
+            let target_largest_bytes = target.largest_allocation_bytes();
+            if target_largest_bytes > limits.maximum_single_allocation_bytes {
                 return Err(SessionResponseError::ResourceLimit);
             }
 
+            let grid_lower = normalized_grid
+                .points()
+                .checked_mul(size_of::<f32>())
+                .ok_or(SessionResponseError::Capacity)?;
+            let owned_id_lower = target_id_bytes(&selection.target)?;
+            remaining_grid_lower = remaining_grid_lower
+                .checked_sub(grid_lower)
+                .ok_or(SessionResponseError::Capacity)?;
+            remaining_owned_id_lower = remaining_owned_id_lower
+                .checked_sub(owned_id_lower)
+                .ok_or(SessionResponseError::Capacity)?;
+
+            grid_bytes = grid_bytes
+                .checked_add(generated_grid_bytes)
+                .ok_or(SessionResponseError::Capacity)?;
+            owned_id_bytes = owned_id_bytes
+                .checked_add(target_bytes)
+                .ok_or(SessionResponseError::Capacity)?;
             let known_before_owner = metadata_bytes
-                .checked_add(grid_lower)
-                .and_then(|value| value.checked_add(lower_owned_id_bytes))
+                .checked_add(grid_bytes)
+                .and_then(|value| value.checked_add(owned_id_bytes))
                 .and_then(|value| value.checked_add(owner_prepared_bytes))
+                .ok_or(SessionResponseError::Capacity)?;
+            let future_lower = remaining_grid_lower
+                .checked_add(remaining_owned_id_lower)
+                .ok_or(SessionResponseError::Capacity)?;
+            let owner_base = known_before_owner
+                .checked_add(future_lower)
                 .ok_or(SessionResponseError::Capacity)?;
             let remaining = limits
                 .maximum_retained_bytes
-                .saturating_sub(known_before_owner);
+                .checked_sub(owner_base)
+                .ok_or(SessionResponseError::ResourceLimit)?;
             let owner_limit = remaining.min(limits.maximum_single_allocation_bytes);
+
             let owner = prepare_owner(
                 &resolved,
                 sample_rate_hz,
@@ -395,12 +424,6 @@ impl PreparedSessionResponseCatalog {
                 return Err(SessionResponseError::ResourceLimit);
             }
 
-            grid_bytes = grid_bytes
-                .checked_add(generated_grid_bytes)
-                .ok_or(SessionResponseError::Capacity)?;
-            owned_id_bytes = owned_id_bytes
-                .checked_add(target_bytes)
-                .ok_or(SessionResponseError::Capacity)?;
             owner_prepared_bytes = owner_prepared_bytes
                 .checked_add(owner_bytes)
                 .ok_or(SessionResponseError::Capacity)?;
@@ -414,7 +437,7 @@ impl PreparedSessionResponseCatalog {
             }
             largest_allocation_bytes = largest_allocation_bytes
                 .max(generated_grid_bytes)
-                .max(target_bytes)
+                .max(target_largest_bytes)
                 .max(owner_bytes);
             bindings.push(ResponseBinding {
                 target,
@@ -542,12 +565,14 @@ pub fn describe_session_response_target(
     effects: &EffectPreparedSession,
     target: &ResponseTarget,
 ) -> Result<ResponseAvailability, SessionResponseError> {
-    Ok(match resolve_target(effects, target)? {
-        ResolvedTarget::InputFilters { descriptor, .. }
-        | ResolvedTarget::Effect { descriptor, .. } => {
-            ResponseAvailability::Available { descriptor }
+    match resolve_target(effects, target) {
+        Ok(ResolvedTarget::InputFilters { descriptor, .. })
+        | Ok(ResolvedTarget::Effect { descriptor, .. }) => {
+            Ok(ResponseAvailability::Available { descriptor })
         }
-    })
+        Err(SessionResponseError::UnsupportedResponse) => Ok(ResponseAvailability::Unsupported),
+        Err(error) => Err(error),
+    }
 }
 
 enum ResolvedTarget<'a> {
@@ -706,18 +731,31 @@ fn duplicate_selection(previous: &[SessionResponseSelection], target: &ResponseT
 
 fn target_id_bytes(target: &ResponseTarget) -> Result<usize, SessionResponseError> {
     let lower = match target {
-        ResponseTarget::InputFilters { track_id } => track_id.as_str().len(),
+        ResponseTarget::InputFilters { track_id } => id_bytes(track_id.as_str())?,
         ResponseTarget::Effect {
             track_id,
             effect_slot_id,
             ..
-        } => track_id
-            .as_str()
-            .len()
-            .checked_add(effect_slot_id.as_str().len())
+        } => id_bytes(track_id.as_str())?
+            .checked_add(id_bytes(effect_slot_id.as_str())?)
             .ok_or(SessionResponseError::Capacity)?,
     };
-    Layout::array::<u8>(lower)
+    Ok(lower)
+}
+
+fn target_id_largest_bytes(target: &ResponseTarget) -> Result<usize, SessionResponseError> {
+    match target {
+        ResponseTarget::InputFilters { track_id } => id_bytes(track_id.as_str()),
+        ResponseTarget::Effect {
+            track_id,
+            effect_slot_id,
+            ..
+        } => Ok(id_bytes(track_id.as_str())?.max(id_bytes(effect_slot_id.as_str())?)),
+    }
+}
+
+fn id_bytes(value: &str) -> Result<usize, SessionResponseError> {
+    Layout::array::<u8>(value.len())
         .map(|layout| layout.size())
         .map_err(|_| SessionResponseError::Capacity)
 }
@@ -779,9 +817,9 @@ fn validate_generated_grid(
     Ok(())
 }
 
-fn generate_grid(grid: ResponseFrequencyGrid) -> Result<Box<[f32]>, SessionResponseError> {
+fn generate_grid(grid: ResponseFrequencyGrid) -> Result<Vec<f32>, SessionResponseError> {
     let points = grid.points();
-    let layout = Layout::array::<f32>(points).map_err(|_| SessionResponseError::Capacity)?;
+    Layout::array::<f32>(points).map_err(|_| SessionResponseError::Capacity)?;
     let mut frequencies = Vec::new();
     frequencies
         .try_reserve_exact(points)
@@ -810,8 +848,7 @@ fn generate_grid(grid: ResponseFrequencyGrid) -> Result<Box<[f32]>, SessionRespo
     if let Some(last) = frequencies.last_mut() {
         *last = maximum_hz;
     }
-    debug_assert_eq!(layout.size(), frequencies.capacity() * size_of::<f32>());
-    Ok(frequencies.into_boxed_slice())
+    Ok(frequencies)
 }
 
 fn own_target(target: &ResponseTarget) -> Result<OwnedTarget, SessionResponseError> {
@@ -852,16 +889,28 @@ enum OwnedTarget {
 }
 
 impl OwnedTarget {
-    fn owned_bytes(&self) -> usize {
+    fn owned_bytes(&self) -> Result<usize, SessionResponseError> {
         match self {
-            Self::InputFilters { track_id } => track_id.capacity(),
+            Self::InputFilters { track_id } => Ok(track_id.capacity()),
             Self::Effect {
                 track_id,
                 effect_slot_id,
                 ..
             } => track_id
                 .capacity()
-                .saturating_add(effect_slot_id.capacity()),
+                .checked_add(effect_slot_id.capacity())
+                .ok_or(SessionResponseError::Capacity),
+        }
+    }
+
+    fn largest_allocation_bytes(&self) -> usize {
+        match self {
+            Self::InputFilters { track_id } => track_id.capacity(),
+            Self::Effect {
+                track_id,
+                effect_slot_id,
+                ..
+            } => track_id.capacity().max(effect_slot_id.capacity()),
         }
     }
 
@@ -888,7 +937,7 @@ struct ResponseBinding {
     analysis_id: u32,
     descriptor: &'static ResponseAnalysisDescriptor,
     grid: ResponseFrequencyGrid,
-    frequencies: Box<[f32]>,
+    frequencies: Vec<f32>,
     owner: Box<dyn PreparedResponseAnalysis>,
 }
 
