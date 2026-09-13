@@ -27,6 +27,12 @@ import type { TrackResponseHostRequest, TrackResponseQuery, TrackResponseResult 
 import type { ResponseWorkerFactory } from "./response-worker.ts";
 import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
+import { ObservationSubscriptionOwner } from "../core/observation-subscriptions.ts";
+import type {
+  ObservationSubscription,
+  ObservationSubscriptionLimits,
+  ObservationSubscriptionRequest,
+} from "../core/observation-subscriptions.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -108,6 +114,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly createResponseWorker?: ResponseWorkerFactory;
   /** One prepared spectrum boundary. The query target must match it. */
   readonly spectrum?: SpectrumQuery;
+  /** Finite SDK-side bounds for resident observation subscriptions. */
+  readonly observationSubscriptionLimits?: ObservationSubscriptionLimits;
   readonly requestDeadlineMs?: number;
   readonly signal?: AbortSignal;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
@@ -142,6 +150,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   observationMap(): Promise<ObservationMap>;
   /** Read one bounded non-consuming batch from the current prepared owner. */
   readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
+  /** Subscribe to bounded resident observation rows; browser delivery is off-render. */
+  subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
   /** Arm, capture and analyze one complete 2048-frame spectrum window. */
@@ -419,6 +429,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumPending = false;
     let spectrumCleanup: Promise<void> | undefined;
     let closed = false;
+    let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
       if (reply.result !== constantValue("resultCodes", "ok")) {
@@ -453,6 +464,24 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         shape.sampleRateHz,
       );
     };
+    const getConsole = (): Promise<EngineConsole> => {
+      semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
+        ? Promise.reject(new MisoUsageError(
+          "this engine booted with no console attached; set policy.console.commandQueueRecords",
+        ))
+        : createBrowserConsole(host, (edits) => observationSubscriptions?.beforeConsoleSubmit(edits));
+      return semanticConsole;
+    };
+    const observationOwner = (): ObservationSubscriptionOwner => observationSubscriptions ??=
+      new ObservationSubscriptionOwner({
+        observationMap,
+        readObservations,
+        console: getConsole,
+        scheduler: {
+          setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
+          clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
+        },
+      }, options.observationSubscriptionLimits);
     const cancelSpectrumCapture = (): Promise<void> => {
       try {
         return Promise.resolve(host.cancelSpectrum?.()).then(() => undefined, () => undefined);
@@ -679,18 +708,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       host,
       observationMap,
       readObservations,
+      subscribeObservations: (request: ObservationSubscriptionRequest) => observationOwner().subscribe(request)
+        .then((receipt) => receipt.handle),
       queryTrackResponse,
       querySpectrum,
-      console: () => {
-        semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
-          ? Promise.reject(new MisoUsageError(
-            "this engine booted with no console attached; set policy.console.commandQueueRecords",
-          ))
-          : createBrowserConsole(host);
-        return semanticConsole;
-      },
+      console: getConsole,
       close: () => {
         closed = true;
+        observationSubscriptions?.invalidate(true);
         closePromise ??= (async () => {
           try {
             if (trackResponsePromise !== undefined) {

@@ -3,6 +3,16 @@ export * from "./engine.ts";
 export * from "./assets.ts";
 export * from "./response.ts";
 export * from "../core/observation.ts";
+export { DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS } from "../core/observation-subscriptions.ts";
+export type {
+  ObservationSubscription,
+  ObservationSubscriptionBounds,
+  ObservationSubscriptionConfiguration,
+  ObservationSubscriptionLimits,
+  ObservationSubscriptionNotification,
+  ObservationSubscriptionReceipt,
+  ObservationSubscriptionRequest,
+} from "../core/observation-subscriptions.ts";
 export type {
   TrackResponseGrid,
   TrackResponseLimits,

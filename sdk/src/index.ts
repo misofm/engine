@@ -19,6 +19,16 @@ export type {
 } from "./core/live-response.ts";
 export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "./core/spectrum.ts";
 export * from "./core/observation.ts";
+export { DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS } from "./core/observation-subscriptions.ts";
+export type {
+  ObservationSubscription,
+  ObservationSubscriptionBounds,
+  ObservationSubscriptionConfiguration,
+  ObservationSubscriptionLimits,
+  ObservationSubscriptionNotification,
+  ObservationSubscriptionReceipt,
+  ObservationSubscriptionRequest,
+} from "./core/observation-subscriptions.ts";
 export * from "./core/session.ts";
 export * from "./core/writer.ts";
 export type * from "./core/types.ts";
