@@ -18,6 +18,8 @@ export type {
   TrackResponseResult,
 } from "./core/live-response.ts";
 export type {
+  SpectrumCollection,
+  SpectrumCollectionEntry,
   SpectrumLimits,
   SpectrumQuery,
   SpectrumResult,

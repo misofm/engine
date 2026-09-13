@@ -2586,7 +2586,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
     target_id_bytes: u32,
 ) -> u32 {
     SPECTRUM_STAGING.with(|slot| {
-        let Ok(staging) = slot.try_borrow() else {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
         let id_bytes = match usize::try_from(target_id_bytes) {
@@ -2605,9 +2605,39 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
             Ok(value) => value,
             Err(result) => return result,
         };
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        let selection_epoch_before =
+            with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
+        let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
             host.select_spectrum(&target, channels)
-        })
+        });
+        let selection_epoch_after =
+            with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
+        if result == RESULT_OK
+            && staging.stream_active
+            && selection_epoch_after != selection_epoch_before
+        {
+            // Selection commits on the host side, so refresh the copied stream profile in the
+            // same control operation. The next read may be warming, but it must never publish
+            // the old target after a successful switch.
+            let selected_target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            let selected_channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+            staging.stream_metadata.target = selected_target;
+            staging.stream_metadata.channels = selected_channels;
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_WARMING;
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.capture_epoch =
+                with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
+            staging.stream_metadata.sequence = 0;
+            staging.stream_metadata.dropped_captures = 0;
+            staging.stream_metadata.windows = 0;
+            staging.stream_metadata.captured_sample = 0;
+            staging.stream_metadata.end_sample = 0;
+            staging.stream_metadata.source_underrun = 0;
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+        }
+        result
     })
 }
 
@@ -2726,6 +2756,12 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
         };
         staging.capture_len = 0;
         staging.result_len = 0;
+        // A collection selection can occur between reads. Read the host's committed entry on
+        // every path, including warming/pending, so metadata cannot retain the previous target.
+        staging.stream_metadata.target =
+            with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+        staging.stream_metadata.channels =
+            with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
         let read = with_host_mut(
             handle,
             Err(SpectrumContinuousReadError::NotActive),
@@ -2835,7 +2871,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
         staging.stream_metadata.captured_sample = window.first_sample;
         staging.stream_metadata.end_sample = end_sample;
         staging.stream_metadata.source_underrun = u32::from(window.source_underrun);
-        let target = staging.stream_metadata.target;
+        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
         let token = match window.sequence.checked_add(1) {
             Some(value) => value,
             None => {
@@ -4511,6 +4547,90 @@ mod spectrum_ffi_tests {
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels),
             SPECTRUM_CHANNEL_BOTH
         );
+
+        // A managed stream must refresh its copied profile on a live collection switch. The
+        // stale-start target would make the following ready window look like the old entry.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
+            SPECTRUM_TARGET_TRACK_POST_MATRIX
+        );
+        for block in 16..32_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "stream source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
+            SPECTRUM_TARGET_TRACK_POST_MATRIX
+        );
+
+        // Repeating the exact prepared selection is an idempotent no-op. It must preserve the
+        // ready window and its sequence instead of spuriously resetting the live stream.
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let id = b"eq0";
+            staging.target_id.fill(0);
+            staging.target_id[..id.len()].copy_from_slice(id);
+        });
+        let before_noop = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(
+                handle,
+                SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                SPECTRUM_CHANNEL_BOTH,
+                3,
+            ),
+            RESULT_OK
+        );
+        let after_noop = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 2);
+        assert_eq!(after_noop.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(after_noop.target, before_noop.target);
+        assert_eq!(after_noop.channels, before_noop.channels);
+        assert_eq!(after_noop.sequence, before_noop.sequence);
+        assert_eq!(after_noop.windows, before_noop.windows);
+
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let id = b"main-out";
+            staging.target_id.fill(0);
+            staging.target_id[..id.len()].copy_from_slice(id);
+        });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(
+                handle,
+                SPECTRUM_TARGET_OUTPUT,
+                SPECTRUM_CHANNEL_LEFT,
+                8,
+            ),
+            RESULT_OK
+        );
+        let selected = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(selected.status, SPECTRUM_STREAM_STATUS_WARMING);
+        assert_eq!(selected.target, SPECTRUM_TARGET_OUTPUT);
+        assert_eq!(selected.channels, SPECTRUM_CHANNEL_LEFT);
+        for block in 32..48_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "switched stream source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let switched = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(switched.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(switched.target, SPECTRUM_TARGET_OUTPUT);
+        assert_eq!(switched.channels, SPECTRUM_CHANNEL_LEFT);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 

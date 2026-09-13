@@ -46,7 +46,14 @@ export type {
   TrackResponseQuery,
   TrackResponseResult,
 } from "../core/live-response.ts";
-export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "../core/spectrum.ts";
+export type {
+  SpectrumCollection,
+  SpectrumCollectionEntry,
+  SpectrumLimits,
+  SpectrumQuery,
+  SpectrumResult,
+  SpectrumTarget,
+} from "../core/spectrum.ts";
 export type {
   SpectrumStreamMetadata,
   SpectrumStreamRead,
