@@ -61,18 +61,18 @@ use host_web::{
     COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES, COMMAND_SOLO, COMMAND_TRIM_DB,
     DEFAULT_COMMAND_QUEUE_RECORDS, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
     DIAGNOSTIC_BYTES, MAXIMUM_COMMAND_RECORDS, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS,
-    METER_HEADER_BYTES, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
+    METER_HEADER_BYTES, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT,
+    RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR,
+    RESPONSE_GRID_LOGARITHMIC, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
+    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
+    RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT,
+    RESPONSE_TARGET_INPUT_FILTERS, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
     RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED, STATE_READY,
-    STATUS_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader, WebResourceReport, WebStatus,
-    RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS,
-    RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
-    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
-    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
-    RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT, RESPONSE_TARGET_INPUT_FILTERS,
-    WebResponseParameter, WebResponseRequest, WebResponseResult,
+    STATUS_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader, WebResourceReport,
+    WebResponseParameter, WebResponseRequest, WebResponseResult, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -453,8 +453,16 @@ fn command_record_fields() -> [Field; 11] {
 
 fn response_request_fields() -> [Field; 27] {
     [
-        ("structSize", offset_of!(WebResponseRequest, struct_size), "u32"),
-        ("abiVersion", offset_of!(WebResponseRequest, abi_version), "u32"),
+        (
+            "structSize",
+            offset_of!(WebResponseRequest, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebResponseRequest, abi_version),
+            "u32",
+        ),
         ("target", offset_of!(WebResponseRequest, target), "u32"),
         ("grid", offset_of!(WebResponseRequest, grid), "u32"),
         ("channels", offset_of!(WebResponseRequest, channels), "u32"),
@@ -462,61 +470,197 @@ fn response_request_fields() -> [Field; 27] {
         ("quality", offset_of!(WebResponseRequest, quality), "u32"),
         ("linkMode", offset_of!(WebResponseRequest, link_mode), "u32"),
         ("bypass", offset_of!(WebResponseRequest, bypass), "u32"),
-        ("effectIdBytes", offset_of!(WebResponseRequest, effect_id_bytes), "u32"),
-        ("parameterCount", offset_of!(WebResponseRequest, parameter_count), "u32"),
+        (
+            "effectIdBytes",
+            offset_of!(WebResponseRequest, effect_id_bytes),
+            "u32",
+        ),
+        (
+            "parameterCount",
+            offset_of!(WebResponseRequest, parameter_count),
+            "u32",
+        ),
         ("points", offset_of!(WebResponseRequest, points), "u32"),
-        ("sampleRateHz", offset_of!(WebResponseRequest, sample_rate_hz), "u32"),
-        ("quantumFrames", offset_of!(WebResponseRequest, quantum_frames), "u32"),
-        ("minimumHz", offset_of!(WebResponseRequest, minimum_hz), "f32"),
-        ("maximumHz", offset_of!(WebResponseRequest, maximum_hz), "f32"),
-        ("leftHpfHz", offset_of!(WebResponseRequest, left_hpf_hz), "f32"),
-        ("leftLpfHz", offset_of!(WebResponseRequest, left_lpf_hz), "f32"),
-        ("rightHpfHz", offset_of!(WebResponseRequest, right_hpf_hz), "f32"),
-        ("rightLpfHz", offset_of!(WebResponseRequest, right_lpf_hz), "f32"),
-        ("configurationId", offset_of!(WebResponseRequest, configuration_id), "u64"),
-        ("maximumPreparedBytes", offset_of!(WebResponseRequest, maximum_prepared_bytes), "u64"),
-        ("maximumTotalStateBytes", offset_of!(WebResponseRequest, maximum_total_state_bytes), "u64"),
-        ("maximumScratchBytes", offset_of!(WebResponseRequest, maximum_scratch_bytes), "u64"),
-        ("maximumAutomationSpansPerBlock", offset_of!(WebResponseRequest, maximum_automation_spans_per_block), "u32"),
-        ("maximumResultBytes", offset_of!(WebResponseRequest, maximum_result_bytes), "u32"),
-        ("reserved", offset_of!(WebResponseRequest, reserved), "u32[2]"),
+        (
+            "sampleRateHz",
+            offset_of!(WebResponseRequest, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "quantumFrames",
+            offset_of!(WebResponseRequest, quantum_frames),
+            "u32",
+        ),
+        (
+            "minimumHz",
+            offset_of!(WebResponseRequest, minimum_hz),
+            "f32",
+        ),
+        (
+            "maximumHz",
+            offset_of!(WebResponseRequest, maximum_hz),
+            "f32",
+        ),
+        (
+            "leftHpfHz",
+            offset_of!(WebResponseRequest, left_hpf_hz),
+            "f32",
+        ),
+        (
+            "leftLpfHz",
+            offset_of!(WebResponseRequest, left_lpf_hz),
+            "f32",
+        ),
+        (
+            "rightHpfHz",
+            offset_of!(WebResponseRequest, right_hpf_hz),
+            "f32",
+        ),
+        (
+            "rightLpfHz",
+            offset_of!(WebResponseRequest, right_lpf_hz),
+            "f32",
+        ),
+        (
+            "configurationId",
+            offset_of!(WebResponseRequest, configuration_id),
+            "u64",
+        ),
+        (
+            "maximumPreparedBytes",
+            offset_of!(WebResponseRequest, maximum_prepared_bytes),
+            "u64",
+        ),
+        (
+            "maximumTotalStateBytes",
+            offset_of!(WebResponseRequest, maximum_total_state_bytes),
+            "u64",
+        ),
+        (
+            "maximumScratchBytes",
+            offset_of!(WebResponseRequest, maximum_scratch_bytes),
+            "u64",
+        ),
+        (
+            "maximumAutomationSpansPerBlock",
+            offset_of!(WebResponseRequest, maximum_automation_spans_per_block),
+            "u32",
+        ),
+        (
+            "maximumResultBytes",
+            offset_of!(WebResponseRequest, maximum_result_bytes),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebResponseRequest, reserved),
+            "u32[2]",
+        ),
     ]
 }
 
 fn response_parameter_fields() -> [Field; 4] {
     [
-        ("parameterId", offset_of!(WebResponseParameter, parameter_id), "u32"),
+        (
+            "parameterId",
+            offset_of!(WebResponseParameter, parameter_id),
+            "u32",
+        ),
         ("channel", offset_of!(WebResponseParameter, channel), "u32"),
         ("value", offset_of!(WebResponseParameter, value), "f32"),
-        ("reserved", offset_of!(WebResponseParameter, reserved), "u32"),
+        (
+            "reserved",
+            offset_of!(WebResponseParameter, reserved),
+            "u32",
+        ),
     ]
 }
 
 fn response_result_fields() -> [Field; 23] {
     [
-        ("structSize", offset_of!(WebResponseResult, struct_size), "u32"),
-        ("abiVersion", offset_of!(WebResponseResult, abi_version), "u32"),
+        (
+            "structSize",
+            offset_of!(WebResponseResult, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebResponseResult, abi_version),
+            "u32",
+        ),
         ("result", offset_of!(WebResponseResult, result), "u32"),
         ("target", offset_of!(WebResponseResult, target), "u32"),
         ("channels", offset_of!(WebResponseResult, channels), "u32"),
         ("fields", offset_of!(WebResponseResult, fields), "u32"),
         ("points", offset_of!(WebResponseResult, points), "u32"),
-        ("sectionCount", offset_of!(WebResponseResult, section_count), "u32"),
-        ("sampleRateHz", offset_of!(WebResponseResult, sample_rate_hz), "u32"),
+        (
+            "sectionCount",
+            offset_of!(WebResponseResult, section_count),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebResponseResult, sample_rate_hz),
+            "u32",
+        ),
         ("reserved0", offset_of!(WebResponseResult, reserved0), "u32"),
-        ("configurationId", offset_of!(WebResponseResult, configuration_id), "u64"),
+        (
+            "configurationId",
+            offset_of!(WebResponseResult, configuration_id),
+            "u64",
+        ),
         ("floorDb", offset_of!(WebResponseResult, floor_db), "f32"),
         ("bypass", offset_of!(WebResponseResult, bypass), "u32"),
-        ("enabledLeft", offset_of!(WebResponseResult, enabled_left), "u32"),
-        ("enabledRight", offset_of!(WebResponseResult, enabled_right), "u32"),
-        ("retainedBytes", offset_of!(WebResponseResult, retained_bytes), "u64"),
-        ("resultBytes", offset_of!(WebResponseResult, result_bytes), "u64"),
-        ("frequenciesOffset", offset_of!(WebResponseResult, frequencies_offset), "u32"),
-        ("totalLeftOffset", offset_of!(WebResponseResult, total_left_offset), "u32"),
-        ("totalRightOffset", offset_of!(WebResponseResult, total_right_offset), "u32"),
-        ("sectionsLeftOffset", offset_of!(WebResponseResult, sections_left_offset), "u32"),
-        ("sectionsRightOffset", offset_of!(WebResponseResult, sections_right_offset), "u32"),
-        ("reserved", offset_of!(WebResponseResult, reserved), "u32[3]"),
+        (
+            "enabledLeft",
+            offset_of!(WebResponseResult, enabled_left),
+            "u32",
+        ),
+        (
+            "enabledRight",
+            offset_of!(WebResponseResult, enabled_right),
+            "u32",
+        ),
+        (
+            "retainedBytes",
+            offset_of!(WebResponseResult, retained_bytes),
+            "u64",
+        ),
+        (
+            "resultBytes",
+            offset_of!(WebResponseResult, result_bytes),
+            "u64",
+        ),
+        (
+            "frequenciesOffset",
+            offset_of!(WebResponseResult, frequencies_offset),
+            "u32",
+        ),
+        (
+            "totalLeftOffset",
+            offset_of!(WebResponseResult, total_left_offset),
+            "u32",
+        ),
+        (
+            "totalRightOffset",
+            offset_of!(WebResponseResult, total_right_offset),
+            "u32",
+        ),
+        (
+            "sectionsLeftOffset",
+            offset_of!(WebResponseResult, sections_left_offset),
+            "u32",
+        ),
+        (
+            "sectionsRightOffset",
+            offset_of!(WebResponseResult, sections_right_offset),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebResponseResult, reserved),
+            "u32[3]",
+        ),
     ]
 }
 

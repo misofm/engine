@@ -84,12 +84,13 @@ use builtins::{
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
-    NativeEffectResponseFactory, ObservationDescriptor, ObservationFold, ObservationKind,
+    AutomationRate, EffectDescriptor, NativeEffectResponseFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterLattice,
-    ParameterMapping, ParameterUnit, PortDescriptor, PortLayout, PortRole, ResponseAnalysisDescriptor,
-    ResponseAmplitudeReference, ResponseBypassSemantics, ResponseChannelLayout, ResponseQueryCadence,
-    ResponseSectionOutput, ResponseTotalScope, SmoothingRule, StepSize, StepUnit,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortLayout, PortRole,
+    ResponseAmplitudeReference, ResponseAnalysisDescriptor, ResponseBypassSemantics,
+    ResponseChannelLayout, ResponseQueryCadence, ResponseSectionOutput, ResponseTotalScope,
+    SmoothingRule, StepSize, StepUnit,
 };
 use host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -253,7 +254,9 @@ pub fn render() -> String {
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"response\": ");
-    out.push_str(&response_descriptor(builtins::input_filter_response_descriptor()));
+    out.push_str(&response_descriptor(
+        builtins::input_filter_response_descriptor(),
+    ));
     out.push_str(",\n    \"parameters\": [\n");
     let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {

@@ -18,10 +18,9 @@ use crate::{
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
     RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_UNSUPPORTED, STATE_READY, WebBootOptions, WebResponseParameter, WebResponseRequest,
-    WebResponseResult, RESPONSE_RESULT_BYTES,
+    RESPONSE_RESULT_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED,
+    STATE_READY, WebBootOptions, WebResponseParameter, WebResponseRequest, WebResponseResult,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -31,8 +30,7 @@ use core::{
 use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
 use host_core::{
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
-    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
-    prepare_response_preview,
+    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, prepare_response_preview,
 };
 
 struct LiveHost {
@@ -65,8 +63,11 @@ impl ResponseStaging {
                 ..WebResponseRequest::default()
             }),
             effect_id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
-            parameters: vec![WebResponseParameter::default(); RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as usize]
-                .into_boxed_slice(),
+            parameters: vec![
+                WebResponseParameter::default();
+                RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as usize
+            ]
+            .into_boxed_slice(),
             result: Vec::new(),
             result_header: WebResponseResult {
                 struct_size: RESPONSE_RESULT_BYTES,
@@ -259,7 +260,10 @@ fn append_f32_values(result: &mut Vec<u8>, values: &[f32], maximum: usize) -> Re
         .len()
         .checked_mul(size_of::<f32>())
         .ok_or(RESULT_REFUSED_BUDGET)?;
-    let end = result.len().checked_add(bytes).ok_or(RESULT_REFUSED_BUDGET)?;
+    let end = result
+        .len()
+        .checked_add(bytes)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
     if end > maximum {
         return Err(RESULT_REFUSED_BUDGET);
     }
@@ -435,7 +439,11 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         0
     };
     let sections_left_offset = if want_left && want_sections {
-        match append_f32_values(&mut payload, sections_left.as_deref().unwrap_or(&[]), maximum) {
+        match append_f32_values(
+            &mut payload,
+            sections_left.as_deref().unwrap_or(&[]),
+            maximum,
+        ) {
             Ok(value) => value,
             Err(result) => return response_failure(staging, result),
         }
@@ -443,7 +451,11 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         0
     };
     let sections_right_offset = if want_right && want_sections {
-        match append_f32_values(&mut payload, sections_right.as_deref().unwrap_or(&[]), maximum) {
+        match append_f32_values(
+            &mut payload,
+            sections_right.as_deref().unwrap_or(&[]),
+            maximum,
+        ) {
             Ok(value) => value,
             Err(result) => return response_failure(staging, result),
         }

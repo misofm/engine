@@ -9,10 +9,9 @@
 use builtins::{BuiltinParameters, prepare_input_filter_response};
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    EffectQuality, InitialParameterValue, LinkMode,
-    PreparedPorts, PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput,
-    ResponsePrepareLimits, ResponseQuery, ResponseSummary, ParameterChannel,
-    default_initial_values,
+    EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PreparedPorts,
+    PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput, ResponsePrepareLimits,
+    ResponseQuery, ResponseSummary, default_initial_values,
 };
 use math::{exp, log};
 
@@ -222,11 +221,19 @@ impl PreparedResponsePreview {
             return Err(ResponsePreviewError::OutputShape);
         }
         let sections = self.descriptor().sections.len();
-        for section_output in [output.sections_left_db.as_deref(), output.sections_right_db.as_deref()] {
-            if let Some(values) = section_output {
-                if values.len() != sections.checked_mul(points).ok_or(ResponsePreviewError::OutputShape)? {
-                    return Err(ResponsePreviewError::OutputShape);
-                }
+        for values in [
+            output.sections_left_db.as_deref(),
+            output.sections_right_db.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if values.len()
+                != sections
+                    .checked_mul(points)
+                    .ok_or(ResponsePreviewError::OutputShape)?
+            {
+                return Err(ResponsePreviewError::OutputShape);
             }
         }
         self.owner
@@ -280,8 +287,8 @@ pub fn prepare_response_preview(
             bypass,
             link_mode,
         } => {
-            let registry = launch_native_effect_registry()
-                .map_err(|_| ResponsePreviewError::UnknownEffect)?;
+            let registry =
+                launch_native_effect_registry().map_err(|_| ResponsePreviewError::UnknownEffect)?;
             let factory = registry
                 .get_ascii(effect_id)
                 .ok_or(ResponsePreviewError::UnknownEffect)?;
@@ -307,8 +314,9 @@ pub fn prepare_response_preview(
                         limits: effect_contract::PrepareEffectLimits {
                             maximum_total_state_bytes: request.limits.maximum_total_state_bytes,
                             maximum_scratch_bytes: request.limits.maximum_scratch_bytes,
-                            maximum_automation_spans_per_block:
-                                request.limits.maximum_automation_spans_per_block,
+                            maximum_automation_spans_per_block: request
+                                .limits
+                                .maximum_automation_spans_per_block,
                         },
                     },
                     limits,
@@ -475,7 +483,11 @@ mod tests {
                 )
                 .expect("EQ query");
             assert_eq!(summary.configuration_id, 9_007_199_254_740_993);
-            assert!(left.iter().chain(right.iter()).all(|value| value.is_finite()));
+            assert!(
+                left.iter()
+                    .chain(right.iter())
+                    .all(|value| value.is_finite())
+            );
             assert_eq!(frequencies[0], 0.0);
             assert_eq!(frequencies[3], sample_rate_hz as f32 * 0.5);
 
@@ -513,7 +525,11 @@ mod tests {
                     },
                 )
                 .expect("input-filter query");
-            assert!(left.iter().chain(right.iter()).all(|value| value.is_finite()));
+            assert!(
+                left.iter()
+                    .chain(right.iter())
+                    .all(|value| value.is_finite())
+            );
             assert!(frequencies.windows(2).all(|pair| pair[1] > pair[0]));
         }
     }
