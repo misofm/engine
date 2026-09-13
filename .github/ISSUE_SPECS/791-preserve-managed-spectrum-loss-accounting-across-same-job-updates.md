@@ -65,3 +65,5 @@ for the stopped candidate; those checks did not exercise this update sequence.
    counting invariant. Focused-target switching and app integration stay separate.
 
 Attempt 1 implementation: Luna max limits baseline reinitialization to actual job replacement and extends the existing loss regression with an accepted cadence update. Actual candidate3 Wasm reproduction now reports 1,0,0 (/tmp/issue791-update-loss-probe.log); focused headless 7/7, browser 7/7, SDK types/deletion and diff checks pass. Only the two authorized SDK files changed. Awaiting independent Astra medium verdict.
+
+Astra medium attempt 1 PASS at f7a220fc (/tmp/issue791-astra-medium-review-attempt1.md): independent actual-Wasm reproduction reports 1,0,0; same-job updates preserve accounting and replacement behavior remains intact. Focused tests/types/deletion pass. Root publishable tarball gate passes (/tmp/issue791-package.log), preserved package tree /tmp/issue791-qualified-sdk-dist. This resolves the sole remaining #789 correction dependency; combined feature delivery still follows separately.
