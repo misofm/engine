@@ -13,6 +13,14 @@ import {
   type ObservationSelection,
 } from "./observation.ts";
 import type { LaneEdit } from "./writer.ts";
+import { normalizeTrackResponseQuery } from "./live-response.ts";
+import type {
+  TrackResponseLimits,
+  TrackResponseObservedState,
+  TrackResponseQuery,
+  TrackResponseRead,
+  TrackResponseResult,
+} from "./live-response.ts";
 
 /** The bounded configuration accepted by `subscribeObservations`. */
 export interface ObservationSubscriptionLimits {
@@ -104,6 +112,11 @@ export interface ObservationSubscriptionTransport {
   observationMap(): MaybePromise<ObservationMap>;
   readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
   console(): MaybePromise<EngineConsole>;
+  /** Optional live-response capture/evaluation seam owned by the same lifetime. */
+  readonly responseRead?: (
+    request: TrackResponseQuery,
+    previousState?: TrackResponseObservedState,
+  ) => MaybePromise<TrackResponseRead>;
   readonly scheduler?: ObservationSubscriptionScheduler;
 }
 
@@ -363,11 +376,16 @@ class ObservationSubscriptionImpl implements ObservationSubscription {
 export class ObservationSubscriptionOwner {
   readonly #transport: ObservationSubscriptionTransport;
   readonly #subscriptionLimits: EffectiveLimits;
+  readonly #responseSubscriptionLimits: ResponseSubscriptionEffectiveLimits | undefined;
   readonly #owner = nextOwner++;
   #epoch = 1n;
   #nextHandle = 1n;
+  #nextResponseHandle = 1n;
+  #nextResponseJob = 1n;
   #handles = new Map<bigint, HandleState>();
   #bindings = new Map<string, BindingState>();
+  #responseHandles = new Map<bigint, ResponseHandleState>();
+  #responseJobs = new Map<string, ResponseJobState>();
   #mutation: Promise<void> = Promise.resolve();
   #polling: Promise<void> | undefined;
   #mutationBusy = false;
@@ -378,9 +396,13 @@ export class ObservationSubscriptionOwner {
   constructor(
     transport: ObservationSubscriptionTransport,
     subscriptionLimits?: ObservationSubscriptionLimits,
+    responseSubscriptionLimits?: TrackResponseSubscriptionLimits,
   ) {
     this.#transport = transport;
     this.#subscriptionLimits = canonicalLimits(subscriptionLimits);
+    this.#responseSubscriptionLimits = transport.responseRead === undefined
+      ? undefined
+      : canonicalResponseSubscriptionLimits(responseSubscriptionLimits);
   }
 
   get bounds(): ObservationSubscriptionBounds {
@@ -388,6 +410,18 @@ export class ObservationSubscriptionOwner {
       ...this.#subscriptionLimits,
       maximumReadSelections: MAXIMUM_OBSERVATION_READS,
       maximumCommandRecords: ABI_LAYOUT.constants.maximumCommandRecords,
+    });
+  }
+
+  get responseBounds(): TrackResponseSubscriptionBounds {
+    const subscriptionLimits = this.#responseSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      throw new MisoUsageError("live response subscriptions are not configured on this owner");
+    }
+    return Object.freeze({
+      ...subscriptionLimits,
+      maximumPoints: ABI_LAYOUT.constants.maximumLiveResponsePoints,
+      maximumCaptureBytes: ABI_LAYOUT.constants.liveResponseCaptureBytes,
     });
   }
 
@@ -598,8 +632,11 @@ export class ObservationSubscriptionOwner {
   invalidate(disposed = false): void {
     this.#epoch += 1n;
     for (const state of this.#handles.values()) state.closed = true;
+    for (const state of this.#responseHandles.values()) state.closed = true;
     this.#handles.clear();
     this.#bindings.clear();
+    this.#responseHandles.clear();
+    this.#responseJobs.clear();
     this.#stopTimer();
     if (disposed) this.#disposed = true;
   }
@@ -750,7 +787,9 @@ export class ObservationSubscriptionOwner {
   async #poll(): Promise<void> {
     if (this.#polling !== undefined) return this.#polling;
     const epoch = this.#epoch;
-    const work = this.#refresh(epoch).then(() => { this.#assertEpoch(epoch); });
+    const work = this.#refresh(epoch)
+      .then(() => this.#refreshResponseJobs(epoch))
+      .then(() => { this.#assertEpoch(epoch); });
     const settled = work.finally(() => {
       if (this.#polling === settled) this.#polling = undefined;
     });
@@ -811,15 +850,21 @@ export class ObservationSubscriptionOwner {
 
   #startTimer(): void {
     const scheduler = this.#transport.scheduler;
-    if (scheduler === undefined || this.#handles.size === 0) return;
-    const cadence = Math.min(...[...this.#handles.values()].map((state) => state.configuration.cadenceMs));
+    if (scheduler === undefined || (this.#handles.size === 0 && this.#responseHandles.size === 0)) return;
+    const cadence = Math.min(
+      ...[...this.#handles.values()].map((state) => state.configuration.cadenceMs),
+      ...[...this.#responseHandles.values()].map((state) => state.configuration.cadenceMs),
+    );
     if (this.#timer !== undefined && this.#timerCadence === cadence) return;
     this.#stopTimer();
     this.#timerCadence = cadence;
     this.#timer = scheduler.setInterval(() => {
       if (this.#mutationBusy || this.#polling !== undefined) return;
       void this.#poll()
-        .then(() => this.#notify([...this.#handles.values()], true))
+        .then(() => {
+          this.#notify([...this.#handles.values()], true);
+          for (const state of this.#responseHandles.values()) this.#notifyResponse(state, true);
+        })
         .catch(() => undefined);
     }, cadence);
   }
@@ -827,7 +872,7 @@ export class ObservationSubscriptionOwner {
   #restartTimer(): void { this.#startTimer(); }
 
   #stopTimerIfIdle(): void {
-    if (this.#handles.size === 0) this.#stopTimer();
+    if (this.#handles.size === 0 && this.#responseHandles.size === 0) this.#stopTimer();
     else this.#startTimer();
   }
 
@@ -862,9 +907,592 @@ export class ObservationSubscriptionOwner {
     return run.finally(() => { this.#mutationBusy = false; });
   }
 
+  /** Subscribe to one selected track response while sharing this owner's lifetime and poll. */
+  subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscriptionReceipt> {
+    const subscriptionLimits = this.#responseSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      return Promise.reject(new MisoUsageError("live response subscriptions are not configured on this owner"));
+    }
+    const normalized = normalizedTrackResponseSubscription(request, subscriptionLimits);
+    return this.#enqueue(async () => {
+      this.#assertOpen();
+      const epoch = this.#epoch;
+      if (this.#responseHandles.size >= subscriptionLimits.maximumHandles) {
+        throw new MisoUsageError(`track response subscriptions are capped at ${subscriptionLimits.maximumHandles}`);
+      }
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      const job = await this.#ensureResponseJob(normalized.configuration, epoch);
+      this.#assertEpoch(epoch);
+      try {
+        this.#assertResponseDeliveryBudget(job, normalized.configuration.cadenceMs);
+      } catch (error) {
+        this.#dropUnreferencedResponseJob(job);
+        throw error;
+      }
+      job.refs += 1;
+      const state = this.#newResponseHandle(normalized.configuration, normalized.callback, job);
+      this.#responseHandles.set(state.id, state);
+      this.#refreshResponseJobCadence(job);
+      this.#startTimer();
+      return this.#responseReceipt(state);
+    });
+  }
+
+  updateTrackResponse(
+    state: ResponseHandleState,
+    request: TrackResponseSubscriptionRequest,
+  ): Promise<TrackResponseSubscriptionReceipt> {
+    const subscriptionLimits = this.#responseSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      return Promise.reject(new MisoUsageError("live response subscriptions are not configured on this owner"));
+    }
+    const normalized = normalizedTrackResponseSubscription(request, subscriptionLimits);
+    return this.#enqueue(async () => {
+      this.#assertResponseHandle(state);
+      const epoch = this.#epoch;
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      const current = state.job;
+      const job = await this.#ensureResponseJob(normalized.configuration, epoch);
+      this.#assertEpoch(epoch);
+      try {
+        this.#assertResponseDeliveryBudget(job, normalized.configuration.cadenceMs, state);
+      } catch (error) {
+        this.#dropUnreferencedResponseJob(job);
+        throw error;
+      }
+      if (job !== current) {
+        current.refs -= 1;
+        if (current.refs === 0) this.#responseJobs.delete(current.key);
+        job.refs += 1;
+        state.job = job;
+      }
+      state.configuration = normalized.configuration;
+      state.callback = normalized.callback;
+      state.cursor = job.publicationSequence;
+      state.nextDeliveryAt = 0;
+      this.#refreshResponseJobCadence(current);
+      if (job !== current) this.#refreshResponseJobCadence(job);
+      this.#restartTimer();
+      return this.#responseReceipt(state);
+    });
+  }
+
+  pumpTrackResponse(state: ResponseHandleState): Promise<TrackResponseSubscriptionNotification | undefined> {
+    return this.#enqueue(async () => {
+      this.#assertResponseHandle(state);
+      const epoch = this.#epoch;
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      if (this.#responseJobs.get(state.job.key) === state.job) state.job.nextCaptureAt = 0;
+      await this.#poll();
+      this.#assertEpoch(epoch);
+      return this.#notifyResponse(state, false);
+    });
+  }
+
+  closeTrackResponse(state: ResponseHandleState): Promise<void> {
+    if (state.closing !== undefined) return state.closing;
+    const pending = this.#enqueue(async () => {
+      if (state.closed) return;
+      this.#assertResponseHandle(state);
+      const job = state.job;
+      state.closed = true;
+      this.#responseHandles.delete(state.id);
+      job.refs -= 1;
+      if (job.refs === 0) this.#responseJobs.delete(job.key);
+      else this.#refreshResponseJobCadence(job);
+      this.#stopTimerIfIdle();
+    });
+    const retryable = pending.catch((error: unknown) => {
+      if (state.closing === retryable) state.closing = undefined;
+      throw error;
+    });
+    state.closing = retryable;
+    return retryable;
+  }
+
+  readLatestTrackResponse(state: ResponseHandleState): TrackResponseResult | undefined {
+    this.#assertResponseHandle(state);
+    return copyTrackResponseResult(state.job.result);
+  }
+
+  async #ensureResponseJob(
+    configuration: TrackResponseSubscriptionConfiguration,
+    epoch: bigint,
+  ): Promise<ResponseJobState> {
+    const subscriptionLimits = this.#responseSubscriptionLimits!;
+    const responseRead = this.#transport.responseRead;
+    if (responseRead === undefined) throw new MisoUsageError("live response subscriptions are not configured on this owner");
+    const query: TrackResponseQuery = Object.freeze({
+      trackId: configuration.trackId,
+      grid: configuration.grid,
+      channels: configuration.channels,
+      responseLimits: configuration.responseLimits,
+    });
+    const key = responseJobKey(query);
+    const existing = this.#responseJobs.get(key);
+    if (existing !== undefined) return existing;
+    if (this.#responseJobs.size >= subscriptionLimits.maximumJobs) {
+      throw new MisoUsageError(`track response jobs are capped at ${subscriptionLimits.maximumJobs}`);
+    }
+    if (this.#responseJobs.size + 1 > subscriptionLimits.maximumCaptureAttempts) {
+      throw new MisoUsageError(
+        `track response capture attempts are capped at ${subscriptionLimits.maximumCaptureAttempts}`,
+      );
+    }
+    const read = await responseRead(query);
+    this.#assertEpoch(epoch);
+    if (read.result === undefined) {
+      throw new MisoEngineError("the first live response capture did not produce a result", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+    }
+    const state = copyObservedState(read.state);
+    const result = copyTrackResponseResult(read.result);
+    this.#assertResponseResultBounds(result, state);
+    const job: ResponseJobState = {
+      id: this.#nextResponseJob++, key, query, refs: 0, state, result,
+      revision: 1n, publicationSequence: 1n,
+      retainedBytes: responseRetainedBytes(result, state),
+      fastestCadenceMs: configuration.cadenceMs,
+      nextCaptureAt: Date.now() + configuration.cadenceMs,
+    };
+    this.#assertResponseRetainedBytes(job.retainedBytes);
+    this.#responseJobs.set(key, job);
+    return job;
+  }
+
+  #newResponseHandle(
+    configuration: TrackResponseSubscriptionConfiguration,
+    callback: ((notification: TrackResponseSubscriptionNotification) => void) | undefined,
+    job: ResponseJobState,
+  ): ResponseHandleState {
+    const state: ResponseHandleState = {
+      id: this.#nextResponseHandle++, owner: this.#owner, epoch: this.#epoch,
+      job, configuration, callback, cursor: job.publicationSequence,
+      nextDeliveryAt: 0, closed: false, closing: undefined, publicHandle: undefined,
+    };
+    state.publicHandle = new TrackResponseSubscriptionImpl(this, state);
+    return state;
+  }
+
+  #responseReceipt(state: ResponseHandleState): TrackResponseSubscriptionReceipt {
+    return Object.freeze({
+      handle: state.publicHandle!, owner: state.owner, epoch: state.epoch, job: state.job.id,
+      revision: state.job.revision, configuration: state.configuration, bounds: this.responseBounds,
+    });
+  }
+
+  #assertResponseResultBounds(result: TrackResponseResult, state: TrackResponseObservedState): void {
+    const subscriptionLimits = this.#responseSubscriptionLimits!;
+    if (result.frequenciesHz.length > this.responseBounds.maximumPoints
+        || (result.leftDb?.length ?? 0) > this.responseBounds.maximumPoints
+        || (result.rightDb?.length ?? 0) > this.responseBounds.maximumPoints) {
+      throw new MisoUsageError("the live response points exceed the subscription bound");
+    }
+    if (responseRetainedBytes(result, state) > subscriptionLimits.maximumRetainedBytes) {
+      throw new MisoUsageError("the live response retained bytes exceed the subscription bound");
+    }
+  }
+
+  #assertResponseDeliveryBudget(
+    candidate: ResponseJobState,
+    candidateCadenceMs?: number,
+    replacing?: ResponseHandleState,
+    candidateResult?: TrackResponseResult,
+  ): void {
+    const maximum = this.#responseSubscriptionLimits!.maximumDeliveredBytesPerSecond;
+    let delivered = 0;
+    for (const handle of this.#responseHandles.values()) {
+      if (handle === replacing) continue;
+      const result = handle.job === candidate && candidateResult !== undefined
+        ? candidateResult : handle.job.result;
+      delivered += responseDeliveryRate(result, handle.configuration.cadenceMs);
+      if (!Number.isFinite(delivered) || delivered > maximum) {
+        throw new MisoUsageError("the live response vectors exceed the delivery bound");
+      }
+    }
+    if (candidateCadenceMs !== undefined) {
+      delivered += responseDeliveryRate(candidateResult ?? candidate.result, candidateCadenceMs);
+      if (!Number.isFinite(delivered) || delivered > maximum) {
+        throw new MisoUsageError("the live response vectors exceed the delivery bound");
+      }
+    }
+  }
+
+  #dropUnreferencedResponseJob(job: ResponseJobState): void {
+    if (job.refs === 0 && this.#responseJobs.get(job.key) === job) this.#responseJobs.delete(job.key);
+  }
+
+  #refreshResponseJobCadence(job: ResponseJobState): void {
+    if (job.refs === 0) return;
+    let fastest = this.#responseSubscriptionLimits!.maximumCadenceMs;
+    for (const handle of this.#responseHandles.values()) {
+      if (handle.job === job && handle.configuration.cadenceMs < fastest) {
+        fastest = handle.configuration.cadenceMs;
+      }
+    }
+    if (fastest !== job.fastestCadenceMs) {
+      job.fastestCadenceMs = fastest;
+      job.nextCaptureAt = Date.now() + fastest;
+    }
+  }
+
+  #assertResponseRetainedBytes(additional: number, replacing?: ResponseJobState): void {
+    const subscriptionLimits = this.#responseSubscriptionLimits!;
+    let retained = 0;
+    for (const job of this.#responseJobs.values()) {
+      if (job !== replacing) retained += job.retainedBytes;
+    }
+    if (!Number.isSafeInteger(retained + additional)
+        || retained + additional > subscriptionLimits.maximumRetainedBytes) {
+      throw new MisoUsageError("the live response retained bytes exceed the subscription bound");
+    }
+  }
+
+  async #refreshResponseJobs(epoch: bigint): Promise<void> {
+    const responseRead = this.#transport.responseRead;
+    if (responseRead === undefined || this.#responseJobs.size === 0) return;
+    const subscriptionLimits = this.#responseSubscriptionLimits!;
+    const jobs = [...this.#responseJobs.values()];
+    if (jobs.length > subscriptionLimits.maximumCaptureAttempts) {
+      throw new MisoUsageError(
+        `track response capture attempts are capped at ${subscriptionLimits.maximumCaptureAttempts}`,
+      );
+    }
+    for (const job of jobs) {
+      if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
+      if (Date.now() < job.nextCaptureAt) continue;
+      const read = await responseRead(job.query, job.state);
+      this.#assertEpoch(epoch);
+      job.nextCaptureAt = Date.now() + job.fastestCadenceMs;
+      if (!read.changed) continue;
+      if (read.result === undefined) {
+        throw new MisoEngineError("the changed live response capture did not produce a result", {
+          phase: "output", code: "abiMismatch", result: 2,
+        });
+      }
+      const state = copyObservedState(read.state);
+      const result = copyTrackResponseResult(read.result);
+      this.#assertResponseResultBounds(result, state);
+      this.#assertResponseDeliveryBudget(job, undefined, undefined, result);
+      this.#assertResponseRetainedBytes(responseRetainedBytes(result, state), job);
+      if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
+      job.state = state;
+      job.result = result;
+      job.retainedBytes = responseRetainedBytes(result, state);
+      job.revision += 1n;
+      job.publicationSequence += 1n;
+    }
+  }
+
+  #notifyResponse(
+    state: ResponseHandleState,
+    respectCadence: boolean,
+  ): TrackResponseSubscriptionNotification | undefined {
+    if (state.closed || state.publicHandle === undefined) return undefined;
+    const job = this.#responseJobs.get(state.job.key);
+    if (job === undefined) return undefined;
+    const now = Date.now();
+    if (respectCadence && now < state.nextDeliveryAt) return undefined;
+    if (job.publicationSequence <= state.cursor) return undefined;
+    const skippedPublications = job.publicationSequence - state.cursor - 1n;
+    state.cursor = job.publicationSequence;
+    if (respectCadence) state.nextDeliveryAt = now + state.configuration.cadenceMs;
+    const notification = Object.freeze({
+      handle: state.publicHandle,
+      owner: this.#owner,
+      epoch: this.#epoch,
+      job: job.id,
+      revision: job.revision,
+      available: true,
+      skippedPublications,
+    });
+    try { state.callback?.(notification); } catch { /* callbacks cannot break scheduling */ }
+    return notification;
+  }
+
+  #assertResponseHandle(state: ResponseHandleState): void {
+    this.#assertOpen();
+    if (state.closed || state.epoch !== this.#epoch || this.#responseHandles.get(state.id) !== state) {
+      throw new MisoUsageError("the track response subscription handle is closed or stale");
+    }
+  }
+
   #assertEpoch(epoch: bigint): void {
     if (epoch !== this.#epoch) {
       throw new MisoUsageError("the observation subscription owner changed while the request was pending");
     }
   }
+}
+
+/** Finite SDK-side bounds for managed live track-response jobs and handles. */
+export interface TrackResponseSubscriptionLimits {
+  readonly maximumHandles?: number;
+  readonly maximumJobs?: number;
+  readonly maximumRetainedBytes?: number;
+  readonly maximumCaptureAttempts?: number;
+  readonly maximumDeliveredBytesPerSecond?: number;
+  readonly maximumCadenceMs?: number;
+}
+
+export const DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS = Object.freeze({
+  maximumHandles: 64,
+  maximumJobs: 16,
+  maximumRetainedBytes: 16 * 1024 * 1024,
+  maximumCaptureAttempts: 16,
+  maximumDeliveredBytesPerSecond: 16 * 1024 * 1024,
+  maximumCadenceMs: 60_000,
+});
+
+export interface TrackResponseSubscriptionRequest extends TrackResponseQuery {
+  readonly cadenceMs?: number;
+  readonly onUpdate?: (notification: TrackResponseSubscriptionNotification) => void;
+}
+
+export interface TrackResponseSubscriptionConfiguration extends TrackResponseQuery {
+  readonly channels: "left" | "right" | "both";
+  readonly responseLimits: TrackResponseLimits;
+  readonly cadenceMs: number;
+}
+
+export interface TrackResponseSubscriptionBounds {
+  readonly maximumHandles: number;
+  readonly maximumJobs: number;
+  readonly maximumRetainedBytes: number;
+  readonly maximumCaptureAttempts: number;
+  readonly maximumDeliveredBytesPerSecond: number;
+  readonly maximumCadenceMs: number;
+  readonly maximumPoints: number;
+  readonly maximumCaptureBytes: number;
+}
+
+export interface TrackResponseSubscriptionNotification {
+  readonly handle: TrackResponseSubscription;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  /** Monotonic observed captured-state identity for this owner/epoch/job. */
+  readonly revision: bigint;
+  readonly available: boolean;
+  /** Known changed publications skipped by this handle's delivery cursor. */
+  readonly skippedPublications: bigint;
+}
+
+export interface TrackResponseSubscriptionReceipt {
+  readonly handle: TrackResponseSubscription;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  readonly revision: bigint;
+  readonly configuration: TrackResponseSubscriptionConfiguration;
+  readonly bounds: TrackResponseSubscriptionBounds;
+}
+
+export interface TrackResponseSubscription {
+  readonly handle: TrackResponseSubscription;
+  readonly id: bigint;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  readonly revision: bigint;
+  readonly configuration: TrackResponseSubscriptionConfiguration;
+  readonly bounds: TrackResponseSubscriptionBounds;
+  readLatest(): TrackResponseResult | undefined;
+  pump(): Promise<TrackResponseSubscriptionNotification | undefined>;
+  update(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscriptionReceipt>;
+  close(): Promise<void>;
+}
+
+/** One capture/evaluation seam shared by browser and headless managed response owners. */
+export interface TrackResponseSubscriptionTransport {
+  responseRead(
+    request: TrackResponseQuery,
+    previousState?: TrackResponseObservedState,
+  ): MaybePromise<TrackResponseRead>;
+  readonly scheduler?: ObservationSubscriptionScheduler;
+}
+
+interface ResponseSubscriptionEffectiveLimits {
+  readonly maximumHandles: number;
+  readonly maximumJobs: number;
+  readonly maximumRetainedBytes: number;
+  readonly maximumCaptureAttempts: number;
+  readonly maximumDeliveredBytesPerSecond: number;
+  readonly maximumCadenceMs: number;
+}
+
+interface ResponseJobState {
+  readonly id: bigint;
+  readonly key: string;
+  readonly query: TrackResponseQuery;
+  refs: number;
+  state: TrackResponseObservedState;
+  result: TrackResponseResult;
+  revision: bigint;
+  publicationSequence: bigint;
+  retainedBytes: number;
+  fastestCadenceMs: number;
+  nextCaptureAt: number;
+}
+
+interface ResponseHandleState {
+  readonly id: bigint;
+  readonly owner: bigint;
+  epoch: bigint;
+  job: ResponseJobState;
+  configuration: TrackResponseSubscriptionConfiguration;
+  callback: ((notification: TrackResponseSubscriptionNotification) => void) | undefined;
+  cursor: bigint;
+  nextDeliveryAt: number;
+  closed: boolean;
+  closing: Promise<void> | undefined;
+  publicHandle: TrackResponseSubscriptionImpl | undefined;
+}
+
+function canonicalResponseSubscriptionLimits(overrides: TrackResponseSubscriptionLimits | undefined): ResponseSubscriptionEffectiveLimits {
+  const value = (name: keyof ResponseSubscriptionEffectiveLimits, fallback: number): number => {
+    const requested = overrides?.[name];
+    if (requested === undefined) return fallback;
+    if (!Number.isSafeInteger(requested) || requested <= 0) {
+      throw new MisoUsageError(`${name} must be a positive safe integer`);
+    }
+    return requested;
+  };
+  return Object.freeze({
+    maximumHandles: value("maximumHandles", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumHandles),
+    maximumJobs: value("maximumJobs", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumJobs),
+    maximumRetainedBytes: value("maximumRetainedBytes", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumRetainedBytes),
+    maximumCaptureAttempts: value("maximumCaptureAttempts", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumCaptureAttempts),
+    maximumDeliveredBytesPerSecond: value("maximumDeliveredBytesPerSecond", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumDeliveredBytesPerSecond),
+    maximumCadenceMs: value("maximumCadenceMs", DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS.maximumCadenceMs),
+  });
+}
+
+function normalizedTrackResponseSubscription(
+  request: TrackResponseSubscriptionRequest,
+  subscriptionLimits: ResponseSubscriptionEffectiveLimits,
+): { readonly configuration: TrackResponseSubscriptionConfiguration; readonly callback: ((notification: TrackResponseSubscriptionNotification) => void) | undefined } {
+  if (request === null || typeof request !== "object") {
+    throw new MisoUsageError("track response subscription request must be an object");
+  }
+  const query = normalizeTrackResponseQuery(request);
+  const cadenceMs = request.cadenceMs ?? 100;
+  if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0 || cadenceMs > subscriptionLimits.maximumCadenceMs) {
+    throw new MisoUsageError(
+      `track response cadenceMs must be an integer in 1..=${subscriptionLimits.maximumCadenceMs}`,
+    );
+  }
+  if (request.onUpdate !== undefined && typeof request.onUpdate !== "function") {
+    throw new MisoUsageError("track response onUpdate must be a function");
+  }
+  return {
+    configuration: Object.freeze({
+      trackId: query.trackId,
+      grid: query.grid,
+      channels: query.channels!,
+      responseLimits: query.responseLimits!,
+      cadenceMs,
+    }),
+    callback: request.onUpdate,
+  };
+}
+
+function responseJobKey(query: TrackResponseQuery): string {
+  return JSON.stringify([
+    query.trackId,
+    query.grid.kind,
+    query.grid.points,
+    query.grid.minimumHz,
+    query.grid.maximumHz,
+    query.channels,
+    query.responseLimits?.maximumResultBytes,
+    query.responseLimits?.requestDeadlineMs ?? 5_000,
+  ]);
+}
+
+function copyObservedState(state: TrackResponseObservedState): TrackResponseObservedState {
+  if (state === null || typeof state !== "object" || !Array.isArray(state.words)) {
+    throw new MisoEngineError("the response state read was malformed", {
+      phase: "output", code: "abiMismatch", result: 2,
+    });
+  }
+  const words = state.words.map((word) => {
+    if (!Number.isSafeInteger(word) || word < 0 || word > 0xffff_ffff) {
+      throw new MisoEngineError("the response state read contained an invalid word", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+    }
+    return word;
+  });
+  return Object.freeze({ words: Object.freeze(words) });
+}
+
+function responseVectorBytes(result: TrackResponseResult): number {
+  return result.frequenciesHz.byteLength
+    + (result.leftDb?.byteLength ?? 0)
+    + (result.rightDb?.byteLength ?? 0);
+}
+
+function responseDeliveryRate(result: TrackResponseResult, cadenceMs: number): number {
+  const bytes = responseVectorBytes(result);
+  const rate = bytes * 1000 / cadenceMs;
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new MisoUsageError("the live response vectors exceed the delivery bound");
+  }
+  return rate;
+}
+
+function responseRetainedBytes(result: TrackResponseResult, state: TrackResponseObservedState): number {
+  const resultBytes = Number(result.resultBytes);
+  const keyBytes = state.words.length * 4;
+  if (!Number.isSafeInteger(resultBytes) || resultBytes < 0
+      || !Number.isSafeInteger(keyBytes) || resultBytes + keyBytes > Number.MAX_SAFE_INTEGER) {
+    throw new MisoEngineError("the response subscription retained bytes exceeded its bound", {
+      phase: "output", code: "refusedBudget", result: 8,
+    });
+  }
+  return resultBytes + keyBytes;
+}
+
+function copyTrackResponseResult(result: TrackResponseResult): TrackResponseResult {
+  return Object.freeze({
+    ...result,
+    frequenciesHz: result.frequenciesHz.slice(),
+    ...(result.leftDb === undefined ? {} : { leftDb: result.leftDb.slice() }),
+    ...(result.rightDb === undefined ? {} : { rightDb: result.rightDb.slice() }),
+    members: Object.freeze(result.members.map((member) => Object.freeze({
+      ...member,
+      enabledLeft: Object.freeze([...member.enabledLeft]),
+      enabledRight: Object.freeze([...member.enabledRight]),
+    }))),
+  });
+}
+
+class TrackResponseSubscriptionImpl implements TrackResponseSubscription {
+  readonly #owner: ObservationSubscriptionOwner;
+  readonly #state: ResponseHandleState;
+
+  constructor(owner: ObservationSubscriptionOwner, state: ResponseHandleState) {
+    this.#owner = owner;
+    this.#state = state;
+  }
+
+  get handle(): TrackResponseSubscription { return this; }
+  get id(): bigint { return this.#state.id; }
+  get owner(): bigint { return this.#state.owner; }
+  get epoch(): bigint { return this.#state.epoch; }
+  get job(): bigint { return this.#state.job.id; }
+  get revision(): bigint { return this.#state.job.revision; }
+  get configuration(): TrackResponseSubscriptionConfiguration { return this.#state.configuration; }
+  get bounds(): TrackResponseSubscriptionBounds { return this.#owner.responseBounds; }
+
+  readLatest(): TrackResponseResult | undefined { return this.#owner.readLatestTrackResponse(this.#state); }
+  pump(): Promise<TrackResponseSubscriptionNotification | undefined> { return this.#owner.pumpTrackResponse(this.#state); }
+  update(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscriptionReceipt> {
+    return this.#owner.updateTrackResponse(this.#state, request);
+  }
+  close(): Promise<void> { return this.#owner.closeTrackResponse(this.#state); }
 }

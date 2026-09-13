@@ -29,6 +29,16 @@ export type {
   ObservationSubscriptionReceipt,
   ObservationSubscriptionRequest,
 } from "./core/observation-subscriptions.ts";
+export { DEFAULT_TRACK_RESPONSE_SUBSCRIPTION_LIMITS } from "./core/observation-subscriptions.ts";
+export type {
+  TrackResponseSubscription,
+  TrackResponseSubscriptionBounds,
+  TrackResponseSubscriptionConfiguration,
+  TrackResponseSubscriptionLimits,
+  TrackResponseSubscriptionNotification,
+  TrackResponseSubscriptionReceipt,
+  TrackResponseSubscriptionRequest,
+} from "./core/observation-subscriptions.ts";
 export * from "./core/session.ts";
 export * from "./core/writer.ts";
 export type * from "./core/types.ts";

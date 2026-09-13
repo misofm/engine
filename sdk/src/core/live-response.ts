@@ -68,6 +68,19 @@ export interface TrackResponseCapture {
   readonly snapshot: Uint8Array;
 }
 
+/** Internal exact identity of the validated active response owners in one capture. */
+export interface TrackResponseObservedState {
+  /** Owned numeric words; capture offsets, padding, token and sample are excluded. */
+  readonly words: readonly number[];
+}
+
+/** Internal capture result used by managed subscriptions before optional analysis. */
+export interface TrackResponseRead {
+  readonly changed: boolean;
+  readonly state: TrackResponseObservedState;
+  readonly result?: TrackResponseResult;
+}
+
 /** Host-side live response request/reply shape used by the browser SDK. */
 export interface TrackResponseHost {
   captureTrackResponse(request: TrackResponseHostRequest): Promise<TrackResponseCapture>;
@@ -215,6 +228,39 @@ function gridValue(grid: TrackResponseGrid, maximumPoints: number): { readonly k
   return { kind: grid.kind === "linear" ? 1 : 2, points };
 }
 
+/** Clone the endpoint query into the effective bounded form used by managed jobs. */
+export function normalizeTrackResponseQuery(request: TrackResponseQuery): TrackResponseQuery {
+  if (request === null || typeof request !== "object") {
+    throw new MisoUsageError("live track response query must be an object");
+  }
+  const maximumPoints = generatedMaximum("maximumLiveResponsePoints");
+  const maximumCaptureBytes = generatedMaximum("liveResponseCaptureBytes");
+  const id = trackIdBytes(request.trackId, generatedMaximum("maximumLiveResponseIdBytes"));
+  const grid = gridValue(request.grid, maximumPoints);
+  const channels = channelValue(request.channels) === 1
+    ? "left" as const
+    : channelValue(request.channels) === 2 ? "right" as const : "both" as const;
+  const maximum = maximumResultBytes(request.responseLimits, maximumCaptureBytes);
+  const deadline = request.responseLimits?.requestDeadlineMs;
+  if (deadline !== undefined && (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647)) {
+    throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
+  }
+  return Object.freeze({
+    trackId: new TextDecoder().decode(id),
+    grid: Object.freeze({
+      kind: request.grid.kind,
+      points: grid.points,
+      minimumHz: request.grid.minimumHz,
+      maximumHz: request.grid.maximumHz,
+    }),
+    channels,
+    responseLimits: Object.freeze({
+      maximumResultBytes: maximum,
+      ...(deadline === undefined ? {} : { requestDeadlineMs: deadline }),
+    }),
+  });
+}
+
 function maximumResultBytes(responseLimits: TrackResponseLimits | undefined, maximumCaptureBytes: number): number {
   return finiteInteger(
     responseLimits?.maximumResultBytes ?? maximumCaptureBytes,
@@ -284,6 +330,196 @@ function responseError(result: number, contract: LiveContract): MisoEngineError 
   });
 }
 
+function appendStringWords(words: number[], value: string): void {
+  const bytes = new TextEncoder().encode(value);
+  words.push(bytes.length);
+  for (let index = 0; index < bytes.length; index += 4) {
+    words.push((bytes[index]!
+      | ((bytes[index + 1] ?? 0) << 8)
+      | ((bytes[index + 2] ?? 0) << 16)
+      | ((bytes[index + 3] ?? 0) << 24)) >>> 0);
+  }
+}
+
+interface ParsedSection {
+  readonly id: number;
+  readonly kind: number;
+  readonly enabled: boolean;
+  readonly words: readonly number[];
+}
+
+interface ParsedOwner {
+  readonly trackId: string;
+  readonly nativeId: string;
+  readonly stableId: string;
+  readonly rack: number;
+  readonly slot: number;
+  readonly kind: number;
+  readonly bypassed: boolean;
+  readonly available: boolean;
+  readonly left: readonly ParsedSection[];
+  readonly right: readonly ParsedSection[];
+}
+
+function appendSections(words: number[], sections: readonly ParsedSection[]): void {
+  words.push(sections.length);
+  for (const section of sections) {
+    words.push(section.id, section.kind, section.enabled ? 1 : 0, section.words.length);
+    words.push(...section.words);
+  }
+}
+
+function observedState(
+  sampleRateHz: number,
+  mode: number,
+  meaning: number,
+  owners: readonly ParsedOwner[],
+): TrackResponseObservedState {
+  const words: number[] = [sampleRateHz, mode, meaning, owners.length];
+  for (const owner of owners) {
+    appendStringWords(words, owner.trackId);
+    appendStringWords(words, owner.nativeId);
+    appendStringWords(words, owner.stableId);
+    words.push(owner.rack, owner.slot, owner.kind, owner.available ? 1 : 0, owner.bypassed ? 1 : 0);
+    appendSections(words, owner.left);
+    appendSections(words, owner.right);
+  }
+  return Object.freeze({ words: Object.freeze(words.slice()) });
+}
+
+function sameObservedState(
+  left: TrackResponseObservedState | undefined,
+  right: TrackResponseObservedState,
+): boolean {
+  if (left === undefined || left.words.length !== right.words.length) return false;
+  for (let index = 0; index < right.words.length; index += 1) {
+    if (left.words[index] !== right.words[index]) return false;
+  }
+  return true;
+}
+
+/** Parse only the bounded semantic owner state, before a response Worker/evaluator is dispatched. */
+export function parseTrackResponseState(capture: Uint8Array): TrackResponseObservedState {
+  const contract = liveContract();
+  const resultLayout = contract.result;
+  const resultOffset = (name: string) => offset(resultLayout, name);
+  if (capture.byteLength < resultLayout.bytes) throw invalidPayload("the live response capture header is truncated");
+  const view = new DataView(capture.buffer, capture.byteOffset, capture.byteLength);
+  const u32 = (at: number) => view.getUint32(at, true);
+  const u64 = (at: number) => view.getBigUint64(at, true);
+  if (u32(resultOffset("structSize")) !== resultLayout.bytes
+      || u32(resultOffset("abiVersion")) !== contract.abiVersion
+      || u32(resultOffset("result")) !== contract.resultOk
+      || u32(resultOffset("mode")) !== contract.modeTarget
+      || u32(resultOffset("meaning")) !== contract.meaningEqFilterSubtotal
+      || u32(resultOffset("points")) !== 0
+      || u32(resultOffset("ownerRecordBytes")) !== contract.owner.bytes
+      || u32(resultOffset("sectionRecordBytes")) !== contract.section.bytes
+      || u32(resultOffset("reserved0")) !== 0 || u32(resultOffset("reserved1")) !== 0
+      || u32(resultOffset("reserved") + 0) !== 0 || u32(resultOffset("reserved") + 4) !== 0) {
+    throw invalidPayload("the engine returned a malformed live response capture header");
+  }
+  if (u64(resultOffset("resultBytes")) !== BigInt(capture.byteLength)) {
+    throw invalidPayload("the live response capture length is inconsistent");
+  }
+  const ownerCount = u32(resultOffset("ownerCount"));
+  if (ownerCount > contract.maximumOwners) throw invalidPayload("the live response owner count exceeds its bound");
+  const ownerOffset = u32(resultOffset("ownersOffset"));
+  const ownerEnd = ownerOffset + ownerCount * contract.owner.bytes;
+  if (!Number.isSafeInteger(ownerEnd) || ownerOffset < resultLayout.bytes || ownerEnd > capture.byteLength) {
+    throw invalidPayload("the live response owner records exceed the capture");
+  }
+  const ownerOffsetOf = (name: string) => offset(contract.owner, name);
+  const owners: ParsedOwner[] = [];
+  let excluded = 0;
+  for (let index = 0; index < ownerCount; index += 1) {
+    const at = ownerOffset + index * contract.owner.bytes;
+    const trackId = readUtf8(capture, u32At(view, at + ownerOffsetOf("trackIdOffset")), u32At(view, at + ownerOffsetOf("trackIdBytes")), "trackId", contract.maximumIdBytes);
+    const nativeId = readUtf8(capture, u32At(view, at + ownerOffsetOf("nativeIdOffset")), u32At(view, at + ownerOffsetOf("nativeIdBytes")), "nativeId", contract.maximumIdBytes);
+    const stableId = readUtf8(capture, u32At(view, at + ownerOffsetOf("stableIdOffset")), u32At(view, at + ownerOffsetOf("stableIdBytes")), "stableId", contract.maximumIdBytes);
+    const rack = u32At(view, at + ownerOffsetOf("rack"));
+    const slot = u32At(view, at + ownerOffsetOf("slot"));
+    const kind = u32At(view, at + ownerOffsetOf("kind"));
+    const bypassed = u32At(view, at + ownerOffsetOf("bypassed"));
+    const availability = u32At(view, at + ownerOffsetOf("availability"));
+    if (bypassed > 1 || availability > 1 || u32At(view, at + ownerOffsetOf("reserved")) !== 0) {
+      throw invalidPayload("the live response owner record is malformed");
+    }
+    const left = parseObservedSections(
+      capture, view, u32At(view, at + ownerOffsetOf("leftOffset")),
+      u32At(view, at + ownerOffsetOf("leftCount")), contract,
+    );
+    const right = parseObservedSections(
+      capture, view, u32At(view, at + ownerOffsetOf("rightOffset")),
+      u32At(view, at + ownerOffsetOf("rightCount")), contract,
+    );
+    if (availability === 0) {
+      if (kind !== 0 || left.length !== 0 || right.length !== 0) throw invalidPayload("the live response exclusion is malformed");
+      excluded += 1;
+    } else if (kind !== 1 && kind !== 2) {
+      throw invalidPayload("the live response owner kind is malformed");
+    }
+    owners.push({
+      trackId, nativeId, stableId, rack, slot, kind, bypassed: bypassed !== 0,
+      available: availability !== 0, left, right,
+    });
+  }
+  if (u32(resultOffset("excludedCount")) !== excluded) {
+    throw invalidPayload("the live response exclusion count is inconsistent");
+  }
+  const sampleRateHz = u32(resultOffset("sampleRateHz"));
+  if (sampleRateHz <= 0) throw invalidPayload("the live response sample rate is invalid");
+  return observedState(sampleRateHz, u32(resultOffset("mode")), u32(resultOffset("meaning")), owners);
+}
+
+export function sameTrackResponseState(
+  left: TrackResponseObservedState | undefined,
+  right: TrackResponseObservedState,
+): boolean {
+  return sameObservedState(left, right);
+}
+
+function parseObservedSections(
+  capture: Uint8Array,
+  view: DataView,
+  sectionOffset: number,
+  count: number,
+  contract: LiveContract,
+): readonly ParsedSection[] {
+  if (count > 4) throw invalidPayload("the live response section count exceeds its bound");
+  if (count === 0) {
+    checkedRange(capture, sectionOffset, 0, "empty live response sections");
+    return Object.freeze([]);
+  }
+  const end = sectionOffset + count * contract.section.bytes;
+  if (!Number.isSafeInteger(end) || sectionOffset < contract.result.bytes || end > capture.byteLength) {
+    throw invalidPayload("the live response sections exceed the capture");
+  }
+  const sectionOffsetOf = (name: string) => offset(contract.section, name);
+  const sections: ParsedSection[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const at = sectionOffset + index * contract.section.bytes;
+    const wordCount = view.getUint32(at + sectionOffsetOf("wordCount"), true);
+    const enabled = view.getUint32(at + sectionOffsetOf("enabled"), true);
+    const kind = view.getUint32(at + sectionOffsetOf("kind"), true);
+    if (enabled > 1 || wordCount > 7 || kind === 0) {
+      throw invalidPayload("the live response section record is malformed");
+    }
+    for (let word = wordCount; word < 7; word += 1) {
+      if (view.getUint32(at + sectionOffsetOf("words") + word * 4, true) !== 0) {
+        throw invalidPayload("the live response section padding is nonzero");
+      }
+    }
+    sections.push(Object.freeze({
+      id: view.getUint32(at + sectionOffsetOf("id"), true), kind,
+      enabled: enabled !== 0,
+      words: Object.freeze(Array.from({ length: wordCount }, (_unused, word) =>
+        view.getUint32(at + sectionOffsetOf("words") + word * 4, true))),
+    }));
+  }
+  return Object.freeze(sections);
+}
+
 function freezeMember(raw: {
   readonly trackId: string;
   readonly nativeId: string;
@@ -324,6 +560,7 @@ interface ParsedCapture {
   readonly snapshotToken: bigint;
   readonly sampleRateHz: number;
   readonly members: readonly TrackResponseMember[];
+  readonly state: TrackResponseObservedState;
 }
 
 /**
@@ -393,16 +630,41 @@ export class TrackResponseModule {
 
   /** Query a live snapshot already captured by a host and copied into this instance. */
   querySnapshot(request: TrackResponseQuery, snapshot: Uint8Array): TrackResponseResult {
-    return this.#run(request, undefined, snapshot);
+    return this.#run(request, undefined, snapshot) as TrackResponseResult;
   }
 
   /** Capture from an active headless owner, then evaluate that immutable captured state. */
   queryActive(request: TrackResponseQuery, handle: number): TrackResponseResult {
     if (this.#capture === undefined) throw new MisoUsageError("the engine asset cannot capture live responses");
-    return this.#run(request, handle);
+    return this.#run(request, handle) as TrackResponseResult;
   }
 
-  #run(request: TrackResponseQuery, handle: number | undefined, snapshot?: Uint8Array): TrackResponseResult {
+  /** Capture and evaluate only when the validated active response state changed. */
+  querySnapshotIfChanged(
+    request: TrackResponseQuery,
+    snapshot: Uint8Array,
+    previousState?: TrackResponseObservedState,
+  ): TrackResponseRead {
+    return this.#run(request, undefined, snapshot, previousState, true) as TrackResponseRead;
+  }
+
+  /** Capture and evaluate only when the active headless response state changed. */
+  queryActiveIfChanged(
+    request: TrackResponseQuery,
+    handle: number,
+    previousState?: TrackResponseObservedState,
+  ): TrackResponseRead {
+    if (this.#capture === undefined) throw new MisoUsageError("the engine asset cannot capture live responses");
+    return this.#run(request, handle, undefined, previousState, true) as TrackResponseRead;
+  }
+
+  #run(
+    request: TrackResponseQuery,
+    handle: number | undefined,
+    snapshot?: Uint8Array,
+    previousState?: TrackResponseObservedState,
+    managed = false,
+  ): TrackResponseResult | TrackResponseRead {
     if (this.#closed) throw new MisoUsageError("the live response module is closed");
     if (this.#busy) throw new MisoUsageError("a live track response query is already in flight");
     this.#busy = true;
@@ -411,19 +673,14 @@ export class TrackResponseModule {
       if (snapshot !== undefined) {
         const capture = this.#copySnapshot(snapshot, parsedRequest.maximumResultBytes);
         const parsed = this.#parseCapture(capture);
-        const result = this.#analyze(parsedRequest);
-        return this.#withCaptureMetadata(result, parsed, request.trackId);
+        return this.#evaluate(parsedRequest, parsed, request.trackId, previousState, managed);
       }
       if (handle === undefined || this.#capture === undefined) throw new MisoUsageError("a live response owner handle is required");
       const result = this.#capture(handle);
       if (result !== this.#contract.resultOk) throw responseError(result, this.#contract);
       const capture = this.#copyCurrentResult(parsedRequest.maximumResultBytes);
       const parsed = this.#parseCapture(capture);
-      const analyzed = this.#analysis();
-      if (analyzed !== this.#contract.resultOk) throw responseError(analyzed, this.#contract);
-      const resultPayload = this.#readResult(parsedRequest.maximumResultBytes);
-      const analyzedResult = this.#decodeResult(resultPayload, parsedRequest);
-      return this.#withCaptureMetadata(analyzedResult, parsed, request.trackId);
+      return this.#evaluate(parsedRequest, parsed, request.trackId, previousState, managed);
     } finally {
       this.#busy = false;
     }
@@ -537,6 +794,7 @@ export class TrackResponseModule {
     let excluded = 0;
     const ownerLayout = this.#contract.owner;
     const ownerOffsetOf = (name: string) => offset(ownerLayout, name);
+    const owners: ParsedOwner[] = [];
     for (let index = 0; index < ownerCount; index += 1) {
       const at = ownerOffset + index * ownerLayout.bytes;
       const trackId = readUtf8(capture, u32At(view, at + ownerOffsetOf("trackIdOffset")), u32At(view, at + ownerOffsetOf("trackIdBytes")), "trackId", this.#contract.maximumIdBytes);
@@ -564,6 +822,10 @@ export class TrackResponseModule {
         enabledLeft: left.map((section) => section.enabled),
         enabledRight: right.map((section) => section.enabled),
       }));
+      owners.push({
+        trackId, nativeId, stableId, rack, slot, kind, bypassed: bypassed !== 0,
+        available: availability !== 0, left, right,
+      });
     }
     if (u32(resultOffset("excludedCount")) !== excluded) throw invalidPayload("the live response exclusion count is inconsistent");
     const sampleRateHz = u32(resultOffset("sampleRateHz"));
@@ -573,10 +835,16 @@ export class TrackResponseModule {
       snapshotToken: u64(resultOffset("snapshotToken")),
       sampleRateHz,
       members: Object.freeze(members),
+      state: observedState(
+        sampleRateHz,
+        u32(resultOffset("mode")),
+        u32(resultOffset("meaning")),
+        owners,
+      ),
     };
   }
 
-  #parseSections(capture: Uint8Array, view: DataView, sectionOffset: number, count: number): readonly Readonly<{ enabled: boolean }>[] {
+  #parseSections(capture: Uint8Array, view: DataView, sectionOffset: number, count: number): readonly ParsedSection[] {
     if (count > 4) throw invalidPayload("the live response section count exceeds its bound");
     if (count === 0) {
       checkedRange(capture, sectionOffset, 0, "empty live response sections");
@@ -586,7 +854,7 @@ export class TrackResponseModule {
     if (!Number.isSafeInteger(end) || sectionOffset < this.#contract.result.bytes || end > capture.byteLength) {
       throw invalidPayload("the live response sections exceed the capture");
     }
-    const sections: Array<Readonly<{ enabled: boolean }>> = [];
+    const sections: ParsedSection[] = [];
     const sectionLayout = this.#contract.section;
     const sectionOffsetOf = (name: string) => offset(sectionLayout, name);
     for (let index = 0; index < count; index += 1) {
@@ -601,7 +869,13 @@ export class TrackResponseModule {
           throw invalidPayload("the live response section padding is nonzero");
         }
       }
-      sections.push(Object.freeze({ enabled: view.getUint32(at + sectionOffsetOf("enabled"), true) !== 0 }));
+      sections.push(Object.freeze({
+        id: view.getUint32(at + sectionOffsetOf("id"), true),
+        kind: view.getUint32(at + sectionOffsetOf("kind"), true),
+        enabled: view.getUint32(at + sectionOffsetOf("enabled"), true) !== 0,
+        words: Object.freeze(Array.from({ length: wordCount }, (_unused, index) =>
+          view.getUint32(at + sectionOffsetOf("words") + index * 4, true))),
+      }));
     }
     return Object.freeze(sections);
   }
@@ -615,6 +889,21 @@ export class TrackResponseModule {
     if (result !== this.#contract.resultOk) throw responseError(result, this.#contract);
     const payload = this.#readResult(request.maximumResultBytes);
     return this.#decodeResult(payload, request);
+  }
+
+  #evaluate(
+    request: { readonly channels: number; readonly maximumResultBytes: number; readonly points: number },
+    capture: ParsedCapture,
+    trackId: string,
+    previousState: TrackResponseObservedState | undefined,
+    managed: boolean,
+  ): TrackResponseResult | TrackResponseRead {
+    if (previousState !== undefined && sameObservedState(previousState, capture.state)) {
+      return Object.freeze({ changed: false, state: capture.state });
+    }
+    const result = this.#withCaptureMetadata(this.#analyze(request), capture, trackId);
+    if (!managed) return result;
+    return Object.freeze({ changed: true, state: capture.state, result });
   }
 
   #readResult(maximumBytes: number): Uint8Array {

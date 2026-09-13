@@ -404,7 +404,8 @@ last close disarms them. Manual console observation edits are refused while mana
 Notifications report missed native windows separately from skipped cached publications. Headless
 pumping never renders implicitly; browser delivery retains the latest values rather than a backlog.
 Session replacement or disposal invalidates old handles. SDK-local owner/epoch IDs do not claim to
-be portable engine-clock identities. Live EQ response and spectrum queries remain separate APIs.
+be portable engine-clock identities. Live EQ response subscriptions use the same managed lifetime;
+spectrum capture remains a separate API.
 
 ## Explicit response previews
 
@@ -458,6 +459,39 @@ The result is an EQ/filter subtotal, with owned frequency and channel arrays and
 metadata. Excluded effects remain identified in the result. Fader, pan, routing and other
 processing are outside this subtotal. Use `createResponsePreview` above for hypothetical
 configurations that have not been applied to the engine.
+
+For a live EQ panel, subscribe to the same explicit query:
+
+```ts
+const responseSubscription = await engine.subscribeTrackResponse({
+  trackId: "vocals",
+  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
+  channels: "both",
+  cadenceMs: 100,
+  onUpdate: ({ handle }) => drawResponse(handle.readLatest()),
+});
+drawResponse(responseSubscription.readLatest()); // First capture is ready on admission.
+// Headless: after your normal render, await responseSubscription.pump().
+await responseSubscription.close();
+```
+
+Identical configurations share a job and its latest result. Browser polling compares captured
+active state before dispatching analysis to the existing response Worker; unchanged state causes
+no evaluation or notification. Headless pumping performs the same comparison without rendering.
+`update()` validates a replacement before releasing the old configuration; refusal preserves it.
+Each `readLatest()` returns owned arrays, and the last close releases the job.
+
+Engine creation accepts `responseSubscriptionLimits`: defaults allow 64 handles, 16 jobs,
+16 MiB of retained result/key payload, 16 capture attempts per poll, and 16 MiB/s of admitted
+vector delivery across consumers. The default cadence is 100 ms; the maximum is 60 seconds.
+Generated endpoint bounds also cap points and capture size. The engine-owned response Worker and
+its Wasm instance are fixed per-engine resources, separate from the per-job payload budget.
+
+The handle reports its effective configuration and bounds. Its bigint `revision` identifies an
+observed captured-state change within this SDK owner/epoch/job. It does not count every intervening
+engine edit. Results retain their original `snapshotToken` and `capturedSample`; unchanged polls
+never retimestamp cached vectors. Notifications count known skipped publications, not unknown
+uncaptured changes. Session replacement or disposal invalidates old handles.
 
 ## Captured spectrum
 
