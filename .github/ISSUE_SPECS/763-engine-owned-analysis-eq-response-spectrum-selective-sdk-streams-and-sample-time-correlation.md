@@ -133,3 +133,5 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 
 **Still required before this parent closes:** common selective lifecycle, sharing, complete identities and loss accounting; engine-tapped spectrum with portable worker DSP and bounded SAB/qualified transfer fallback; packed remote vectors; bounded sample joins; integrated documentation/examples/resource evidence and one descriptive benchmark. No required feature is moved outside the parent. Optimization follows working functionality.
+
+Astra xhigh clarified #781 as the first usable explicit spectrum query with zero or one preparation-selected target per engine, selectable from any of the three required taps. Multiple prepared targets, selective updates and shared capture remain required in this parent’s selective-service work; they are not deferred outside #763. All numerical, lifecycle, realtime, ownership and actual SDK/browser gates remain required for #781.
