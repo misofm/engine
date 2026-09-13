@@ -209,3 +209,44 @@ changed. No source, test, SDK/host ABI, script, workflow, dependency, or fixture
 
 `git diff --check` passed. This successful results tranche is paused for root's exact-path
 checkpoint and push audit before any further qualification or delivery action.
+
+# Issue #766 artifact qualification attempt 1 review
+
+Verdict: **PASS — bounded artifact qualification**.
+
+Reviewed delivery head: `e9674c93554db64815fca53c392d9f44e516f745`.
+Accepted #764 source/test identity: `c125794add17bc60f044bcaeb5f2907a4fdc359d` (Astra medium attempt-3 source PASS).
+Synchronized pre-feature baseline: `77cbde0a3dc90e5ffb385e0bf39ac87a8f2e218c`.
+Reviewer: Astra, medium. This is one coherent attempt-1 verdict. Read the full #766 spec and evidence, exact tracked diff, builder controls, identity/invocation/exit records, and substantive command output. Performed only cheap read-only identity, hash, file-set, authority-byte and result-diff verification; no successful expensive qualification gate was rerun, and no source edits, agents, commits or external actions were performed.
+
+## Verified scope and lineage
+
+The worktree was clean at the reviewed head, and the remote feature branch contains that head. The diff from accepted #764 source contains only the #764/#766 issue records, artifact pin, generated browser matrix, and browser results. No accepted source/test, host or SDK code, dependency/lock/toolchain file, build script/flag, workflow, resource expectation, PCM fixture or gate changed. The provisional checkpoint `597293ec` changes only the pin and #766 record; later qualification commits change only results/matrix/evidence.
+
+Discovery identity records Rust/Cargo 1.97.1, Node v22.23.2, npm 10.9.8 and wasm-objdump 1.0.34. The unchanged official builder retains its pinned simd128, locked release, debuginfo stripping and remap behavior. Preserved invocations show one report-mode discovery and one ordinary build with report mode explicitly unset. Their captured exits are zero; logs show completed builds. Later docs/pin/results commits do not change accepted source build inputs.
+
+## Artifact agreement
+
+Independently recomputed the actual six-file artifact hashes in `/tmp/issue766-attempt1-artifact`. The Wasm hash is:
+
+`b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69`
+
+It agrees exactly with the canonical 65-byte report stdout, tracked digest-plus-LF pin, ordinary-build verification, and browser result lineage. The report output directory remains empty. The ordinary artifact contains exactly six regular nonsymlink files with the expected names. All six recomputed hashes agree with the issue's recorded list.
+
+Independently compared all five non-Wasm payloads byte-for-byte with the current source/generated authorities and their pre-#764 baseline Git blobs: all agree. Parsed the old/new result JSON: only `candidateCommit` and `wasmSha256` differ. The matrix diff changes only its corresponding generated lineage sentence. Browser versions, resource rows, native PCM corpus results, gate results and expectations are unchanged.
+
+## Authentic qualification evidence
+
+Read `/tmp/issue766-attempt1-logs`: every prescribed command has invocation/source/artifact identity plus separate stdout, stderr and exit files. All stored exits are zero. Artifact-consuming invocations point to the same ordinary directory, and browser qualification identifies the accepted source commit, all three browsers, matrix recording and mutation self-tests.
+
+- Static AudioWorklet checks passed, including module/callgraph restrictions, metadata/ABI/vocabulary and boot budget.
+- Expected-resource/native-witness parity passed, with all 26 existing red mutations detected.
+- Hermetic host/worklet checks and existing mutations passed. The expected negative-control `FAIL` diagnostics in stderr correspond to the successful analyser mutation self-test, not a failed outer gate.
+- SDK types passed; headless tests reported 193 passes and zero failures; package checks reported 11 passes and a successful publishable-tarball gate. This is a package check, not registry publication.
+- Browser logs report all gates passed on Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, then results/matrix generation. The matrix consistency command exited zero.
+
+No correction is required by this review. The evidence qualifies the existing representative production PCM/control/resource/browser boundaries for these artifact bytes. It does not prove a layout-only explanation for the hash change, universal PCM equivalence, or browser execution of the native response API.
+
+## Delivery boundary
+
+Required PR qualification for the exact delivered head remains a separate pending delivery gate. This PASS is not a claim that PR/main CI, merge, issue synchronization/closure or cleanup has completed. Root may append evidence-only records and proceed when exact-head required CI permits; verify successful main qualification and synchronize #766/#764 after delivery. Parent #763 remains open, with its browser/headless analysis milestones still outstanding.
