@@ -413,6 +413,15 @@ impl SpectrumCapture {
         })
     }
 
+    /// Return the current capture epoch for an active continuous stream.
+    #[must_use]
+    pub fn stream_epoch(&self) -> Option<u64> {
+        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE {
+            return None;
+        }
+        Some(self.shared.epoch.load(Ordering::Acquire))
+    }
+
     /// Read one scheduled window and its stream-history metadata.
     pub fn try_read_continuous(
         &mut self,

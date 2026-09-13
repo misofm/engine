@@ -46,3 +46,5 @@ Astra medium attempt 1 PASS: /tmp/issue785-astra-medium-review-attempt1.md. Fina
 Delivered through PR #788, merged main 8b69aaf660408986d4f25f99acc82450009fe786. Required qualification 34756579779 passed on final head f22910b03f48dd134542f951a157d0768aa1dbdd. Astra medium attempt 1 PASS and final SDK/browser/package evidence are accepted. GitHub #785 is CLOSED and remote state was verified. Parent #763 remains open.
 
 Merged-main qualification 34756914694 also passes for 8b69aaf660408986d4f25f99acc82450009fe786. The completed response worktree was removed after its clean/pushed audit; the final SDK distribution is preserved at /tmp/issue785-final-sdk-dist and all test/review logs remain outside the removed worktree.
+
+An installable local snapshot of merged main is preserved at /tmp/issue785-package/misofm-engine-main-8b69aaf6.tgz (SHA-256 f707302255f2348f683643df069a4a5617054e87febbca5d5e1a916a7c4c9fb0), with BUILD.json provenance. It passes the existing unpacked-package smoke checks. This is not a registry publication and contains #785, not unfinished #789.

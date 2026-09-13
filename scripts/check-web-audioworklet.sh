@@ -235,6 +235,13 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_spectrum_request_ptr \
   miso_engine_web_v1_spectrum_result_bytes \
   miso_engine_web_v1_spectrum_result_ptr \
+  miso_engine_web_v1_spectrum_stream_analysis \
+  miso_engine_web_v1_spectrum_stream_metadata_bytes \
+  miso_engine_web_v1_spectrum_stream_metadata_ptr \
+  miso_engine_web_v1_spectrum_stream_read \
+  miso_engine_web_v1_spectrum_stream_reset \
+  miso_engine_web_v1_spectrum_stream_start \
+  miso_engine_web_v1_spectrum_stream_stop \
   miso_engine_web_v1_spectrum_target_id_capacity \
   miso_engine_web_v1_spectrum_target_id_ptr \
   miso_engine_web_v1_track_response_analysis \
