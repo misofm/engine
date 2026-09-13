@@ -1044,6 +1044,13 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
     6: consoleAttached ? 256 * 48 : 0,
     7: meterFrameFloats * 4,
   };
+  // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
+  // This fixture does not model a compiled observation row, but the worklet still prewarms and
+  // discovers the fixed staging views before it can publish `miso.ready.v1`.
+  const observationIdPointer = 17500;
+  const observationSelectionPointer = 18000;
+  const observationResultPointer = 19000;
+  const observationSelectionCapacity = 4;
   calls.commands = [];
   calls.commandResult = 0;
   calls.meterLease = [];
@@ -1132,6 +1139,22 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
+    miso_engine_web_v1_observation_count: () => 0,
+    miso_engine_web_v1_observation_id_ptr: () => observationIdPointer,
+    miso_engine_web_v1_observation_id_capacity: () => 128,
+    miso_engine_web_v1_observation_track_index: () => 0,
+    miso_engine_web_v1_observation_rack: () => 1,
+    miso_engine_web_v1_observation_effect_index: () => 0,
+    miso_engine_web_v1_observation_effect_slot_id: () => 0,
+    miso_engine_web_v1_observation_native_effect_id: () => 0,
+    miso_engine_web_v1_observation_tap_count: () => 0,
+    miso_engine_web_v1_observation_tap_id: () => 0,
+    miso_engine_web_v1_observation_selection_ptr: () => observationSelectionPointer,
+    miso_engine_web_v1_observation_selection_bytes: () => 32,
+    miso_engine_web_v1_observation_selection_capacity: () => observationSelectionCapacity,
+    miso_engine_web_v1_observation_read: () => 0,
+    miso_engine_web_v1_observation_result_ptr: () => observationResultPointer,
+    miso_engine_web_v1_observation_result_bytes: (_handle, count = 0) => count * 96,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
