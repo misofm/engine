@@ -121,3 +121,64 @@ publication belongs to #794 and is not implied by source acceptance.
 
 Scope-only at creation. No implementation or fresh runtime result is claimed.
 The SDK result and method names above are frozen for downstream implementation.
+
+## Fresh coordinator entry point and complete issue map
+
+This issue is the entry point for the user's requested cross-repository handoff.
+Deliver the seven scoped issues below, with the independent PCM/storage work
+ordered after the plotting path unless it is ready without delaying that path.
+Do not implement the previously proposed three adapter analysis wrappers.
+
+| Work | Authoritative issue | Dependency |
+| --- | --- | --- |
+| SDK measurement/console ownership | https://github.com/misofm/engine/issues/796 | Accepted engine #793 |
+| Exact SDK release | https://github.com/misofm/engine/issues/794 | #796 PASS, merged source and required CI |
+| Adapter uses/exposes the same SDK engine | https://github.com/misofm/engine-web-adapter/issues/95 | #796 API; #794 registry for final publication |
+| App direct SDK measurements and EQ visualizer | https://github.com/misofm/app/issues/210 | Published SDK and adapter pair |
+| SDK generic PCM readiness | https://github.com/misofm/engine/issues/797 | Existing SDK ring/feed; independent of #796 |
+| Adapter adopts SDK readiness | https://github.com/misofm/engine-web-adapter/issues/101 | #797 and its published SDK before final acceptance |
+| Backend-specific capability checks | https://github.com/misofm/engine-web-adapter/issues/102 | Independent of measurement/plotting work |
+
+Primary order: #796 → #794 → adapter #95 → app #210. Accepted exact tarballs
+may support downstream source preparation after independent API PASS; final
+pins, publication and deployment use verified registry packages. Do not publish
+the old 0.2.5 first and require another release solely for #796: 0.2.5 was still
+unused at scoping, so reuse it if a fresh registry check confirms that. Already
+accepted siblings may share a frozen release cut, but plotting never waits for
+the PCM/backend issues. If #797 needs a later package, create its ordinary
+bounded release issue before claiming availability; source PASS is not npm
+publication. No extra codec/backend or new release framework is authorized.
+
+The requested coordinator is a fresh Astra MEDIUM agent. It delegates each
+implementation to Luna XHIGH and each independent verification to another,
+fresh Astra MEDIUM agent; the coordinator does not substitute for the verifier.
+Verification fixes concrete bugs within the brief and does not expand scope.
+Keep one active launch-critical implementation tranche, commit focused-green
+exact paths before layering, preserve current main, use required/proportional
+gates and synchronize remote evidence/closure. Deploying the final app main and
+necessary package publication were already authorized by the user.
+
+Source state at this scoping checkpoint: engine main
+`69c268f240bf30b2a43b43dd521120cd89dcc0b9`, adapter main
+`f833303f146de7cbe1705fe88ae68a6d6e0d4e45`, app main
+`7d876e2569b3f40c416663e4bf780fe41e2ee328`; registry latest SDK 0.2.4,
+adapter 0.5.4. These are baselines to refresh, not pins against future main.
+Engine #793 is delivered and CLOSED: PR #795 and merged-main required CI
+34788089349 passed, including the existing three-browser qualification. Engine
+#763 remains OPEN for its larger stated scope; do not silently absorb or close
+that program as part of this handoff.
+
+Scoping changed documentation only. In the shared workspace, engine specs are
+on `codex/sdk-adapter-boundary-spec` at `/tmp/miso-engine-sdk-boundary-spec`;
+adapter specs are on `codex/engine-analysis-forwarding` at
+`/tmp/miso-adapter-engine-analysis-integration`, incorporating current main;
+app specs are on local `codex/engine-analysis-integration` at
+`/tmp/miso-app-engine-analysis-integration`, incorporating current main. The app
+scope checkpoint has not been pushed: its AGENTS requires lint/typecheck/test/
+build before any push, and no app implementation/testing is claimed by scoping.
+The GitHub issue body is synchronized and sufficient in a fresh environment.
+Audit/preserve these branches and any unpushed work before starting. Leave the
+unrelated dirty primary app untouched. The completed spectrum feature worktree
+has been removed after all commits were merged/pushed and evidence preserved;
+no old temporary worktree or audio daemon is a prerequisite. Each repo's current
+AGENTS and issue bodies remain the implementation authority.

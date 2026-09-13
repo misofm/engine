@@ -312,3 +312,7 @@ product/optimization issue, not Issue 055 scope.
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
+
+## SDK and source-adapter ownership handoff
+
+Issue [#796](https://github.com/misofm/engine/issues/796), **Own browser meter and render-telemetry subscriptions in the SDK engine**, is the coordination entry point. Its body links the complete spec-driven delivery map: SDK ownership → release #794 → adapter #95 → app #210. Issue [#797](https://github.com/misofm/engine/issues/797), **Provide codec-neutral PCM runway validation beside the SDK feed**, and adapter #101/#102 are independent follow-ups and do not delay plotting. These issue bodies freeze the user-requested Luna XHIGH implementation and fresh Astra MEDIUM verification workflow, overriding historical model defaults above for this work. Scope creation does not claim implementation or publication.
