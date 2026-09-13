@@ -258,9 +258,28 @@ jobs:
           npm ci
           npx playwright install "${{ matrix.browser }}"
           npx playwright install-deps "${{ matrix.browser }}"
+          sudo apt-get install -y pulseaudio
       - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
         working-directory: hosts/host-web/qualification
-        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --sdk-root "$GITHUB_WORKSPACE/sdk" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
+        run: |
+          # A real AudioContext needs an output device even on a headless runner. Keep this
+          # browser job's sink/socket private; qualification still renders the actual Worklet.
+          qualification_audio_dir="$(mktemp -d "$RUNNER_TEMP/qualification-audio.XXXXXX")"
+          export PULSE_SERVER="unix:$qualification_audio_dir/native"
+          DBUS_SESSION_BUS_ADDRESS="unix:path=$qualification_audio_dir/no-session-bus" \
+          pulseaudio --daemonize=no --exit-idle-time=-1 --use-pid-file=no --disable-shm=yes -n \
+            --load="module-native-protocol-unix socket=$qualification_audio_dir/native auth-anonymous=1" \
+            --load="module-null-sink sink_name=qualification rate=48000 channels=2" \
+            --log-target="file:$qualification_audio_dir/pulse.log" &
+          qualification_audio_pid=$!
+          trap 'kill "$qualification_audio_pid" 2>/dev/null || true; wait "$qualification_audio_pid" 2>/dev/null || true; cat "$qualification_audio_dir/pulse.log"' EXIT
+          for attempt in {1..50}; do
+            [[ -S "$qualification_audio_dir/native" ]] && break
+            sleep 0.1
+          done
+          [[ -S "$qualification_audio_dir/native" ]]
+          pactl -s "$PULSE_SERVER" info
+          npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --sdk-root "$GITHUB_WORKSPACE/sdk" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
 
   lint:
     name: fmt, clippy, doc, and hermetic policy gates

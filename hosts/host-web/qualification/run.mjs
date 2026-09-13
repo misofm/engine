@@ -485,7 +485,7 @@ function validateSdkResponse(browserName, response) {
     && collection?.peakBin === 32 && Math.abs(collection?.peakHz - 750) < 0.01
     && collection?.finite === true && collection?.owned === true
     && collection?.audioContinued === true,
-  "spectrum collection did not return distinct owned A/B/A known-signal spans while audio continued");
+  `spectrum collection did not return distinct owned A/B/A known-signal spans while audio continued: ${JSON.stringify(collection)}`);
 }
 
 function mutate(result, mutation) {
@@ -642,7 +642,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     });
     page.setDefaultTimeout(120000);
     await page.goto(`${origin}/qualification/index.html`);
-    const result = await page.evaluate(async (enabled) => {
+    const execution = page.evaluate(async (enabled) => {
       try {
         const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
         return await module.runQualification();
@@ -651,11 +651,17 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
           qualificationError: {
             message: error?.message ?? String(error),
             name: error?.name ?? typeof error,
+            stack: error?.stack,
             value: error !== null && typeof error === "object" ? { ...error } : error,
           },
         };
       }
     }, sdkEnabled);
+    if (sdkEnabled) {
+      // Resume the real collection AudioContext with a trusted gesture across browsers.
+      await Promise.race([execution, page.locator("#spectrum-collection-resume").click()]);
+    }
+    const result = await execution;
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);

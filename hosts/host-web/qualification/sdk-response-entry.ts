@@ -379,17 +379,20 @@ async function createSpectrumCollectionBrowser() {
   const browser = await createEngine({
     document,
     spectrumCollection: SPECTRUM_COLLECTION,
-    policy: { sourceRingFrames: 4_096 },
+    policy: { sourceRingFrames: frames },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
-      sourceRingFrames: 4_096,
+      sourceRingFrames: frames,
       backend: "simd128" as const,
       sources: [{ id: "console-source", channels: 2, frames: BigInt(frames) }],
       tracks: ["track-a", "track-b"],
     }),
     createContext: () => {
-      return new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
+      const context = new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
+      // Keep the known first capture at sample zero even when autoplay is permitted.
+      void context.suspend();
+      return context;
     },
     createHost: (request) => createDefaultHost({
       ...request,
@@ -509,7 +512,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
           notifications.push(notification);
         }
       }
-      if (notification?.status === "gap") break;
+      if (notification?.status === "gap" && subscription.readLatest() !== undefined) break;
     }
     const first = subscription.readLatest();
     if (first === undefined) throw new Error("continuous spectrum did not publish a window");
@@ -533,6 +536,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       || callbackGap;
     const readyNotification = notifications.find((notification) => notification.available);
     const sharedAfterFirstClose = (await subscription.close(), shared.readLatest() !== undefined);
+    await shared.pump();
     await shared.close();
     let staleReadRefused = false;
     try { shared.readLatest(); } catch { staleReadRefused = true; }
@@ -760,9 +764,29 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
       cadenceMs: 1,
     })).handle;
     const context = browser.context as AudioContext;
-    await submitBlocks(0, 16, false);
-    await context.resume();
-    const remainingSource = submitBlocks(16, totalBlocks, true);
+    // Feed the fixed short signal before playback; this gate measures selection continuity,
+    // not per-message producer throughput on the browser's main thread.
+    await submitBlocks(0, totalBlocks, true);
+    const resumeButton = document.createElement("button");
+    resumeButton.id = "spectrum-collection-resume";
+    resumeButton.textContent = "Start spectrum qualification audio";
+    document.body.append(resumeButton);
+    let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+    let resumeGesture = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        resumeTimer = setTimeout(() => reject(new Error(
+          `spectrum collection audio resume timed out (gesture=${resumeGesture}, state=${context.state})`,
+        )), 10_000);
+        resumeButton.addEventListener("click", () => {
+          resumeGesture = true;
+          void context.resume().then(resolve, reject);
+        }, { once: true });
+      });
+    } finally {
+      if (resumeTimer !== undefined) clearTimeout(resumeTimer);
+      resumeButton.remove();
+    }
     const first = await waitForResult(subscription, entryA);
     const firstClock = context.currentTime;
     const firstLeft = first.leftDb;
@@ -784,11 +808,11 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
     const left = result.leftDb;
     if (left === undefined) throw new Error("spectrum collection omitted the final A channel");
     const peak = spectrumPeak(left);
-    await remainingSource;
     const owned = result.frequenciesHz !== result.leftDb
       && result.frequenciesHz !== result.rightDb
       && result.leftDb !== result.rightDb;
     const resultTarget = spectrumTargetKey(result.target);
+    await subscription.pump();
     await subscription.close();
     const audioContinued = context.state === "running" && secondClock >= firstClock && finalClock >= secondClock;
     return {
@@ -993,6 +1017,7 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const leftOnlyResult = leftOnly.readLatest();
     const independentChannelJob = leftOnly.job !== shared.job
       && leftOnlyResult?.leftDb !== undefined && leftOnlyResult.rightDb === undefined;
+    await shared.pump();
     await shared.close();
     await leftOnly.close();
     const queriesAtLastClose = stats.queries;
@@ -1164,6 +1189,7 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
       && updated[0]?.left === undefined
       && updated[0]?.right !== undefined
       && Number.isFinite(updated[0].right);
+    await shared.pump();
     await shared.close();
     let staleReadRefused = false;
     try {
