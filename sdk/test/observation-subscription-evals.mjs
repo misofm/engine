@@ -63,6 +63,7 @@ function injectedOwner() {
   let submitHook;
   let readHook;
   let consoleHook;
+  let readCount = 0;
   let submitCount = 0;
   const map = {
     bindings: [{
@@ -92,14 +93,15 @@ function injectedOwner() {
     observationMap: () => map,
     console: () => consoleHook === undefined ? console : consoleHook(),
     readObservations: async (selections) => {
+      readCount += 1;
       if (readHook) await readHook();
       return selections.map((selection) => ({
         ...selection,
         nativeEffectId: "miso.compressor",
         descriptor: FAKE_DESCRIPTOR,
         sampleRateHz: 48_000,
-        status: armed ? "ready" : "unarmed",
-        ...(armed ? {
+        status: armed && selection.effectSlotId !== "gate" ? "ready" : "unarmed",
+        ...(armed && selection.effectSlotId !== "gate" ? {
           left: 1, right: 2,
           window: { firstSample: 0n, endSample: 128n, sequence, blocks: 1 },
         } : {}),
@@ -119,6 +121,7 @@ function injectedOwner() {
     setSubmit: (hook) => { submitHook = hook; },
     setRead: (hook) => { readHook = hook; },
     setConsole: (hook) => { consoleHook = hook; },
+    readCount: () => readCount,
     submitCount: () => submitCount,
   };
 }
@@ -228,6 +231,26 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     await pumping;
     await overlap.close();
 
+    const mutationHarness = injectedOwner();
+    mutationHarness.map.bindings.push({
+      trackId: "t", rack: "dynamic", effectSlotId: "gate", effectIndex: 1,
+      nativeEffectId: "miso.compressor", tapIds: [1],
+    });
+    const managed = (await mutationHarness.owner.subscribe({
+      selections: [injectedSelection], windowBlocks: 1,
+    })).handle;
+    let releaseRead;
+    mutationHarness.setRead(() => new Promise((resolve) => { releaseRead = resolve; }));
+    const updating = managed.update({ selections: [injectedSelection, selection("gate")], windowBlocks: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const readsDuringPreflight = mutationHarness.readCount();
+    mutationHarness.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(mutationHarness.readCount(), readsDuringPreflight);
+    releaseRead();
+    await updating;
+    await managed.close();
+
     const fastHarness = injectedOwner();
     let fast = 0;
     let slow = 0;
@@ -250,6 +273,9 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     await first.pump();
     lossHarness.setSequence(10n);
     await first.pump();
+    lossHarness.setSequence(11n);
+    const next = await first.pump();
+    assert.equal(next.nativeMissedWindows, 0n);
     const joining = (await lossHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
     const notification = await joining.pump();
     assert.equal(notification.nativeMissedWindows, 0n);

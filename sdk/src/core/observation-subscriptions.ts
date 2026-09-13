@@ -787,6 +787,7 @@ export class ObservationSubscriptionOwner {
           const gap = sequence - cursor - 1n;
           const nativeDelta = binding.nativeMissed - seenNative;
           nativeMissed += nativeDelta;
+          state.nativeMissedSeen.set(entry.key, binding.nativeMissed);
           skipped += gap > nativeDelta ? gap - nativeDelta : 0n;
           state.cursor.set(entry.key, sequence);
           available = true;
@@ -816,6 +817,7 @@ export class ObservationSubscriptionOwner {
     this.#stopTimer();
     this.#timerCadence = cadence;
     this.#timer = scheduler.setInterval(() => {
+      if (this.#mutationBusy || this.#polling !== undefined) return;
       void this.#poll()
         .then(() => this.#notify([...this.#handles.values()], true))
         .catch(() => undefined);
