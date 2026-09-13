@@ -52,12 +52,22 @@ const TRACK_RESPONSE_FIELDS = [
   "tag", "requestId", "trackId", "grid", "channels", "points", "minimumHz", "maximumHz",
   "maximumResultBytes",
 ];
+const SPECTRUM_REQUEST_BYTES = 40;
+const SPECTRUM_MAXIMUM_ID_BYTES = 127;
+const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
+const SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS = 1;
+const SPECTRUM_TARGET_TRACK_POST_MATRIX = 2;
+const SPECTRUM_TARGET_OUTPUT = 3;
+const SPECTRUM_CHANNEL_LEFT = 1;
+const SPECTRUM_CHANNEL_RIGHT = 2;
+const SPECTRUM_CHANNEL_BOTH = 3;
 
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum",
 ];
+const LEGACY_OPTION_FIELDS = OPTION_FIELDS.slice(0, -1);
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
   "endOfRegion",
@@ -65,6 +75,7 @@ const SOURCE_FIELDS = [
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
+const SPECTRUM_FIELDS = ["tag", "requestId", "operation", "channels"];
 
 function validObservationAddress(address) {
   return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
@@ -211,7 +222,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   initialize(init) {
     if (!exactFields(init, INIT_FIELDS) || !(init.document instanceof Uint8Array)
-        || !exactFields(init.options, OPTION_FIELDS)) {
+        || (!exactFields(init.options, OPTION_FIELDS)
+          && !(init.options?.spectrum === undefined && exactFields(init.options, LEGACY_OPTION_FIELDS)))) {
       return RESULT_INVALID_ARGUMENT;
     }
     this.instance = new WebAssembly.Instance(init.module, {});
@@ -228,6 +240,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } catch (_) {
       return RESULT_INVALID_ARGUMENT;
     }
+    const spectrumResult = this.stageSpectrumRequest(init.options.spectrum);
+    if (spectrumResult !== RESULT_OK) return spectrumResult;
     const documentPointer = this.exports.miso_engine_web_v1_document_ptr(init.document.byteLength);
     if (!u32(documentPointer) || documentPointer === 0) {
       return this.exports.miso_engine_web_v1_boot_result();
@@ -334,6 +348,48 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       memoryBytes: this.memoryBytes,
     });
     this.ready = true;
+    return RESULT_OK;
+  }
+
+  stageSpectrumRequest(options) {
+    if (options === null || options === undefined) return RESULT_OK;
+    const target = options?.target === "trackPostInputBuiltins"
+      ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
+      : options?.target === "trackPostMatrix"
+        ? SPECTRUM_TARGET_TRACK_POST_MATRIX
+        : options?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
+    const channels = options?.channels === "left"
+      ? SPECTRUM_CHANNEL_LEFT
+      : options?.channels === "right"
+        ? SPECTRUM_CHANNEL_RIGHT
+        : options?.channels === "both" ? SPECTRUM_CHANNEL_BOTH : 0;
+    if (!exactFields(options, ["target", "targetId", "channels", "maximumCaptureBytes"])
+        || target === 0 || channels === 0
+        || typeof options.targetId !== "string" || options.targetId.length === 0
+        || !u32(options.maximumCaptureBytes) || options.maximumCaptureBytes === 0
+        || options.maximumCaptureBytes > SPECTRUM_MAXIMUM_BYTES) {
+      return RESULT_INVALID_ARGUMENT;
+    }
+    const requestPointer = this.exports.miso_engine_web_v1_spectrum_request_ptr();
+    const requestBytes = this.exports.miso_engine_web_v1_spectrum_request_bytes();
+    const idPointer = this.exports.miso_engine_web_v1_spectrum_target_id_ptr();
+    const idCapacity = this.exports.miso_engine_web_v1_spectrum_target_id_capacity();
+    if (!u32(requestPointer) || requestPointer === 0 || requestBytes !== SPECTRUM_REQUEST_BYTES
+        || !u32(idPointer) || idPointer === 0 || idCapacity !== SPECTRUM_MAXIMUM_ID_BYTES) {
+      return RESULT_INTERNAL;
+    }
+    const idBytes = writeBoundedUtf8(options.targetId, this.exports.memory.buffer, idPointer, idCapacity);
+    if (idBytes <= 0) return RESULT_INVALID_ARGUMENT;
+    const view = new DataView(this.exports.memory.buffer, requestPointer, requestBytes);
+    view.setUint32(0, SPECTRUM_REQUEST_BYTES, true);
+    view.setUint32(4, ABI_VERSION, true);
+    view.setUint32(8, target, true);
+    view.setUint32(12, channels, true);
+    view.setUint32(16, idBytes, true);
+    view.setUint32(20, 0, true);
+    view.setBigUint64(24, BigInt(options.maximumCaptureBytes), true);
+    view.setUint32(32, 0, true);
+    view.setUint32(36, 0, true);
     return RESULT_OK;
   }
 
@@ -735,6 +791,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.trackresponse.v1"
         && exactFields(message, TRACK_RESPONSE_FIELDS)) {
       this.receiveTrackResponse(message);
+    } else if (message?.tag === "miso.spectrum.v1"
+        && exactFields(message, SPECTRUM_FIELDS)) {
+      this.receiveSpectrum(message);
     } else if (message?.tag === "miso.status.v1"
         && exactFields(message, ["tag", "requestId"])) {
       this.port.postMessage({
@@ -920,6 +979,53 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       tag: "miso.trackresponse.v1",
       requestId: message.requestId,
       result,
+      snapshot,
+    }, [snapshot.buffer]);
+  }
+
+  /// Arm, read or cancel the one prepared spectrum observer. The Worklet only copies raw samples;
+  /// FFT/window/log analysis remains in the off-render SDK Worker.
+  receiveSpectrum(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || (message.operation !== "arm" && message.operation !== "read" && message.operation !== "cancel")
+        || (message.channels !== "left" && message.channels !== "right" && message.channels !== "both")) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    const channels = message.channels === "left"
+      ? SPECTRUM_CHANNEL_LEFT
+      : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;
+    let result;
+    try {
+      result = message.operation === "arm"
+        ? this.exports.miso_engine_web_v1_spectrum_arm(this.handle)
+        : message.operation === "cancel"
+          ? this.exports.miso_engine_web_v1_spectrum_cancel(this.handle)
+          : this.exports.miso_engine_web_v1_spectrum_read(this.handle, channels);
+    } catch (_) {
+      result = RESULT_INTERNAL;
+    }
+    if (this.exports.memory.buffer !== this.memoryBuffer) {
+      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
+      return;
+    }
+    let snapshot = new Uint8Array(0);
+    if (message.operation === "read" && result === RESULT_OK) {
+      const pointer = this.exports.miso_engine_web_v1_spectrum_capture_ptr();
+      const bytes = this.exports.miso_engine_web_v1_spectrum_capture_bytes();
+      const capacity = this.exports.miso_engine_web_v1_spectrum_capture_capacity();
+      if (!u32(pointer) || pointer === 0 || !u32(bytes) || bytes === 0
+          || !u32(capacity) || bytes > capacity || bytes > SPECTRUM_MAXIMUM_BYTES) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      snapshot = new Uint8Array(this.memoryBuffer, pointer, bytes).slice();
+    }
+    this.port.postMessage({
+      tag: "miso.spectrum.v1",
+      requestId: message.requestId,
+      result,
+      operation: message.operation,
       snapshot,
     }, [snapshot.buffer]);
   }

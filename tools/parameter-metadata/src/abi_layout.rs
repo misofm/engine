@@ -78,8 +78,8 @@ use host_web::{
     RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
     RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
     SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
-    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_REQUEST_BYTES,
-    SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS,
+    SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_TARGET_OUTPUT,
     SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
     STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
@@ -120,7 +120,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 78] = [
+pub const EXPORTS: [&str; 79] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -180,6 +180,7 @@ pub const EXPORTS: [&str; 78] = [
     "miso_engine_web_v1_spectrum_capture_ptr",
     "miso_engine_web_v1_spectrum_capture_set_bytes",
     "miso_engine_web_v1_spectrum_close",
+    "miso_engine_web_v1_spectrum_read",
     "miso_engine_web_v1_spectrum_request_bytes",
     "miso_engine_web_v1_spectrum_request_ptr",
     "miso_engine_web_v1_spectrum_result_bytes",
@@ -1582,6 +1583,9 @@ pub fn render() -> String {
     ));
     out.push_str(&format!(
         "    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
     ));
     out.push_str(&format!(
         "    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"

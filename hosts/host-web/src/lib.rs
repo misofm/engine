@@ -194,6 +194,8 @@ pub const SPECTRUM_CHANNEL_BOTH: u32 = SPECTRUM_CHANNEL_LEFT | SPECTRUM_CHANNEL_
 pub const SPECTRUM_MAXIMUM_ID_BYTES: usize = LIVE_RESPONSE_MAXIMUM_ID_BYTES;
 /// Maximum one-shot raw spectrum payload retained by the browser bridge.
 pub const SPECTRUM_CAPTURE_BYTES: usize = 1 << 20;
+/// This explicit-query slice prepares at most one selected spectrum target per host.
+pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 1;
 /// Fixed 2048-sample raw capture header.
 pub const SPECTRUM_WINDOW_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
 /// Fixed analyzed spectrum result header.
@@ -1531,6 +1533,7 @@ impl AudioWorkletEngineHost {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes),
             options,
+            spectrum_request.is_some(),
         )?;
         let retained_projection = projected_retained_bytes(
             &session,
@@ -3784,6 +3787,7 @@ fn project_buffers(
     maximum_source_channels: u32,
     id_staging_bytes: u64,
     options: WebBootOptions,
+    spectrum_configured: bool,
 ) -> Result<PreparedBufferProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let source_samples = u64::from(maximum_source_channels)
@@ -3813,7 +3817,11 @@ fn project_buffers(
         .checked_add(plane_reference_bytes)
         .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .and_then(|bytes| bytes.checked_add(crate::ffi::live_response_staging_retained_bytes()))
-        .and_then(|bytes| bytes.checked_add(crate::ffi::spectrum_staging_retained_bytes()))
+        .and_then(|bytes| {
+            bytes.checked_add(crate::ffi::spectrum_staging_retained_bytes(
+                spectrum_configured,
+            ))
+        })
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3841,7 +3849,9 @@ fn project_buffers(
         .max(plane_reference_bytes)
         .max(crate::ffi::observation_staging_largest_allocation_bytes())
         .max(crate::ffi::live_response_staging_largest_allocation_bytes())
-        .max(crate::ffi::spectrum_staging_largest_allocation_bytes());
+        .max(crate::ffi::spectrum_staging_largest_allocation_bytes(
+            spectrum_configured,
+        ));
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;

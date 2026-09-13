@@ -458,6 +458,28 @@ export interface MisoTrackResponseCaptureReply {
   readonly snapshot: Uint8Array;
 }
 
+export type MisoSpectrumTarget = "trackPostInputBuiltins" | "trackPostMatrix" | "output";
+export type MisoSpectrumChannels = "left" | "right" | "both";
+
+/** One prepared spectrum boundary passed to the Worklet during boot. */
+export interface MisoSpectrumBootOptions {
+  readonly target: MisoSpectrumTarget;
+  readonly targetId: string;
+  readonly channels: MisoSpectrumChannels;
+  readonly maximumCaptureBytes: number;
+}
+
+export type MisoSpectrumOperation = "arm" | "read" | "cancel";
+
+/** Reply for one bounded spectrum arm/read/cancel request. */
+export interface MisoSpectrumReply {
+  readonly tag: "miso.spectrum.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly operation: MisoSpectrumOperation;
+  readonly snapshot: Uint8Array;
+}
+
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -621,6 +643,8 @@ export interface MisoWebBootOptions {
   /// `masterGrDb` is a designation rather than a discovery. Plus one because zero has to keep
   /// meaning "unset". Requires `consoleObservationTaps !== 0n`.
   consoleMasterTrackPlusOne: bigint;
+  /// One optional prepared graph boundary; `null` retains no capture storage.
+  spectrum?: MisoSpectrumBootOptions | null;
 }
 
 export interface MisoWebResourceReport {
@@ -725,6 +749,12 @@ export interface MisoAudioWorkletHost {
   captureTrackResponse(
     request: MisoTrackResponseCaptureRequest,
   ): Promise<MisoTrackResponseCaptureReply>;
+  /// Arm the prepared spectrum boundary for its next complete window.
+  armSpectrum(): Promise<MisoSpectrumReply>;
+  /// Read one completed spectrum window; `result: 6` carries an empty pending snapshot.
+  readSpectrum(request: { readonly channels: MisoSpectrumChannels }): Promise<MisoSpectrumReply>;
+  /// Cancel the prepared spectrum boundary and discard any pending window.
+  cancelSpectrum(): Promise<MisoSpectrumReply>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
   /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,

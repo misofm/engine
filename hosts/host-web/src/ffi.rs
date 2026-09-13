@@ -85,11 +85,11 @@ struct ResponseStaging {
 struct SpectrumStaging {
     request: Box<WebSpectrumRequest>,
     target_id: Box<[u8]>,
-    capture: Vec<u8>,
+    capture: Option<Vec<u8>>,
     capture_len: usize,
-    result: Vec<u8>,
+    result: Option<Vec<u8>>,
     result_len: usize,
-    analyzer: SpectrumAnalyzer,
+    analyzer: Option<Box<SpectrumAnalyzer>>,
 }
 
 impl SpectrumStaging {
@@ -101,12 +101,49 @@ impl SpectrumStaging {
                 ..WebSpectrumRequest::default()
             }),
             target_id: vec![0; SPECTRUM_MAXIMUM_ID_BYTES].into_boxed_slice(),
-            capture: vec![0; SPECTRUM_CAPTURE_BYTES],
+            capture: None,
             capture_len: 0,
-            result: vec![0; SPECTRUM_CAPTURE_BYTES],
+            result: None,
             result_len: 0,
-            analyzer: SpectrumAnalyzer::new(),
+            analyzer: None,
         }
+    }
+
+    fn configure_capture(&mut self) -> Result<(), u32> {
+        if self.capture.is_some() && self.result.is_some() {
+            return Ok(());
+        }
+        let mut capture = Vec::new();
+        capture
+            .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
+            .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        capture.resize(SPECTRUM_CAPTURE_BYTES, 0);
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
+            .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        result.resize(SPECTRUM_CAPTURE_BYTES, 0);
+        self.capture = Some(capture);
+        self.result = Some(result);
+        self.capture_len = 0;
+        self.result_len = 0;
+        Ok(())
+    }
+
+    fn release_capture(&mut self) {
+        self.capture = None;
+        self.result = None;
+        self.analyzer = None;
+        self.capture_len = 0;
+        self.result_len = 0;
+    }
+
+    fn ensure_analysis_storage(&mut self) -> Result<(), u32> {
+        self.configure_capture()?;
+        if self.analyzer.is_none() {
+            self.analyzer = Some(Box::new(SpectrumAnalyzer::new()));
+        }
+        Ok(())
     }
 }
 
@@ -187,18 +224,28 @@ pub(crate) const fn live_response_staging_largest_allocation_bytes() -> u64 {
     LIVE_RESPONSE_CAPTURE_BYTES as u64
 }
 
-/// Heap payload retained by the fixed one-shot spectrum capture and analysis staging area.
-pub(crate) const fn spectrum_staging_retained_bytes() -> u64 {
+/// Heap payload retained by the one-shot spectrum staging area.
+///
+/// Request and target-ID staging are always available for the pre-boot write. The two PCM byte
+/// buffers are allocated only for a configured capture; the analyzer is worker-owned and is not
+/// part of the host's retained resource report.
+pub(crate) const fn spectrum_staging_retained_bytes(configured: bool) -> u64 {
     size_of::<WebSpectrumRequest>() as u64
         + SPECTRUM_MAXIMUM_ID_BYTES as u64
-        + SPECTRUM_CAPTURE_BYTES as u64
-        + SPECTRUM_CAPTURE_BYTES as u64
-        + size_of::<SpectrumAnalyzer>() as u64
+        + if configured {
+            SPECTRUM_CAPTURE_BYTES as u64 * 2
+        } else {
+            0
+        }
 }
 
-/// Largest one allocation in the fixed one-shot spectrum staging area.
-pub(crate) const fn spectrum_staging_largest_allocation_bytes() -> u64 {
-    SPECTRUM_CAPTURE_BYTES as u64
+/// Largest one allocation in the one-shot spectrum staging area.
+pub(crate) const fn spectrum_staging_largest_allocation_bytes(configured: bool) -> u64 {
+    if configured {
+        SPECTRUM_CAPTURE_BYTES as u64
+    } else {
+        SPECTRUM_MAXIMUM_ID_BYTES as u64
+    }
 }
 
 impl ResponseStaging {
@@ -611,6 +658,10 @@ fn spectrum_capture_bytes(channels: u32) -> usize {
 }
 
 fn spectrum_failure(staging: &mut SpectrumStaging, result: u32) -> u32 {
+    let Some(bytes) = staging.result.as_mut() else {
+        staging.result_len = 0;
+        return result;
+    };
     let header = WebSpectrumResult {
         struct_size: SPECTRUM_RESULT_HEADER_BYTES,
         abi_version: ABI_VERSION,
@@ -619,7 +670,7 @@ fn spectrum_failure(staging: &mut SpectrumStaging, result: u32) -> u32 {
         result_bytes: u64::from(SPECTRUM_RESULT_HEADER_BYTES),
         ..WebSpectrumResult::default()
     };
-    let copied = copy_live_record(&mut staging.result, 0, &header);
+    let copied = copy_live_record(bytes, 0, &header);
     debug_assert!(copied);
     staging.result_len = SPECTRUM_RESULT_HEADER_BYTES as usize;
     result
@@ -661,10 +712,13 @@ fn write_spectrum_window(
     {
         return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
     }
-    let maximum = staging.capture.len();
+    let Some(bytes) = staging.capture.as_mut() else {
+        return RESULT_REFUSED_BUDGET;
+    };
+    let maximum = bytes.len();
     let mut cursor = SPECTRUM_WINDOW_HEADER_BYTES as usize;
     let left_offset = if (window.channels as u32) & SPECTRUM_CHANNEL_LEFT != 0 {
-        match append_spectrum_f32(&mut staging.capture, &mut cursor, &window.left) {
+        match append_spectrum_f32(bytes, &mut cursor, &window.left) {
             Ok(offset) => offset,
             Err(result) => return spectrum_failure(staging, result),
         }
@@ -672,7 +726,7 @@ fn write_spectrum_window(
         0
     };
     let right_offset = if (window.channels as u32) & SPECTRUM_CHANNEL_RIGHT != 0 {
-        match append_spectrum_f32(&mut staging.capture, &mut cursor, &window.right) {
+        match append_spectrum_f32(bytes, &mut cursor, &window.right) {
             Ok(offset) => offset,
             Err(result) => return spectrum_failure(staging, result),
         }
@@ -697,7 +751,7 @@ fn write_spectrum_window(
         left_offset,
         right_offset,
     };
-    if !copy_live_record(&mut staging.capture, 0, &header) {
+    if !copy_live_record(bytes, 0, &header) {
         return spectrum_failure(staging, RESULT_REFUSED_BUDGET);
     }
     staging.capture_len = cursor;
@@ -731,7 +785,14 @@ fn spectrum_f32_plane(
 }
 
 fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
-    let bytes = match staging.capture.get(..staging.capture_len) {
+    if staging.ensure_analysis_storage().is_err() {
+        return spectrum_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+    let bytes = match staging
+        .capture
+        .as_ref()
+        .and_then(|capture| capture.get(..staging.capture_len))
+    {
         Some(bytes) => bytes,
         None => return spectrum_failure(staging, RESULT_INVALID_ARGUMENT),
     };
@@ -788,19 +849,34 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
     };
     if staging
         .analyzer
+        .as_ref()
+        .expect("analysis storage initialized")
         .analyze(&window, header.sample_rate_hz, &mut output)
         .is_err()
     {
         return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
     }
     let mut cursor = SPECTRUM_RESULT_HEADER_BYTES as usize;
-    let frequencies_offset =
-        match append_spectrum_f32(&mut staging.result, &mut cursor, &frequencies) {
-            Ok(offset) => offset,
-            Err(result) => return spectrum_failure(staging, result),
-        };
+    let frequencies_offset = match append_spectrum_f32(
+        staging
+            .result
+            .as_mut()
+            .expect("analysis storage initialized"),
+        &mut cursor,
+        &frequencies,
+    ) {
+        Ok(offset) => offset,
+        Err(result) => return spectrum_failure(staging, result),
+    };
     let left_offset = if left {
-        match append_spectrum_f32(&mut staging.result, &mut cursor, &left_dbfs) {
+        match append_spectrum_f32(
+            staging
+                .result
+                .as_mut()
+                .expect("analysis storage initialized"),
+            &mut cursor,
+            &left_dbfs,
+        ) {
             Ok(offset) => offset,
             Err(result) => return spectrum_failure(staging, result),
         }
@@ -808,7 +884,14 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
         0
     };
     let right_offset = if right {
-        match append_spectrum_f32(&mut staging.result, &mut cursor, &right_dbfs) {
+        match append_spectrum_f32(
+            staging
+                .result
+                .as_mut()
+                .expect("analysis storage initialized"),
+            &mut cursor,
+            &right_dbfs,
+        ) {
             Ok(offset) => offset,
             Err(result) => return spectrum_failure(staging, result),
         }
@@ -835,7 +918,14 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging) -> u32 {
         right_offset,
         reserved0: 0,
     };
-    if !copy_live_record(&mut staging.result, 0, &result_header) {
+    if !copy_live_record(
+        staging
+            .result
+            .as_mut()
+            .expect("analysis storage initialized"),
+        0,
+        &result_header,
+    ) {
         return spectrum_failure(staging, RESULT_REFUSED_BUDGET);
     }
     staging.result_len = cursor;
@@ -1855,16 +1945,33 @@ pub extern "C" fn miso_engine_web_v1_spectrum_target_id_capacity() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_ptr() -> u32 {
     SPECTRUM_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .map_or(0, |staging| pointer_u32(staging.capture.as_ptr()))
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if staging.capture.is_none() && staging.request.target != 0 {
+            if staging.configure_capture().is_err() {
+                return 0;
+            }
+        }
+        staging
+            .capture
+            .as_ref()
+            .map_or(0, |capture| pointer_u32(capture.as_ptr()))
     })
 }
 
 /// Return the maximum raw spectrum-window staging capacity.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_capacity() -> u32 {
-    u32::try_from(SPECTRUM_CAPTURE_BYTES).unwrap_or(0)
+    SPECTRUM_STAGING.with(|slot| {
+        slot.try_borrow().ok().map_or(0, |staging| {
+            staging
+                .capture
+                .as_ref()
+                .and_then(|capture| u32::try_from(capture.len()).ok())
+                .unwrap_or(0)
+        })
+    })
 }
 
 /// Return the byte length of the most recent raw spectrum window.
@@ -1885,10 +1992,18 @@ pub extern "C" fn miso_engine_web_v1_spectrum_capture_set_bytes(bytes: u32) -> u
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
+        if staging.capture.is_none() && staging.request.target != 0 {
+            if staging.configure_capture().is_err() {
+                return RESULT_REFUSED_BUDGET;
+            }
+        }
         let Ok(length) = usize::try_from(bytes) else {
             return RESULT_INVALID_ARGUMENT;
         };
-        if !(SPECTRUM_WINDOW_HEADER_BYTES as usize..=SPECTRUM_CAPTURE_BYTES).contains(&length) {
+        let Some(capacity) = staging.capture.as_ref().map(Vec::len) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        if !(SPECTRUM_WINDOW_HEADER_BYTES as usize..=capacity).contains(&length) {
             return RESULT_INVALID_ARGUMENT;
         }
         staging.capture_len = length;
@@ -1924,9 +2039,18 @@ pub extern "C" fn miso_engine_web_v1_spectrum_close() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_result_ptr() -> u32 {
     SPECTRUM_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .map_or(0, |staging| pointer_u32(staging.result.as_ptr()))
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if staging.result.is_none() && staging.request.target != 0 {
+            if staging.configure_capture().is_err() {
+                return 0;
+            }
+        }
+        staging
+            .result
+            .as_ref()
+            .map_or(0, |result| pointer_u32(result.as_ptr()))
     })
 }
 
@@ -2230,11 +2354,19 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
             return None;
         }
         let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
-            let Ok(spectrum) = spectrum.try_borrow() else {
+            let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
                 return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
             };
-            staged_spectrum_request(&spectrum)
-                .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))
+            let request = staged_spectrum_request(&spectrum)
+                .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))?;
+            if request.is_some() {
+                spectrum
+                    .configure_capture()
+                    .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))?;
+            } else {
+                spectrum.release_capture();
+            }
+            Ok(request)
         });
         match spectrum_request.and_then(|request| {
             AudioWorkletEngineHost::boot_with_spectrum(&staging.document, *staging.options, request)
@@ -2252,6 +2384,11 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
         }
     });
     let Some(host) = booted else {
+        SPECTRUM_STAGING.with(|slot| {
+            if let Ok(mut staging) = slot.try_borrow_mut() {
+                staging.release_capture();
+            }
+        });
         return 0;
     };
     LIVE_HOST.with(|slot| {

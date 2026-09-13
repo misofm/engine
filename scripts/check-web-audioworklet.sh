@@ -208,6 +208,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_spectrum_capture_ptr \
   miso_engine_web_v1_spectrum_capture_set_bytes \
   miso_engine_web_v1_spectrum_close \
+  miso_engine_web_v1_spectrum_read \
   miso_engine_web_v1_spectrum_request_bytes \
   miso_engine_web_v1_spectrum_request_ptr \
   miso_engine_web_v1_spectrum_result_bytes \

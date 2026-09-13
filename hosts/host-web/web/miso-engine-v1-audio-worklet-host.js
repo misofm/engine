@@ -33,8 +33,9 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum",
 ];
+const LEGACY_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -1);
 
 const SOURCE_FIELDS = [
   "sourceId",
@@ -89,6 +90,11 @@ const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
 const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
 const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
 const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
+const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
+const SPECTRUM_TARGETS = new Set(["trackPostInputBuiltins", "trackPostMatrix", "output"]);
+const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
+const SPECTRUM_MAXIMUM_ID_BYTES = 127;
+const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
 
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
@@ -262,8 +268,22 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
+function validSpectrumBoot(options) {
+  if (options === null) return true;
+  return hasExactFields(options, SPECTRUM_BOOT_FIELDS)
+    && SPECTRUM_TARGETS.has(options.target)
+    && typeof options.targetId === "string"
+    && options.targetId.length > 0
+    && new TextEncoder().encode(options.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
+    && SPECTRUM_CHANNELS.has(options.channels)
+    && Number.isSafeInteger(options.maximumCaptureBytes)
+    && options.maximumCaptureBytes > 0
+    && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
+}
+
 function validBootOptions(options) {
-  if (!hasExactFields(options, BOOT_OPTION_FIELDS)) return false;
+  if (!hasExactFields(options, BOOT_OPTION_FIELDS)
+      && !(options?.spectrum === undefined && hasExactFields(options, LEGACY_BOOT_OPTION_FIELDS))) return false;
   return validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
     && validU64(options.consoleCommandQueueRecords)
@@ -275,7 +295,8 @@ function validBootOptions(options) {
     && (options.consoleObservationTaps === 0n || options.consoleCommandQueueRecords !== 0n)
     && validU64(options.consoleMasterTrackPlusOne)
     && options.consoleMasterTrackPlusOne <= 0xffffffffn
-    && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n);
+    && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n)
+    && validSpectrumBoot(options.spectrum ?? null);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -377,6 +398,7 @@ class MisoAudioWorkletHost {
   #inFlightCommands = 0;
   #inFlightObservationReads = 0;
   #inFlightTrackResponses = 0;
+  #inFlightSpectrum = 0;
   #inFlightLease = new Set();
   #commandQueueRecords;
   #consoleMeterBlocks;
@@ -452,6 +474,8 @@ class MisoAudioWorkletHost {
       this.#inFlightObservationReads -= 1;
     } else if (pending.response === "trackResponse") {
       this.#inFlightTrackResponses -= 1;
+    } else if (pending.response === "spectrum") {
+      this.#inFlightSpectrum -= 1;
     } else if (pending.response === "lease" || pending.response === "sessionMap"
       || pending.response === "observationMap") {
       this.#inFlightLease.delete(pending.leaseKind);
@@ -552,6 +576,8 @@ class MisoAudioWorkletHost {
               ? ["tag", "requestId", "result", "rows"]
               : pending.response === "trackResponse"
                 ? TRACK_RESPONSE_REPLY_FIELDS
+                : pending.response === "spectrum"
+                  ? ["tag", "requestId", "result", "operation", "snapshot"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -568,6 +594,8 @@ class MisoAudioWorkletHost {
             ? "miso.observation.v1"
             : pending.response === "trackResponse"
               ? "miso.trackresponse.v1"
+              : pending.response === "spectrum"
+                ? "miso.spectrum.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -611,6 +639,16 @@ class MisoAudioWorkletHost {
         && message.snapshot.byteLength <= pending.trackResponseMaximumBytes)
         || (message.result !== RESULT_OK && message.snapshot.byteLength === 0))
     );
+    const validSpectrum = pending.response !== "spectrum" || (
+      message.operation === pending.spectrumOperation
+      && message.snapshot instanceof Uint8Array
+      && message.snapshot.buffer instanceof ArrayBuffer
+      && (message.result === RESULT_OK
+        ? (pending.spectrumOperation === "read"
+          ? message.snapshot.byteLength > 0 && message.snapshot.byteLength <= SPECTRUM_MAXIMUM_BYTES
+          : message.snapshot.byteLength === 0)
+        : message.snapshot.byteLength === 0)
+    );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
       && validResult(message.lastResult) && message.backend === this.#numericBackend
@@ -622,7 +660,7 @@ class MisoAudioWorkletHost {
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validCommandAck || !validSessionMap
-        || !validObservationMap || !validObservationRead || !validTrackResponse) {
+        || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -645,6 +683,7 @@ class MisoAudioWorkletHost {
     this.#inFlightStatus = 0;
     this.#inFlightObservationReads = 0;
     this.#inFlightTrackResponses = 0;
+    this.#inFlightSpectrum = 0;
     for (const pending of unsettled) pending.reject(error);
   }
 
@@ -662,6 +701,7 @@ class MisoAudioWorkletHost {
     if (response === "command") return this.#inFlightCommands >= this.#commandQueueRecords;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
     if (response === "trackResponse") return this.#inFlightTrackResponses >= 1;
+    if (response === "spectrum") return this.#inFlightSpectrum >= 1;
     if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       return this.#inFlightLease.has(sourceId);
     }
@@ -681,6 +721,8 @@ class MisoAudioWorkletHost {
       this.#inFlightObservationReads += 1;
     } else if (response === "trackResponse") {
       this.#inFlightTrackResponses += 1;
+    } else if (response === "spectrum") {
+      this.#inFlightSpectrum += 1;
     } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       this.#inFlightLease.add(sourceId);
     }
@@ -712,6 +754,7 @@ class MisoAudioWorkletHost {
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
+        spectrumOperation: stamped.operation,
         resolve,
         reject,
         response,
@@ -941,6 +984,36 @@ class MisoAudioWorkletHost {
     );
   }
 
+  /// Arm the prepared one-shot spectrum observer.
+  armSpectrum() {
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "arm", channels: "both" },
+      [],
+      "spectrum",
+    );
+  }
+
+  /// Read one completed spectrum window. A backpressure result carries an empty snapshot.
+  readSpectrum(request) {
+    if (!hasExactFields(request, ["channels"]) || !SPECTRUM_CHANNELS.has(request.channels)) {
+      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    }
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "read", channels: request.channels },
+      [],
+      "spectrum",
+    );
+  }
+
+  /// Cancel the prepared one-shot spectrum observer.
+  cancelSpectrum() {
+    return this.#request(
+      { tag: "miso.spectrum.v1", operation: "cancel", channels: "both" },
+      [],
+      "spectrum",
+    );
+  }
+
   /// Take or release the decimated meter lease (issue #137 D2).
   ///
   /// `onFrame` receives every `miso.meter.v1` frame while the lease is held. Passing
@@ -1025,7 +1098,7 @@ export async function createMisoAudioWorkletHost(options) {
       processorOptions: {
         module: selected.module,
         document: new Uint8Array(options.document),
-        options: { ...options.options },
+        options: { ...options.options, spectrum: options.options.spectrum ?? null },
       },
     });
     const ready = await new Promise((resolve, reject) => {
