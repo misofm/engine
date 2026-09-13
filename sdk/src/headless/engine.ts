@@ -301,6 +301,7 @@ export class OfflineEngine {
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
       console: () => this.console(),
+      spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
       spectrumStart: (smoothingMs) => this.#boundary.startSpectrumStream(smoothingMs),

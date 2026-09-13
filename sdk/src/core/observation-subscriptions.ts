@@ -128,6 +128,7 @@ export interface ObservationSubscriptionTransport {
     previousState?: TrackResponseObservedState,
   ) => MaybePromise<TrackResponseRead>;
   /** Optional managed spectrum stream owned by this same engine lifetime. */
+  readonly spectrumPrepared?: () => SpectrumQuery | undefined;
   readonly spectrumStart?: (smoothingMs: number) => MaybePromise<SpectrumStreamStart>;
   readonly spectrumRead?: () => MaybePromise<SpectrumStreamRead>;
   readonly spectrumStop?: () => MaybePromise<EngineCallResult | void>;
@@ -1111,11 +1112,25 @@ export class ObservationSubscriptionOwner {
       if (this.#spectrumHandles.size >= subscriptionLimits.maximumHandles) {
         throw new MisoUsageError(`spectrum subscriptions are capped at ${subscriptionLimits.maximumHandles}`);
       }
+      this.#assertSpectrumPrepared(normalized.configuration);
+      this.#assertSpectrumAdmission(normalized.configuration);
+      const hadJob = this.#spectrumJob !== undefined;
       await this.#waitForPoll();
       this.#assertEpoch(epoch);
-      const job = await this.#ensureSpectrumJob(normalized.configuration, epoch);
-      this.#assertEpoch(epoch);
-      this.#assertSpectrumDeliveryBudget(job, normalized.configuration.cadenceMs);
+      let job: SpectrumJobState;
+      try {
+        job = await this.#ensureSpectrumJob(normalized.configuration, epoch);
+        this.#assertEpoch(epoch);
+        this.#assertSpectrumDeliveryBudget(job, normalized.configuration.cadenceMs);
+      } catch (error) {
+        // A first admission may have started a native stream before a returned
+        // profile proved unusable. Ensure that refusal cannot leave an orphan.
+        if (!hadJob && this.#spectrumJob !== undefined && this.#spectrumJob.refs === 0) {
+          const stop = await Promise.resolve(this.#transport.spectrumStop!()).catch(() => undefined);
+          if (stop === undefined || stop.ok) this.#spectrumJob = undefined;
+        }
+        throw error;
+      }
       job.refs += 1;
       const state = this.#newSpectrumHandle(normalized.configuration, normalized.callback, job);
       this.#spectrumHandles.set(state.id, state);
@@ -1135,6 +1150,8 @@ export class ObservationSubscriptionOwner {
     const normalized = normalizedSpectrumSubscription(request, subscriptionLimits);
     return this.#enqueue(async () => {
       this.#assertSpectrumHandle(state);
+      this.#assertSpectrumPrepared(normalized.configuration);
+      this.#assertSpectrumAdmission(normalized.configuration, state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
       this.#assertEpoch(epoch);
@@ -1238,10 +1255,12 @@ export class ObservationSubscriptionOwner {
   ): Promise<SpectrumJobState> {
     const subscriptionLimits = this.#spectrumSubscriptionLimits!;
     const spectrumStart = this.#transport.spectrumStart;
+    const spectrumStop = this.#transport.spectrumStop;
     if (spectrumStart === undefined || this.#transport.spectrumRead === undefined
         || this.#transport.spectrumStop === undefined) {
       throw new MisoUsageError("managed spectrum subscriptions are not configured on this owner");
     }
+    this.#assertSpectrumPrepared(configuration);
     const key = spectrumJobKey(configuration);
     const existing = this.#spectrumJob;
     if (existing !== undefined) {
@@ -1250,49 +1269,91 @@ export class ObservationSubscriptionOwner {
       }
       return existing;
     }
-    const started = await spectrumStart(configuration.smoothingMs);
-    this.#assertEpoch(epoch);
-    if (!started.ok) {
-      throw new MisoEngineError("the engine refused the spectrum stream start", {
-        phase: started.code === "wrongState" ? "lifecycle" : "output",
-        code: started.code as never,
-        result: started.result,
-      });
+    let nativeStarted = false;
+    try {
+      const started = await spectrumStart(configuration.smoothingMs);
+      nativeStarted = started.ok;
+      this.#assertEpoch(epoch);
+      if (!started.ok) {
+        throw new MisoEngineError("the engine refused the spectrum stream start", {
+          phase: started.code === "wrongState" ? "lifecycle" : "output",
+          code: started.code as never,
+          result: started.result,
+        });
+      }
+      const metadata = started.metadata;
+      if (metadata.status !== "warming" && metadata.status !== "pending") {
+        throw new MisoEngineError("the spectrum stream returned an invalid start state", {
+          phase: "output", code: "abiMismatch", result: 2,
+        });
+      }
+      if (metadata.target !== undefined && spectrumTargetKey(metadata.target) !== spectrumTargetKey(configuration.target)) {
+        throw new MisoEngineError("the spectrum stream target differs from the prepared target", {
+          phase: "output", code: "abiMismatch", result: 2,
+        });
+      }
+      if (metadata.channels !== undefined && metadata.channels !== configuration.channels) {
+        throw new MisoUsageError("the spectrum stream channels were not prepared");
+      }
+      const captureCadenceMs = metadata.sampleRateHz > 0 && metadata.hopFrames > 0
+        ? metadata.hopFrames * 1000 / metadata.sampleRateHz : 0;
+      if (!Number.isFinite(captureCadenceMs) || captureCadenceMs <= 0) {
+        throw new MisoEngineError("the spectrum stream returned an invalid cadence", {
+          phase: "output", code: "abiMismatch", result: 2,
+        });
+      }
+      const job: SpectrumJobState = {
+        id: this.#nextSpectrumJob++, key, query: Object.freeze({
+          target: configuration.target,
+          channels: configuration.channels,
+          ...(configuration.spectrumLimits === undefined ? {} : { spectrumLimits: configuration.spectrumLimits }),
+        }), smoothingMs: configuration.smoothingMs, refs: 0, metadata,
+        result: undefined, revision: 0n, publicationSequence: 0n,
+        retainedBytes: 0, captureCadenceMs, nextCaptureAt: 0,
+        publicationStamp: spectrumPublicationStamp(metadata),
+      };
+      this.#assertSpectrumRetainedBytes(job.retainedBytes);
+      this.#spectrumJob = job;
+      return job;
+    } catch (error) {
+      if (nativeStarted) {
+        try { await this.#transport.spectrumStop!(); } catch { /* preserve the original admission error */ }
+      }
+      throw error;
     }
-    const metadata = started.metadata;
-    if (metadata.status !== "warming" && metadata.status !== "pending") {
-      throw new MisoEngineError("the spectrum stream returned an invalid start state", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
+  }
+
+  #assertSpectrumPrepared(configuration: SpectrumSubscriptionConfiguration): void {
+    const prepared = this.#transport.spectrumPrepared?.();
+    if (prepared === undefined) return;
+    if (spectrumTargetKey(prepared.target) !== spectrumTargetKey(configuration.target)) {
+      throw new MisoUsageError("the spectrum stream target was not prepared");
     }
-    if (metadata.target !== undefined && spectrumTargetKey(metadata.target) !== spectrumTargetKey(configuration.target)) {
-      throw new MisoEngineError("the spectrum stream target differs from the prepared target", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    if (metadata.channels !== undefined && metadata.channels !== configuration.channels) {
+    if ((prepared.channels ?? "both") !== configuration.channels) {
       throw new MisoUsageError("the spectrum stream channels were not prepared");
     }
-    const captureCadenceMs = metadata.sampleRateHz > 0 && metadata.hopFrames > 0
-      ? metadata.hopFrames * 1000 / metadata.sampleRateHz : 0;
-    if (!Number.isFinite(captureCadenceMs) || captureCadenceMs <= 0) {
-      throw new MisoEngineError("the spectrum stream returned an invalid cadence", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
+  }
+
+  #assertSpectrumAdmission(
+    configuration: SpectrumSubscriptionConfiguration,
+    replacing?: SpectrumHandleState,
+  ): void {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits!;
+    const candidateBytes = spectrumVectorBytes(configuration.channels);
+    if (candidateBytes > subscriptionLimits.maximumRetainedBytes) {
+      throw new MisoUsageError("the spectrum result exceeds the retained-byte bound");
     }
-    const job: SpectrumJobState = {
-      id: this.#nextSpectrumJob++, key, query: Object.freeze({
-        target: configuration.target,
-        channels: configuration.channels,
-        ...(configuration.spectrumLimits === undefined ? {} : { spectrumLimits: configuration.spectrumLimits }),
-      }), smoothingMs: configuration.smoothingMs, refs: 0, metadata,
-      result: undefined, revision: 0n, publicationSequence: 0n,
-      retainedBytes: 0, captureCadenceMs, nextCaptureAt: 0,
-      publicationStamp: spectrumPublicationStamp(metadata),
-    };
-    this.#assertSpectrumRetainedBytes(job.retainedBytes);
-    this.#spectrumJob = job;
-    return job;
+    let delivered = spectrumDeliveryRate(candidateBytes, configuration.cadenceMs);
+    for (const handle of this.#spectrumHandles.values()) {
+      if (handle === replacing) continue;
+      delivered += spectrumDeliveryRate(
+        spectrumVectorBytes(handle.configuration.channels),
+        handle.configuration.cadenceMs,
+      );
+    }
+    if (!Number.isFinite(delivered) || delivered > subscriptionLimits.maximumDeliveredBytesPerSecond) {
+      throw new MisoUsageError("the spectrum vectors exceed the delivery bound");
+    }
   }
 
   #assertSpectrumResultBounds(result: SpectrumResult): void {

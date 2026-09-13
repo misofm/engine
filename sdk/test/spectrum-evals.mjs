@@ -5,6 +5,7 @@ import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 const WINDOW_FRAMES = 2_048;
@@ -238,4 +239,77 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
     await subscription?.close();
     engine.dispose();
   }
+});
+
+test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (target = prepared.target, status = "warming") => Object.freeze({
+    result: 0,
+    status,
+    target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 1_024,
+    sourceUnderrun: false,
+    captureEpoch: 1n,
+    sequence: 0n,
+    droppedCaptures: 0n,
+    windows: 0n,
+    capturedSample: 0n,
+    endSample: 0n,
+    analysisEpoch: 0n,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+  const makeOwner = (spectrumSubscriptionLimits, startMetadata = metadata()) => {
+    let starts = 0;
+    let stops = 0;
+    let reads = 0;
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => ({ bindings: [] }),
+      readObservations: () => [],
+      console: () => { throw new Error("unused"); },
+      spectrumPrepared: () => prepared,
+      spectrumStart: async () => {
+        starts += 1;
+        return { ok: true, result: 0, code: "ok", metadata: startMetadata };
+      },
+      spectrumRead: async () => {
+        reads += 1;
+        return { metadata: metadata(prepared.target, "pending") };
+      },
+      spectrumStop: async () => {
+        stops += 1;
+        return { ok: true, result: 0, code: "ok" };
+      },
+    }, undefined, undefined, spectrumSubscriptionLimits);
+    return { owner, counts: () => ({ starts, stops, reads }) };
+  };
+
+  const refused = makeOwner({ maximumDeliveredBytesPerSecond: 1 });
+  await assert.rejects(
+    refused.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
+    /delivery bound/,
+  );
+  assert.deepEqual(refused.counts(), { starts: 0, stops: 0, reads: 0 });
+
+  const malformed = makeOwner(undefined, metadata({ kind: "trackPostMatrix", trackId: "other" }));
+  await assert.rejects(
+    malformed.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
+    /target differs|not prepared/,
+  );
+  assert.deepEqual(malformed.counts(), { starts: 1, stops: 1, reads: 0 });
+
+  const working = makeOwner();
+  const subscription = (await working.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 })).handle;
+  await assert.rejects(
+    subscription.update({ ...prepared, target: { kind: "output", outputId: "missing" }, cadenceMs: 1 }),
+    /not prepared/,
+  );
+  assert.deepEqual(working.counts(), { starts: 1, stops: 0, reads: 0 });
+  await subscription.pump();
+  assert.deepEqual(working.counts(), { starts: 1, stops: 0, reads: 1 });
+  await subscription.close();
+  assert.deepEqual(working.counts(), { starts: 1, stops: 1, reads: 1 });
 });

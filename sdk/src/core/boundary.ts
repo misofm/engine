@@ -477,6 +477,11 @@ export class WasmBoundary {
     return enrichObservationMap(tracks, raw);
   }
 
+  /** Internal managed-subscription view of the optional prepared spectrum query. */
+  preparedSpectrumQuery(): SpectrumQuery | undefined {
+    return this.#spectrumQuery;
+  }
+
   /** Read one bounded non-consuming batch from the current prepared owner. */
   readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
     validateObservationSelections(selections);
