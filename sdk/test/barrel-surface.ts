@@ -31,7 +31,9 @@ import * as headlessBarrel from "../src/headless/index.ts";
 
 import * as agent from "../src/core/agent.ts";
 import * as consoleSurface from "../src/core/console.ts";
+import * as liveResponse from "../src/core/live-response.ts";
 import * as catalog from "../src/generated/catalog.ts";
+import * as browserResponse from "../src/browser/response.ts";
 import * as hostMirror from "../src/browser/host-mirror.ts";
 import * as lattice from "../src/core/lattice.ts";
 import * as writer from "../src/core/writer.ts";
@@ -96,6 +98,31 @@ type StepDeclarationsDiffer = Assert<
 type HostMirrorFn =
   Assert<Exact<typeof browserBarrel.toWebBootOptions, typeof hostMirror.toWebBootOptions>>;
 
+// --- core/live-response.ts: one native contract through every public entry point --------------
+
+type RootTrackResponseQuery =
+  Assert<Exact<barrel.TrackResponseQuery, liveResponse.TrackResponseQuery>>;
+type RootTrackResponseResult =
+  Assert<Exact<barrel.TrackResponseResult, liveResponse.TrackResponseResult>>;
+type HeadlessTrackResponseResult =
+  Assert<Exact<headlessBarrel.TrackResponseResult, liveResponse.TrackResponseResult>>;
+type BrowserTrackResponseResult =
+  Assert<Exact<browserBarrel.TrackResponseResult, liveResponse.TrackResponseResult>>;
+type BrowserResponsePreviewClass =
+  Assert<Exact<typeof browserBarrel.BrowserResponsePreview, typeof browserResponse.BrowserResponsePreview>>;
+type BrowserResponsePreviewCreate =
+  Assert<Exact<typeof browserBarrel.createResponsePreview, typeof browserResponse.createResponsePreview>>;
+
+// Raw snapshot bytes and evaluator/Worker transports stay internal to the engine entry points.
+// @ts-expect-error TrackResponseModule is not a public root evaluator
+type NoRootTrackResponseModule = typeof barrel.TrackResponseModule;
+// @ts-expect-error BrowserTrackResponse is not a public browser transport
+type NoBrowserTrackResponse = typeof browserBarrel.BrowserTrackResponse;
+// @ts-expect-error createTrackResponse is not a public browser transport
+type NoBrowserCreateTrackResponse = typeof browserBarrel.createTrackResponse;
+// @ts-expect-error TrackResponseModule is not a public headless evaluator
+type NoHeadlessTrackResponseModule = typeof headlessBarrel.TrackResponseModule;
+
 // --- the barrels the deep imports already had ---------------------------------------------------
 //
 // The three entry points `sdk/package.json` names must each keep their pre-#278 surface. Naming a
@@ -147,6 +174,16 @@ export type BarrelSurfacePins = [
   CatalogStepSize,
   StepDeclarationsDiffer,
   HostMirrorFn,
+  RootTrackResponseQuery,
+  RootTrackResponseResult,
+  HeadlessTrackResponseResult,
+  BrowserTrackResponseResult,
+  BrowserResponsePreviewClass,
+  BrowserResponsePreviewCreate,
+  NoRootTrackResponseModule,
+  NoBrowserTrackResponse,
+  NoBrowserCreateTrackResponse,
+  NoHeadlessTrackResponseModule,
   RootSessionBuilder,
   HeadlessAsset,
   BrowserPolicy,

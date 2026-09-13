@@ -32,20 +32,84 @@
         "left": {
           "polarity_invert": false,
           "trim_db": 0.0,
-          "hpf_hz": 0.0,
-          "lpf_hz": 0.0,
+          "hpf_hz": 80.0,
+          "lpf_hz": 18000.0,
           "delay_samples": 0
         },
         "right": {
           "polarity_invert": false,
           "trim_db": 0.0,
-          "hpf_hz": 0.0,
-          "lpf_hz": 0.0,
+          "hpf_hz": 120.0,
+          "lpf_hz": 12000.0,
           "delay_samples": 0
         }
       },
       "simd1": {
-        "effects": []
+        "effects": [
+          {
+            "id": "eq-simd1",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "left",
+                "unit": "hz",
+                "value": 120.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "right",
+                "unit": "hz",
+                "value": 2400.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "left",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "right",
+                "unit": "db",
+                "value": -9.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 0.70710677
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "dynamic": {
         "effects": [
@@ -109,7 +173,22 @@
         ]
       },
       "simd2": {
-        "effects": []
+        "effects": [
+          {
+            "id": "eq-simd2",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": true,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,

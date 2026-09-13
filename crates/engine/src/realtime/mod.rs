@@ -26,12 +26,14 @@ pub use observe::{
 pub use plan::{
     ExecutorHandover, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
     PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
-    RenderTime,
+    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSink,
 };
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
     PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
-    RealtimePlanOwner, RealtimeRenderReport, SwapOutcome, plan_exchange,
+    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome, plan_exchange,
     plan_exchange_resource_report,
 };
 pub use spsc::{
@@ -44,6 +46,142 @@ mod tests {
     use super::*;
     use crate::{QuantumFrames, SampleRateHz};
     use core::num::NonZeroUsize;
+
+    struct SnapshotExecutor;
+
+    impl PreparedPlanExecutor for SnapshotExecutor {
+        fn copy_response_snapshot(
+            &self,
+            _track_id: &str,
+            captured_sample: u64,
+            sink: &mut dyn ResponseSnapshotSink,
+        ) -> Result<u32, ResponseSnapshotError> {
+            let section = ResponseSnapshotSection {
+                id: 1,
+                kind: 1,
+                enabled: true,
+                word_count: 1,
+                words: [captured_sample as u32; 7],
+            };
+            sink.copy_owner(
+                ResponseSnapshotOwnerInfo {
+                    track_id: "track",
+                    native_id: "miso.test",
+                    stable_id: "owner",
+                    rack: 2,
+                    slot: 0,
+                    kind: 1,
+                    bypassed: false,
+                    availability: ResponseSnapshotAvailability::Provided,
+                },
+                &[section],
+                &[section],
+            )?;
+            Ok(1)
+        }
+
+        fn render(
+            &mut self,
+            _arena: &mut BufferArena,
+            _input: Option<PlanarBufferRef<'_>>,
+            mut output: PlanarBufferMut<'_>,
+            _time: RenderTime,
+        ) -> Result<(), RenderError> {
+            output.plane_mut(0)?.fill(0.0);
+            output.plane_mut(1)?.fill(0.0);
+            Ok(())
+        }
+    }
+
+    struct SnapshotSink {
+        calls: usize,
+        first_word: u32,
+    }
+
+    impl ResponseSnapshotSink for SnapshotSink {
+        fn copy_owner(
+            &mut self,
+            _owner: ResponseSnapshotOwnerInfo<'_>,
+            left: &[ResponseSnapshotSection],
+            right: &[ResponseSnapshotSection],
+        ) -> Result<(), ResponseSnapshotError> {
+            assert_eq!(left, right);
+            assert_eq!(left.len(), 1);
+            self.calls += 1;
+            self.first_word = left[0].words[0];
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn response_capture_uses_next_boundary_and_refuses_failed_render() {
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two"),
+        };
+        let mut plan = PreparedRenderPlan::prepare_with_executor(
+            PrepareRenderPlan {
+                plan_id: 8,
+                envelope,
+                scratch: &[],
+            },
+            Box::new(SnapshotExecutor),
+        )
+        .expect("plan");
+        let mut sink = SnapshotSink {
+            calls: 0,
+            first_word: u32::MAX,
+        };
+        let initial = plan
+            .copy_response_snapshot(ResponseSnapshotRequest {
+                track_id: "track",
+                sink: &mut sink,
+            })
+            .expect("initial boundary");
+        assert_eq!(initial.captured_sample, 0);
+        assert_eq!(sink.first_word, 0);
+
+        let mut samples = [0.0_f32; 8];
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+        plan.render_contiguous(
+            RenderIo {
+                input: None,
+                output,
+            },
+            0,
+        )
+        .expect("render");
+        let after = plan
+            .copy_response_snapshot(ResponseSnapshotRequest {
+                track_id: "track",
+                sink: &mut sink,
+            })
+            .expect("next boundary");
+        assert_eq!(after.captured_sample, 4);
+        assert_eq!(sink.first_word, 4);
+
+        let mut malformed = [0.0_f32; 4];
+        let output = PlanarBufferMut::try_new(&mut malformed, 1, 4, 4).expect("shape");
+        assert_eq!(
+            plan.render_contiguous(
+                RenderIo {
+                    input: None,
+                    output,
+                },
+                4,
+            ),
+            Err(RenderError::OutputShape)
+        );
+        assert_eq!(
+            plan.copy_response_snapshot(ResponseSnapshotRequest {
+                track_id: "track",
+                sink: &mut sink,
+            }),
+            Err(ResponseSnapshotError::Owner)
+        );
+    }
 
     /// The plan owns the clock, and a contiguous render is the only caller that has to know the
     /// rule. Rendering the same block twice is a discontinuity, and the error names the sample the

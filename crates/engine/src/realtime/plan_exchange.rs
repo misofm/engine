@@ -12,6 +12,7 @@ use super::{Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscErro
 pub struct PlanEpoch(pub u64);
 use super::{
     PreparedPlanExecutor, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
+    ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotRequest,
 };
 use core::{
     alloc::Layout,
@@ -98,6 +99,17 @@ pub struct RealtimeRenderReport {
     pub active_epoch: PlanEpoch,
     /// Inner prepared-plan render report.
     pub render: RenderReport,
+}
+
+/// Boundary metadata for a response capture made from the active realtime plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RealtimeResponseSnapshot {
+    /// The complete plan that owned the capture.
+    pub active_epoch: PlanEpoch,
+    /// The active plan's next sample at capture.
+    pub captured_sample: u64,
+    /// Number of response-capable owners copied in graph order.
+    pub owners: u32,
 }
 /// Publication failure preserving candidate ownership.
 #[must_use]
@@ -417,6 +429,24 @@ impl RealtimePlanOwner {
     #[must_use]
     pub fn next_absolute_sample(&self) -> u64 {
         self.active.1.next_absolute_sample()
+    }
+
+    /// Copy one selected track's retained response owners from the active plan without applying
+    /// a pending replacement or draining any queued controls.
+    pub fn copy_response_snapshot(
+        &mut self,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<RealtimeResponseSnapshot, ResponseSnapshotError> {
+        let active_epoch = self.active.0;
+        let ResponseSnapshotCapture {
+            captured_sample,
+            owners,
+        } = self.active.1.copy_response_snapshot(request)?;
+        Ok(RealtimeResponseSnapshot {
+            active_epoch,
+            captured_sample,
+            owners,
+        })
     }
     /// Publish at the boundary, then render the block that must start at
     /// [`Self::next_absolute_sample`].

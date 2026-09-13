@@ -37,6 +37,22 @@ const OBSERVATION_ROW_FIELDS = [
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
 const TELEMETRY_WINDOW_BLOCKS = 128;
 
+// Live-track response capture uses one fixed raw snapshot staging area. The Worklet only fills
+// the request/identity staging and copies the completed bytes; all grid validation and numerical
+// analysis happen in the existing analysis Worker through the separate Rust export.
+const LIVE_RESPONSE_REQUEST_BYTES = 48;
+const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
+const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
+const LIVE_RESPONSE_CAPTURE_GRID_LINEAR = 1;
+const LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC = 2;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT = 1;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT = 2;
+const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
+const TRACK_RESPONSE_FIELDS = [
+  "tag", "requestId", "trackId", "grid", "channels", "points", "minimumHz", "maximumHz",
+  "maximumResultBytes",
+];
+
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
@@ -223,12 +239,38 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     this.backend = "simd128";
-    // The first observation staging query allocates its fixed control buffers. Force that one
-    // allocation before caching any views, so a lazy linear-memory growth cannot detach the
-    // status/PCM views that the render path keeps for the lifetime of this processor.
+    // The first observation and live-response staging queries allocate their fixed control
+    // buffers. Force every one before caching any views, so a lazy linear-memory growth cannot
+    // detach the status/PCM/response views that the render path keeps for this processor.
     const observationStagingPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
     if (!u32(observationStagingPointer) || observationStagingPointer === 0) return RESULT_INTERNAL;
+    const trackResponseRequestPointer = this.exports.miso_engine_web_v1_track_response_request_ptr();
+    const trackResponseRequestBytes = this.exports.miso_engine_web_v1_track_response_request_bytes();
+    const trackResponseTrackIdPointer = this.exports.miso_engine_web_v1_track_response_track_id_ptr();
+    const trackResponseTrackIdCapacity = this.exports.miso_engine_web_v1_track_response_track_id_capacity();
+    const trackResponseSnapshotPointer = this.exports.miso_engine_web_v1_track_response_snapshot_ptr();
+    const trackResponseSnapshotCapacity = this.exports.miso_engine_web_v1_track_response_snapshot_capacity();
+    if (!u32(trackResponseRequestPointer) || trackResponseRequestPointer === 0
+        || trackResponseRequestBytes !== LIVE_RESPONSE_REQUEST_BYTES
+        || !u32(trackResponseTrackIdPointer) || trackResponseTrackIdPointer === 0
+        || trackResponseTrackIdCapacity !== LIVE_RESPONSE_MAXIMUM_ID_BYTES
+        || !u32(trackResponseSnapshotPointer) || trackResponseSnapshotPointer === 0
+        || !u32(trackResponseSnapshotCapacity) || trackResponseSnapshotCapacity === 0) {
+      return RESULT_INTERNAL;
+    }
     this.memoryBuffer = this.exports.memory.buffer;
+    this.trackResponseRequestView = new DataView(
+      this.memoryBuffer,
+      trackResponseRequestPointer,
+      trackResponseRequestBytes,
+    );
+    this.trackResponseTrackIdView = new Uint8Array(
+      this.memoryBuffer,
+      trackResponseTrackIdPointer,
+      trackResponseTrackIdCapacity,
+    );
+    this.trackResponseSnapshotPointer = trackResponseSnapshotPointer;
+    this.trackResponseSnapshotCapacity = trackResponseSnapshotCapacity;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
     this.sourcePcmPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_PCM);
@@ -690,6 +732,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.observation.v1"
         && exactFields(message, ["tag", "requestId", "selections"])) {
       this.receiveObservationRead(message);
+    } else if (message?.tag === "miso.trackresponse.v1"
+        && exactFields(message, TRACK_RESPONSE_FIELDS)) {
+      this.receiveTrackResponse(message);
     } else if (message?.tag === "miso.status.v1"
         && exactFields(message, ["tag", "requestId"])) {
       this.port.postMessage({
@@ -794,6 +839,89 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       result: RESULT_OK,
       rows,
     });
+  }
+
+  /// Capture one immutable selected-track response snapshot for the analysis Worker.
+  ///
+  /// This handler never constructs a response collector or evaluates a curve. Rust copies the
+  /// prepared owners into the prewarmed fixed staging area; this side makes one detached byte
+  /// copy for the Worker and returns it to the main realm. A capture refusal returns no bytes and
+  /// leaves the Worklet's render state untouched.
+  receiveTrackResponse(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || typeof message.trackId !== "string" || message.trackId.length === 0
+        || message.trackId.length > LIVE_RESPONSE_MAXIMUM_ID_BYTES
+        || !Number.isInteger(message.grid)
+        || (message.grid !== LIVE_RESPONSE_CAPTURE_GRID_LINEAR
+          && message.grid !== LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC)
+        || !Number.isInteger(message.channels)
+        || (message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT
+          && message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT
+          && message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH)
+        || !Number.isInteger(message.points) || message.points < 2
+        || message.points > LIVE_RESPONSE_MAXIMUM_POINTS
+        || typeof message.minimumHz !== "number" || !Number.isFinite(message.minimumHz)
+        || typeof message.maximumHz !== "number" || !Number.isFinite(message.maximumHz)
+        || !Number.isInteger(message.maximumResultBytes) || message.maximumResultBytes <= 0
+        || message.maximumResultBytes > this.trackResponseSnapshotCapacity) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    const idBytes = writeBoundedUtf8(
+      message.trackId,
+      this.memoryBuffer,
+      this.trackResponseTrackIdView.byteOffset,
+      this.trackResponseTrackIdView.byteLength,
+    );
+    if (idBytes < 0) {
+      const snapshot = new Uint8Array(0);
+      this.port.postMessage({
+        tag: "miso.trackresponse.v1",
+        requestId: message.requestId,
+        result: RESULT_INVALID_ARGUMENT,
+        snapshot,
+      }, [snapshot.buffer]);
+      return;
+    }
+    const request = this.trackResponseRequestView;
+    request.setUint32(0, LIVE_RESPONSE_REQUEST_BYTES, true);
+    request.setUint32(4, ABI_VERSION, true);
+    request.setUint32(8, idBytes, true);
+    request.setUint32(12, message.grid, true);
+    request.setUint32(16, message.channels, true);
+    request.setUint32(20, message.points, true);
+    request.setFloat32(24, message.minimumHz, true);
+    request.setFloat32(28, message.maximumHz, true);
+    request.setUint32(32, message.maximumResultBytes, true);
+    request.setUint32(36, 0, true);
+    request.setUint32(40, 0, true);
+    request.setUint32(44, 0, true);
+    let result;
+    try {
+      result = this.exports.miso_engine_web_v1_track_response_capture(this.handle);
+    } catch (_) {
+      result = RESULT_INTERNAL;
+    }
+    if (this.exports.memory.buffer !== this.memoryBuffer) {
+      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
+      return;
+    }
+    const resultPointer = this.exports.miso_engine_web_v1_track_response_result_ptr();
+    const resultBytes = this.exports.miso_engine_web_v1_track_response_result_bytes();
+    if (!u32(resultPointer) || resultPointer === 0 || !u32(resultBytes)
+        || resultBytes > this.trackResponseSnapshotCapacity) {
+      this.sticky(RESULT_INTERNAL, message.requestId);
+      return;
+    }
+    const snapshot = result === RESULT_OK
+      ? new Uint8Array(this.memoryBuffer, resultPointer, resultBytes).slice()
+      : new Uint8Array(0);
+    this.port.postMessage({
+      tag: "miso.trackresponse.v1",
+      requestId: message.requestId,
+      result,
+      snapshot,
+    }, [snapshot.buffer]);
   }
 
   receiveSource(message) {

@@ -406,6 +406,28 @@ The browser entry exports the same `createResponsePreview` name and accepts a ve
 The returned `requestedConfiguration`, `configurationId` (`bigint`), frequencies, totals and
 sections are explicit request results and carry no active-session identity.
 
+## Live track EQ/filter response
+
+A booted browser or headless engine can query the actual target response of one track:
+
+```ts
+const response = await engine.queryTrackResponse({
+  trackId: "vocals",
+  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
+  channels: "both",
+});
+```
+
+The engine captures its current EQ and input-filter target words at one render-block boundary,
+then evaluates the copied state off the audio thread. `capturedSample` is a `bigint`; queued
+commands appear only after the engine has applied them. During smoothing, the curve describes
+the stationary target, not the instantaneous response of the ramp.
+
+The result is an EQ/filter subtotal, with owned frequency and channel arrays and ordered owner
+metadata. Excluded effects remain identified in the result. Fader, pan, routing and other
+processing are outside this subtotal. Use `createResponsePreview` above for hypothetical
+configurations that have not been applied to the engine.
+
 ## Tests
 
 The eval suites run under Node's native type stripping, so `sdk/src/**/*.ts` is imported directly

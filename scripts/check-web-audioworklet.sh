@@ -199,7 +199,19 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_id \
   miso_engine_web_v1_source_seek \
   miso_engine_web_v1_source_submit \
-  miso_engine_web_v1_status_ptr | sort)
+  miso_engine_web_v1_status_ptr \
+  miso_engine_web_v1_track_response_analysis \
+  miso_engine_web_v1_track_response_capture \
+  miso_engine_web_v1_track_response_close \
+  miso_engine_web_v1_track_response_request_bytes \
+  miso_engine_web_v1_track_response_request_ptr \
+  miso_engine_web_v1_track_response_result_bytes \
+  miso_engine_web_v1_track_response_result_ptr \
+  miso_engine_web_v1_track_response_snapshot_capacity \
+  miso_engine_web_v1_track_response_snapshot_ptr \
+  miso_engine_web_v1_track_response_snapshot_set_bytes \
+  miso_engine_web_v1_track_response_track_id_capacity \
+  miso_engine_web_v1_track_response_track_id_ptr | sort)
 
 for module in "$simd"; do
   metadata=$(wasm-objdump -x "$module")

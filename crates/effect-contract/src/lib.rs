@@ -10,12 +10,14 @@ mod step;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
 pub use response::{
-    NativeEffectResponseFactory, PreparedResponseAnalysis, ResponseAmplitudeReference,
-    ResponseAnalysisDescriptor, ResponseAnalysisError, ResponseAnalysisMode,
-    ResponseBypassSemantics, ResponseChannelLayout, ResponseConfigurationView,
-    ResponseDescriptorError, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
-    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
-    ResponseTotalScope, validate_response_analysis_descriptor,
+    NativeEffectResponseFactory, PreparedResponseAnalysis, RESPONSE_SNAPSHOT_WORDS,
+    ResponseAmplitudeReference, ResponseAnalysisDescriptor, ResponseAnalysisError,
+    ResponseAnalysisMode, ResponseBypassSemantics, ResponseChannelLayout,
+    ResponseConfigurationView, ResponseDescriptorError, ResponseOutput, ResponsePrepareLimits,
+    ResponseQuery, ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput,
+    ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSummary, ResponseSummary, ResponseTotalScope,
+    validate_response_analysis_descriptor,
 };
 pub use step::{
     DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
@@ -1638,6 +1640,20 @@ pub trait PreparedNativeEffect: Send {
         let _ = (parameter_index, channel);
         Err(ParameterAccessError::Unsupported)
     }
+
+    /// Copies this owner's immutable target words into caller-provided response storage.
+    ///
+    /// The caller must hold the exclusive prepared-plan owner. Implementations only copy
+    /// already-retained words and metadata; they do not design coefficients or advance state.
+    /// Unsupported owners leave the caller buffers untouched.
+    fn copy_response_snapshot(
+        &self,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        let _ = request;
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -1731,6 +1747,20 @@ pub trait PreparedNativeEffectBank: Send {
         let _ = (tap_index, out);
         false
     }
+
+    /// Copies one bank lane's immutable target words into caller-provided response storage.
+    ///
+    /// The lane is the prepared bank member index, not a graph track count. Unsupported owners
+    /// and invalid lanes leave the caller buffers untouched.
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        let _ = (lane, request);
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+
     /// Write one track's state payload.
     ///
     /// # Snapshotting a collapsed bank

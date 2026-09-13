@@ -112,6 +112,10 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use engine::LAUNCH_SAMPLE_RATES;
+pub use engine::realtime::{
+    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+};
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
     HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
@@ -125,7 +129,9 @@ pub use render_session::StartedRenderSession;
 pub use response::{
     PreparedResponsePreview, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
     ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
-    generate_response_grid, prepare_response_preview,
+    ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
+    ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
+    generate_response_grid, prepare_response_preview, query_response_snapshot_into,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};

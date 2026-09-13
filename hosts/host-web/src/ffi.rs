@@ -15,7 +15,11 @@
 
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
-    BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
+    BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
+    LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES, LIVE_RESPONSE_MAXIMUM_OWNERS,
+    LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+    LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES, LIVE_RESPONSE_REQUEST_BYTES,
+    LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES, MAXIMUM_DOCUMENT_BYTES,
     MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
     OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
     OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
@@ -24,7 +28,8 @@ use crate::{
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
     RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_UNSUPPORTED, RESULT_WRONG_STATE, STATE_READY, WebBootOptions, WebObservationResult,
+    RESULT_UNSUPPORTED, RESULT_WRONG_STATE, STATE_READY, WebBootOptions, WebLiveResponseOwner,
+    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebObservationResult,
     WebObservationSelection, WebResponseParameter, WebResponseRequest, WebResponseResult,
 };
 use core::{
@@ -33,9 +38,14 @@ use core::{
     ptr, slice,
 };
 use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
+use engine::realtime::{
+    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+};
 use host_core::{
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
-    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, prepare_response_preview,
+    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot,
+    ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
+    ResponseSnapshotQueryError, prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -57,6 +67,12 @@ struct ResponseStaging {
     parameters: Box<[WebResponseParameter]>,
     result: Vec<u8>,
     result_header: WebResponseResult,
+    live_request: Box<WebLiveResponseRequest>,
+    live_track_id: Box<[u8]>,
+    live_result: Vec<u8>,
+    live_result_len: usize,
+    live_result_header: WebLiveResponseResult,
+    live_token: u64,
 }
 
 struct ObservationStaging {
@@ -120,6 +136,22 @@ pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
     largest
 }
 
+/// Heap payload retained by the prewarmed live-response capture staging area.
+pub(crate) const fn live_response_staging_retained_bytes() -> u64 {
+    // Prewarming this shared workspace also initializes its existing preview request buffers.
+    size_of::<WebResponseRequest>() as u64
+        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
+        + RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as u64 * size_of::<WebResponseParameter>() as u64
+        + size_of::<WebLiveResponseRequest>() as u64
+        + LIVE_RESPONSE_MAXIMUM_ID_BYTES as u64
+        + LIVE_RESPONSE_CAPTURE_BYTES as u64
+}
+
+/// Largest one allocation in the fixed live-response capture staging area.
+pub(crate) const fn live_response_staging_largest_allocation_bytes() -> u64 {
+    LIVE_RESPONSE_CAPTURE_BYTES as u64
+}
+
 impl ResponseStaging {
     fn new() -> Self {
         Self {
@@ -141,6 +173,23 @@ impl ResponseStaging {
                 result: RESULT_OK,
                 ..WebResponseResult::default()
             },
+            live_request: Box::new(WebLiveResponseRequest {
+                struct_size: LIVE_RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                ..WebLiveResponseRequest::default()
+            }),
+            live_track_id: vec![0; LIVE_RESPONSE_MAXIMUM_ID_BYTES].into_boxed_slice(),
+            live_result: vec![0; crate::LIVE_RESPONSE_CAPTURE_BYTES],
+            live_result_len: 0,
+            live_result_header: WebLiveResponseResult {
+                struct_size: LIVE_RESPONSE_RESULT_BYTES,
+                abi_version: ABI_VERSION,
+                mode: LIVE_RESPONSE_MODE_TARGET,
+                meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+                owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+                ..WebLiveResponseResult::default()
+            },
+            live_token: 0,
         }
     }
 
@@ -388,6 +437,624 @@ fn response_header_bytes(header: WebResponseResult) -> Vec<u8> {
     let pointer = ptr::from_ref(&header).cast::<u8>();
     // SAFETY: `WebResponseResult` is repr(C), and the exact object is alive for this copy.
     unsafe { slice::from_raw_parts(pointer, size_of::<WebResponseResult>()) }.to_vec()
+}
+
+/// Copy one fully initialized ABI record without allocating a temporary byte vector.
+///
+/// Capture runs through the prepared-plan owner and must remain allocation-free.  The caller
+/// supplies fixed staging, so a checked `copy_nonoverlapping` is the only serialization step.
+fn copy_live_record<T: Copy>(bytes: &mut [u8], offset: usize, value: &T) -> bool {
+    let Some(end) = offset.checked_add(size_of::<T>()) else {
+        return false;
+    };
+    let Some(destination) = bytes.get_mut(offset..end) else {
+        return false;
+    };
+    // SAFETY: `destination` is checked to be exactly the record size and `value` points to a
+    // live, fully initialized `repr(C)` record for the duration of this copy.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            ptr::from_ref(value).cast::<u8>(),
+            destination.as_mut_ptr(),
+            size_of::<T>(),
+        );
+    }
+    true
+}
+
+fn live_response_error_code(error: host_core::ResponseSnapshotQueryError) -> u32 {
+    match error {
+        ResponseSnapshotQueryError::InvalidGrid
+        | ResponseSnapshotQueryError::OutputShape
+        | ResponseSnapshotQueryError::MalformedSnapshot => RESULT_INVALID_ARGUMENT,
+        ResponseSnapshotQueryError::Capacity => RESULT_REFUSED_BUDGET,
+        ResponseSnapshotQueryError::UnsupportedProvider => RESULT_UNSUPPORTED,
+        ResponseSnapshotQueryError::Numerical => RESULT_INTERNAL,
+    }
+}
+
+fn live_response_capture_error_code(error: ResponseSnapshotError) -> u32 {
+    match error {
+        ResponseSnapshotError::Unsupported => RESULT_UNSUPPORTED,
+        ResponseSnapshotError::MissingTrack | ResponseSnapshotError::InvalidShape => {
+            RESULT_INVALID_ARGUMENT
+        }
+        ResponseSnapshotError::Capacity => RESULT_REFUSED_BUDGET,
+        ResponseSnapshotError::Owner => RESULT_INTERNAL,
+    }
+}
+
+fn live_response_grid(request: WebLiveResponseRequest) -> Result<ResponsePreviewGrid, u32> {
+    let points = usize::try_from(request.points).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if !(2..=LIVE_RESPONSE_MAXIMUM_POINTS).contains(&points)
+        || request.channels == 0
+        || request.channels > crate::RESPONSE_CHANNEL_BOTH
+        || !request.minimum_hz.is_finite()
+        || !request.maximum_hz.is_finite()
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    match request.grid {
+        crate::RESPONSE_GRID_LINEAR => Ok(ResponsePreviewGrid::Linear {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        }),
+        crate::RESPONSE_GRID_LOGARITHMIC => Ok(ResponsePreviewGrid::Logarithmic {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        }),
+        _ => Err(RESULT_INVALID_ARGUMENT),
+    }
+}
+
+fn live_response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
+    staging.live_result_header = WebLiveResponseResult {
+        struct_size: LIVE_RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result,
+        mode: LIVE_RESPONSE_MODE_TARGET,
+        meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+        owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+        section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+        result_bytes: LIVE_RESPONSE_RESULT_BYTES as u64,
+        ..WebLiveResponseResult::default()
+    };
+    let copied = copy_live_record(&mut staging.live_result, 0, &staging.live_result_header);
+    debug_assert!(copied);
+    staging.live_result_len = LIVE_RESPONSE_RESULT_BYTES as usize;
+    result
+}
+
+struct LiveResponseCaptureSink<'a> {
+    bytes: &'a mut [u8],
+    next: usize,
+    owner_count: usize,
+    excluded_count: usize,
+}
+
+impl<'a> LiveResponseCaptureSink<'a> {
+    fn new(bytes: &'a mut [u8]) -> Result<Self, ResponseSnapshotError> {
+        let owner_bytes = LIVE_RESPONSE_MAXIMUM_OWNERS
+            .checked_mul(size_of::<WebLiveResponseOwner>())
+            .ok_or(ResponseSnapshotError::Capacity)?;
+        let next = size_of::<WebLiveResponseResult>()
+            .checked_add(owner_bytes)
+            .ok_or(ResponseSnapshotError::Capacity)?;
+        if next > bytes.len() {
+            return Err(ResponseSnapshotError::Capacity);
+        }
+        Ok(Self {
+            bytes,
+            next,
+            owner_count: 0,
+            excluded_count: 0,
+        })
+    }
+
+    fn append(&mut self, source: &[u8]) -> Result<u32, ResponseSnapshotError> {
+        let end = self
+            .next
+            .checked_add(source.len())
+            .ok_or(ResponseSnapshotError::Capacity)?;
+        if end > self.bytes.len() {
+            return Err(ResponseSnapshotError::Capacity);
+        }
+        let offset = u32::try_from(self.next).map_err(|_| ResponseSnapshotError::Capacity)?;
+        self.bytes[self.next..end].copy_from_slice(source);
+        self.next = end;
+        Ok(offset)
+    }
+
+    fn append_section(
+        &mut self,
+        section: ResponseSnapshotSection,
+    ) -> Result<u32, ResponseSnapshotError> {
+        let record = WebLiveResponseSection {
+            id: section.id,
+            kind: section.kind,
+            enabled: u32::from(section.enabled),
+            word_count: u32::from(section.word_count),
+            words: section.words,
+        };
+        let offset = self.next;
+        if !copy_live_record(self.bytes, offset, &record) {
+            return Err(ResponseSnapshotError::Capacity);
+        }
+        self.next = offset
+            .checked_add(size_of::<WebLiveResponseSection>())
+            .ok_or(ResponseSnapshotError::Capacity)?;
+        u32::try_from(offset).map_err(|_| ResponseSnapshotError::Capacity)
+    }
+
+    fn write_owner(
+        &mut self,
+        index: usize,
+        owner: WebLiveResponseOwner,
+    ) -> Result<(), ResponseSnapshotError> {
+        let offset = size_of::<WebLiveResponseResult>()
+            .checked_add(
+                index
+                    .checked_mul(size_of::<WebLiveResponseOwner>())
+                    .ok_or(ResponseSnapshotError::Capacity)?,
+            )
+            .ok_or(ResponseSnapshotError::Capacity)?;
+        if !copy_live_record(self.bytes, offset, &owner) {
+            return Err(ResponseSnapshotError::Capacity);
+        }
+        Ok(())
+    }
+}
+
+impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
+    fn copy_owner(
+        &mut self,
+        owner: ResponseSnapshotOwnerInfo<'_>,
+        left: &[ResponseSnapshotSection],
+        right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError> {
+        if self.owner_count >= LIVE_RESPONSE_MAXIMUM_OWNERS
+            || left.len() > 4
+            || right.len() > 4
+            || owner.track_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
+            || owner.native_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
+            || owner.stable_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
+        {
+            return Err(ResponseSnapshotError::Capacity);
+        }
+        let track_id_offset = self.append(owner.track_id.as_bytes())?;
+        let native_id_offset = self.append(owner.native_id.as_bytes())?;
+        let stable_id_offset = self.append(owner.stable_id.as_bytes())?;
+        let left_offset = self.next;
+        for section in left {
+            self.append_section(*section)?;
+        }
+        let right_offset = self.next;
+        for section in right {
+            self.append_section(*section)?;
+        }
+        let record = WebLiveResponseOwner {
+            track_id_offset,
+            track_id_bytes: u32::try_from(owner.track_id.len())
+                .map_err(|_| ResponseSnapshotError::Capacity)?,
+            native_id_offset,
+            native_id_bytes: u32::try_from(owner.native_id.len())
+                .map_err(|_| ResponseSnapshotError::Capacity)?,
+            stable_id_offset,
+            stable_id_bytes: u32::try_from(owner.stable_id.len())
+                .map_err(|_| ResponseSnapshotError::Capacity)?,
+            rack: u32::from(owner.rack),
+            slot: owner.slot,
+            kind: owner.kind,
+            bypassed: u32::from(owner.bypassed),
+            availability: u32::from(owner.availability == ResponseSnapshotAvailability::Provided),
+            left_offset: u32::try_from(left_offset).map_err(|_| ResponseSnapshotError::Capacity)?,
+            left_count: u32::try_from(left.len()).map_err(|_| ResponseSnapshotError::Capacity)?,
+            right_offset: u32::try_from(right_offset)
+                .map_err(|_| ResponseSnapshotError::Capacity)?,
+            right_count: u32::try_from(right.len()).map_err(|_| ResponseSnapshotError::Capacity)?,
+            reserved: [0; 1],
+        };
+        self.write_owner(self.owner_count, record)?;
+        self.owner_count += 1;
+        if owner.availability == ResponseSnapshotAvailability::DeclaredUnavailable {
+            self.excluded_count += 1;
+        }
+        Ok(())
+    }
+}
+
+fn run_live_response_capture(
+    host: &mut AudioWorkletEngineHost,
+    staging: &mut ResponseStaging,
+) -> u32 {
+    let request = *staging.live_request;
+    if request.struct_size != LIVE_RESPONSE_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.reserved != [0; 3]
+        || request.track_id_bytes == 0
+        || request.track_id_bytes as usize > staging.live_track_id.len()
+        || request.maximum_result_bytes == 0
+        || usize::try_from(request.maximum_result_bytes)
+            .map_or(true, |value| value > LIVE_RESPONSE_CAPTURE_BYTES)
+    {
+        return live_response_failure(staging, RESULT_INVALID_ARGUMENT);
+    }
+    if let Err(result) = live_response_grid(request) {
+        return live_response_failure(staging, result);
+    }
+    let track_id =
+        match core::str::from_utf8(&staging.live_track_id[..request.track_id_bytes as usize]) {
+            Ok(value) => value,
+            Err(_) => return live_response_failure(staging, RESULT_INVALID_ARGUMENT),
+        };
+    let maximum_result_bytes = usize::try_from(request.maximum_result_bytes)
+        .expect("validated live response result bound");
+    let captured = {
+        let mut sink =
+            match LiveResponseCaptureSink::new(&mut staging.live_result[..maximum_result_bytes]) {
+                Ok(value) => value,
+                Err(error) => {
+                    return live_response_failure(staging, live_response_capture_error_code(error));
+                }
+            };
+        match host.copy_response_snapshot(track_id, &mut sink) {
+            Ok(value) => Ok((value, sink.owner_count, sink.excluded_count, sink.next)),
+            Err(error) => Err(live_response_capture_error_code(error)),
+        }
+    };
+    let (capture, owner_count, excluded_count, result_bytes) = match captured {
+        Ok(value) => value,
+        Err(result) => return live_response_failure(staging, result),
+    };
+    let Some(sequence) = staging.live_token.checked_add(1) else {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    };
+    if result_bytes > maximum_result_bytes {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+    staging.live_token = sequence;
+    let owners_offset = size_of::<WebLiveResponseResult>() as u32;
+    staging.live_result_header = WebLiveResponseResult {
+        struct_size: LIVE_RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        mode: LIVE_RESPONSE_MODE_TARGET,
+        meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+        channels: request.channels,
+        points: 0,
+        owner_count: u32::try_from(owner_count).unwrap_or(0),
+        excluded_count: u32::try_from(excluded_count).unwrap_or(0),
+        sample_rate_hz: host.status().sample_rate_hz,
+        reserved0: 0,
+        reserved1: 0,
+        captured_sample: capture.captured_sample,
+        snapshot_token: sequence,
+        result_bytes: u64::try_from(result_bytes).unwrap_or(u64::MAX),
+        frequencies_offset: 0,
+        left_offset: 0,
+        right_offset: 0,
+        owners_offset,
+        owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+        section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+        reserved: [0; 2],
+    };
+    let copied = copy_live_record(&mut staging.live_result, 0, &staging.live_result_header);
+    debug_assert!(copied);
+    staging.live_result_len = result_bytes;
+    RESULT_OK
+}
+
+fn read_live_record<T: Copy>(bytes: &[u8], offset: u32) -> Result<T, u32> {
+    let start = usize::try_from(offset).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let end = start
+        .checked_add(size_of::<T>())
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    let source = bytes.get(start..end).ok_or(RESULT_INVALID_ARGUMENT)?;
+    // SAFETY: The source range is checked against the payload and `read_unaligned` accepts the
+    // byte alignment of a Wasm result payload.
+    Ok(unsafe { ptr::read_unaligned(source.as_ptr().cast::<T>()) })
+}
+
+fn live_payload_bytes(bytes: &[u8], offset: u32, count: u32) -> Result<&[u8], u32> {
+    let start = usize::try_from(offset).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let length = usize::try_from(count).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let end = start.checked_add(length).ok_or(RESULT_INVALID_ARGUMENT)?;
+    bytes.get(start..end).ok_or(RESULT_INVALID_ARGUMENT)
+}
+
+fn parse_live_string(bytes: &[u8], offset: u32, count: u32) -> Result<Box<str>, u32> {
+    let value = core::str::from_utf8(live_payload_bytes(bytes, offset, count)?)
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if value.is_empty() || value.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok(value.into())
+}
+
+fn parse_live_sections(
+    bytes: &[u8],
+    offset: u32,
+    count: u32,
+    record_bytes: u32,
+) -> Result<Box<[ResponseSnapshotSection]>, u32> {
+    if count > 4 || record_bytes != LIVE_RESPONSE_SECTION_BYTES {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let count_usize = usize::try_from(count).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let stride = usize::try_from(record_bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let start = usize::try_from(offset).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let total = count_usize
+        .checked_mul(stride)
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    let end = start.checked_add(total).ok_or(RESULT_INVALID_ARGUMENT)?;
+    if end > bytes.len() {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let mut sections = Vec::with_capacity(count_usize);
+    for index in 0..count_usize {
+        let section_offset = u32::try_from(
+            start
+                .checked_add(index.checked_mul(stride).ok_or(RESULT_INVALID_ARGUMENT)?)
+                .ok_or(RESULT_INVALID_ARGUMENT)?,
+        )
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+        let raw: WebLiveResponseSection = read_live_record(bytes, section_offset)?;
+        if raw.enabled > 1
+            || raw.word_count > 7
+            || raw.words[usize::try_from(raw.word_count).unwrap_or(8)..]
+                .iter()
+                .any(|word| *word != 0)
+        {
+            return Err(RESULT_INVALID_ARGUMENT);
+        }
+        sections.push(ResponseSnapshotSection {
+            id: raw.id,
+            kind: raw.kind,
+            enabled: raw.enabled != 0,
+            word_count: u8::try_from(raw.word_count).map_err(|_| RESULT_INVALID_ARGUMENT)?,
+            words: raw.words,
+        });
+    }
+    Ok(sections.into_boxed_slice())
+}
+
+fn parse_live_snapshot(staging: &ResponseStaging) -> Result<(ResponseSnapshot, u64), u32> {
+    let bytes = staging
+        .live_result
+        .get(..staging.live_result_len)
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    let header: WebLiveResponseResult = read_live_record(bytes, 0)?;
+    if header.struct_size != LIVE_RESPONSE_RESULT_BYTES
+        || header.abi_version != ABI_VERSION
+        || header.result != RESULT_OK
+        || header.mode != LIVE_RESPONSE_MODE_TARGET
+        || header.meaning != LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL
+        || header.reserved0 != 0
+        || header.reserved1 != 0
+        || header.reserved != [0; 2]
+        || header.snapshot_token == 0
+        || header.points != 0
+        || header.owner_record_bytes != LIVE_RESPONSE_OWNER_BYTES
+        || header.section_record_bytes != LIVE_RESPONSE_SECTION_BYTES
+        || header.result_bytes != staging.live_result_len as u64
+        || header.owner_count as usize > LIVE_RESPONSE_MAXIMUM_OWNERS
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let owner_count = usize::try_from(header.owner_count).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let owners_start =
+        usize::try_from(header.owners_offset).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let owner_stride = size_of::<WebLiveResponseOwner>();
+    let owner_end = owners_start
+        .checked_add(
+            owner_count
+                .checked_mul(owner_stride)
+                .ok_or(RESULT_INVALID_ARGUMENT)?,
+        )
+        .ok_or(RESULT_INVALID_ARGUMENT)?;
+    if owner_end > bytes.len() || owners_start < size_of::<WebLiveResponseResult>() {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let mut owners = Vec::with_capacity(owner_count);
+    let mut excluded = 0_u32;
+    for index in 0..owner_count {
+        let offset = u32::try_from(
+            owners_start
+                .checked_add(
+                    index
+                        .checked_mul(owner_stride)
+                        .ok_or(RESULT_INVALID_ARGUMENT)?,
+                )
+                .ok_or(RESULT_INVALID_ARGUMENT)?,
+        )
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+        let raw: WebLiveResponseOwner = read_live_record(bytes, offset)?;
+        if raw.bypassed > 1
+            || raw.availability > 1
+            || raw.reserved != [0; 1]
+            || raw.left_count > 4
+            || raw.right_count > 4
+        {
+            return Err(RESULT_INVALID_ARGUMENT);
+        }
+        let track_id = parse_live_string(bytes, raw.track_id_offset, raw.track_id_bytes)?;
+        let native_id = parse_live_string(bytes, raw.native_id_offset, raw.native_id_bytes)?;
+        let stable_id = parse_live_string(bytes, raw.stable_id_offset, raw.stable_id_bytes)?;
+        let left = parse_live_sections(
+            bytes,
+            raw.left_offset,
+            raw.left_count,
+            header.section_record_bytes,
+        )?;
+        let right = parse_live_sections(
+            bytes,
+            raw.right_offset,
+            raw.right_count,
+            header.section_record_bytes,
+        )?;
+        if raw.availability == 1 && (left.is_empty() || right.is_empty()) {
+            return Err(RESULT_INVALID_ARGUMENT);
+        }
+        if raw.availability == 0 {
+            excluded = excluded.checked_add(1).ok_or(RESULT_INVALID_ARGUMENT)?;
+        }
+        owners.push(ResponseSnapshotOwner {
+            track_id,
+            native_id,
+            stable_id,
+            rack: u8::try_from(raw.rack).map_err(|_| RESULT_INVALID_ARGUMENT)?,
+            slot: raw.slot,
+            kind: raw.kind,
+            bypassed: raw.bypassed != 0,
+            availability: if raw.availability == 0 {
+                ResponseSnapshotAvailability::DeclaredUnavailable
+            } else {
+                ResponseSnapshotAvailability::Provided
+            },
+            left,
+            right,
+        });
+    }
+    if excluded != header.excluded_count {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok((
+        ResponseSnapshot {
+            sample_rate_hz: header.sample_rate_hz,
+            captured_sample: header.captured_sample,
+            owners: owners.into_boxed_slice(),
+        },
+        header.snapshot_token,
+    ))
+}
+
+fn append_live_f32(
+    bytes: &mut [u8],
+    cursor: &mut usize,
+    values: &[f32],
+    maximum: usize,
+) -> Result<u32, u32> {
+    let byte_count = values
+        .len()
+        .checked_mul(size_of::<f32>())
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    let end = cursor
+        .checked_add(byte_count)
+        .ok_or(RESULT_REFUSED_BUDGET)?;
+    if end > maximum || end > bytes.len() {
+        return Err(RESULT_REFUSED_BUDGET);
+    }
+    let offset = u32::try_from(*cursor).map_err(|_| RESULT_REFUSED_BUDGET)?;
+    for (index, value) in values.iter().copied().enumerate() {
+        let at = *cursor + index * size_of::<f32>();
+        bytes[at..at + size_of::<f32>()].copy_from_slice(&value.to_le_bytes());
+    }
+    *cursor = end;
+    Ok(offset)
+}
+
+fn run_live_response_analysis(staging: &mut ResponseStaging) -> u32 {
+    let request = *staging.live_request;
+    if request.struct_size != LIVE_RESPONSE_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.reserved != [0; 3]
+        || request.maximum_result_bytes == 0
+        || usize::try_from(request.maximum_result_bytes)
+            .map_or(true, |value| value > LIVE_RESPONSE_CAPTURE_BYTES)
+    {
+        return live_response_failure(staging, RESULT_INVALID_ARGUMENT);
+    }
+    let grid = match live_response_grid(request) {
+        Ok(value) => value,
+        Err(result) => return live_response_failure(staging, result),
+    };
+    let points = grid.points();
+    let selected_channels = usize::from(request.channels & crate::RESPONSE_CHANNEL_LEFT != 0)
+        + usize::from(request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0);
+    let Some(required_result_bytes) = points
+        .checked_mul(size_of::<f32>())
+        .and_then(|vector_bytes| vector_bytes.checked_mul(selected_channels + 1))
+        .and_then(|vectors| size_of::<WebLiveResponseResult>().checked_add(vectors))
+    else {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    };
+    let maximum_result_bytes = usize::try_from(request.maximum_result_bytes)
+        .expect("validated live response result bound");
+    if required_result_bytes > maximum_result_bytes {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+    let (snapshot, snapshot_token) = match parse_live_snapshot(staging) {
+        Ok(value) => value,
+        Err(result) => return live_response_failure(staging, result),
+    };
+    let mut frequencies = vec![0.0_f32; points];
+    let mut left = vec![0.0_f32; points];
+    let mut right = vec![0.0_f32; points];
+    let summary = match query_response_snapshot_into(
+        &snapshot,
+        grid,
+        ResponseSnapshotOutput {
+            frequencies_hz: &mut frequencies,
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+        },
+    ) {
+        Ok(value) => value,
+        Err(error) => return live_response_failure(staging, live_response_error_code(error)),
+    };
+    let maximum = request.maximum_result_bytes as usize;
+    let mut cursor = size_of::<WebLiveResponseResult>();
+    let frequencies_offset =
+        match append_live_f32(&mut staging.live_result, &mut cursor, &frequencies, maximum) {
+            Ok(value) => value,
+            Err(result) => return live_response_failure(staging, result),
+        };
+    let left_offset = if request.channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
+        match append_live_f32(&mut staging.live_result, &mut cursor, &left, maximum) {
+            Ok(value) => value,
+            Err(result) => return live_response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    let right_offset = if request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
+        match append_live_f32(&mut staging.live_result, &mut cursor, &right, maximum) {
+            Ok(value) => value,
+            Err(result) => return live_response_failure(staging, result),
+        }
+    } else {
+        0
+    };
+    staging.live_result_header = WebLiveResponseResult {
+        struct_size: LIVE_RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        mode: LIVE_RESPONSE_MODE_TARGET,
+        meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+        channels: request.channels,
+        points: u32::try_from(points).unwrap_or(0),
+        owner_count: summary.owners,
+        excluded_count: summary.excluded_owners,
+        sample_rate_hz: summary.sample_rate_hz,
+        reserved0: 0,
+        reserved1: 0,
+        captured_sample: summary.captured_sample,
+        snapshot_token,
+        result_bytes: u64::try_from(cursor).unwrap_or(u64::MAX),
+        frequencies_offset,
+        left_offset,
+        right_offset,
+        owners_offset: 0,
+        owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+        section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+        reserved: [0; 2],
+    };
+    let copied = copy_live_record(&mut staging.live_result, 0, &staging.live_result_header);
+    debug_assert!(copied);
+    staging.live_result_len = cursor;
+    RESULT_OK
 }
 
 fn response_buffer_budget(
@@ -784,6 +1451,144 @@ pub extern "C" fn miso_engine_web_v1_response_close() -> u32 {
             return RESULT_INTERNAL;
         };
         staging.reset();
+        RESULT_OK
+    })
+}
+
+/// Return a writable request header for one live selected-track response query.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_request_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        staging.live_result_len = 0;
+        staging.live_request.struct_size = LIVE_RESPONSE_REQUEST_BYTES;
+        staging.live_request.abi_version = ABI_VERSION;
+        pointer_u32(ptr::from_mut(&mut *staging.live_request))
+    })
+}
+
+/// Return the fixed live response request-header byte size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_request_bytes() -> u32 {
+    LIVE_RESPONSE_REQUEST_BYTES
+}
+
+/// Return the fixed raw snapshot staging address used by capture and analysis.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_snapshot_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+    })
+}
+
+/// Return the maximum byte length of the fixed raw snapshot staging area.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_snapshot_capacity() -> u32 {
+    u32::try_from(LIVE_RESPONSE_CAPTURE_BYTES).unwrap_or(0)
+}
+
+/// Set the byte length of a raw snapshot copied into the fixed staging area.
+///
+/// The analysis Worker copies the Worklet's capture reply into this same staging area before
+/// calling [`miso_engine_web_v1_track_response_analysis`].  The length is explicit so malformed
+/// or truncated replies are rejected by the Rust decoder rather than inferred from stale bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_snapshot_set_bytes(bytes: u32) -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let Ok(length) = usize::try_from(bytes) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        if !(LIVE_RESPONSE_RESULT_BYTES as usize..=LIVE_RESPONSE_CAPTURE_BYTES).contains(&length) {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        staging.live_result_len = length;
+        RESULT_OK
+    })
+}
+
+/// Return writable staging for the selected track's UTF-8 identity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_track_id_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.live_track_id.as_mut_ptr())
+    })
+}
+
+/// Return the maximum selected-track identity byte length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_track_id_capacity() -> u32 {
+    LIVE_RESPONSE_MAXIMUM_ID_BYTES as u32
+}
+
+/// Capture one selected track's live response at the current boundary into raw staging.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_capture(handle: u32) -> u32 {
+    LIVE_HOST.with(|host_slot| {
+        let Ok(mut live) = host_slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let Some(live) = live.as_mut().filter(|value| value.handle == handle) else {
+            return RESULT_WRONG_STATE;
+        };
+        RESPONSE_STAGING.with(|staging_slot| {
+            let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            run_live_response_capture(&mut live.host, &mut staging)
+        })
+    })
+}
+
+/// Analyze one staged raw live-response snapshot using the native Rust response composer.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_analysis() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        run_live_response_analysis(&mut staging)
+    })
+}
+
+/// Return the live response result payload address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_result_ptr() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+    })
+}
+
+/// Return the live response result payload byte length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_result_bytes() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|staging| u32::try_from(staging.live_result_len).ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Release the live response staging payload.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
+    RESPONSE_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        staging.live_result_len = 0;
         RESULT_OK
     })
 }
@@ -1597,5 +2402,245 @@ mod response_budget_tests {
             ),
             Ok(()),
         );
+    }
+}
+
+#[cfg(test)]
+mod live_response_ffi_tests {
+    use super::*;
+    use core::alloc::Layout;
+    use core::cell::Cell;
+    use std::alloc::{GlobalAlloc, System};
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+        static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    struct CountingAllocator;
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn count_allocation() {
+        if ARMED.try_with(Cell::get).unwrap_or(false) {
+            ALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        }
+    }
+
+    fn count_deallocation() {
+        if ARMED.try_with(Cell::get).unwrap_or(false) {
+            DEALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        }
+    }
+
+    // SAFETY: every allocator operation is forwarded unchanged to the system allocator; the
+    // thread-local counters observe successful operations but never alter ownership or layout.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplied this layout for one system allocation.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                count_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplied this layout for one zeroed system allocation.
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() {
+                count_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_deallocation();
+            // SAFETY: the pointer and layout are the matching allocation supplied by the caller.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: the caller supplied the matching allocation and replacement size.
+            let replacement = unsafe { System.realloc(pointer, layout, new_size) };
+            if !replacement.is_null() {
+                count_allocation();
+                count_deallocation();
+            }
+            replacement
+        }
+    }
+
+    fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+        ARMED.with(|armed| armed.set(false));
+        ALLOCATIONS.with(|count| count.set(0));
+        DEALLOCATIONS.with(|count| count.set(0));
+        ARMED.with(|armed| armed.set(true));
+        let result = operation();
+        ARMED.with(|armed| armed.set(false));
+        (
+            result,
+            ALLOCATIONS.with(Cell::get),
+            DEALLOCATIONS.with(Cell::get),
+        )
+    }
+
+    fn stage_request(track_id: &[u8]) {
+        stage_request_with_limit(track_id, LIVE_RESPONSE_CAPTURE_BYTES as u32);
+    }
+
+    fn stage_request_with_limit(track_id: &[u8], maximum_result_bytes: u32) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            assert!(track_id.len() <= staging.live_track_id.len());
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..track_id.len()].copy_from_slice(track_id);
+            *staging.live_request = WebLiveResponseRequest {
+                struct_size: LIVE_RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                track_id_bytes: u32::try_from(track_id.len()).expect("short test track ID"),
+                grid: crate::RESPONSE_GRID_LINEAR,
+                channels: crate::RESPONSE_CHANNEL_BOTH,
+                points: 5,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+                maximum_result_bytes,
+                reserved: [0; 3],
+            };
+            staging.live_result_len = 0;
+        });
+    }
+
+    fn captured_header() -> WebLiveResponseResult {
+        RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
+    }
+
+    #[test]
+    fn ffi_live_capture_analysis_is_prewarmed_and_token_exhaustion_is_typed() {
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let handle = test_boot(document.as_bytes(), options);
+        assert_ne!(handle, 0, "the mixed input-filter/EQ fixture must boot");
+
+        // Initialize every fixed response staging allocation before measuring the owner callback.
+        assert_eq!(
+            miso_engine_web_v1_track_response_request_bytes(),
+            LIVE_RESPONSE_REQUEST_BYTES
+        );
+        let _ = miso_engine_web_v1_track_response_request_ptr();
+        let _ = miso_engine_web_v1_track_response_track_id_ptr();
+        let _ = miso_engine_web_v1_track_response_snapshot_ptr();
+        assert_eq!(
+            miso_engine_web_v1_track_response_snapshot_capacity(),
+            LIVE_RESPONSE_CAPTURE_BYTES as u32
+        );
+        stage_request_with_limit(b"eq0", LIVE_RESPONSE_RESULT_BYTES);
+        let (refused_capture, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(refused_capture, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "an undersized capture refusal allocated");
+        assert_eq!(deallocations, 0, "an undersized capture refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            0,
+            "an undersized capture refusal advanced the snapshot token"
+        );
+        stage_request(b"eq0");
+
+        let (capture_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(capture_result, RESULT_OK);
+        assert_eq!(allocations, 0, "prewarmed FFI capture allocated");
+        assert_eq!(deallocations, 0, "prewarmed FFI capture freed");
+        let capture_header = captured_header();
+        assert_eq!(capture_header.result, RESULT_OK);
+        assert_eq!(capture_header.captured_sample, 0);
+        assert_eq!(capture_header.snapshot_token, 1);
+        assert!(
+            capture_header.owner_count >= 2,
+            "input filters and EQ must both be captured"
+        );
+        assert!(capture_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+
+        let (snapshot, token) = RESPONSE_STAGING
+            .with(|slot| parse_live_snapshot(&slot.borrow()).expect("captured mixed snapshot"));
+        assert_eq!(token, 1);
+        assert!(
+            snapshot
+                .owners
+                .iter()
+                .any(|owner| owner.native_id.as_ref() == "miso.builtin.input-filters")
+        );
+        assert!(
+            snapshot
+                .owners
+                .iter()
+                .any(|owner| owner.native_id.as_ref() == "miso.parametric-eq")
+        );
+
+        assert_eq!(miso_engine_web_v1_track_response_analysis(), RESULT_OK);
+        let analysis_header = captured_header();
+        assert_eq!(analysis_header.result, RESULT_OK);
+        assert_eq!(analysis_header.points, 5);
+        assert_eq!(analysis_header.captured_sample, 0);
+        assert_eq!(analysis_header.snapshot_token, 1);
+        assert!(analysis_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+        let result_len = miso_engine_web_v1_track_response_result_bytes();
+        assert_eq!(analysis_header.result_bytes, u64::from(result_len));
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let values = bytes
+                .chunks_exact(size_of::<f32>())
+                .skip(size_of::<WebLiveResponseResult>() / size_of::<f32>())
+                .take(15)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 word")));
+            assert!(values.into_iter().all(f32::is_finite));
+        });
+
+        let undersized_analysis_bytes =
+            u32::try_from(size_of::<WebLiveResponseResult>() + 5 * size_of::<f32>() * 3 - 1)
+                .expect("small live response bound");
+        RESPONSE_STAGING.with(|slot| {
+            slot.borrow_mut().live_request.maximum_result_bytes = undersized_analysis_bytes;
+        });
+        let (refused_analysis, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_analysis());
+        assert_eq!(refused_analysis, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "an undersized analysis refusal allocated");
+        assert_eq!(deallocations, 0, "an undersized analysis refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
+
+        // Closing clears payload length but must not reset the host-scoped sequence identity.
+        assert_eq!(miso_engine_web_v1_track_response_close(), RESULT_OK);
+        stage_request(b"eq0");
+        let (second_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(second_result, RESULT_OK);
+        assert_eq!(allocations, 0);
+        assert_eq!(deallocations, 0);
+        assert_eq!(captured_header().snapshot_token, 2);
+
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
+        stage_request(b"eq0");
+        let (exhausted_result, allocations, deallocations) =
+            measured(|| miso_engine_web_v1_track_response_capture(handle));
+        assert_eq!(exhausted_result, RESULT_REFUSED_BUDGET);
+        assert_eq!(allocations, 0, "token exhaustion refusal allocated");
+        assert_eq!(deallocations, 0, "token exhaustion refusal freed");
+        assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            u64::MAX,
+            "exhaustion must not wrap or reuse a snapshot token"
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 }

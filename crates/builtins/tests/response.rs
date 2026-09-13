@@ -13,7 +13,97 @@ use dsp_reference::{
     ReferenceBiquad, ReferenceFilterKind, ReferenceSvfStateSpace, ReferenceTptOutput,
     rbj_butterworth_magnitude_db,
 };
+use effect_contract::{
+    BankWidth, ResponseAnalysisError, ResponseSnapshotKind, ResponseSnapshotRequest,
+    ResponseSnapshotSection,
+};
 use engine::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
+use lane::Backend;
+
+fn snapshot_sentinel() -> ResponseSnapshotSection {
+    ResponseSnapshotSection {
+        id: 99,
+        kind: 99,
+        enabled: true,
+        word_count: 7,
+        words: [0xDEAD_BEEF; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    }
+}
+
+#[test]
+fn prepared_input_owner_snapshot_copies_scalar_and_bank_words() {
+    let mut parameters = BuiltinParameters::default();
+    parameters.left.hpf_hz = 100.0;
+    parameters.left.lpf_hz = 1_000.0;
+    parameters.right.hpf_hz = 200.0;
+    parameters.right.lpf_hz = 2_000.0;
+    let input = BuiltinChain::new(48_000, parameters)
+        .expect("prepared input")
+        .into_input_builtins();
+    let expected = test_support::input_section_words(&input);
+    let mut left = [snapshot_sentinel(); 2];
+    let mut right = [snapshot_sentinel(); 2];
+    let summary = input
+        .copy_response_snapshot(
+            48_000,
+            ResponseSnapshotRequest {
+                bypassed: false,
+                left: &mut left,
+                right: &mut right,
+            },
+        )
+        .expect("scalar owner snapshot");
+    assert_eq!(summary.kind, ResponseSnapshotKind::BuiltinInputFilters);
+    assert_eq!(summary.sample_rate_hz, 48_000);
+    assert_eq!(summary.sections, 2);
+    assert_eq!(left[0].words, expected[0]);
+    assert_eq!(left[1].words, expected[1]);
+    assert_eq!(right[0].words, expected[2]);
+    assert_eq!(right[1].words, expected[3]);
+    assert_ne!(left[0].words, right[0].words);
+
+    let width = BankWidth::for_backend(Backend::current()).expect("native bank width");
+    let bank = BuiltinInputBank::new(Backend::current(), width, vec![input]).expect("bank");
+    let mut bank_left = [snapshot_sentinel(); 2];
+    let mut bank_right = [snapshot_sentinel(); 2];
+    let bank_summary = bank
+        .copy_response_snapshot_lane(
+            0,
+            48_000,
+            ResponseSnapshotRequest {
+                bypassed: false,
+                left: &mut bank_left,
+                right: &mut bank_right,
+            },
+        )
+        .expect("bank owner snapshot");
+    assert_eq!(bank_summary, summary);
+    assert_eq!(bank_left[0].words, expected[0]);
+    assert_eq!(bank_right[1].words, expected[3]);
+}
+
+#[test]
+fn prepared_input_owner_snapshot_rejects_wrong_shape_without_writing() {
+    let input = BuiltinChain::new(48_000, BuiltinParameters::default())
+        .expect("prepared input")
+        .into_input_builtins();
+    let sentinel = snapshot_sentinel();
+    let mut left = [sentinel; 1];
+    let mut right = [sentinel; 2];
+    let error = input
+        .copy_response_snapshot(
+            48_000,
+            ResponseSnapshotRequest {
+                bypassed: false,
+                left: &mut left,
+                right: &mut right,
+            },
+        )
+        .expect_err("wrong shape must refuse");
+    assert_eq!(error, ResponseAnalysisError::OutputShape);
+    assert_eq!(left[0], sentinel);
+    assert!(right.iter().all(|section| *section == sentinel));
+}
 
 /// The state-space model of a prepared section, built from **all seven** of its cast words.
 ///
@@ -841,4 +931,41 @@ fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
             );
         }
     }
+}
+
+#[test]
+fn snapshot_magnitude_query_validates_both_lanes_before_publishing() {
+    let identity = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: false,
+        word_count: 7,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let singular = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: true,
+        word_count: 7,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let left_sections = [identity; 2];
+    let right_sections = [singular; 2];
+    let mut left = [41.0_f64];
+    let mut right = [43.0_f64];
+    assert_eq!(
+        query_input_filter_snapshot_magnitudes_into(
+            48_000,
+            false,
+            &left_sections,
+            &right_sections,
+            &[0.0],
+            1,
+            &mut left,
+            &mut right,
+        ),
+        Err(InputFilterResponseError::Numerical)
+    );
+    assert_eq!(left, [41.0]);
+    assert_eq!(right, [43.0]);
 }

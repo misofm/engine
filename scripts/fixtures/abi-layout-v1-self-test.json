@@ -55,7 +55,19 @@
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
-    "miso_engine_web_v1_status_ptr"
+    "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_track_response_analysis",
+    "miso_engine_web_v1_track_response_capture",
+    "miso_engine_web_v1_track_response_close",
+    "miso_engine_web_v1_track_response_request_bytes",
+    "miso_engine_web_v1_track_response_request_ptr",
+    "miso_engine_web_v1_track_response_result_bytes",
+    "miso_engine_web_v1_track_response_result_ptr",
+    "miso_engine_web_v1_track_response_snapshot_capacity",
+    "miso_engine_web_v1_track_response_snapshot_ptr",
+    "miso_engine_web_v1_track_response_snapshot_set_bytes",
+    "miso_engine_web_v1_track_response_track_id_capacity",
+    "miso_engine_web_v1_track_response_track_id_ptr"
   ],
   "structures": {
     "bootOptions": {
@@ -256,6 +268,79 @@
         { "name": "sectionsRightOffset", "offset": 96, "type": "u32" },
         { "name": "reserved", "offset": 100, "type": "u32[3]" }
       ]
+    },
+    "liveResponseRequest": {
+      "bytes": 48,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "trackIdBytes", "offset": 8, "type": "u32" },
+        { "name": "grid", "offset": 12, "type": "u32" },
+        { "name": "channels", "offset": 16, "type": "u32" },
+        { "name": "points", "offset": 20, "type": "u32" },
+        { "name": "minimumHz", "offset": 24, "type": "f32" },
+        { "name": "maximumHz", "offset": 28, "type": "f32" },
+        { "name": "maximumResultBytes", "offset": 32, "type": "u32" },
+        { "name": "reserved", "offset": 36, "type": "u32[3]" }
+      ]
+    },
+    "liveResponseOwner": {
+      "bytes": 64,
+      "fields": [
+        { "name": "trackIdOffset", "offset": 0, "type": "u32" },
+        { "name": "trackIdBytes", "offset": 4, "type": "u32" },
+        { "name": "nativeIdOffset", "offset": 8, "type": "u32" },
+        { "name": "nativeIdBytes", "offset": 12, "type": "u32" },
+        { "name": "stableIdOffset", "offset": 16, "type": "u32" },
+        { "name": "stableIdBytes", "offset": 20, "type": "u32" },
+        { "name": "rack", "offset": 24, "type": "u32" },
+        { "name": "slot", "offset": 28, "type": "u32" },
+        { "name": "kind", "offset": 32, "type": "u32" },
+        { "name": "bypassed", "offset": 36, "type": "u32" },
+        { "name": "availability", "offset": 40, "type": "u32" },
+        { "name": "leftOffset", "offset": 44, "type": "u32" },
+        { "name": "leftCount", "offset": 48, "type": "u32" },
+        { "name": "rightOffset", "offset": 52, "type": "u32" },
+        { "name": "rightCount", "offset": 56, "type": "u32" },
+        { "name": "reserved", "offset": 60, "type": "u32[1]" }
+      ]
+    },
+    "liveResponseSection": {
+      "bytes": 44,
+      "fields": [
+        { "name": "id", "offset": 0, "type": "u32" },
+        { "name": "kind", "offset": 4, "type": "u32" },
+        { "name": "enabled", "offset": 8, "type": "u32" },
+        { "name": "wordCount", "offset": 12, "type": "u32" },
+        { "name": "words", "offset": 16, "type": "u32[7]" }
+      ]
+    },
+    "liveResponseResult": {
+      "bytes": 104,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "result", "offset": 8, "type": "u32" },
+        { "name": "mode", "offset": 12, "type": "u32" },
+        { "name": "meaning", "offset": 16, "type": "u32" },
+        { "name": "channels", "offset": 20, "type": "u32" },
+        { "name": "points", "offset": 24, "type": "u32" },
+        { "name": "ownerCount", "offset": 28, "type": "u32" },
+        { "name": "excludedCount", "offset": 32, "type": "u32" },
+        { "name": "sampleRateHz", "offset": 36, "type": "u32" },
+        { "name": "reserved0", "offset": 40, "type": "u32" },
+        { "name": "reserved1", "offset": 44, "type": "u32" },
+        { "name": "capturedSample", "offset": 48, "type": "u64" },
+        { "name": "snapshotToken", "offset": 56, "type": "u64" },
+        { "name": "resultBytes", "offset": 64, "type": "u64" },
+        { "name": "frequenciesOffset", "offset": 72, "type": "u32" },
+        { "name": "leftOffset", "offset": 76, "type": "u32" },
+        { "name": "rightOffset", "offset": 80, "type": "u32" },
+        { "name": "ownersOffset", "offset": 84, "type": "u32" },
+        { "name": "ownerRecordBytes", "offset": 88, "type": "u32" },
+        { "name": "sectionRecordBytes", "offset": 92, "type": "u32" },
+        { "name": "reserved", "offset": 96, "type": "u32[2]" }
+      ]
     }
   },
   "commandRecord": {
@@ -289,6 +374,8 @@
     "responseGrids": [{ "value": 1, "name": "linear" }, { "value": 2, "name": "logarithmic" }],
     "responseChannels": [{ "value": 1, "name": "left" }, { "value": 2, "name": "right" }, { "value": 3, "name": "both" }],
     "responseFields": [{ "value": 1, "name": "total" }, { "value": 2, "name": "sections" }],
+    "liveResponseModes": [{ "value": 1, "name": "target" }],
+    "liveResponseMeanings": [{ "value": 1, "name": "eqFilterSubtotal" }],
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "diagnosticBytes": 16384,
@@ -298,6 +385,10 @@
     "maximumResponseEffectIdBytes": 127,
     "maximumResponseParameterOverrides": 256,
     "maximumResponseResultBytes": 16777216,
+    "maximumLiveResponseOwners": 256,
+    "maximumLiveResponseIdBytes": 127,
+    "maximumLiveResponsePoints": 4096,
+    "liveResponseCaptureBytes": 1048576,
     "defaultMaximumMemoryBytes": 536870912,
     "sourceRing": { "stallToleranceMs": 100, "reserveQuanta": 2 }
   }

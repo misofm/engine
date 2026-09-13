@@ -124,7 +124,9 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered SDK preview:** #775 via PR #776, merged main `fbfce55b4c0441128ea513162bfe016c6a624935`. Astra medium PASS; required qualification `34738424659` PASS on final head `27ed73f4c7622aab2843232edfbb624311d886ae`. Actual three-browser SDK execution, 198 headless tests and package/artifact/resource gates pass. #775 is CLOSED. This is an explicit requested-configuration utility, not applied-target/live response or spectrum.
 
-**Active:** #777 exposes selected existing per-effect resident observations through both SDKs, preserving original independent values, units and sample spans. It reuses existing readers and request/reply paths. No render computation or general subscription service is added. Astra xhigh approved its stateless scope; Luna max implements, Astra medium verifies.
+**Delivered selected resident observations:** #777 via PR #778, merged main `cf9a620af4efa53672bfcdf48fc4757b5386b1bf`. Astra medium PASS; required qualification `34743497328` PASS on final head `7d5500a465d5309697383d181decb547a5f5debf`. Browser/headless stable selections preserve independent values, units, original sample spans and non-consuming reads. Actual three-browser, 201 headless, package, resource and hermetic gates pass.
+
+**Active:** #779 adds an on-demand live track EQ/filter target subtotal captured from actual owners between render blocks, evaluated through existing worker analysis and exposed through both SDKs. Astra xhigh approved one combined usable query; Luna max implements and Astra medium verifies concrete correctness without new scope.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 

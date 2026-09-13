@@ -277,6 +277,8 @@ pub(crate) fn bind_rack_banks_indexed(
                 members: members.clone().into_boxed_slice(),
                 active_mask: group.active_mask.clone(),
                 processor,
+                response_snapshot_declared: entries[0].factory.response_analysis().is_some(),
+                native_id: entries[0].factory.descriptor().id.as_str(),
                 scratch,
                 // Issue #181: the group this slot came out of, carried forward so the runtime can
                 // build one chain per cohort instead of one per slot. It is the same `(group,

@@ -33,13 +33,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
-    PreparedEffectMetadata, PreparedNativeEffect, SeamSide, TailSamples,
+    PreparedEffectMetadata, PreparedNativeEffect, ResponseAnalysisError, ResponseSnapshotRequest,
+    ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::{
     QuantumFrames,
     realtime::{
         BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
         PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
+        ResponseSnapshotError, ResponseSnapshotSink,
     },
 };
 use lane::Backend;
@@ -265,6 +267,12 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
     pub runtime_owner_field_bytes: u64,
     pub runtime_owner_allocation_bytes: u64,
+    /// Boxed response-owner binding table retained by the prepared runtime.
+    pub response_binding_table_bytes: u64,
+    /// Payload bytes retained by the per-owner stable-id and track-id strings.
+    pub response_binding_string_bytes: u64,
+    /// Largest individual cloned identity allocation.
+    pub largest_response_binding_string_bytes: u64,
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
@@ -272,6 +280,18 @@ pub struct GraphRuntimeMetadataResourceEstimate {
 impl GraphRuntimeMetadataResourceEstimate {
     /// Computes the checked retained field and conservative mixed op/unit allocation bound.
     pub fn checked_for(emitted_op_count: u64) -> Option<Self> {
+        Self::checked_for_with_response_bindings(emitted_op_count, 0, 0, 0)
+    }
+
+    /// Computes runtime metadata plus the retained response-owner table and its cloned identity
+    /// strings. The binding count/string payloads are supplied by the graph compiler because the
+    /// lowered runtime owns those values after the semantic model is consumed.
+    pub fn checked_for_with_response_bindings(
+        emitted_op_count: u64,
+        response_binding_count: u64,
+        response_binding_string_bytes: u64,
+        largest_response_binding_string_bytes: u64,
+    ) -> Option<Self> {
         let (_, runtime_field_bytes) = runtime::scalar_split_runtime_layout();
         let (op_layout_delta_bytes, runtime_unit_layout_delta_bytes) =
             runtime::scalar_split_op_layout();
@@ -286,7 +306,15 @@ impl GraphRuntimeMetadataResourceEstimate {
         let emitted_op_delta_bytes = emitted_op_layout_delta_bytes.checked_mul(emitted_op_count)?;
         let runtime_op_containing_bytes = runtime_op_bytes.checked_mul(emitted_op_count)?;
         let runtime_unit_containing_bytes = runtime_unit_bytes.checked_mul(emitted_op_count)?;
+        let response_binding_entry_bytes =
+            u64::try_from(core::mem::size_of::<runtime::ResponseOwnerBinding>())
+                .expect("response binding layout fits u64");
+        let response_binding_table_bytes =
+            response_binding_entry_bytes.checked_mul(response_binding_count)?;
         let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
+        let total_bytes = total_bytes
+            .checked_add(response_binding_table_bytes)?
+            .checked_add(response_binding_string_bytes)?;
         Some(Self {
             emitted_op_count,
             runtime_field_bytes,
@@ -297,10 +325,15 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime_unit_containing_bytes,
             runtime_owner_field_bytes,
             runtime_owner_allocation_bytes,
+            response_binding_table_bytes,
+            response_binding_string_bytes,
+            largest_response_binding_string_bytes,
             total_bytes,
             largest_allocation_bytes: runtime_owner_allocation_bytes
                 .max(runtime_op_containing_bytes)
-                .max(runtime_unit_containing_bytes),
+                .max(runtime_unit_containing_bytes)
+                .max(response_binding_table_bytes)
+                .max(largest_response_binding_string_bytes),
         })
     }
 }
@@ -615,6 +648,11 @@ pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
     pub processor: Box<dyn PreparedNativeEffect>,
+    /// Factory-declared response capability, retained beside the prepared processor so an
+    /// unsupported hook is a required-owner refusal rather than a silent exclusion.
+    pub response_snapshot_declared: bool,
+    /// Static descriptor identity of the prepared native effect.
+    pub native_id: &'static str,
 }
 
 /// One prepared effect's live-console control channel, carried **beside** the prepared effects
@@ -650,6 +688,10 @@ pub struct GraphPreparedEffectBank {
     /// `true` today; the field exists so a padded group can be bound without a second bank shape.
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
+    /// Factory-declared response capability shared by this homogeneous bank.
+    pub response_snapshot_declared: bool,
+    /// Static descriptor identity shared by this homogeneous bank.
+    pub native_id: &'static str,
     pub scratch: AoSoaScratch,
     /// The cohort chain this bank is one slot of (issue #181).
     ///
@@ -800,6 +842,23 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// Copy one bank member's retained response words without advancing render state.
+    fn copy_response_snapshot_lane(
+        &self,
+        _lane: usize,
+        _sample_rate_hz: u32,
+        _request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+    /// Whether this prepared builtin declares a response provider for its owner.
+    fn response_snapshot_declared(&self) -> bool {
+        false
+    }
+    /// The static native identity of this builtin response provider, when declared.
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        None
+    }
     /// Cumulative `[process_calls, frames_processed]` after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
@@ -1675,6 +1734,24 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// may read the block it is given.
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
 
+    /// Copy this scalar owner's retained response words without advancing render state.
+    fn copy_response_snapshot(
+        &self,
+        _sample_rate_hz: u32,
+        _request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+
+    /// Whether this prepared scalar owner declares a response provider.
+    fn response_snapshot_declared(&self) -> bool {
+        false
+    }
+    /// The static native identity of this scalar response provider, when declared.
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        None
+    }
+
     /// This bound processor's channel-symmetry witness for the track it renders.
     ///
     /// The scalar-tail sibling of `GraphPreparedBuiltinBankProcessor::lane_symmetry`, defaulted to
@@ -1771,6 +1848,7 @@ pub struct PreparedTrackDelay {
 struct GraphExecutor {
     runtime: runtime::Runtime,
     output: u32,
+    sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
     source_input_buffers: Box<[(usize, u32)]>,
@@ -1783,6 +1861,7 @@ struct GraphExecutor {
 struct GraphExecutorWithoutSplitPairTable {
     runtime: runtime::RuntimeWithoutSplitPairTable,
     output: u32,
+    sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
 }
@@ -1808,6 +1887,7 @@ impl GraphExecutor {
         planning: runtime::SequentialPlan,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
+        let sample_rate_hz = plan.envelope.sample_rate.0;
         let source_inputs: BTreeSet<_> = source_set
             .as_ref()
             .map(|set| {
@@ -1854,6 +1934,7 @@ impl GraphExecutor {
         Self {
             runtime,
             output,
+            sample_rate_hz,
             source_set,
             source_input_buffers,
         }
@@ -1874,6 +1955,16 @@ impl PreparedPlanExecutor for GraphExecutor {
         })
     }
 
+    fn copy_response_snapshot(
+        &self,
+        track_id: &str,
+        _captured_sample: u64,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<u32, ResponseSnapshotError> {
+        self.runtime
+            .copy_response_snapshot(track_id, self.sample_rate_hz, sink)
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
@@ -1885,6 +1976,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         let Self {
             runtime,
             output: output_buffer,
+            sample_rate_hz: _,
             source_set,
             source_input_buffers,
         } = self;
@@ -3970,6 +4062,8 @@ mod tests {
                         processor: Box::new(OptionalSidechainSum {
                             metadata: effect_metadata,
                         }),
+                        response_snapshot_declared: false,
+                        native_id: "miso.test.optional-sidechain-sum",
                     });
                 }
             }
@@ -5009,6 +5103,8 @@ mod tests {
                 id: effect_id.clone(),
                 metadata,
                 processor: Box::new(LiveGain::new(metadata)),
+                response_snapshot_declared: false,
+                native_id: "miso.test.live-gain",
             }],
             effect_controls: match control {
                 None => Vec::new(),
@@ -5419,6 +5515,8 @@ mod tests {
                 id: effect_id,
                 metadata,
                 processor: Box::new(SidechainSum { metadata }),
+                response_snapshot_declared: false,
+                native_id: "miso.test.sidechain-sum",
             }],
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
@@ -5693,6 +5791,8 @@ mod tests {
                 id: effect_id,
                 metadata,
                 processor,
+                response_snapshot_declared: false,
+                native_id: "miso.test.sidechain-sum",
             }],
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
