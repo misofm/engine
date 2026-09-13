@@ -39,6 +39,8 @@ pub enum ResponseSnapshotAvailability {
 pub struct ResponseSnapshotOwnerInfo<'a> {
     /// The selected track's stable graph identity.
     pub track_id: &'a str,
+    /// The authoritative native provider identity, independent of the session node identity.
+    pub native_id: &'a str,
     /// The owner's stable slot/effect identity.
     pub stable_id: &'a str,
     /// Native rack/stage identity, with zero reserved for the input filter owner.

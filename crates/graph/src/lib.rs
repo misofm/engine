@@ -648,6 +648,11 @@ pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
     pub processor: Box<dyn PreparedNativeEffect>,
+    /// Factory-declared response capability, retained beside the prepared processor so an
+    /// unsupported hook is a required-owner refusal rather than a silent exclusion.
+    pub response_snapshot_declared: bool,
+    /// Static descriptor identity of the prepared native effect.
+    pub native_id: &'static str,
 }
 
 /// One prepared effect's live-console control channel, carried **beside** the prepared effects
@@ -683,6 +688,10 @@ pub struct GraphPreparedEffectBank {
     /// `true` today; the field exists so a padded group can be bound without a second bank shape.
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
+    /// Factory-declared response capability shared by this homogeneous bank.
+    pub response_snapshot_declared: bool,
+    /// Static descriptor identity shared by this homogeneous bank.
+    pub native_id: &'static str,
     pub scratch: AoSoaScratch,
     /// The cohort chain this bank is one slot of (issue #181).
     ///
@@ -841,6 +850,14 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         _request: ResponseSnapshotRequest<'_>,
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
         Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+    /// Whether this prepared builtin declares a response provider for its owner.
+    fn response_snapshot_declared(&self) -> bool {
+        false
+    }
+    /// The static native identity of this builtin response provider, when declared.
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        None
     }
     /// Cumulative `[process_calls, frames_processed]` after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
@@ -1724,6 +1741,15 @@ pub trait GraphRuntimeProcessor: Send + Any {
         _request: ResponseSnapshotRequest<'_>,
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
         Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+
+    /// Whether this prepared scalar owner declares a response provider.
+    fn response_snapshot_declared(&self) -> bool {
+        false
+    }
+    /// The static native identity of this scalar response provider, when declared.
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        None
     }
 
     /// This bound processor's channel-symmetry witness for the track it renders.
@@ -4036,6 +4062,8 @@ mod tests {
                         processor: Box::new(OptionalSidechainSum {
                             metadata: effect_metadata,
                         }),
+                        response_snapshot_declared: false,
+                        native_id: "miso.test.optional-sidechain-sum",
                     });
                 }
             }
@@ -5075,6 +5103,8 @@ mod tests {
                 id: effect_id.clone(),
                 metadata,
                 processor: Box::new(LiveGain::new(metadata)),
+                response_snapshot_declared: false,
+                native_id: "miso.test.live-gain",
             }],
             effect_controls: match control {
                 None => Vec::new(),
@@ -5485,6 +5515,8 @@ mod tests {
                 id: effect_id,
                 metadata,
                 processor: Box::new(SidechainSum { metadata }),
+                response_snapshot_declared: false,
+                native_id: "miso.test.sidechain-sum",
             }],
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
@@ -5759,6 +5791,8 @@ mod tests {
                 id: effect_id,
                 metadata,
                 processor,
+                response_snapshot_declared: false,
+                native_id: "miso.test.sidechain-sum",
             }],
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),

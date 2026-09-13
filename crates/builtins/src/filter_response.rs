@@ -449,6 +449,9 @@ pub fn query_input_filter_snapshot_magnitudes_into(
             if words.iter().any(|word| !word.is_finite()) {
                 return Err(InputFilterResponseError::Numerical);
             }
+            if section.enabled && words.iter().all(|word| *word == 0.0) {
+                return Err(InputFilterResponseError::Numerical);
+            }
             decoded[index] = if section.enabled {
                 SvfSection {
                     c1: words[0],
@@ -468,6 +471,12 @@ pub fn query_input_filter_snapshot_magnitudes_into(
     };
     let left_sections = decode(left)?;
     let right_sections = decode(right)?;
+    // Validate every requested point and both lanes before publishing any caller output.  This
+    // keeps a late numerical refusal atomic with respect to the caller's buffers.
+    for &frequency_hz in frequencies_hz {
+        snapshot_point_magnitude(left_sections, frequency_hz, sample_rate_hz, bypassed)?;
+        snapshot_point_magnitude(right_sections, frequency_hz, sample_rate_hz, bypassed)?;
+    }
     for (index, &frequency_hz) in frequencies_hz.iter().enumerate() {
         output_left[index] =
             snapshot_point_magnitude(left_sections, frequency_hz, sample_rate_hz, bypassed)?;

@@ -406,6 +406,12 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
+    fn response_snapshot_declared(&self) -> bool {
+        true
+    }
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        Some("miso.builtin.input-filters")
+    }
     /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -3748,6 +3754,12 @@ impl GraphRuntimeProcessor for InputProcessor {
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
         self.0.copy_response_snapshot(sample_rate_hz, request)
     }
+    fn response_snapshot_declared(&self) -> bool {
+        true
+    }
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        Some("miso.builtin.input-filters")
+    }
 }
 struct FaderProcessor(FaderMuteBuiltins);
 impl GraphRuntimeProcessor for FaderProcessor {
@@ -3833,6 +3845,12 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
         request: ResponseSnapshotRequest<'_>,
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
         self.input.copy_response_snapshot(sample_rate_hz, request)
+    }
+    fn response_snapshot_declared(&self) -> bool {
+        true
+    }
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        Some("miso.builtin.input-filters")
     }
 }
 
@@ -5866,6 +5884,8 @@ mod tests {
                     id: sidechain_effect_id,
                     metadata,
                     processor: Box::new(SidechainSum(metadata)),
+                    response_snapshot_declared: false,
+                    native_id: "miso.test.sidechain-sum",
                 }]
             } else {
                 Vec::new()

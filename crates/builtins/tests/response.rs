@@ -932,3 +932,40 @@ fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
         }
     }
 }
+
+#[test]
+fn snapshot_magnitude_query_validates_both_lanes_before_publishing() {
+    let identity = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: false,
+        word_count: 7,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let singular = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: true,
+        word_count: 7,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let left_sections = [identity; 2];
+    let right_sections = [singular; 2];
+    let mut left = [41.0_f64];
+    let mut right = [43.0_f64];
+    assert_eq!(
+        query_input_filter_snapshot_magnitudes_into(
+            48_000,
+            false,
+            &left_sections,
+            &right_sections,
+            &[0.0],
+            1,
+            &mut left,
+            &mut right,
+        ),
+        Err(InputFilterResponseError::Numerical)
+    );
+    assert_eq!(left, [41.0]);
+    assert_eq!(right, [43.0]);
+}

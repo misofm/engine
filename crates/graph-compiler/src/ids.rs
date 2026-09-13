@@ -315,6 +315,8 @@ pub(crate) fn into_effects(
             id: node,
             metadata: entry.metadata,
             processor: entry.processor,
+            response_snapshot_declared: entry.factory.response_analysis().is_some(),
+            native_id: entry.factory.descriptor().id.as_str(),
         });
     }
     (effects, controls, observations)

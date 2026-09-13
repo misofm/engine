@@ -189,6 +189,8 @@ pub enum ResponsePreviewError {
 pub struct ResponseSnapshotOwner {
     /// Stable track identity repeated for convenient worker-side validation.
     pub track_id: Box<str>,
+    /// Authoritative native provider identity, separate from the session stable identity.
+    pub native_id: Box<str>,
     /// Stable native owner identity in declared signal order.
     pub stable_id: Box<str>,
     /// Native rack/stage identity.
@@ -233,6 +235,7 @@ const COLLECTOR_SECTION_CAPACITY: usize = 4;
 
 struct CollectorOwner {
     track_id: String,
+    native_id: String,
     stable_id: String,
     rack: u8,
     slot: u32,
@@ -264,6 +267,7 @@ impl ResponseSnapshotCollector {
         let owners = (0..maximum_owners)
             .map(|_| CollectorOwner {
                 track_id: String::with_capacity(maximum_identity_bytes),
+                native_id: String::with_capacity(maximum_identity_bytes),
                 stable_id: String::with_capacity(maximum_identity_bytes),
                 rack: 0,
                 slot: 0,
@@ -294,6 +298,7 @@ impl ResponseSnapshotCollector {
             .take(owner_count)
             .map(|owner| ResponseSnapshotOwner {
                 track_id: owner.track_id.into_boxed_str(),
+                native_id: owner.native_id.into_boxed_str(),
                 stable_id: owner.stable_id.into_boxed_str(),
                 rack: owner.rack,
                 slot: owner.slot,
@@ -326,6 +331,7 @@ impl ResponseSnapshotSink for ResponseSnapshotCollector {
             || left.len() > COLLECTOR_SECTION_CAPACITY
             || right.len() > COLLECTOR_SECTION_CAPACITY
             || owner.track_id.len() > self.owners[self.next_owner].track_id.capacity()
+            || owner.native_id.len() > self.owners[self.next_owner].native_id.capacity()
             || owner.stable_id.len() > self.owners[self.next_owner].stable_id.capacity()
         {
             return Err(ResponseSnapshotError::Capacity);
@@ -333,6 +339,8 @@ impl ResponseSnapshotSink for ResponseSnapshotCollector {
         let destination = &mut self.owners[self.next_owner];
         destination.track_id.clear();
         destination.track_id.push_str(owner.track_id);
+        destination.native_id.clear();
+        destination.native_id.push_str(owner.native_id);
         destination.stable_id.clear();
         destination.stable_id.push_str(owner.stable_id);
         destination.rack = owner.rack;
@@ -1055,6 +1063,18 @@ mod tests {
                 .map(|owner| owner.stable_id.as_ref())
                 .collect::<Vec<_>>(),
             vec!["input-filters", "eq", "comp"]
+        );
+        assert_eq!(
+            snapshot
+                .owners
+                .iter()
+                .map(|owner| owner.native_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec![
+                "miso.builtin.input-filters",
+                "miso.parametric-eq",
+                "miso.compressor",
+            ]
         );
         assert_eq!(
             snapshot.owners[2].availability,

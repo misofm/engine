@@ -17,7 +17,7 @@ use effect_contract::{
 use parametric_eq::{
     EQ_SECTION_COUNT, EqBandKind, EqResponseConfiguration, EqResponseError, EqResponseMode,
     EqResponseOutput, EqResponseRequest, EqSvfWords, ParametricEqFactory, design_svf,
-    query_response_into,
+    query_response_into, query_snapshot_magnitudes_into,
 };
 use support::{
     FROZEN_FREQUENCIES, GridRow, LAUNCH_RATES, frozen_grid, request_at_rate, set_initial,
@@ -1636,4 +1636,41 @@ fn prepared_owner_snapshot_rejects_wrong_shape_without_writing() {
     assert_eq!(error, ResponseAnalysisError::OutputShape);
     assert!(left.iter().all(|section| *section == sentinel));
     assert!(right.iter().all(|section| *section == sentinel));
+}
+
+#[test]
+fn snapshot_magnitude_query_validates_both_lanes_before_publishing() {
+    let identity = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: false,
+        word_count: 6,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let singular = ResponseSnapshotSection {
+        id: 1,
+        kind: 1,
+        enabled: true,
+        word_count: 6,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    };
+    let left_sections = [identity; EQ_SECTION_COUNT];
+    let right_sections = [singular; EQ_SECTION_COUNT];
+    let mut left = [31.0_f64];
+    let mut right = [37.0_f64];
+    assert_eq!(
+        query_snapshot_magnitudes_into(
+            48_000,
+            false,
+            &left_sections,
+            &right_sections,
+            &[0.0],
+            1,
+            &mut left,
+            &mut right,
+        ),
+        Err(EqResponseError::Numerical)
+    );
+    assert_eq!(left, [31.0]);
+    assert_eq!(right, [37.0]);
 }

@@ -66,6 +66,7 @@ mod tests {
             sink.copy_owner(
                 ResponseSnapshotOwnerInfo {
                     track_id: "track",
+                    native_id: "miso.test",
                     stable_id: "owner",
                     rack: 2,
                     slot: 0,

@@ -520,6 +520,9 @@ pub fn query_snapshot_magnitudes_into(
             if decoded.iter().any(|word| !word.is_finite()) {
                 return Err(EqResponseError::Numerical);
             }
+            if section.enabled && decoded.iter().all(|word| *word == 0.0) {
+                return Err(EqResponseError::Numerical);
+            }
             words[index] = if section.enabled {
                 EqSvfWords::from_array(decoded)
             } else {
@@ -531,6 +534,12 @@ pub fn query_snapshot_magnitudes_into(
     let left_words = decode(left)?;
     let right_words = decode(right)?;
 
+    // Complete both lanes before publishing anything.  A later numerical refusal must not leave
+    // a caller with a mixture of old sentinels and newly written points.
+    for &frequency_hz in frequencies_hz {
+        snapshot_point_magnitude(&left_words, frequency_hz, sample_rate_hz, bypassed)?;
+        snapshot_point_magnitude(&right_words, frequency_hz, sample_rate_hz, bypassed)?;
+    }
     for (index, &frequency_hz) in frequencies_hz.iter().enumerate() {
         output_left[index] =
             snapshot_point_magnitude(&left_words, frequency_hz, sample_rate_hz, bypassed)?;

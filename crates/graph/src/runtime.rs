@@ -714,6 +714,7 @@ fn emit_response_snapshot_owner(
     sink.copy_owner(
         ResponseSnapshotOwnerInfo {
             track_id: &binding.track_id,
+            native_id: &binding.native_id,
             stable_id: &binding.stable_id,
             rack: binding.rack,
             slot: binding.slot,
@@ -734,6 +735,7 @@ fn emit_unavailable_response_snapshot_owner(
     sink.copy_owner(
         ResponseSnapshotOwnerInfo {
             track_id: &binding.track_id,
+            native_id: &binding.native_id,
             stable_id: &binding.stable_id,
             rack: binding.rack,
             slot: binding.slot,
@@ -773,6 +775,9 @@ fn copy_scalar_response_snapshot(
             Ok(summary) => (summary, false),
             Err(ResponseAnalysisError::UnsupportedMode)
             | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                if binding.response_snapshot_declared {
+                    return Err(ResponseSnapshotError::Unsupported);
+                }
                 return emit_unavailable_response_snapshot_owner(binding, false, sink);
             }
             Err(error) => return Err(response_snapshot_error(error)),
@@ -789,6 +794,9 @@ fn copy_scalar_response_snapshot(
                 Ok(summary) => (summary, bypassed),
                 Err(ResponseAnalysisError::UnsupportedMode)
                 | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                    if binding.response_snapshot_declared {
+                        return Err(ResponseSnapshotError::Unsupported);
+                    }
                     return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
                 }
                 Err(error) => return Err(response_snapshot_error(error)),
@@ -807,6 +815,9 @@ fn copy_scalar_response_snapshot(
                 Ok(summary) => (summary, bypassed),
                 Err(ResponseAnalysisError::UnsupportedMode)
                 | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                    if binding.response_snapshot_declared {
+                        return Err(ResponseSnapshotError::Unsupported);
+                    }
                     return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
                 }
                 Err(error) => return Err(response_snapshot_error(error)),
@@ -863,6 +874,9 @@ impl RuntimeUnit {
                     Ok(summary) => summary,
                     Err(ResponseAnalysisError::UnsupportedMode)
                     | Err(ResponseAnalysisError::UnsupportedCapability) => {
+                        if binding.response_snapshot_declared {
+                            return Err(ResponseSnapshotError::Unsupported);
+                        }
                         return emit_unavailable_response_snapshot_owner(binding, bypassed, sink);
                     }
                     Err(error) => return Err(response_snapshot_error(error)),
@@ -1263,7 +1277,9 @@ pub(crate) struct UnitIdentity {
 /// stores the indices needed to reach the already-owned processor.
 pub(crate) struct ResponseOwnerBinding {
     track_id: Box<str>,
+    native_id: Box<str>,
     stable_id: Box<str>,
+    response_snapshot_declared: bool,
     rack: u8,
     slot: u32,
     unit: usize,
@@ -2383,6 +2399,10 @@ pub(crate) struct RuntimeParts {
     banks: Vec<Option<GraphPreparedEffectBank>>,
     builtin_banks: Vec<Option<GraphPreparedBuiltinBank>>,
     membership: BankMembership,
+    /// Prepared owner metadata captured before processors and banks are moved into runtime units.
+    /// The runtime retains only this compact lowering map; response capture reads the same binding
+    /// rows as execution and never asks a DSP stage for identity metadata.
+    response_metadata: BTreeMap<GraphNodeId, (bool, &'static str)>,
     /// Render quantum, so a console-driven effect's staging and shunt are sized once, at bind.
     frames: usize,
 }
@@ -2410,6 +2430,39 @@ impl RuntimeParts {
             facts.set(observed);
         });
         let membership = bank_membership(spec, &banks, &builtin_banks);
+        let mut response_metadata = BTreeMap::new();
+        for effect in &effects {
+            response_metadata.insert(
+                GraphNodeId::Effect(effect.id.clone()),
+                (effect.response_snapshot_declared, effect.native_id),
+            );
+        }
+        for bank in &banks {
+            for member in &bank.members {
+                response_metadata.insert(
+                    GraphNodeId::Effect(member.clone()),
+                    (bank.response_snapshot_declared, bank.native_id),
+                );
+            }
+        }
+        for bank in &builtin_banks {
+            let declared = bank.processor.response_snapshot_declared();
+            let native_id = bank.processor.response_snapshot_native_id().unwrap_or("");
+            for member in &bank.members {
+                response_metadata.insert(member.clone(), (declared, native_id));
+            }
+        }
+        for binding in &bindings {
+            if let Some(processor) = binding.processor.as_ref() {
+                response_metadata.insert(
+                    binding.node.clone(),
+                    (
+                        processor.response_snapshot_declared(),
+                        processor.response_snapshot_native_id().unwrap_or(""),
+                    ),
+                );
+            }
+        }
         let mut by_node: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>> = BTreeMap::new();
         for observer in observers {
             by_node
@@ -2449,6 +2502,7 @@ impl RuntimeParts {
             banks: banks.into_iter().map(Some).collect(),
             builtin_banks: builtin_banks.into_iter().map(Some).collect(),
             membership,
+            response_metadata,
             frames,
         }
     }
@@ -3392,7 +3446,14 @@ pub(crate) fn build_sequential(
         &units,
         &mut identity,
     );
-    let response_bindings = response_owner_bindings(program, spec, &op_slot, &units, &retired);
+    let response_bindings = response_owner_bindings(
+        program,
+        spec,
+        &op_slot,
+        &units,
+        &parts.response_metadata,
+        &retired,
+    );
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -3422,6 +3483,7 @@ fn response_owner_bindings(
     spec: &GraphSpec,
     op_slot: &[Option<(usize, usize)>],
     units: &[RuntimeUnit],
+    response_metadata: &BTreeMap<GraphNodeId, (bool, &'static str)>,
     retired: &std::collections::BTreeSet<usize>,
 ) -> Vec<ResponseOwnerBinding> {
     let mut next_slot = BTreeMap::<String, u32>::new();
@@ -3456,12 +3518,16 @@ fn response_owner_bindings(
                     member
                 }
             };
+            let (response_snapshot_declared, native_id) =
+                response_metadata.get(node).copied().unwrap_or((false, ""));
             let slot = next_slot.entry(track_id.to_owned()).or_default();
             let signal_slot = *slot;
             *slot = slot.saturating_add(1);
             Some(ResponseOwnerBinding {
                 track_id: Box::from(track_id),
+                native_id: Box::from(native_id),
                 stable_id: Box::from(stable_id),
+                response_snapshot_declared,
                 rack,
                 slot: signal_slot,
                 unit,
@@ -4725,7 +4791,7 @@ mod tests {
 
         struct Sink {
             calls: usize,
-            owner: Option<(String, String, u8, u32, u32)>,
+            owner: Option<(String, String, String, u8, u32, u32)>,
             word: u32,
         }
         impl ResponseSnapshotSink for Sink {
@@ -4740,6 +4806,7 @@ mod tests {
                 self.calls += 1;
                 self.owner = Some((
                     owner.track_id.to_owned(),
+                    owner.native_id.to_owned(),
                     owner.stable_id.to_owned(),
                     owner.rack,
                     owner.slot,
@@ -4773,7 +4840,9 @@ mod tests {
             }],
             vec![ResponseOwnerBinding {
                 track_id: Box::from("track"),
+                native_id: Box::from("miso.test.owner"),
                 stable_id: Box::from("eq"),
+                response_snapshot_declared: true,
                 rack: 2,
                 slot: 4,
                 unit: 0,
@@ -4795,11 +4864,85 @@ mod tests {
         assert_eq!(sink.word, 0x1234_5678);
         assert_eq!(
             sink.owner,
-            Some(("track".to_owned(), "eq".to_owned(), 2, 4, 1))
+            Some((
+                "track".to_owned(),
+                "miso.test.owner".to_owned(),
+                "eq".to_owned(),
+                2,
+                4,
+                1,
+            ))
         );
         assert_eq!(
             runtime.copy_response_snapshot("missing", 48_000, &mut sink),
             Err(ResponseSnapshotError::MissingTrack)
+        );
+    }
+
+    #[test]
+    fn declared_response_provider_refuses_unsupported_hook() {
+        struct DecliningOwner;
+        impl GraphRuntimeProcessor for DecliningOwner {
+            fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn response_snapshot_declared(&self) -> bool {
+                true
+            }
+            fn response_snapshot_native_id(&self) -> Option<&'static str> {
+                Some("miso.test.declared")
+            }
+        }
+
+        struct Sink;
+        impl ResponseSnapshotSink for Sink {
+            fn copy_owner(
+                &mut self,
+                _owner: ResponseSnapshotOwnerInfo<'_>,
+                _left: &[ResponseSnapshotSection],
+                _right: &[ResponseSnapshotSection],
+            ) -> Result<(), ResponseSnapshotError> {
+                panic!("unsupported provider must not publish an exclusion")
+            }
+        }
+
+        let runtime = Runtime::new(
+            stereo_lease(1, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![RuntimeUnit::Op(RuntimeOp {
+                inputs: Box::new([]),
+                staged: Box::new([]),
+                sidechain: None,
+                output: ARENA_BASE,
+                kind: NodeKind::Bound(Box::new(DecliningOwner)),
+                split_pair: None,
+                observers: Box::new([]),
+            })],
+            Vec::new(),
+            vec![UnitIdentity {
+                banked: false,
+                resident_input: false,
+                stages: 1,
+                upstream_of_seam_stages: 1,
+                lane_tracks: Box::new([Box::from("track")]),
+            }],
+            vec![ResponseOwnerBinding {
+                track_id: Box::from("track"),
+                native_id: Box::from("miso.test.declared"),
+                stable_id: Box::from("declared"),
+                response_snapshot_declared: true,
+                rack: 2,
+                slot: 0,
+                unit: 0,
+                member: 0,
+            }],
+            0,
+            0,
+        );
+        assert_eq!(
+            runtime.copy_response_snapshot("track", 48_000, &mut Sink),
+            Err(ResponseSnapshotError::Unsupported)
         );
     }
 

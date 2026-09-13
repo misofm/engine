@@ -546,8 +546,15 @@ impl GraphCompiler {
             .try_fold((0_u64, 0_u64), |(total, largest), track| {
                 let track_bytes = u64::try_from(track.id.as_str().len()).ok()?;
                 let stable_bytes = u64::try_from("input-filters".len()).ok()?;
-                let total = total.checked_add(track_bytes)?.checked_add(stable_bytes)?;
-                Some((total, largest.max(track_bytes).max(stable_bytes)))
+                let native_bytes = u64::try_from("miso.builtin.input-filters".len()).ok()?;
+                let total = total
+                    .checked_add(track_bytes)?
+                    .checked_add(stable_bytes)?
+                    .checked_add(native_bytes)?;
+                Some((
+                    total,
+                    largest.max(track_bytes).max(stable_bytes).max(native_bytes),
+                ))
             })
             .and_then(|(total, largest)| {
                 effects
@@ -556,8 +563,16 @@ impl GraphCompiler {
                     .try_fold((total, largest), |(total, largest), entry| {
                         let track_bytes = u64::try_from(entry.track_id.len()).ok()?;
                         let stable_bytes = u64::try_from(entry.effect_id.len()).ok()?;
-                        let total = total.checked_add(track_bytes)?.checked_add(stable_bytes)?;
-                        Some((total, largest.max(track_bytes).max(stable_bytes)))
+                        let native_bytes =
+                            u64::try_from(entry.factory.descriptor().id.as_str().len()).ok()?;
+                        let total = total
+                            .checked_add(track_bytes)?
+                            .checked_add(stable_bytes)?
+                            .checked_add(native_bytes)?;
+                        Some((
+                            total,
+                            largest.max(track_bytes).max(stable_bytes).max(native_bytes),
+                        ))
                     })
             })
         else {

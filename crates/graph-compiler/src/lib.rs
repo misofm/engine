@@ -2557,17 +2557,24 @@ mod tests {
                         let track_bytes = track_id.as_str().len() as u64;
                         (
                             count + 1,
-                            bytes + track_bytes + "input-filters".len() as u64,
-                            largest.max(track_bytes).max("input-filters".len() as u64),
+                            bytes
+                                + track_bytes
+                                + "input-filters".len() as u64
+                                + "miso.builtin.input-filters".len() as u64,
+                            largest
+                                .max(track_bytes)
+                                .max("input-filters".len() as u64)
+                                .max("miso.builtin.input-filters".len() as u64),
                         )
                     }
                     GraphNodeId::Effect(effect) => {
                         let track_bytes = effect.track_id.as_str().len() as u64;
                         let stable_bytes = effect.effect_id.as_str().len() as u64;
+                        let native_bytes = "miso.parametric-eq".len() as u64;
                         (
                             count + 1,
-                            bytes + track_bytes + stable_bytes,
-                            largest.max(track_bytes).max(stable_bytes),
+                            bytes + track_bytes + stable_bytes + native_bytes,
+                            largest.max(track_bytes).max(stable_bytes).max(native_bytes),
                         )
                     }
                     _ => (count, bytes, largest),
