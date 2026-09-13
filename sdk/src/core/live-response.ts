@@ -215,9 +215,9 @@ function gridValue(grid: TrackResponseGrid, maximumPoints: number): { readonly k
   return { kind: grid.kind === "linear" ? 1 : 2, points };
 }
 
-function maximumResultBytes(limits: TrackResponseLimits | undefined, maximumCaptureBytes: number): number {
+function maximumResultBytes(responseLimits: TrackResponseLimits | undefined, maximumCaptureBytes: number): number {
   return finiteInteger(
-    limits?.maximumResultBytes ?? maximumCaptureBytes,
+    responseLimits?.maximumResultBytes ?? maximumCaptureBytes,
     "maximumResultBytes",
     1,
     maximumCaptureBytes,
