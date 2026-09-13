@@ -32,7 +32,7 @@ def usable_text: type == "string" and length > 0 and . != "unknown" and . != "de
 def render_workload:
   . == "full_chain_filters" or . == "identity_chain" or . == "matrix_ramp" or . == "meter_success_full";
 def frozen_manifest_sha256:
-  "31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796";
+  "436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0";
 def frozen_input_sha256:
   if .workload_kind == "full_chain_filters" and .sample_rate_hz == 48000 then
     "6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0"
@@ -51,9 +51,9 @@ def frozen_input_sha256:
   elif .workload_kind == "meter_success_full" and .sample_rate_hz == 96000 then
     "aa1c4d8835753ce290d7abcf1cbf3ffdb98b79a58f0ec6cd0cce6614f5befef9"
   elif .workload_kind == "prepare_256_tracks" and .sample_rate_hz == 48000 then
-    "a1dec8525c20505a9b440e6cf93fa6ffa1144896c889fa3abd94f76224f3e210"
+    "905cbda3fc751fa3070a78e833661fc3f38ec0057bdd957f392426a9982b4fda"
   elif .workload_kind == "prepare_256_tracks" and .sample_rate_hz == 96000 then
-    "880faace46cfa2e9f454d625e54206aa752a9947292057a6b58f64224ea13f30"
+    "c0e4cd28796212b3c85b9b0f90d08f2aef0fe1e834391922cd54005506aaa434"
   else null
   end;
 def input_id:

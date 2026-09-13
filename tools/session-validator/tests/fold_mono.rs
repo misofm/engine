@@ -6,8 +6,8 @@ use session_validator::{
     FOLD_MONO_MAX_ENTRIES, FOLD_MONO_MAX_SESSION_BYTES, fold_mono_session_document,
 };
 
-const OLD: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const NEW: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const OLD: &str = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const NEW: &str = "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn identity_session() -> session::SessionModel {
     let mut model = parse_session_json(include_str!(
@@ -191,7 +191,7 @@ fn mappings_are_simultaneous_and_resulting_shapes_must_converge() {
             (OLD.to_owned(), NEW.to_owned()),
             (
                 NEW.to_owned(),
-                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                     .to_owned(),
             ),
         ],
@@ -212,12 +212,12 @@ fn mapped_source_shape_and_map_errors_are_transactional() {
     let input = canonical_model(&model);
     for replacement in [
         (
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             NEW,
         ),
         (OLD, OLD),
         (
-            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             NEW,
         ),
     ] {
@@ -359,7 +359,7 @@ fn cli_enforces_bounded_map_entries_and_session_input() {
     ));
     let mut oversized_map = String::new();
     for index in 0..=FOLD_MONO_MAX_ENTRIES {
-        oversized_map.push_str(&format!("sha256:{index:064x}\tsha256:{:064x}\n", index + 1));
+        oversized_map.push_str(&format!("blake3:{index:064x}\tblake3:{:064x}\n", index + 1));
     }
     std::fs::write(&map_path, oversized_map).unwrap();
     std::fs::write(&input_path, canonical_model(&identity_session())).unwrap();

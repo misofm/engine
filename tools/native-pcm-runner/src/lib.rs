@@ -24,6 +24,7 @@ use std::{
     ptr,
 };
 
+use blake3::Hasher as Blake3Hasher;
 use session::{SessionModel, Source, SourceBitDepth, parse_session_json};
 use sha2::{Digest, Sha256};
 use source::{
@@ -366,7 +367,7 @@ fn preflight_output(output: &Path) -> Result<(), RunnerError> {
 
 fn identity_digest(identity: &str) -> Result<[u8; 32], RunnerError> {
     let value = identity
-        .strip_prefix("sha256:")
+        .strip_prefix("blake3:")
         .ok_or_else(|| RunnerError::new(FailurePhase::Resolve, "identity.scheme"))?;
     if value.len() != 64
         || value
@@ -397,7 +398,7 @@ fn hash_canonical_wave(
     reader
         .seek(SeekFrom::Start(metadata.data_offset_bytes))
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.seek"))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Blake3Hasher::new();
     let mut buffer = [0_u8; 16 * 1024];
     let mut remaining = metadata.data_length_bytes;
     while remaining != 0 {
@@ -415,7 +416,7 @@ fn hash_canonical_wave(
     reader
         .rewind()
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.seek"))?;
-    Ok(hasher.finalize().into())
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn wave_bit_depth(encoding: NativeWaveEncoding) -> Option<SourceBitDepth> {
@@ -1482,15 +1483,15 @@ mod tests {
 
     #[test]
     fn identity_grammar_is_closed() {
-        assert!(identity_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
+        assert!(identity_digest(&format!("blake3:{}", "a".repeat(64))).is_ok());
         for value in [
-            format!("sha256:{}", "A".repeat(64)),
-            format!("sha256:{}", "a".repeat(63)),
+            format!("blake3:{}", "A".repeat(64)),
+            format!("blake3:{}", "a".repeat(63)),
             format!("sha512:{}", "a".repeat(64)),
         ] {
             assert_eq!(
                 identity_digest(&value).expect_err(&value).code,
-                if value.starts_with("sha256:") {
+                if value.starts_with("blake3:") {
                     "identity.syntax"
                 } else {
                     "identity.scheme"
@@ -1839,7 +1840,7 @@ mod tests {
     #[test]
     fn resolver_rejects_identity_shape_file_shape_and_declaration_mismatches_precompile() {
         for (label, replace_from, replace_to, expected) in [
-            ("uppercase", "sha256:", "sha256:A", "session.invalid"),
+            ("uppercase", "blake3:", "blake3:A", "session.invalid"),
             (
                 "wrong-rate",
                 "\"sample_rate_hz\": 48000",
@@ -1898,8 +1899,8 @@ mod tests {
         fs::write(temp.join("rf64-48000.wav"), b"RF64").expect("truncated");
         let session =
             fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json")).expect("session");
-        let actual = hex_digest(Sha256::digest(b"RF64").into());
-        let start = session.find("sha256:").expect("identity") + 7;
+        let actual = blake3::hash(b"RF64").to_hex().to_string();
+        let start = session.find("blake3:").expect("identity") + 7;
         let mut changed = session;
         changed.replace_range(start..start + 64, &actual);
         fs::write(temp.join("session.json"), changed).expect("session");
@@ -1926,7 +1927,7 @@ mod tests {
         let base =
             fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json")).expect("f32 session");
         let pcm16_identity =
-            "sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2";
+            "blake3:41b5fff5e18a17133898edad06d13da6504aea16e283378ee6c13f6a3faed9fe";
         for (label, source, session, expected_declared_depth) in [
             (
                 "f32-declared-integer",
@@ -1939,7 +1940,7 @@ mod tests {
                 Path::new(STEM_IDENTITY_FIXTURES).join("pcm16-stereo-boundaries.wav"),
                 base.replacen(
                     base.lines()
-                        .find(|line| line.contains("\"content\": \"sha256:"))
+                        .find(|line| line.contains("\"content\": \"blake3:"))
                         .and_then(|line| line.split("\"content\": \"").nth(1))
                         .and_then(|tail| tail.split('"').next())
                         .expect("base content identity"),
@@ -2100,7 +2101,7 @@ mod tests {
         let base =
             fs::read_to_string(Path::new(FIXTURES).join("riff-48000.json")).expect("base session");
         let replace_identity = |session: &str, digest: &str| {
-            let start = session.find("sha256:").expect("identity") + 7;
+            let start = session.find("blake3:").expect("identity") + 7;
             let mut changed = session.to_owned();
             changed.replace_range(start..start + 64, digest);
             changed
@@ -2117,7 +2118,7 @@ mod tests {
                 "truncated-riff",
                 Some(b"RIFF".to_vec()),
                 {
-                    let digest = hex_digest(Sha256::digest(b"RIFF").into());
+                    let digest = blake3::hash(b"RIFF").to_hex().to_string();
                     replace_identity(&base, &digest)
                 },
                 "wave.container",

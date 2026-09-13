@@ -159,7 +159,7 @@ fn transaction_outer_header_uses_sizing_sink_repeated_count() {
 fn source() -> Source {
     Source {
         id: id("voice"),
-        content: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        content: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_owned(),
         channels: 2,
         bit_depth: SourceBitDepth::Float32,

@@ -9,7 +9,7 @@ command -v jq >/dev/null || { printf 'jq is required for benchmark validator tes
 hash64="6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0"
 binary64="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 output64="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-manifest64="31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796"
+manifest64="436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0"
 commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
@@ -113,7 +113,7 @@ preparation="$(jq '
   .total_operations=128 | .frames_per_operation=null |
   .tracks=256 | .meter_observers=56 | .meter_queue_capacity=4 |
   .input_fixture_id="fixtures/builtins/v1/benchmark/prepare_256_tracks-48000.toml" |
-  .input_fixture_sha256="a1dec8525c20505a9b440e6cf93fa6ffa1144896c889fa3abd94f76224f3e210" |
+  .input_fixture_sha256="905cbda3fc751fa3070a78e833661fc3f38ec0057bdd957f392426a9982b4fda" |
   .render_errors="not_applicable" | .render_allocations="not_applicable" |
   .render_deallocations="not_applicable" | .render_locks="not_applicable" |
   .render_logs="not_applicable" | .render_file_io="not_applicable" |
@@ -174,13 +174,13 @@ done
 delta_scratch=$(mktemp -d)
 trap 'rm -rf -- "$delta_scratch"' EXIT
 sed \
-  -e 's/ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b/31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796/' \
+  -e 's/ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b/436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0/' \
   -e 's/4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9/6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0/' \
   -e 's/cc4f23f6579cc255a1282797de2b78c93951f947c7b0ab72fa2ca713780f8a1e/ac9e825b5051a161ca731b04bd9b9b825bad6484c3a3f911551051e316224fa0/' \
   -e 's/65232ba5a59f54a22762a6ebc82620be6332f9d583c0e61fe4c5d82ede23e7ac/15dfc8b6d918d01a5d6e46417e37a10023d31a85391e8fb2371af0cdc055dd95/' \
   -e 's/9bc765fb84d94dd31f83137e2aa091fd09a28a8dab8fbe1d18a0b4a9a60c85a7/962bc24d4104cb5a30e3a5aa158a5ca1075cae01f08433d2c7cbe8c1271cd99a/' \
-  -e 's/0c2130e5f3563e011cc7251a4a42d27b2a84f5871a81facae49be0a5c1cf21ff/a1dec8525c20505a9b440e6cf93fa6ffa1144896c889fa3abd94f76224f3e210/' \
-  -e 's/5ca5e3b6e0080b66c53f0a12753e3681ea1caf6571ff3747e2303ac8cf0779a6/880faace46cfa2e9f454d625e54206aa752a9947292057a6b58f64224ea13f30/' \
+  -e 's/0c2130e5f3563e011cc7251a4a42d27b2a84f5871a81facae49be0a5c1cf21ff/905cbda3fc751fa3070a78e833661fc3f38ec0057bdd957f392426a9982b4fda/' \
+  -e 's/5ca5e3b6e0080b66c53f0a12753e3681ea1caf6571ff3747e2303ac8cf0779a6/c0e4cd28796212b3c85b9b0f90d08f2aef0fe1e834391922cd54005506aaa434/' \
   "$script_directory/builtins-benchmark-record-validator.jq" >"$delta_scratch/record.expected"
 cmp -s "$delta_scratch/record.expected" "$script_directory/builtins-current-benchmark-record-validator.jq" ||
   { printf 'current record validator exceeds seven allowed hash deltas\n' >&2; exit 1; }

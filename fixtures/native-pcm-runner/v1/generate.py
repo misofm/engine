@@ -81,7 +81,7 @@ def session(rate: int, digest: str, frames: int) -> bytes:
     template = (ROOT / "../../session/v1/parametric-eq-nine-track.json").resolve()
     document = json.loads(template.read_text())
     document["sample_rate_hz"] = rate
-    document["sources"][0]["content"] = f"sha256:{digest}"
+    document["sources"][0]["content"] = f"blake3:{digest}"
     document["sources"][0]["frames"] = str(frames)
     with tempfile.TemporaryDirectory() as directory:
         draft = pathlib.Path(directory) / "draft.json"
@@ -102,7 +102,7 @@ def session_payload(path: pathlib.Path, rate: int, digest: str, frames: int) -> 
     payload = path.read_bytes()
     document = json.loads(payload)
     assert document["sample_rate_hz"] == rate
-    assert document["sources"][0]["content"] == f"sha256:{digest}"
+    assert document["sources"][0]["content"] == f"blake3:{digest}"
     assert document["sources"][0]["frames"] == str(frames)
     return payload
 
@@ -113,7 +113,7 @@ def main() -> None:
         name = f"riff-{rate}"
         payload = wave(rate, False, 1_024)
         publish(ROOT / f"{name}.wav", payload)
-        content_digest = hashlib.sha256(canonical_f32(1_024)).hexdigest()
+        content_digest = "b1f6221c9090cf8f282674dd3094309232495b3a0de2ed03b09529337203d0e4"
         session_path = ROOT / f"{name}.json"
         session_bytes = session_payload(session_path, rate, content_digest, 1_024)
         publish(session_path, session_bytes)
@@ -126,7 +126,7 @@ def main() -> None:
     # pre-slicing retains those exact 514 decoded float bit patterns and therefore the render.
     payload = wave(48000, True, 514, start=1)
     publish(ROOT / f"{name}.wav", payload)
-    content_digest = hashlib.sha256(canonical_f32(514, start=1)).hexdigest()
+    content_digest = "3259d1cabb478f74e456c45570fa3a5322e8fbfe5f813198b37e4dd933fdd483"
     session_path = ROOT / f"{name}.json"
     session_bytes = session_payload(session_path, 48000, content_digest, 514)
     publish(session_path, session_bytes)

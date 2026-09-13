@@ -147,12 +147,12 @@ describe("finding 6 -- web delivery is integer-only at launch", () => {
   test("16 and 24 open; 32f refuses typed, naming the token", () => {
     for (const bitDepth of [16, 24]) {
       assert.doesNotThrow(() => assertWebDeliverableSources([
-        { id: "stem", spec: { channels: 2, bitDepth, frames: 480, content: `sha256:${"0".repeat(64)}` } },
+        { id: "stem", spec: { channels: 2, bitDepth, frames: 480, content: `blake3:${"0".repeat(64)}` } },
       ]));
     }
     assert.throws(
       () => assertWebDeliverableSources([
-        { id: "stem", spec: { channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}` } },
+        { id: "stem", spec: { channels: 2, bitDepth: "32f", frames: 480, content: `blake3:${"0".repeat(64)}` } },
       ]),
       (error) => {
         assert.ok(error instanceof MisoEngineError);
@@ -168,8 +168,8 @@ describe("finding 6 -- web delivery is integer-only at launch", () => {
   test("the refusal is per source, and names which one", () => {
     assert.throws(
       () => assertWebDeliverableSources([
-        { id: "drums", spec: { channels: 2, bitDepth: 24, frames: 480, content: `sha256:${"0".repeat(64)}` } },
-        { id: "vocals", spec: { channels: 1, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}` } },
+        { id: "drums", spec: { channels: 2, bitDepth: 24, frames: 480, content: `blake3:${"0".repeat(64)}` } },
+        { id: "vocals", spec: { channels: 1, bitDepth: "32f", frames: 480, content: `blake3:${"0".repeat(64)}` } },
       ]),
       (error) => {
         assert.ok(error.message.includes("vocals"), "the refusal names the offending source");
@@ -391,7 +391,7 @@ describe("the browser open sequence", () => {
         document: sessionDocument({ bitDepth: "32f" }),
         sources: [{
           id: "stem",
-          spec: { channels: 2, bitDepth: "32f", frames: 4_800, content: `sha256:${"0".repeat(64)}` },
+          spec: { channels: 2, bitDepth: "32f", frames: 4_800, content: `blake3:${"0".repeat(64)}` },
         }],
         simd128ModuleUrl: "/wasm",
         workletModuleUrl: "/worklet",

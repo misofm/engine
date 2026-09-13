@@ -39,7 +39,7 @@ export async function moduleBytes() {
   return new Uint8Array(await readFile(modulePath));
 }
 
-const ZERO_CONTENT = `sha256:${"0".repeat(64)}`;
+const ZERO_CONTENT = `blake3:${"0".repeat(64)}`;
 
 /**
  * A one-track Session V1 document.

@@ -30,7 +30,7 @@ the canonical digest of the PCM their harness actually feeds.
 `docs/STEM_IDENTITY_V1.md` §"Canonical serialization": samples only, interleaved frame-major
 (frame 0 ch 0, frame 0 ch 1, frame 1 ch 0, …), `bit_depth = "32f"` meaning each sample is its raw
 four-byte IEEE-754 binary32 pattern little-endian, preimage length exactly
-`frames * channels * 4`, digest SHA-256.
+`frames * channels * 4`, BLAKE3-256 digest.
 
 ## 1. `tests/browser-v1/session.toml` — 256 frames
 
@@ -50,7 +50,7 @@ arrays perform is the identity map. The interleaved preimage is
 `256 * 2 * 4 = 2048` bytes, and
 
 ```
-sha256 = a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949
+blake3 = 6ce0c6f4220b52e88b9915b492af5c92549318c00560b12ecc0543778db5b82d
 ```
 
 This is the same 256 frames the raw-Wasm oracle already pins by shape:
@@ -64,7 +64,7 @@ declaration is 2,048 frames stereo, so the preimage is `2048 * 2 * 4 = 16384` by
 `0x3E800000` little-endian:
 
 ```
-sha256 = 680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c
+blake3 = 18e5038d588b861a1754abcd0e0cc0a943fe983d4ac112232a972a4d9b5c28c5
 ```
 
 ## 3. `tests/browser-v1/observation-session.toml` — 2048 frames
@@ -75,13 +75,13 @@ sha256 = 680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c
 `2048 * 2 * 4 = 16384` bytes of `0x3F000000` little-endian:
 
 ```
-sha256 = 66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c
+blake3 = 0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea
 ```
 
 ## Why no render digest moves, browser-v1 path
 
 `content` is grammar-checked only — `crates/session/src/validate.rs`
-`valid_source_content_identity` tests `^sha256:[0-9a-f]{64}$` and nothing reads the value
+`valid_source_content_identity` tests `^blake3:[0-9a-f]{64}$` and nothing reads the value
 afterwards. The browser and raw-Wasm legs both push PCM through
 `miso_engine_web_v1_source_submit`; no resolver ever fetches by identity here. Each edit also
 substitutes 64 hex characters for 64 hex characters in place, so
@@ -96,7 +96,7 @@ this document — is unchanged. `direct-oracle.mjs` re-derives and re-asserts al
 `scripts/web-audioworklet-browser-correctness.py` asserted the pre-#241 spelling
 `length_samples = N`, which no longer exists in any of the three documents — that is the red gate
 on `main`. The pins are now the post-#241 facts: `sample_rate_hz`, `quantum_frames`, the source
-row's `channels = 2, bit_depth = "32f", frames = N`, the source row's `content = "sha256:…"`, and
+row's `channels = 2, bit_depth = "32f", frames = N`, the source row's `content = "blake3:…"`, and
 the unchanged `effect_id` rows. Shape and identity are separate strings so each goes red alone, and
 re-declaring the identity session's digest on the 2,048-frame command session — the exact `04d291dd`
 defect — is now refused.
@@ -136,7 +136,7 @@ exact 15-bit significand: the f64 arithmetic JavaScript performs and the f32 sto
 `16640 * 2 * 4 = 133120` bytes, and
 
 ```
-sha256 = 8e7350ab6d22bf4a3e9357474ae4622a55d630dfc020f27010a69a72965d51cf
+blake3 = 965bddf2dc4159cd2e3cf9826ceed5a5fdd0e1774ebba4e5c73052a80b06e5ff
 ```
 
 The console row's own gate is unaffected: its `expectedDigest` is the *rendered* output after the
@@ -151,7 +151,7 @@ tap has a real reduction to publish. Preimage `2048 * 2 * 4 = 16384` bytes of `0
 little-endian:
 
 ```
-sha256 = 66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c
+blake3 = 0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea
 ```
 
 This is the **same** digest derived in §3 for `tests/browser-v1/observation-session.toml`, and that
@@ -161,7 +161,7 @@ documents feed 2,048 stereo frames of constant `0.5` from different code paths
 at the same canonical serialization. `STEM_IDENTITY_V1` §"Declaration and interpretation" says so
 outright: reusing canonical bytes under a declaration in another document is a coherent
 reinterpretation. What is impossible is the pairing named in the introduction — one digest under
-two different `frames`, which would need one SHA-256 to cover two preimage lengths — and that is not
+two different `frames`, which would need one BLAKE3-256 digest to cover two preimage lengths — and that is not
 what happens here.
 
 ## 6. `qualification/stall-session.toml` — 5,120 frames
@@ -171,58 +171,29 @@ the default ring) from the same `sourcePlanes(block)` generator as §4, so it is
 truncated to `n = 0 .. 5119`. Preimage `5120 * 2 * 4 = 40960` bytes:
 
 ```
-sha256 = 938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7
+blake3 = cdd579231aadf4a1c6d53b4bcaa435cd707bdc81fb8ec3377c3be0e2c25d2324
 ```
 
-It is *not* a prefix relation on the digest — SHA-256 of a prefix shares nothing with SHA-256 of the
+It is *not* a prefix relation on the digest — BLAKE3-256 of a prefix shares nothing with BLAKE3-256 of the
 whole — which is exactly why the console and stall documents, fed by one generator, must still
 carry two different identities. Sharing one would be the #241 defect again in a new spelling.
 
 ## Reproduction — all five distinct identities
 
-```python
-import hashlib, struct
-
-def identity(samples):                       # interleaved f32 LE
-    return hashlib.sha256(b"".join(struct.pack("<f", s) for s in samples)).hexdigest()
-
-def f32(x):
-    return struct.unpack("<f", struct.pack("<f", x))[0]
-
-def source_planes(frames):                   # qualification.js::sourcePlanes, interleaved
-    out = []
-    for n in range(frames):
-        out += [f32((n + 1) / 8192), f32(-(n + 1) / 16384)]
-    return out
-
-ramp = []
-for base, step in ((0.125, 0.0009765625), (-0.25, 0.00048828125)):
-    for i in range(128):
-        ramp += [f32(base + step * i), 0.0]
-
-identity(ramp) # a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949
-identity([0.25] * 4096) # 680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c
-identity([0.5] * 4096) # 66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c
-identity(source_planes(130 * 128)) # 8e7350ab6d22bf4a3e9357474ae4622a55d630dfc020f27010a69a72965d51cf
-identity(source_planes(40 * 128)) # 938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7
-```
-
-`hosts/host-web/qualification/session-identities.mjs` reproduces the last two (and the
-observation row) independently in Node, from the harness's own exported generators, and agrees. So
-does the repository's own reference oracle, on the canonical preimages written out of the Python
-above:
+`hosts/host-web/qualification/session-identities.mjs` derives the console, observation, and stall
+rows from the harness's own exported PCM generators with the browser's BLAKE3 implementation. The
+repository's native reference oracle agrees when given those canonical preimages:
 
 ```sh
 cargo run --locked -p stem-hasher -- raw \
-  --input console.pcm --channels 2 --bit-depth 32f --frames 16640   # 8e7350ab…
+  --input console.pcm --channels 2 --bit-depth 32f --frames 16640   # 965bddf2…
 cargo run --locked -p stem-hasher -- raw \
-  --input stall.pcm --channels 2 --bit-depth 32f --frames 5120      # 938d3a47…
+  --input stall.pcm --channels 2 --bit-depth 32f --frames 5120      # cdd57923…
 cargo run --locked -p stem-hasher -- raw \
-  --input observation.pcm --channels 2 --bit-depth 32f --frames 2048 # 66e39e41…
+  --input observation.pcm --channels 2 --bit-depth 32f --frames 2048 # 0b3c2abe…
 ```
 
-Three independent implementations — Python, the Node check, and the Rust oracle — agree on all
-three.
+The browser check and the Rust oracle agree on all three.
 
 ## The qualification gate (#272)
 
@@ -238,7 +209,7 @@ feeds), serializes per `STEM_IDENTITY_V1`, and requires the document to carry th
 verbatim, shape and identity together:
 
 ```
-{ id = "console-source", content = "sha256:…", channels = 2, bit_depth = "32f", frames = 16640 },
+{ id = "console-source", content = "blake3:…", channels = 2, bit_depth = "32f", frames = 16640 },
 ```
 
 A pinned hex string would need editing in step with any generator change, and "edited out of step"
@@ -255,7 +226,7 @@ their bytes to `createMisoAudioWorkletHost` as `sessionToml`. Nothing in
 and `host.sessionMap()` returns track and tap structure only — the harness reads `map.tracks` and
 `map.metersAttached` and nothing else. Engine-side, `content` reaches
 `crates/session/src/validate.rs::valid_source_content_identity`, a
-`^sha256:[0-9a-f]{64}$` grammar test, and `visit.rs`, which re-serializes it into the canonical
+`^blake3:[0-9a-f]{64}$` grammar test, and `visit.rs`, which re-serializes it into the canonical
 document form; no resolver ever fetches bytes by identity on this leg, and the PCM arrives instead
 through `miso_engine_web_v1_source_submit`. Every digest the qualification gates compare
 (`corpus.nativeDigest`, `console.expectedDigest`/`renderedDigest`, `stall.expectedDigest`/

@@ -1,12 +1,12 @@
-import { IncrementalSha256 } from "./incremental-sha256.js"
+import { IncrementalBlake3 } from "./incremental-blake3.js"
 import { StemResolverError, stemDigest, stemFileName } from "./identity.js"
 
-export const DEFAULT_STEM_STORE_FOLDER = "miso-stems-v1"
+export const DEFAULT_STEM_STORE_FOLDER = "miso-stems-blake3-v1"
 
 const INDEX_FILE = "index.json"
 const STAGING_DIRECTORY = "staging"
 const INDEX_VERSION = 1
-const FINAL_NAME = /^sha256-([0-9a-f]{64})$/
+const FINAL_NAME = /^blake3-([0-9a-f]{64})$/
 const LOCK_PREFIX = "miso:stem-store:v1"
 
 /** A typed web-adapter storage refusal. */
@@ -356,7 +356,7 @@ export class OpfsStemStore {
         `Opening staging for ${stem.identity} made no progress`,
         options.signal
       )
-      const hash = new IncrementalSha256()
+      const hash = new IncrementalBlake3()
       const reader = resolved.stream.getReader()
       let bytes = 0
       try {
@@ -390,7 +390,7 @@ export class OpfsStemStore {
                 identity: stem.identity,
                 expectedBytes: stem.bytes,
                 observedBytes: bytes,
-                expectedSha256: digest,
+                expectedBlake3: digest,
               }
             )
           }
@@ -444,8 +444,8 @@ export class OpfsStemStore {
             identity: stem.identity,
             expectedBytes: stem.bytes,
             observedBytes: bytes,
-            expectedSha256: digest,
-            observedSha256: streamedHex,
+            expectedBlake3: digest,
+            observedBlake3: streamedHex,
           }
         )
       }
@@ -469,8 +469,8 @@ export class OpfsStemStore {
             identity: stem.identity,
             expectedBytes: stem.bytes,
             observedBytes: reopened.bytes,
-            expectedSha256: digest,
-            observedSha256: reopened.hex,
+            expectedBlake3: digest,
+            observedBlake3: reopened.hex,
           }
         )
       }
@@ -653,7 +653,7 @@ export class OpfsStemStore {
       options.signal
     )
     const reader = file.stream().getReader()
-    const hash = new IncrementalSha256()
+    const hash = new IncrementalBlake3()
     let bytes = 0
     try {
       while (true) {
@@ -856,7 +856,7 @@ export class OpfsStemStore {
     for await (const [name, handle] of this.#directory.entries()) {
       const match = FINAL_NAME.exec(name)
       if (match === null || handle.kind !== "file") continue
-      const identity = `sha256:${match[1]}`
+      const identity = `blake3:${match[1]}`
       // A final protected by an in-flight promote is not yet an unambiguous
       // crash artifact. Its owner will either index it or leave it for a later
       // recovery pass after releasing the lock.
@@ -910,7 +910,7 @@ export class OpfsStemStore {
     for await (const [name, handle] of this.#directory.entries()) {
       const match = FINAL_NAME.exec(name)
       if (match === null || handle.kind !== "file") continue
-      const identity = `sha256:${match[1]}`
+      const identity = `blake3:${match[1]}`
       if (
         index.stems[identity] === undefined &&
         !liveLocks?.has(this.#stemLockName(identity))
@@ -940,7 +940,7 @@ export class OpfsStemStore {
     for await (const [name, handle] of this.#staging.entries()) {
       if (handle.kind !== "file") continue
       const digest = name.slice(-64)
-      const lockName = this.#stemLockName(`sha256:${digest}`)
+      const lockName = this.#stemLockName(`blake3:${digest}`)
       if (liveLocks?.has(lockName)) continue
       let oldEnough = true
       if (liveLocks === null) {

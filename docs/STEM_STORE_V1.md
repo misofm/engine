@@ -16,11 +16,12 @@ pinned lossless decode to #245's injected decoder.
 
 ## Layout and trust
 
-The construction parameter defaults to `miso-stems-v1`:
+The construction parameter defaults to `miso-stems-blake3-v1`. This clean prelaunch namespace
+ensures an obsolete identity index can never retain unreachable finals:
 
 ```text
-miso-stems-v1/
-  sha256-<64 lowercase hex>       canonical PCM, and nothing else
+miso-stems-blake3-v1/
+  blake3-<64 lowercase hex>       canonical PCM, and nothing else
   staging/<tab-id>-<hex>          untrusted in-flight bytes
   index.json                      {bytes,lastUsedAt,pins[]} per identity
 ```
@@ -28,7 +29,7 @@ miso-stems-v1/
 The stem directory is one artifact namespace, not a generic content store.
 CID effect packages will use the declared sibling namespace
 `miso-effect-packages-v1`; they never share stem filenames or index rows. The
-scheme prefix (`sha256:` for stems, CID vocabulary for packages) selects the
+scheme prefix (`blake3:` for stems, CID vocabulary for packages) selects the
 namespace before resolution; package storage remains deferred.
 
 Only indexed final files are playable. A move is index-last: decoded bytes are
@@ -51,7 +52,7 @@ The final owner ruling on #244 overrides N-14:
 
 > interactive implies every referenced stem was fully hashed at this open.
 
-Every indexed hit is streamed through incremental SHA-256 inside the loading
+Every indexed hit is streamed through incremental BLAKE3-256 inside the loading
 gate. The same pass counts bytes, so it also validates the document-derived
 `frames × channels × bytes_per_sample(bit_depth)` requirement, where
 `bytes_per_sample` is STEM_IDENTITY_V1's closed table: 2 for `16`, 3 for `24`,
@@ -128,12 +129,12 @@ the crash backstop.
 
 ## Hash implementation and provenance
 
-`incremental-sha256.js` is a repository-owned implementation of NIST FIPS
-180-4 SHA-256. Its exact source digest and rationale are pinned in
-`incremental-sha256.provenance.json`; the gate verifies the pin and the empty,
-`abc`, million-`a`, irregular-chunk, and Node-crypto oracle vectors. This is
-shipped code: SHA-256 is chosen for the existing digest vocabulary and Sui
-verification, not because it is implementation-free.
+`incremental-blake3.js` is a repository-owned bounded-memory BLAKE3-256
+implementation. Its exact source digest and rationale are pinned in
+`incremental-blake3.provenance.json`; the gate verifies that pin plus official
+empty, `abc`, million-`a`, and independent irregular-ending vectors. This is
+shipped code: source identity uses BLAKE3-256, while unrelated package and
+artifact integrity hashes retain their own algorithms.
 
 ## Loading gate and Worker pump
 

@@ -244,8 +244,9 @@ pub enum ConformanceDecoder {
 /// because the gate that should have caught it could not fail. Both runners now read this
 /// constant, so a re-pin is one edit and the two arms cannot disagree by omission; if the Wasm
 /// arm ever computes something else, that is a real target divergence and the parity gate says so.
-/// The arithmetic behind the current value is in `docs/derivations/274-parity-repin.md`.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xbdeb_b0f8_1c38_ec42;
+/// Issue #787 changed the two source-identity spellings in the transaction frame from `sha256:`
+/// to same-length `blake3:` strings. The frame count and total encoded byte count remain fixed.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xe4de_c003_302d_891a;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

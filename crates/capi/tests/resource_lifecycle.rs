@@ -1556,7 +1556,7 @@ fn compiled_model_owners(session_id: &str, canonical: &str) -> Vec<PrimitiveOwne
         },
         PrimitiveOwner {
             name: "source content identity",
-            bytes: "sha256:7e945c107a97cd24135e85dc2f407c5ecd39663a8737bf5b92114ccce38f1ab8".len()
+            bytes: "blake3:7e945c107a97cd24135e85dc2f407c5ecd39663a8737bf5b92114ccce38f1ab8".len()
                 as u64,
         },
         PrimitiveOwner {

@@ -1784,7 +1784,7 @@ mod tests {
     use session::{CompileCaps, StableId, compile_session, parse_session_json};
 
     const SESSION_CONTENT: &[u8] =
-        b"sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
+        b"blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
 
     #[test]
     fn native_worker_idle_paths_do_not_use_active_spin_primitives() {

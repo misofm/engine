@@ -42,7 +42,7 @@
     "source": {
       "type": "object", "additionalProperties": false, "required": ["id", "content", "channels", "bit_depth", "frames"],
       "properties": {
-        "id": { "$ref": "#/$defs/id" }, "content": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "id": { "$ref": "#/$defs/id" }, "content": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
         "channels": { "$ref": "#/$defs/u8" }, "bit_depth": { "enum": [16, 24, "32f"] }, "frames": { "$ref": "#/$defs/u64" }
       }
     },

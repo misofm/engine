@@ -33,12 +33,12 @@ const PROVENANCE_FIELDS = [
   "reason",
 ]
 const DEPENDENCY_FIELDS = ["artifact", "sha256"]
-const PRIMARY_ARTIFACT = "incremental-sha256.js"
+const PRIMARY_ARTIFACT = "incremental-blake3.js"
 const PRIMARY_DEPENDENCY = "../hex-lower.js"
-const ALGORITHM_AUTHORITY = "NIST FIPS 180-4, SHA-256"
+const ALGORITHM_AUTHORITY = "BLAKE3 specification, 32-byte default output"
 const IMPLEMENTATION = "repository-owned independent JavaScript implementation"
 const REASON =
-  "Canonical-PCM stems exceed one-shot digest RAM budgets; SHA-256 remains the schema vocabulary and is verifiable by Sui std::hash::sha2_256. No zero-shipped-code claim is made."
+  "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. No zero-shipped-code claim is made."
 
 // Wall-clock budget assertions in the stem-store test files (cold-open/verify-open latency, the
 // fallback-write abort deadline) are opt-in via `--budgets`, so this gate stays hermetic and
@@ -109,7 +109,7 @@ async function staticChecks(repository) {
   for (const relative of engineRoots) {
     for (const file of await sourceFiles(join(repository, relative), [".rs"])) {
       const text = await readFile(file, "utf8")
-      assert.doesNotMatch(text, /miso-stems-v1|FileSystemFileHandle|\bOPFS\b/)
+      assert.doesNotMatch(text, /miso-stems-blake3-v1|FileSystemFileHandle|\bOPFS\b/)
     }
   }
 }
@@ -417,61 +417,61 @@ async function runMutationLedger() {
 }
 
 async function validateSourceProvenance(provenanceRoot) {
-  const provenancePath = join(provenanceRoot, "incremental-sha256.provenance.json")
+  const provenancePath = join(provenanceRoot, "incremental-blake3.provenance.json")
   const provenance = JSON.parse(await readFile(provenancePath, "utf8"))
   assert.deepEqual(
     Object.keys(provenance).sort(),
     [...PROVENANCE_FIELDS].sort(),
-    "incremental SHA-256 provenance shape changed"
+    "incremental BLAKE3 provenance shape changed"
   )
-  assert.equal(provenance.schema, 1, "incremental SHA-256 provenance schema changed")
+  assert.equal(provenance.schema, 1, "incremental BLAKE3 provenance schema changed")
   assert.equal(
     provenance.artifact,
     PRIMARY_ARTIFACT,
-    "incremental SHA-256 provenance artifact changed"
+    "incremental BLAKE3 provenance artifact changed"
   )
-  assertSha256(provenance.sha256, "incremental SHA-256 source hash")
+  assertSha256(provenance.sha256, "incremental BLAKE3 source hash")
   assert.equal(
     provenance.algorithmAuthority,
     ALGORITHM_AUTHORITY,
-    "incremental SHA-256 algorithm authority changed"
+    "incremental BLAKE3 algorithm authority changed"
   )
   assert.equal(
     provenance.implementation,
     IMPLEMENTATION,
-    "incremental SHA-256 implementation authority changed"
+    "incremental BLAKE3 implementation authority changed"
   )
-  assert.equal(provenance.reason, REASON, "incremental SHA-256 provenance reason changed")
-  assert.ok(Array.isArray(provenance.dependencies), "incremental SHA-256 dependencies are not an array")
+  assert.equal(provenance.reason, REASON, "incremental BLAKE3 provenance reason changed")
+  assert.ok(Array.isArray(provenance.dependencies), "incremental BLAKE3 dependencies are not an array")
   assert.equal(
     provenance.dependencies.length,
     1,
-    "incremental SHA-256 provenance must contain exactly one dependency"
+    "incremental BLAKE3 provenance must contain exactly one dependency"
   )
   const [dependency] = provenance.dependencies
   assert.deepEqual(
     Object.keys(dependency).sort(),
     [...DEPENDENCY_FIELDS].sort(),
-    "incremental SHA-256 dependency shape changed"
+    "incremental BLAKE3 dependency shape changed"
   )
   assert.equal(
     dependency.artifact,
     PRIMARY_DEPENDENCY,
-    "incremental SHA-256 dependency artifact changed"
+    "incremental BLAKE3 dependency artifact changed"
   )
-  assertSha256(dependency.sha256, "incremental SHA-256 dependency hash")
+  assertSha256(dependency.sha256, "incremental BLAKE3 dependency hash")
 
   const hasher = await readFile(join(provenanceRoot, PRIMARY_ARTIFACT))
   assert.equal(
     createHash("sha256").update(hasher).digest("hex"),
     provenance.sha256,
-    "incremental SHA-256 source provenance moved without a re-pin"
+    "incremental BLAKE3 source provenance moved without a re-pin"
   )
   const helper = await readFile(join(provenanceRoot, PRIMARY_DEPENDENCY))
   assert.equal(
     createHash("sha256").update(helper).digest("hex"),
     dependency.sha256,
-    "incremental SHA-256 dependency provenance moved without a re-pin"
+    "incremental BLAKE3 dependency provenance moved without a re-pin"
   )
 }
 
@@ -488,7 +488,7 @@ async function runProvenanceSelfTest() {
         const target = join(temporary, PRIMARY_ARTIFACT)
         await writeFile(target, `${await readFile(target, "utf8")}\n`)
       },
-      expectedFailure: "incremental SHA-256 source provenance moved without a re-pin",
+      expectedFailure: "incremental BLAKE3 source provenance moved without a re-pin",
     },
     {
       name: "helper bytes mutated",
@@ -496,7 +496,7 @@ async function runProvenanceSelfTest() {
         const target = join(temporary, PRIMARY_DEPENDENCY)
         await writeFile(target, `${await readFile(target, "utf8")}\n`)
       },
-      expectedFailure: "incremental SHA-256 dependency provenance moved without a re-pin",
+      expectedFailure: "incremental BLAKE3 dependency provenance moved without a re-pin",
     },
     {
       name: "dependency roster removed",
@@ -505,7 +505,7 @@ async function runProvenanceSelfTest() {
           provenance.dependencies = []
         })
       },
-      expectedFailure: "incremental SHA-256 provenance must contain exactly one dependency",
+      expectedFailure: "incremental BLAKE3 provenance must contain exactly one dependency",
     },
     {
       name: "extra dependency",
@@ -514,7 +514,7 @@ async function runProvenanceSelfTest() {
           provenance.dependencies.push({ artifact: "../extra.js", sha256: "0".repeat(64) })
         })
       },
-      expectedFailure: "incremental SHA-256 provenance must contain exactly one dependency",
+      expectedFailure: "incremental BLAKE3 provenance must contain exactly one dependency",
     },
     {
       name: "renamed dependency",
@@ -523,7 +523,7 @@ async function runProvenanceSelfTest() {
           provenance.dependencies[0].artifact = "../renamed-hex-lower.js"
         })
       },
-      expectedFailure: "incremental SHA-256 dependency artifact changed",
+      expectedFailure: "incremental BLAKE3 dependency artifact changed",
     },
     {
       name: "different well-formed dependency hash",
@@ -532,7 +532,7 @@ async function runProvenanceSelfTest() {
           provenance.dependencies[0].sha256 = "0".repeat(64)
         })
       },
-      expectedFailure: "incremental SHA-256 dependency provenance moved without a re-pin",
+      expectedFailure: "incremental BLAKE3 dependency provenance moved without a re-pin",
     },
   ]
 
@@ -555,7 +555,7 @@ async function runProvenanceSelfTest() {
 }
 
 async function mutateProvenance(provenanceRoot, mutate) {
-  const path = join(provenanceRoot, "incremental-sha256.provenance.json")
+  const path = join(provenanceRoot, "incremental-blake3.provenance.json")
   const provenance = JSON.parse(await readFile(path, "utf8"))
   mutate(provenance)
   await writeFile(path, `${JSON.stringify(provenance, null, 2)}\n`)
