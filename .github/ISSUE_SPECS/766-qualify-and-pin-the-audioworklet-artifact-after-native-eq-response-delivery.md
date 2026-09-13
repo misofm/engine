@@ -157,3 +157,55 @@ stdout, stderr, exit, canonical-output verification, and the full build identity
 This is an unqualified candidate only. No ordinary artifact was built, no six-file output or
 results/matrix update was produced, and no qualification command ran. The provisional pin and this
 evidence are paused for root's exact-path checkpoint and push audit before the next tranche.
+
+## Attempt 1 ordinary artifact and qualification evidence — Luna
+
+After root checkpointed the provisional pin as `597293ec`, the unchanged builder ran exactly once
+with report mode unset into the same fresh directory `/tmp/issue766-attempt1-artifact`:
+
+```
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN bash scripts/build-web-audioworklet.sh /tmp/issue766-attempt1-artifact
+```
+
+It exited `0`. The ordinary output contained exactly the six frozen files, and its Wasm SHA-256
+matched both the provisional pin and the report-mode candidate:
+`b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69`. The five non-Wasm authority
+comparisons all passed. The six actual artifact hashes were:
+
+```
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+c42c997bc8bdcb21245f54251fff9f95020a0f5305bc24d22fe54386f043f18e  miso-engine-v1-audio-worklet-host.d.ts
+59549964170b87f331a7ecb90fa4272734ad09184f891f6e5b46ab71aa0fb425  miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69  miso-engine-v1-audio-worklet.simd128.wasm
+2b0e1195bbad7e2672de62a4e4f331d21f01f5ce042338ae8e400a4a9afa5585  miso-engine-v1-parameter-metadata.json
+```
+
+The exact ordinary-build invocation, stdout, stderr, exit, file/hash/cmp invocation, output,
+stderr, and exit are preserved under `/tmp/issue766-attempt1-logs/ordinary-build.*` and
+`/tmp/issue766-attempt1-logs/ordinary-build.verification.*`.
+
+All specified existing gates then ran against this same six-file directory; every command exited
+`0`:
+
+```
+bash scripts/check-web-audioworklet.sh /tmp/issue766-attempt1-artifact
+python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue766-attempt1-artifact
+bash scripts/test-web-audioworklet.sh
+bash scripts/check-sdk-types.sh
+bash scripts/check-sdk-headless.sh /tmp/issue766-attempt1-artifact
+bash scripts/sdk-package.sh check /tmp/issue766-attempt1-artifact
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue766-attempt1-artifact --browser all --record-matrix --candidate-commit c125794add17bc60f044bcaeb5f2907a4fdc359d --self-test-mutations
+node hosts/host-web/qualification/generate-matrix.mjs --check
+```
+
+Per-gate raw stdout, stderr, exit status, and invocation are preserved as
+`/tmp/issue766-attempt1-logs/gate-{web-static,browser-resources,web-hermetic,sdk-types,sdk-headless,sdk-package,browser-qualify,matrix-check}.{stdout,stderr,exit,invocation}`.
+The browser run reported all gates passed for Chromium `151.0.7922.34`, Firefox `153.0`, and
+WebKit `26.5`, and generated `results.json` plus `BROWSER_DEPLOYMENT_MATRIX.md`. The only tracked
+result/matrix changes are the expected `candidateCommit`/Wasm digest lineage and its generated
+matrix sentence; no browser versions, resource rows, native corpus digests, or gate expectations
+changed. No source, test, SDK/host ABI, script, workflow, dependency, or fixture file changed.
+
+`git diff --check` passed. This successful results tranche is paused for root's exact-path
+checkpoint and push audit before any further qualification or delivery action.
