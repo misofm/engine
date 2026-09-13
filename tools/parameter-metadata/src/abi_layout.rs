@@ -67,6 +67,12 @@ use host_web::{
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED, STATE_READY,
     STATUS_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader, WebResourceReport, WebStatus,
+    RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS,
+    RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
+    RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT, RESPONSE_TARGET_INPUT_FILTERS,
+    WebResponseParameter, WebResponseRequest, WebResponseResult,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -100,7 +106,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 25] = [
+pub const EXPORTS: [&str; 36] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -126,6 +132,17 @@ pub const EXPORTS: [&str; 25] = [
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_response_close",
+    "miso_engine_web_v1_response_effect_id_capacity",
+    "miso_engine_web_v1_response_effect_id_ptr",
+    "miso_engine_web_v1_response_parameter_bytes",
+    "miso_engine_web_v1_response_parameter_capacity",
+    "miso_engine_web_v1_response_parameter_ptr",
+    "miso_engine_web_v1_response_query",
+    "miso_engine_web_v1_response_request_bytes",
+    "miso_engine_web_v1_response_request_ptr",
+    "miso_engine_web_v1_response_result_bytes",
+    "miso_engine_web_v1_response_result_ptr",
 ];
 
 /// The boot staging sequence, by export name, in call order.
@@ -434,6 +451,75 @@ fn command_record_fields() -> [Field; 11] {
     ]
 }
 
+fn response_request_fields() -> [Field; 27] {
+    [
+        ("structSize", offset_of!(WebResponseRequest, struct_size), "u32"),
+        ("abiVersion", offset_of!(WebResponseRequest, abi_version), "u32"),
+        ("target", offset_of!(WebResponseRequest, target), "u32"),
+        ("grid", offset_of!(WebResponseRequest, grid), "u32"),
+        ("channels", offset_of!(WebResponseRequest, channels), "u32"),
+        ("fields", offset_of!(WebResponseRequest, fields), "u32"),
+        ("quality", offset_of!(WebResponseRequest, quality), "u32"),
+        ("linkMode", offset_of!(WebResponseRequest, link_mode), "u32"),
+        ("bypass", offset_of!(WebResponseRequest, bypass), "u32"),
+        ("effectIdBytes", offset_of!(WebResponseRequest, effect_id_bytes), "u32"),
+        ("parameterCount", offset_of!(WebResponseRequest, parameter_count), "u32"),
+        ("points", offset_of!(WebResponseRequest, points), "u32"),
+        ("sampleRateHz", offset_of!(WebResponseRequest, sample_rate_hz), "u32"),
+        ("quantumFrames", offset_of!(WebResponseRequest, quantum_frames), "u32"),
+        ("minimumHz", offset_of!(WebResponseRequest, minimum_hz), "f32"),
+        ("maximumHz", offset_of!(WebResponseRequest, maximum_hz), "f32"),
+        ("leftHpfHz", offset_of!(WebResponseRequest, left_hpf_hz), "f32"),
+        ("leftLpfHz", offset_of!(WebResponseRequest, left_lpf_hz), "f32"),
+        ("rightHpfHz", offset_of!(WebResponseRequest, right_hpf_hz), "f32"),
+        ("rightLpfHz", offset_of!(WebResponseRequest, right_lpf_hz), "f32"),
+        ("configurationId", offset_of!(WebResponseRequest, configuration_id), "u64"),
+        ("maximumPreparedBytes", offset_of!(WebResponseRequest, maximum_prepared_bytes), "u64"),
+        ("maximumTotalStateBytes", offset_of!(WebResponseRequest, maximum_total_state_bytes), "u64"),
+        ("maximumScratchBytes", offset_of!(WebResponseRequest, maximum_scratch_bytes), "u64"),
+        ("maximumAutomationSpansPerBlock", offset_of!(WebResponseRequest, maximum_automation_spans_per_block), "u32"),
+        ("maximumResultBytes", offset_of!(WebResponseRequest, maximum_result_bytes), "u32"),
+        ("reserved", offset_of!(WebResponseRequest, reserved), "u32[2]"),
+    ]
+}
+
+fn response_parameter_fields() -> [Field; 4] {
+    [
+        ("parameterId", offset_of!(WebResponseParameter, parameter_id), "u32"),
+        ("channel", offset_of!(WebResponseParameter, channel), "u32"),
+        ("value", offset_of!(WebResponseParameter, value), "f32"),
+        ("reserved", offset_of!(WebResponseParameter, reserved), "u32"),
+    ]
+}
+
+fn response_result_fields() -> [Field; 23] {
+    [
+        ("structSize", offset_of!(WebResponseResult, struct_size), "u32"),
+        ("abiVersion", offset_of!(WebResponseResult, abi_version), "u32"),
+        ("result", offset_of!(WebResponseResult, result), "u32"),
+        ("target", offset_of!(WebResponseResult, target), "u32"),
+        ("channels", offset_of!(WebResponseResult, channels), "u32"),
+        ("fields", offset_of!(WebResponseResult, fields), "u32"),
+        ("points", offset_of!(WebResponseResult, points), "u32"),
+        ("sectionCount", offset_of!(WebResponseResult, section_count), "u32"),
+        ("sampleRateHz", offset_of!(WebResponseResult, sample_rate_hz), "u32"),
+        ("reserved0", offset_of!(WebResponseResult, reserved0), "u32"),
+        ("configurationId", offset_of!(WebResponseResult, configuration_id), "u64"),
+        ("floorDb", offset_of!(WebResponseResult, floor_db), "f32"),
+        ("bypass", offset_of!(WebResponseResult, bypass), "u32"),
+        ("enabledLeft", offset_of!(WebResponseResult, enabled_left), "u32"),
+        ("enabledRight", offset_of!(WebResponseResult, enabled_right), "u32"),
+        ("retainedBytes", offset_of!(WebResponseResult, retained_bytes), "u64"),
+        ("resultBytes", offset_of!(WebResponseResult, result_bytes), "u64"),
+        ("frequenciesOffset", offset_of!(WebResponseResult, frequencies_offset), "u32"),
+        ("totalLeftOffset", offset_of!(WebResponseResult, total_left_offset), "u32"),
+        ("totalRightOffset", offset_of!(WebResponseResult, total_right_offset), "u32"),
+        ("sectionsLeftOffset", offset_of!(WebResponseResult, sections_left_offset), "u32"),
+        ("sectionsRightOffset", offset_of!(WebResponseResult, sections_right_offset), "u32"),
+        ("reserved", offset_of!(WebResponseResult, reserved), "u32[3]"),
+    ]
+}
+
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -563,6 +649,27 @@ pub fn render() -> String {
         "commandReport",
         COMMAND_REPORT_BYTES,
         &command_report_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "responseRequest",
+        RESPONSE_REQUEST_BYTES,
+        &response_request_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "responseParameter",
+        RESPONSE_PARAMETER_BYTES,
+        &response_parameter_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "responseResult",
+        RESPONSE_RESULT_BYTES,
+        &response_result_fields(),
         false,
     );
     out.push_str("  },\n");
@@ -579,6 +686,39 @@ pub fn render() -> String {
     render_named_constants(&mut out, "bufferKinds", &buffers);
     render_named_constants(&mut out, "wireCommandKinds", &wire_command_kinds);
     render_named_constants(&mut out, "commandReasons", &command_reasons);
+    render_named_constants(
+        &mut out,
+        "responseTargets",
+        &[
+            (RESPONSE_TARGET_EFFECT, "effect"),
+            (RESPONSE_TARGET_INPUT_FILTERS, "inputFilters"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "responseGrids",
+        &[
+            (RESPONSE_GRID_LINEAR, "linear"),
+            (RESPONSE_GRID_LOGARITHMIC, "logarithmic"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "responseChannels",
+        &[
+            (RESPONSE_CHANNEL_LEFT, "left"),
+            (RESPONSE_CHANNEL_RIGHT, "right"),
+            (RESPONSE_CHANNEL_BOTH, "both"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "responseFields",
+        &[
+            (RESPONSE_FIELD_TOTAL, "total"),
+            (RESPONSE_FIELD_SECTIONS, "sections"),
+        ],
+    );
     out.push_str(&format!(
         "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     ));
@@ -594,6 +734,15 @@ pub fn render() -> String {
     ));
     out.push_str(&format!(
         "    \"maximumObservationTaps\": {MAXIMUM_OBSERVATION_TAPS},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumResponseEffectIdBytes\": {RESPONSE_MAXIMUM_EFFECT_ID_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumResponseParameterOverrides\": {RESPONSE_MAXIMUM_PARAMETER_OVERRIDES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumResponseResultBytes\": {RESPONSE_MAXIMUM_RESULT_BYTES},\n"
     ));
     out.push_str(&format!(
         "    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"

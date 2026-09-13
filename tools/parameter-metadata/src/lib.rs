@@ -85,9 +85,11 @@ use builtins::{
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
-    ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterLattice, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortLayout, PortRole, SmoothingRule, StepSize, StepUnit,
+    NativeEffectResponseFactory, ObservationDescriptor, ObservationFold, ObservationKind,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterLattice,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortLayout, PortRole, ResponseAnalysisDescriptor,
+    ResponseAmplitudeReference, ResponseBypassSemantics, ResponseChannelLayout, ResponseQueryCadence,
+    ResponseSectionOutput, ResponseTotalScope, SmoothingRule, StepSize, StepUnit,
 };
 use host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -250,7 +252,9 @@ pub fn render() -> String {
         out.push_str(&format!("]{}\n", comma(index, vocabularies.len())));
     }
     out.push_str("  },\n");
-    out.push_str("  \"builtins\": {\n    \"parameters\": [\n");
+    out.push_str("  \"builtins\": {\n    \"response\": ");
+    out.push_str(&response_descriptor(builtins::input_filter_response_descriptor()));
+    out.push_str(",\n    \"parameters\": [\n");
     let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {
         out.push_str(&builtin_parameter(parameter));
@@ -265,7 +269,10 @@ pub fn render() -> String {
         "every registered effect is emitted"
     );
     for (index, descriptor) in descriptors.iter().enumerate() {
-        out.push_str(&effect(descriptor));
+        let response = registry
+            .get_ascii(descriptor.id.as_str())
+            .and_then(|factory| factory.response_analysis());
+        out.push_str(&effect(descriptor, response));
         out.push_str(&format!("{}\n", comma(index, descriptors.len())));
     }
     out.push_str("  ]\n}\n");
@@ -292,7 +299,10 @@ fn optional_number(value: Option<f32>) -> String {
     value.map_or_else(|| "null".to_owned(), number)
 }
 
-fn effect(descriptor: &EffectDescriptor) -> String {
+fn effect(
+    descriptor: &EffectDescriptor,
+    response: Option<&dyn NativeEffectResponseFactory>,
+) -> String {
     let mut out = String::new();
     out.push_str("    {\n");
     out.push_str(&format!(
@@ -331,7 +341,7 @@ fn effect(descriptor: &EffectDescriptor) -> String {
     } else {
         out.push_str("\n      ],\n");
     }
-    // Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
+    // // Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
     // shape for every effect and "this build has no menu for that effect" is impossible to
     // confuse with "this document predates observation".
     out.push_str("      \"observations\": [");
@@ -341,11 +351,108 @@ fn effect(descriptor: &EffectDescriptor) -> String {
         out.push_str(comma(index, descriptor.observations.len()));
     }
     if descriptor.observations.is_empty() {
-        out.push_str("]\n    }");
+        out.push_str("],\n");
     } else {
-        out.push_str("\n      ]\n    }");
+        out.push_str("\n      ],\n");
     }
+    out.push_str("      \"response\": ");
+    match response {
+        Some(factory) => out.push_str(&response_descriptor(factory.analysis_descriptor())),
+        None => out.push_str("null"),
+    }
+    out.push_str("\n    }");
     out
+}
+
+fn response_descriptor(descriptor: &ResponseAnalysisDescriptor) -> String {
+    let mut out = String::new();
+    out.push_str("{ ");
+    out.push_str(&format!(
+        "\"id\": {}, \"name\": \"{}\", \"axisUnit\": \"{}\", \"unit\": \"{}\", ",
+        descriptor.id,
+        escape(descriptor.name),
+        response_axis_unit(descriptor.axis_unit),
+        response_axis_unit(descriptor.unit),
+    ));
+    out.push_str(&format!(
+        "\"amplitudeReference\": \"{}\", \"channels\": \"{}\", \"mode\": \"{}\", ",
+        response_amplitude_reference(descriptor.amplitude_reference),
+        response_channels(descriptor.channels),
+        response_mode(descriptor.mode),
+    ));
+    out.push_str(&format!(
+        "\"cadence\": \"{}\", \"sectionOutput\": \"{}\", \"cost\": \"computed\", ",
+        response_cadence(descriptor.cadence),
+        response_section_output(descriptor.section_output),
+    ));
+    out.push_str(&format!(
+        "\"floorDb\": {}, \"totalScope\": \"{}\", \"bypass\": \"{}\", \"sections\": [",
+        number(descriptor.floor_db),
+        response_scope(descriptor.total_scope),
+        response_bypass(descriptor.bypass),
+    ));
+    for (index, section) in descriptor.sections.iter().enumerate() {
+        out.push_str(&format!(
+            "{{ \"id\": {}, \"name\": \"{}\" }}{}",
+            section.id,
+            escape(section.name),
+            comma(index, descriptor.sections.len()),
+        ));
+    }
+    out.push_str("] }");
+    out
+}
+
+const fn response_axis_unit(unit: ParameterUnit) -> &'static str {
+    match unit {
+        ParameterUnit::Hz => "hz",
+        ParameterUnit::Db => "db",
+        _ => "unknown",
+    }
+}
+
+const fn response_amplitude_reference(reference: ResponseAmplitudeReference) -> &'static str {
+    match reference {
+        ResponseAmplitudeReference::Unity => "unity",
+    }
+}
+
+const fn response_channels(channels: ResponseChannelLayout) -> &'static str {
+    match channels {
+        ResponseChannelLayout::Independent => "independent",
+    }
+}
+
+const fn response_mode(mode: effect_contract::ResponseAnalysisMode) -> &'static str {
+    match mode {
+        effect_contract::ResponseAnalysisMode::RequestedConfiguration => "requestedConfiguration",
+    }
+}
+
+const fn response_cadence(cadence: ResponseQueryCadence) -> &'static str {
+    match cadence {
+        ResponseQueryCadence::ExplicitQuery => "explicitQuery",
+    }
+}
+
+const fn response_section_output(output: ResponseSectionOutput) -> &'static str {
+    match output {
+        ResponseSectionOutput::TotalAndOptionalSections => "totalAndOptionalSections",
+    }
+}
+
+const fn response_scope(scope: ResponseTotalScope) -> &'static str {
+    match scope {
+        ResponseTotalScope::ParametricEqCascade => "parametricEqCascade",
+        ResponseTotalScope::BuiltinInputFilterSubtotal => "builtinInputFilterSubtotal",
+    }
+}
+
+const fn response_bypass(bypass: ResponseBypassSemantics) -> &'static str {
+    match bypass {
+        ResponseBypassSemantics::EffectWideIdentityWithSections => "effectWideIdentityWithSections",
+        ResponseBypassSemantics::NoEffectBypass => "noEffectBypass",
+    }
 }
 
 /// Emit one declared port row.

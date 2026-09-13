@@ -185,6 +185,31 @@ export const CATALOG = deepFreeze(
     ]
   },
   "builtins": {
+    "response": {
+      "id": 1,
+      "name": "Input Filter Response",
+      "axisUnit": "hz",
+      "unit": "db",
+      "amplitudeReference": "unity",
+      "channels": "independent",
+      "mode": "requestedConfiguration",
+      "cadence": "explicitQuery",
+      "sectionOutput": "totalAndOptionalSections",
+      "cost": "computed",
+      "floorDb": -120,
+      "totalScope": "builtinInputFilterSubtotal",
+      "bypass": "noEffectBypass",
+      "sections": [
+        {
+          "id": 1,
+          "name": "HPF"
+        },
+        {
+          "id": 2,
+          "name": "LPF"
+        }
+      ]
+    },
     "parameters": [
       {
         "id": 1,
@@ -849,7 +874,8 @@ export const CATALOG = deepFreeze(
           "maximum": 100,
           "subscribable": true
         }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.delay",
@@ -1062,7 +1088,8 @@ export const CATALOG = deepFreeze(
           "layoutName": "dualMonoPlanar"
         }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.gate-expander",
@@ -1378,7 +1405,8 @@ export const CATALOG = deepFreeze(
           "maximum": 100,
           "subscribable": true
         }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.multiband-compressor",
@@ -1834,7 +1862,8 @@ export const CATALOG = deepFreeze(
           "maximum": 100,
           "subscribable": true
         }
-      ]
+      ],
+      "response": null
     },
     {
       "id": "miso.parametric-eq",
@@ -2850,7 +2879,40 @@ export const CATALOG = deepFreeze(
           "layoutName": "dualMonoPlanar"
         }
       ],
-      "observations": []
+      "observations": [],
+      "response": {
+        "id": 1,
+        "name": "Parametric EQ Response",
+        "axisUnit": "hz",
+        "unit": "db",
+        "amplitudeReference": "unity",
+        "channels": "independent",
+        "mode": "requestedConfiguration",
+        "cadence": "explicitQuery",
+        "sectionOutput": "totalAndOptionalSections",
+        "cost": "computed",
+        "floorDb": -120,
+        "totalScope": "parametricEqCascade",
+        "bypass": "effectWideIdentityWithSections",
+        "sections": [
+          {
+            "id": 1,
+            "name": "Band 1"
+          },
+          {
+            "id": 2,
+            "name": "Band 2"
+          },
+          {
+            "id": 3,
+            "name": "Band 3"
+          },
+          {
+            "id": 4,
+            "name": "Band 4"
+          }
+        ]
+      }
     },
     {
       "id": "miso.soft-clip",
@@ -2989,7 +3051,8 @@ export const CATALOG = deepFreeze(
           "layoutName": "dualMonoPlanar"
         }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.transient-shaper",
@@ -3128,7 +3191,8 @@ export const CATALOG = deepFreeze(
           "layoutName": "dualMonoPlanar"
         }
       ],
-      "observations": []
+      "observations": [],
+      "response": null
     },
     {
       "id": "miso.true-peak-limiter",
@@ -3288,7 +3352,8 @@ export const CATALOG = deepFreeze(
           "maximum": 100,
           "subscribable": true
         }
-      ]
+      ],
+      "response": null
     }
   ]
 } as const,

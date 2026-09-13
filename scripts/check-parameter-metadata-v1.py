@@ -103,6 +103,14 @@ LAUNCH_PORT_REQUIRED = {"mainInput": True, "mainOutput": True, "sidechainInput":
 # this list moving is drift between the engine and every consumer that authors against the table.
 SIDECHAIN_EFFECTS = {"miso.compressor", "miso.gate-expander"}
 
+RESPONSE_KEYS = {
+    "id", "name", "axisUnit", "unit", "amplitudeReference", "channels", "mode", "cadence",
+    "sectionOutput", "cost", "floorDb", "totalScope", "bypass", "sections",
+}
+RESPONSE_SECTION_KEYS = {"id", "name"}
+RESPONSE_SCOPES = {"parametricEqCascade", "builtinInputFilterSubtotal"}
+RESPONSE_BYPASSES = {"effectWideIdentityWithSections", "noEffectBypass"}
+
 BUILTIN_PARAMETER_KEYS = {
     "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
     "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "step",
@@ -239,7 +247,8 @@ def validate(document: dict) -> None:
         require(len(rows) == len(expected), f"observation vocabulary {name} membership")
 
     builtins = document["builtins"]
-    require(set(builtins) == {"parameters"}, "builtin keys")
+    require(set(builtins) == {"response", "parameters"}, "builtin keys")
+    validate_response(builtins["response"], "builtinInputFilterSubtotal", "noEffectBypass")
     seen_ids: set[int] = set()
     live_names: set[str] = set()
     for parameter in builtins["parameters"]:
@@ -311,7 +320,7 @@ def validate(document: dict) -> None:
     for effect in document["effects"]:
         require(set(effect) == {
             "id", "displayName", "contractMajor", "contractMinor", "stateLayoutVersion",
-            "parameters", "ports", "observations",
+            "parameters", "ports", "observations", "response",
         }, "effect keys")
         require(isinstance(effect["id"], str) and effect["id"], "effect id")
         require(effect["contractMajor"] == 1, "effect contract major")
@@ -353,6 +362,37 @@ def validate(document: dict) -> None:
         require(all(value >= 1 for value in tap_ids), "observation ids are nonzero")
         for observation in observations:
             validate_effect_observation(observation)
+        response = effect["response"]
+        if effect["id"] == "miso.parametric-eq":
+            require(response is not None, "parametric EQ response capability")
+            validate_response(response, "parametricEqCascade", "effectWideIdentityWithSections")
+        else:
+            require(response is None, "only parametric EQ declares a response capability")
+
+
+def validate_response(response: object, scope: str, bypass: str) -> None:
+    require(isinstance(response, dict), "response descriptor is an object")
+    require(set(response) == RESPONSE_KEYS, "response descriptor keys")
+    require(isinstance(response["id"], int) and response["id"] >= 1, "response id")
+    require(isinstance(response["name"], str) and response["name"], "response name")
+    require(response["axisUnit"] == "hz", "response axis unit")
+    require(response["unit"] == "db", "response output unit")
+    require(response["amplitudeReference"] == "unity", "response amplitude reference")
+    require(response["channels"] == "independent", "response channels")
+    require(response["mode"] == "requestedConfiguration", "response mode")
+    require(response["cadence"] == "explicitQuery", "response cadence")
+    require(response["sectionOutput"] == "totalAndOptionalSections", "response section output")
+    require(response["cost"] == "computed", "response cost")
+    require(finite(response["floorDb"], "response floor"), "response floor is finite")
+    require(response["floorDb"] < 0, "response floor is negative")
+    require(response["totalScope"] == scope, "response total scope")
+    require(response["bypass"] == bypass, "response bypass semantics")
+    sections = response["sections"]
+    require(isinstance(sections, list) and sections, "response sections")
+    ids = [section["id"] for section in sections]
+    require(all(set(section) == RESPONSE_SECTION_KEYS for section in sections), "response section keys")
+    require(ids == sorted(ids) and len(ids) == len(set(ids)) and all(value >= 1 for value in ids), "response section order")
+    require(all(isinstance(section["name"], str) and section["name"] for section in sections), "response section names")
 
 
 def validate_effect_port(port: dict) -> None:
