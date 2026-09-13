@@ -153,3 +153,9 @@ The only currently authorized outside-parent successors are those the parent alr
 #764 supplies the native requested-configuration parametric-EQ curve query. Luna max implemented it; Astra medium passed attempt 3 at `c125794add17bc60f044bcaeb5f2907a4fdc359d`. #766 qualified its linked AudioWorklet artifact through the existing static/resource/SDK/headless/package and three-browser gates; Astra medium passed qualification attempt 1 at `e9674c93554db64815fca53c392d9f44e516f745`. The changed artifact digest is `b3422caa59e95b8e5a9e20e591bf5e7341ba7216b155a6790fdd72352cb0df69`; no layout-only explanation or new browser response endpoint is claimed.
 
 PR #765 owns delivery of both children. Required final-head CI and merge remain pending at this evidence checkpoint; neither child is reported closed here. Stage 2 native input-filter response is briefed but not implemented. All remaining parent stages and full engine/SDK acceptance remain open.
+
+## Stage 1 delivered; stage 2 active
+
+#764 and its required artifact successor #766 are delivered through PR #765, merged main `7dcb127518d0666f6cbe809053732b215defeb9f`. Final PR qualification `34728325698` and post-main qualification `34728654011` succeeded. Native callers can prepare immutable EQ configurations and query independent L/R totals and optional band curves without query allocations. This is native requested-configuration functionality, not the complete SDK preview milestone. Both children close with synchronized evidence.
+
+#767 now owns native input HPF/LPF response queries under the same Astra xhigh / Luna max / Astra medium workflow. All remaining parent stages stay required and open.
