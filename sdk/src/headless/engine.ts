@@ -14,6 +14,7 @@ import type {
   ObservationReadResult,
   ObservationSelection,
 } from "../core/observation.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -132,6 +133,11 @@ export class OfflineEngine {
   /** Read one bounded non-consuming batch from selected resident observation taps. */
   readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
     return this.#boundary.readObservations(selections);
+  }
+
+  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
+  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
+    return this.#boundary.queryTrackResponse(request);
   }
 
   /** A semantic console bound to the currently loaded session. */

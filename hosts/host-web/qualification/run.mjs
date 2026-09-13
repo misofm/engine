@@ -208,6 +208,34 @@ function validateSdkResponse(browserName, response) {
   gate(browserName, "sdk-response", response?.ownedAfterSecondQuery === true,
     "SDK response arrays were not stable after a subsequent query");
   const observations = response?.observations;
+  const live = observations?.liveResponse;
+  const liveMembers = Array.isArray(live?.members) ? live.members : [];
+  const liveInputFilters = liveMembers.find((member) =>
+    member.nativeId === "miso.builtin.input-filters"
+      && member.stableId === "input-filters"
+      && member.rack === "input"
+      && member.kind === "inputFilters"
+      && member.available === true,
+  );
+  const liveCompressor = liveMembers.find((member) =>
+    member.nativeId === "miso.compressor"
+      && member.kind === "unavailable"
+      && member.available === false,
+  );
+  const liveU64 = (value) => typeof value === "string"
+    && /^[0-9]+$/.test(value) && BigInt(value) > 0n;
+  gate(browserName, "sdk-live-response", live?.trackId === "track"
+    && live.mode === "target" && live.meaning === "eqFilterSubtotal"
+    && live.sampleRateHz === 48_000 && live.points === 5
+    && Number.isFinite(live.firstFrequency) && Number.isFinite(live.lastFrequency)
+    && Array.isArray(live.left) && live.left.length === 5
+    && Array.isArray(live.right) && live.right.length === 5
+    && live.finite === true && liveU64(live.capturedSample) && liveU64(live.snapshotToken)
+    && liveU64(live.resultBytes) && live.ownedAfterSecondQuery === true
+    && live.pendingRefused === true && live.closedRefused === true
+    && liveInputFilters !== undefined && liveCompressor !== undefined
+    && live.excludedMemberCount === 1,
+  "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
     && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
     && observations.pendingBeforeArm?.every((status) => status === "unarmed")

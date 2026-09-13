@@ -429,6 +429,35 @@ export interface MisoObservationReadReply {
   readonly rows: MisoObservationReadRow[];
 }
 
+/** Numeric grid selector used by the live track-response capture bridge. */
+export type MisoTrackResponseGrid = 1 | 2;
+
+/** Numeric channel selector used by the live track-response capture bridge. */
+export type MisoTrackResponseChannels = 1 | 2 | 3;
+
+/** One bounded capture request. Rust evaluates the grid after the Worklet copies this snapshot. */
+export interface MisoTrackResponseCaptureRequest {
+  readonly trackId: string;
+  /** `1` linear or `2` logarithmic. */
+  readonly grid: MisoTrackResponseGrid;
+  /** `1` left, `2` right or `3` both. */
+  readonly channels: MisoTrackResponseChannels;
+  readonly points: number;
+  readonly minimumHz: number;
+  readonly maximumHz: number;
+  /** Total raw capture/result byte budget, including the fixed header. */
+  readonly maximumResultBytes: number;
+}
+
+/** Detached immutable bytes captured from one prepared track boundary. */
+export interface MisoTrackResponseCaptureReply {
+  readonly tag: "miso.trackresponse.v1";
+  readonly requestId: number;
+  readonly result: number;
+  /** Non-empty only for `result === 0`; the analysis Worker owns the next copy. */
+  readonly snapshot: Uint8Array;
+}
+
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -692,6 +721,10 @@ export interface MisoAudioWorkletHost {
   observationMap(): Promise<MisoObservationMap>;
   /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
   readObservations(request: { selections: MisoObservationAddress[] }): Promise<MisoObservationReadReply>;
+  /// Capture one immutable selected-track response snapshot for the existing Rust analysis Worker.
+  captureTrackResponse(
+    request: MisoTrackResponseCaptureRequest,
+  ): Promise<MisoTrackResponseCaptureReply>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
   /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,

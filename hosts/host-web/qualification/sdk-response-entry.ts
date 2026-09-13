@@ -49,6 +49,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     }),
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
   browser.host.node.connect(browser.context.destination);
   try {
@@ -76,6 +77,53 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     const ready = await browser.readObservations(selections);
     const projected = await browser.readObservations([observationSelection("comp", "left")]);
     const repeated = await browser.readObservations(selections);
+    const liveRequest = {
+      trackId: "track",
+      grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
+      channels: "both" as const,
+      responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 5_000 },
+    };
+    const livePromise = browser.queryTrackResponse(liveRequest);
+    let livePendingRefused = false;
+    try {
+      await browser.queryTrackResponse(liveRequest);
+    } catch {
+      livePendingRefused = true;
+    }
+    const live = await livePromise;
+    const liveAgain = await browser.queryTrackResponse(liveRequest);
+    const liveLeft = live.leftDb === undefined ? [] : Array.from(live.leftDb);
+    const liveRight = live.rightDb === undefined ? [] : Array.from(live.rightDb);
+    const liveAgainLeft = liveAgain.leftDb === undefined ? [] : Array.from(liveAgain.leftDb);
+    const liveAgainRight = liveAgain.rightDb === undefined ? [] : Array.from(liveAgain.rightDb);
+    const liveFinite = live.frequenciesHz.length === liveRequest.grid.points
+      && liveLeft.length === liveRequest.grid.points
+      && liveRight.length === liveRequest.grid.points
+      && Array.from(live.frequenciesHz).every(Number.isFinite)
+      && liveLeft.every(Number.isFinite)
+      && liveRight.every(Number.isFinite);
+    const liveOwnedAfterSecondQuery = liveFinite
+      && liveAgain.frequenciesHz.length === live.frequenciesHz.length
+      && Array.from(live.frequenciesHz).every((value, index) => value === liveAgain.frequenciesHz[index])
+      && liveLeft.every((value, index) => value === liveAgainLeft[index])
+      && liveRight.every((value, index) => value === liveAgainRight[index]);
+    const liveMembers = live.members.map((member) => ({
+      nativeId: member.nativeId,
+      stableId: member.stableId,
+      rack: member.rack,
+      slot: member.slot,
+      kind: member.kind,
+      available: member.available,
+      enabledLeft: member.enabledLeft.length,
+      enabledRight: member.enabledRight.length,
+    }));
+    await browser.close();
+    let liveClosedRefused = false;
+    try {
+      await browser.queryTrackResponse(liveRequest);
+    } catch {
+      liveClosedRefused = true;
+    }
     const first = ready[0];
     const projectedRow = projected[0];
     return {
@@ -105,6 +153,26 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       projectedChannels: projected.map((row) => row.channels),
       distinctChannelProjection: first?.left !== undefined && first?.right !== undefined
         && projectedRow?.left !== undefined && projectedRow?.right === undefined,
+      liveResponse: {
+        trackId: live.trackId,
+        mode: live.mode,
+        meaning: live.meaning,
+        sampleRateHz: live.sampleRateHz,
+        points: live.frequenciesHz.length,
+        firstFrequency: live.frequenciesHz[0],
+        lastFrequency: live.frequenciesHz[live.frequenciesHz.length - 1],
+        left: liveLeft,
+        right: liveRight,
+        finite: liveFinite,
+        members: liveMembers,
+        excludedMemberCount: live.excludedMemberCount,
+        capturedSample: live.capturedSample.toString(),
+        snapshotToken: live.snapshotToken.toString(),
+        resultBytes: live.resultBytes.toString(),
+        ownedAfterSecondQuery: liveOwnedAfterSecondQuery,
+        pendingRefused: livePendingRefused,
+        closedRefused: liveClosedRefused,
+      },
     };
   } finally {
     await browser.close();

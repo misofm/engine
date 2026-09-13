@@ -10,6 +10,7 @@ export * from "./pcm-ring.ts";
 export * from "./pcm-feed.ts";
 export * from "./response.ts";
 export * from "../core/observation.ts";
+export * from "../core/live-response.ts";
 
 export { scratchBootWithWorker, prepareBrowserSessionWithWorker } from "./scratch.ts";
 export type { ScratchWorker, ScratchWorkerFactory, ScratchBootWorkerOptions, PreparedBrowserSession } from "./scratch.ts";

@@ -3,6 +3,7 @@ export * from "./engine.ts";
 export * from "./assets.ts";
 export * from "./response.ts";
 export * from "../core/observation.ts";
+export * from "../core/live-response.ts";
 export { EngineConsole } from "../core/console.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {

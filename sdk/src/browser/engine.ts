@@ -3,6 +3,7 @@ import { WasmBoundary } from "../core/boundary.ts";
 import type { SessionShape } from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
+import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { SourceSpec } from "../core/types.ts";
 import {
   assertQuantumMatch,
@@ -18,6 +19,10 @@ import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserConsole } from "./console.ts";
+import { createTrackResponse } from "./response.ts";
+import type { BrowserTrackResponse } from "./response.ts";
+import type { TrackResponseHostRequest, TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
+import type { ResponseWorkerFactory } from "./response-worker.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -95,6 +100,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly hostModuleUrl?: string;
   readonly scratchWorkerModuleUrl?: string;
   readonly createWorker?: ScratchWorkerFactory;
+  readonly responseWorkerModuleUrl?: string | URL;
+  readonly createResponseWorker?: ResponseWorkerFactory;
   readonly requestDeadlineMs?: number;
   readonly signal?: AbortSignal;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
@@ -129,6 +136,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   observationMap(): Promise<ObservationMap>;
   /** Read one bounded non-consuming batch from the current prepared owner. */
   readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
+  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
+  queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
   /** Bind the semantic console once; rejects with MisoUsageError when no console was attached. */
   console(): Promise<EngineConsole>;
   /** Dispose the worklet host, then close its context. Safe to call more than once. */
@@ -141,6 +150,49 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
     return new Uint8Array(document);
   }
   return new TextEncoder().encode(document.toJson());
+}
+
+function trackResponseHostRequest(request: TrackResponseQuery): TrackResponseHostRequest {
+  const maximumIdBytes = ABI_LAYOUT.constants.maximumLiveResponseIdBytes;
+  const maximumPoints = ABI_LAYOUT.constants.maximumLiveResponsePoints;
+  const maximumCaptureBytes = ABI_LAYOUT.constants.liveResponseCaptureBytes;
+  if (typeof request.trackId !== "string" || request.trackId.length === 0
+      || new TextEncoder().encode(request.trackId).byteLength > maximumIdBytes) {
+    throw new MisoUsageError("trackId must be a nonempty string within the live response identity bound");
+  }
+  if (request.grid.kind !== "linear" && request.grid.kind !== "logarithmic") {
+    throw new MisoUsageError("grid.kind must be linear or logarithmic");
+  }
+  if (!Number.isSafeInteger(request.grid.points) || request.grid.points < 2 || request.grid.points > maximumPoints) {
+    throw new MisoUsageError(`grid.points must be an integer in 2..=${maximumPoints}`);
+  }
+  if (!Number.isFinite(request.grid.minimumHz) || !Number.isFinite(request.grid.maximumHz)) {
+    throw new MisoUsageError("grid endpoints must be finite");
+  }
+  if (request.grid.kind === "logarithmic" && request.grid.minimumHz <= 0) {
+    throw new MisoUsageError("logarithmic grid minimumHz must be positive");
+  }
+  const channels = request.channels === undefined || request.channels === "both"
+    ? 3 : request.channels === "left" ? 1 : request.channels === "right" ? 2 : undefined;
+  if (channels === undefined) throw new MisoUsageError("channels must be left, right, or both");
+  const maximumResultBytes = request.responseLimits?.maximumResultBytes ?? maximumCaptureBytes;
+  if (!Number.isSafeInteger(maximumResultBytes) || maximumResultBytes < 1 || maximumResultBytes > maximumCaptureBytes) {
+    throw new MisoUsageError(`maximumResultBytes must be an integer in 1..=${maximumCaptureBytes}`);
+  }
+  const requestDeadlineMs = request.responseLimits?.requestDeadlineMs;
+  if (requestDeadlineMs !== undefined
+      && (!Number.isFinite(requestDeadlineMs) || requestDeadlineMs <= 0 || requestDeadlineMs > 2_147_483_647)) {
+    throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
+  }
+  return {
+    trackId: request.trackId,
+    grid: request.grid.kind === "linear" ? 1 : 2,
+    channels,
+    points: request.grid.points,
+    minimumHz: request.grid.minimumHz,
+    maximumHz: request.grid.maximumHz,
+    maximumResultBytes,
+  };
 }
 
 /**
@@ -251,6 +303,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     });
     let semanticConsole: Promise<EngineConsole> | undefined;
     let closePromise: Promise<void> | undefined;
+    let trackResponse: BrowserTrackResponse | undefined;
+    let trackResponsePromise: Promise<BrowserTrackResponse> | undefined;
+    let trackResponsePending = false;
+    let closed = false;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
       if (reply.result !== constantValue("resultCodes", "ok")) {
@@ -285,12 +341,52 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         shape.sampleRateHz,
       );
     };
+    const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
+      if (closed) throw new MisoUsageError("the browser engine is closed");
+      if (trackResponsePending) throw new MisoUsageError("a live track response query is already in flight");
+      trackResponsePending = true;
+      try {
+        const hostRequest = trackResponseHostRequest(request);
+        if (typeof host.captureTrackResponse !== "function") {
+          throw new MisoUsageError("the browser host does not support live track responses");
+        }
+        const capture = await host.captureTrackResponse(hostRequest);
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        if (capture.result !== constantValue("resultCodes", "ok")) {
+          throw new MisoEngineError("the browser host refused the live track response capture", {
+            phase: capture.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+            code: resultName(capture.result, "call"),
+            result: capture.result,
+          });
+        }
+        trackResponsePromise ??= createTrackResponse({
+          ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
+          ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
+          ...(options.createResponseWorker === undefined ? {} : { createWorker: options.createResponseWorker }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        }).then((client) => {
+          trackResponse = client;
+          return client;
+        });
+        const client = trackResponse ?? await trackResponsePromise;
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        const result = await client.query(request, capture);
+        if (closed) {
+          await client.close();
+          throw new MisoUsageError("the browser engine is closed");
+        }
+        return result;
+      } finally {
+        trackResponsePending = false;
+      }
+    };
     return Object.freeze({
       shape,
       context,
       host,
       observationMap,
       readObservations,
+      queryTrackResponse,
       console: () => {
         semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
           ? Promise.reject(new MisoUsageError(
@@ -300,8 +396,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         return semanticConsole;
       },
       close: () => {
+        closed = true;
         closePromise ??= (async () => {
           try {
+            if (trackResponsePromise !== undefined) {
+              try { await (trackResponse ?? await trackResponsePromise)?.close(); } catch { /* host close remains authoritative */ }
+            }
             await host.dispose();
           } finally {
             // A failed MessagePort disposal must not leak the much larger AudioContext.

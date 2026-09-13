@@ -32,15 +32,15 @@
         "left": {
           "polarity_invert": false,
           "trim_db": 0.0,
-          "hpf_hz": 0.0,
-          "lpf_hz": 0.0,
+          "hpf_hz": 80.0,
+          "lpf_hz": 18000.0,
           "delay_samples": 0
         },
         "right": {
           "polarity_invert": false,
           "trim_db": 0.0,
-          "hpf_hz": 0.0,
-          "lpf_hz": 0.0,
+          "hpf_hz": 120.0,
+          "lpf_hz": 12000.0,
           "delay_samples": 0
         }
       },

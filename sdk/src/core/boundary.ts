@@ -11,6 +11,8 @@ import {
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
+import { TrackResponseModule } from "./live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -157,6 +159,7 @@ export class WasmBoundary {
   #handle: number;
   #optionBytes: Uint8Array;
   #metersAttached: boolean;
+  #trackResponse: TrackResponseModule | undefined;
 
   private constructor(
     exports: ExportTable,
@@ -550,6 +553,12 @@ export class WasmBoundary {
     );
   }
 
+  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
+  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
+    this.#trackResponse ??= new TrackResponseModule(this.#exports);
+    return this.#trackResponse.queryActive(request, this.#live());
+  }
+
   /**
    * Submit one quantum-sized block of planar source PCM.
    *
@@ -764,6 +773,8 @@ export class WasmBoundary {
    */
   dispose(): void {
     if (this.#handle === 0) return;
+    this.#trackResponse?.close();
+    this.#trackResponse = undefined;
     const result = Number(this.#exports.miso_engine_web_v1_dispose(this.#handle));
     this.#handle = 0;
     if (result !== constantValue("resultCodes", "ok")) {
