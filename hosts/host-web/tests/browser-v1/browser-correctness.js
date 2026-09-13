@@ -19,6 +19,7 @@ function bootOptions() {
     consoleObservationTaps: 0n,
     consoleMasterTrackPlusOne: 0n,
     spectrum: undefined,
+    spectrumCollection: undefined,
   };
 }
 

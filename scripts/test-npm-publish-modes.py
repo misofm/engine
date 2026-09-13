@@ -28,12 +28,12 @@ WORKFLOW = ROOT / ".github/workflows/npm-publish.yml"
 QUALIFICATION = ROOT / ".github/workflows/qualification.yml"
 
 PACKAGE = "@misofm/engine"
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 EXPECTED_SHA = "a" * 40
 
 # The workflow was read and hashed before the two authorized edits.  Normalizing precisely those
-# edits back out makes the test an invariant audit for all dispatch, publication, registry,
-# consumer, attestation, pin and evidence statements in the release workflow.
+# edits and the exact #794 release version/pin back out makes the test an invariant audit for
+# all dispatch, publication, registry, consumer, attestation, pin and evidence statements.
 BASELINE_WORKFLOW_SHA256 = "478111e6393fda9e99dce3de8c521b71de0dcba141cc041ada2b0846352d107c"
 QUALIFY_PACK_STEP_SHA256 = "65f9cdee7267135423f20785b180ee192c3173ca60a7c2e47e7300601e4eaf91"
 
@@ -192,6 +192,13 @@ def normalize_authorized_edits(text: str) -> str:
             "shared re-smoke step must export MODE exactly once")
     require(text.count(PUBLISH_GUARD) == 1,
             "shared re-smoke step must carry exactly one publish-only dry-run guard")
+    # #794 changes only five version literals and the accepted artifact pin.
+    # Keep the original baseline hash, so no other workflow edits are normalized away.
+    require(text.count("0.2.5") == 5, "expected five exact #794 release-version guards")
+    release_pin = "c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4"
+    baseline_pin = "47d12d99c034a3209b9d142d51d5a1ea62c4bcbdbbb90dc074546b7a6f6d85ba"
+    require(text.count(release_pin) == 1, "expected the exact accepted #794 artifact pin")
+    text = text.replace("0.2.5", "0.2.4").replace(release_pin, baseline_pin, 1)
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 
@@ -199,11 +206,12 @@ def check_static_contract(text: str, steps: list[Step]) -> None:
     normalized = normalize_authorized_edits(text)
     actual_hash = hashlib.sha256(normalized.encode()).hexdigest()
     require(actual_hash == BASELINE_WORKFLOW_SHA256,
-            "npm-publish.yml changed outside the authorized MODE and publish guard edits")
+            "npm-publish.yml changed outside the authorized MODE, publish guard and #794 metadata edits")
     named = step_map(steps)
     pack = named.get(PACK_NAME)
     require(pack is not None, "missing qualify-only pack step")
-    require(hashlib.sha256(pack.raw.encode()).hexdigest() == QUALIFY_PACK_STEP_SHA256,
+    normalized_pack = pack.raw.replace('item.version !== "0.2.5"', 'item.version !== "0.2.4"', 1)
+    require(hashlib.sha256(normalized_pack.encode()).hexdigest() == QUALIFY_PACK_STEP_SHA256,
             "qualify-only pack step is not byte-equivalent to the approved baseline")
     shared = named.get(SHARED_NAME)
     require(shared is not None and shared.run is not None, "shared re-smoke run block is missing")
@@ -325,7 +333,7 @@ def write_consumer_package():
         (root / name).write_text(source, encoding="utf-8")
     bindir = root / "bin"
     bindir.mkdir(exist_ok=True)
-    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.2.4");\n'
+    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.2.5");\n'
     path = bindir / "enginectl.mjs"
     path.write_text(enginectl, encoding="utf-8")
     path.chmod(0o755)
@@ -394,7 +402,7 @@ SMOKE = '''import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const packageDir = process.argv[2];
 if (!packageDir || !existsSync(`${packageDir}/package.json`)) throw new Error("fixture smoke package is missing");
 const packageJson = JSON.parse(readFileSync(`${packageDir}/package.json`, "utf8"));
-if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.2.4") throw new Error("fixture package identity mismatch");
+if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.2.5") throw new Error("fixture package identity mismatch");
 appendFileSync(process.env.SMOKE_MARKER, "smoke\\n");
 '''
 
@@ -455,7 +463,7 @@ def valid_audit_report(sha512: str) -> dict:
     statement = {
         "_type": "https://in-toto.io/Statement/v1",
         "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": [{"name": "pkg:npm/%40misofm/engine@0.2.4", "digest": {"sha512": sha512}}],
+        "subject": [{"name": "pkg:npm/%40misofm/engine@0.2.5", "digest": {"sha512": sha512}}],
         "predicate": {
             "buildDefinition": {
                 "externalParameters": {"workflow": {
@@ -674,6 +682,12 @@ def test_invalid_shapes(workflow: str) -> None:
         1,
     )
     expect_invalid("folded run block", lambda: extract_steps(unknown_run))
+    for label, old, new in (
+        ("wrong release version", 'PACKAGE_VERSION: "0.2.5"', 'PACKAGE_VERSION: "0.2.6"'),
+        ("wrong release pin", "c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4", "0" * 64),
+    ):
+        mutated = workflow.replace(old, new, 1)
+        expect_invalid(label, lambda: check_static_contract(mutated, extract_steps(mutated)))
     missing_mode = workflow.replace(MODE_ENV, "", 1)
     expect_invalid("missing MODE export", lambda: check_static_contract(missing_mode, extract_steps(missing_mode)))
 
