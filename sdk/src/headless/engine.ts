@@ -14,16 +14,20 @@ import type {
   ObservationReadResult,
   ObservationSelection,
 } from "../core/observation.ts";
-import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
+import type { TrackResponseObservedState, TrackResponseQuery, TrackResponseRead, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
+  TrackResponseSubscriptionOwner,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
   ObservationSubscriptionLimits,
   ObservationSubscriptionRequest,
+  TrackResponseSubscription,
+  TrackResponseSubscriptionLimits,
+  TrackResponseSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -88,6 +92,8 @@ export interface OfflineEngineOptions extends BootOptions {
   readonly asset?: MisoEngineAsset;
   /** Finite SDK-side bounds for resident observation subscriptions. */
   readonly observationSubscriptionLimits?: ObservationSubscriptionLimits;
+  /** Finite SDK-side bounds for managed live track-response subscriptions. */
+  readonly responseSubscriptionLimits?: TrackResponseSubscriptionLimits;
 }
 
 /** A booted headless session. */
@@ -96,15 +102,19 @@ export class OfflineEngine {
   readonly #asset: MisoEngineAsset;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
+  readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
+  #responseSubscriptions: TrackResponseSubscriptionOwner | undefined;
 
   private constructor(
     asset: MisoEngineAsset,
     boundary: WasmBoundary,
     observationLimits: ObservationSubscriptionLimits | undefined,
+    responseLimits: TrackResponseSubscriptionLimits | undefined,
   ) {
     this.#asset = asset;
     this.#boundary = boundary;
     this.#observationLimits = observationLimits;
+    this.#responseLimits = responseLimits;
   }
 
   static async create(
@@ -114,6 +124,7 @@ export class OfflineEngine {
     const {
       asset: suppliedAsset,
       observationSubscriptionLimits,
+      responseSubscriptionLimits,
       ...boot
     } = options;
     const spectrumQuery = boot.spectrum === undefined ? undefined : cloneSpectrumQuery(boot.spectrum);
@@ -123,6 +134,7 @@ export class OfflineEngine {
       asset,
       await WasmBoundary.boot(asset, documentBytes(document), bootOptions),
       observationSubscriptionLimits,
+      responseSubscriptionLimits,
     );
   }
 
@@ -167,6 +179,11 @@ export class OfflineEngine {
   /** Subscribe to bounded resident observation rows; values are refreshed by `pump()`. */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
+  }
+
+  /** Subscribe to one selected track response; values are refreshed by `pump()`. */
+  subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription> {
+    return this.#responseOwner().subscribe(request).then((receipt) => receipt.handle);
   }
 
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
@@ -258,11 +275,13 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
+    this.#responseSubscriptions?.invalidate();
     this.#boundary.reboot(documentBytes(document), options);
   }
 
   dispose(): void {
     this.#observationSubscriptions?.invalidate(true);
+    this.#responseSubscriptions?.invalidate(true);
     this.#boundary.dispose();
   }
 
@@ -272,6 +291,13 @@ export class OfflineEngine {
       readObservations: (selections) => this.readObservations(selections),
       console: () => this.console(),
     }, this.#observationLimits);
+  }
+
+  #responseOwner(): TrackResponseSubscriptionOwner {
+    return this.#responseSubscriptions ??= new TrackResponseSubscriptionOwner({
+      responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
+        this.#boundary.queryTrackResponseIfChanged(request, previousState),
+    }, this.#responseLimits);
   }
 }
 
