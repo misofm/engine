@@ -88,7 +88,7 @@ test("browser response Worker enforces one request, preserves bigint, and closes
   const worker = new FakeWorker();
   const preview = await BrowserResponsePreview.create({
     asset,
-    limits: { requestDeadlineMs: 100 },
+    responseLimits: { requestDeadlineMs: 100 },
     createWorker: () => worker,
   });
   assert.equal(worker.requests[0].type, "response-init");
@@ -111,7 +111,7 @@ test("browser response Worker timeout is terminal and admits no second job", asy
   const worker = new FakeWorker();
   const preview = await BrowserResponsePreview.create({
     asset,
-    limits: { requestDeadlineMs: 10 },
+    responseLimits: { requestDeadlineMs: 10 },
     createWorker: () => worker,
   });
   await assert.rejects(preview.query(query), /deadline/);
@@ -130,7 +130,7 @@ test("browser response Worker failure messages are terminal", async () => {
     const worker = new FakeWorker();
     const preview = await BrowserResponsePreview.create({
       asset,
-      limits: { requestDeadlineMs: 100 },
+      responseLimits: { requestDeadlineMs: 100 },
       createWorker: () => worker,
     });
     const pending = preview.query(query);

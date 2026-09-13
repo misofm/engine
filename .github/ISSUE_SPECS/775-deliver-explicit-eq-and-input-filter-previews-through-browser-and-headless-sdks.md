@@ -27,7 +27,7 @@ The parent is complete only when all of these work:
 Minimal public shape (equivalent concise naming permitted):
 
 ```ts
-const preview = await createResponsePreview({ asset, limits });
+const preview = await createResponsePreview({ asset, responseLimits });
 preview.capabilities; // Generated engine owner declarations.
 const result = await preview.query({
   configurationId: 7n,
@@ -196,3 +196,9 @@ All six consumer exit records under `/tmp/issue775-candidate2-remaining-gates/` 
 No remaining blocker was found in the bounded attempt-2 correction. Source/candidate acceptance is PASS; root still owns committing qualification evidence, required CI, merged delivery and GitHub synchronization. Parent #763 stays open. This reviewer made no source edits, commits, GitHub mutations or agent delegations.
 
 Root delivery boundary: accepted production source `559c23a36e6827f715798aa82d9aa498e3205d4f`, test-only correction `3df262d63e208300ef7148a4761e083f745afaf1`, candidate Wasm `e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab`. PR/required CI/merge remain pending; no remote completion is claimed yet.
+
+## Attempt 3 CI integration correction
+
+PR qualification `34737581447` failed on three integration causes: unsorted generated export names, the legacy SDK deletion rule for generic `limits` properties, and a third duplicate `normalize_zero` definition. Original job logs are `/tmp/issue775-ci-{workspace,sdk,lint,audit}-failure.log`. The last two Rust policy jobs share the same duplicate-helper cause.
+
+Luna corrected the generated export order and regenerated its ABI assets/fixture; named the new analysis-specific option `responseLimits`; and removed the duplicate helper in favor of `effect_contract::normalize_zero`. No validation rule was weakened and no DSP or response algorithm changed. Full parameter-metadata tests, SDK deletion/self-tests, effect-runtime policy, fmt, types, generated check and focused candidate-2 SDK regressions pass (all actual exit 0, `/tmp/issue775-attempt3-focused/`). Candidate 2 proves the unchanged behavior; a current artifact will verify the final Rust/metadata inputs before delivery. This bounded third attempt adds no feature or optimization.

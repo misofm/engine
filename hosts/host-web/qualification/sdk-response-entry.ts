@@ -10,7 +10,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
   const preview = await createResponsePreview({
     asset,
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-    limits: { requestDeadlineMs: 5_000 },
+    responseLimits: { requestDeadlineMs: 5_000 },
   });
   try {
     const eq = await preview.query({

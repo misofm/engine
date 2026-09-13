@@ -286,7 +286,7 @@ function responseParameterRows(
 /** A synchronous query client around one analysis-only Wasm instance. */
 export class ResponsePreviewModule {
   readonly #exports: RawExports;
-  readonly #limits: {
+  readonly #responseLimits: {
     readonly maximumPreparedBytes: bigint;
     readonly maximumTotalStateBytes: bigint;
     readonly maximumScratchBytes: bigint;
@@ -297,15 +297,15 @@ export class ResponsePreviewModule {
   #closed = false;
   #busy = false;
 
-  constructor(instance: WebAssembly.Instance, limits: ResponsePreviewLimits = {}) {
+  constructor(instance: WebAssembly.Instance, responseLimits: ResponsePreviewLimits = {}) {
     this.#exports = rawExports(instance);
-    this.#limits = {
-      maximumPreparedBytes: u64(limits.maximumPreparedBytes ?? (1 << 20), "maximumPreparedBytes"),
-      maximumTotalStateBytes: u64(limits.maximumTotalStateBytes ?? (1 << 30), "maximumTotalStateBytes"),
-      maximumScratchBytes: u64(limits.maximumScratchBytes ?? (1 << 30), "maximumScratchBytes"),
-      maximumAutomationSpansPerBlock: finiteInteger(limits.maximumAutomationSpansPerBlock ?? 4096, "maximumAutomationSpansPerBlock", 1, 0xffff_ffff),
-      maximumResultBytes: finiteInteger(limits.maximumResultBytes ?? (16 << 20), "maximumResultBytes", 1, 16 << 20),
-      requestDeadlineMs: finiteInteger(limits.requestDeadlineMs ?? 5000, "requestDeadlineMs", 1, 2_147_483_647),
+    this.#responseLimits = {
+      maximumPreparedBytes: u64(responseLimits.maximumPreparedBytes ?? (1 << 20), "maximumPreparedBytes"),
+      maximumTotalStateBytes: u64(responseLimits.maximumTotalStateBytes ?? (1 << 30), "maximumTotalStateBytes"),
+      maximumScratchBytes: u64(responseLimits.maximumScratchBytes ?? (1 << 30), "maximumScratchBytes"),
+      maximumAutomationSpansPerBlock: finiteInteger(responseLimits.maximumAutomationSpansPerBlock ?? 4096, "maximumAutomationSpansPerBlock", 1, 0xffff_ffff),
+      maximumResultBytes: finiteInteger(responseLimits.maximumResultBytes ?? (16 << 20), "maximumResultBytes", 1, 16 << 20),
+      requestDeadlineMs: finiteInteger(responseLimits.requestDeadlineMs ?? 5000, "requestDeadlineMs", 1, 2_147_483_647),
     };
     for (const name of [
       "miso_engine_web_v1_response_request_ptr", "miso_engine_web_v1_response_effect_id_ptr",
@@ -364,11 +364,11 @@ export class ResponsePreviewModule {
     setF32("minimumHz", asF32(request.grid.minimumHz, "grid.minimumHz"));
     setF32("maximumHz", asF32(request.grid.maximumHz, "grid.maximumHz"));
     setU64("configurationId", request.configurationId);
-    setU64("maximumPreparedBytes", this.#limits.maximumPreparedBytes);
-    setU64("maximumTotalStateBytes", this.#limits.maximumTotalStateBytes);
-    setU64("maximumScratchBytes", this.#limits.maximumScratchBytes);
-    setU32("maximumAutomationSpansPerBlock", this.#limits.maximumAutomationSpansPerBlock);
-    setU32("maximumResultBytes", this.#limits.maximumResultBytes);
+    setU64("maximumPreparedBytes", this.#responseLimits.maximumPreparedBytes);
+    setU64("maximumTotalStateBytes", this.#responseLimits.maximumTotalStateBytes);
+    setU64("maximumScratchBytes", this.#responseLimits.maximumScratchBytes);
+    setU32("maximumAutomationSpansPerBlock", this.#responseLimits.maximumAutomationSpansPerBlock);
+    setU32("maximumResultBytes", this.#responseLimits.maximumResultBytes);
     const idPtr = callable(this.#exports, "miso_engine_web_v1_response_effect_id_ptr")();
     const parameterPtr = callable(this.#exports, "miso_engine_web_v1_response_parameter_ptr")();
     const bytes = new Uint8Array(memory.buffer);

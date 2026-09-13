@@ -11,7 +11,7 @@ import { loadBundledEngineAsset } from "./assets.ts";
 export interface HeadlessResponsePreviewOptions {
   /** A verified asset supplied by the host. Absent loads the package's bundled asset. */
   readonly asset?: MisoEngineAsset;
-  readonly limits?: ResponsePreviewLimits;
+  readonly responseLimits?: ResponsePreviewLimits;
 }
 
 /** A stopped, synchronous response preview over one analysis-only Wasm instance. */
@@ -27,7 +27,7 @@ export class HeadlessResponsePreview {
   static async create(options: HeadlessResponsePreviewOptions = {}): Promise<HeadlessResponsePreview> {
     const asset = options.asset ?? await loadBundledEngineAsset();
     const instance = await asset.instantiate();
-    return new HeadlessResponsePreview(asset, new ResponsePreviewModule(instance, options.limits));
+    return new HeadlessResponsePreview(asset, new ResponsePreviewModule(instance, options.responseLimits));
   }
 
   get asset(): MisoEngineAsset { return this.#asset; }

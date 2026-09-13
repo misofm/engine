@@ -7,7 +7,7 @@ import type {
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 
 export type ResponseWorkerRequest =
-  | { readonly type: "response-init"; readonly module: WebAssembly.Module; readonly limits: ResponsePreviewLimits }
+  | { readonly type: "response-init"; readonly module: WebAssembly.Module; readonly responseLimits: ResponsePreviewLimits }
   | { readonly type: "response-query"; readonly requestId: number; readonly query: ResponsePreviewQuery }
   | { readonly type: "response-close" };
 
@@ -50,7 +50,7 @@ scope.onmessage = (event) => {
     const request = event.data;
     if (request.type === "response-init") {
       preview?.close();
-      preview = new ResponsePreviewModule(new WebAssembly.Instance(request.module, {}), request.limits);
+      preview = new ResponsePreviewModule(new WebAssembly.Instance(request.module, {}), request.responseLimits);
       scope.postMessage({ type: "response-ready" });
     } else if (request.type === "response-query") {
       if (preview === undefined) throw new MisoUsageError("the response Worker is not initialized");

@@ -13,7 +13,7 @@ import type { ResponseWorker, ResponseWorkerError, ResponseWorkerFactory, Respon
 
 export interface BrowserResponsePreviewOptions {
   readonly asset: MisoEngineAsset;
-  readonly limits?: ResponsePreviewLimits;
+  readonly responseLimits?: ResponsePreviewLimits;
   readonly responseWorkerModuleUrl?: string | URL;
   readonly createWorker?: ResponseWorkerFactory;
   readonly signal?: AbortSignal;
@@ -23,7 +23,7 @@ export interface BrowserResponsePreviewOptions {
 export class BrowserResponsePreview {
   readonly #asset: MisoEngineAsset;
   readonly #worker: ResponseWorker;
-  readonly #limits: ResponsePreviewLimits;
+  readonly #responseLimits: ResponsePreviewLimits;
   #closed = false;
   #nextRequestId = 1;
   #pending: { readonly requestId: number; readonly resolve: (result: ResponsePreviewResult) => void; readonly reject: (error: unknown) => void; readonly timer: ReturnType<typeof setTimeout> } | undefined;
@@ -31,10 +31,10 @@ export class BrowserResponsePreview {
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
 
-  private constructor(asset: MisoEngineAsset, worker: ResponseWorker, limits: ResponsePreviewLimits) {
+  private constructor(asset: MisoEngineAsset, worker: ResponseWorker, responseLimits: ResponsePreviewLimits) {
     this.#asset = asset;
     this.#worker = worker;
-    this.#limits = limits;
+    this.#responseLimits = responseLimits;
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -46,8 +46,8 @@ export class BrowserResponsePreview {
 
   static async create(options: BrowserResponsePreviewOptions): Promise<BrowserResponsePreview> {
     if (options.asset === undefined) throw new MisoUsageError("a verified response asset is required");
-    const limits = options.limits ?? {};
-    const deadline = limits.requestDeadlineMs ?? 5_000;
+    const responseLimits = options.responseLimits ?? {};
+    const deadline = responseLimits.requestDeadlineMs ?? 5_000;
     if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
       throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
     }
@@ -63,7 +63,7 @@ export class BrowserResponsePreview {
     } catch (error) {
       throw new MisoUsageError(`response Worker could not start: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const preview = new BrowserResponsePreview(options.asset, worker, limits);
+    const preview = new BrowserResponsePreview(options.asset, worker, responseLimits);
     try {
       await preview.initialize(options.signal, deadline);
       return preview;
@@ -82,7 +82,7 @@ export class BrowserResponsePreview {
     if (this.#pending !== undefined) return Promise.reject(new MisoUsageError("a response query is already in flight"));
     const requestId = this.#nextRequestId;
     this.#nextRequestId = requestId === 0x7fff_ffff ? 1 : requestId + 1;
-    const deadline = this.#limits.requestDeadlineMs ?? 5_000;
+    const deadline = this.#responseLimits.requestDeadlineMs ?? 5_000;
     return new Promise<ResponsePreviewResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.#pending?.requestId !== requestId) return;
@@ -109,7 +109,7 @@ export class BrowserResponsePreview {
     signal?.addEventListener("abort", abort, { once: true });
     try {
       timer = setTimeout(() => this.#rejectReady(new MisoUsageError("response Worker initialization exceeded its deadline")), deadline);
-      this.#worker.postMessage({ type: "response-init", module: this.#asset.module, limits: this.#limits });
+      this.#worker.postMessage({ type: "response-init", module: this.#asset.module, responseLimits: this.#responseLimits });
       await this.#ready;
     } finally {
       if (timer !== undefined) clearTimeout(timer);

@@ -125,13 +125,6 @@ pub const EXPORTS: [&str; 36] = [
     "miso_engine_web_v1_meter_poll",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_resource_ptr",
-    "miso_engine_web_v1_source_channels",
-    "miso_engine_web_v1_source_count",
-    "miso_engine_web_v1_source_frames",
-    "miso_engine_web_v1_source_id",
-    "miso_engine_web_v1_source_seek",
-    "miso_engine_web_v1_source_submit",
-    "miso_engine_web_v1_status_ptr",
     "miso_engine_web_v1_response_close",
     "miso_engine_web_v1_response_effect_id_capacity",
     "miso_engine_web_v1_response_effect_id_ptr",
@@ -143,6 +136,13 @@ pub const EXPORTS: [&str; 36] = [
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_source_channels",
+    "miso_engine_web_v1_source_count",
+    "miso_engine_web_v1_source_frames",
+    "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_status_ptr",
 ];
 
 /// The boot staging sequence, by export name, in call order.

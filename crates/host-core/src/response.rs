@@ -11,7 +11,7 @@ use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PreparedPorts,
     PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput, ResponsePrepareLimits,
-    ResponseQuery, ResponseSummary, default_initial_values,
+    ResponseQuery, ResponseSummary, default_initial_values, normalize_zero,
 };
 use math::{exp, log};
 
@@ -389,10 +389,6 @@ fn index_of_parameter(
         .iter()
         .position(|candidate| core::ptr::eq(candidate, parameter))
         .expect("parameter came from descriptor") as u32
-}
-
-fn normalize_zero(value: f32) -> f32 {
-    if value == 0.0 { 0.0 } else { value }
 }
 
 /// Generate and validate one explicit frequency axis with portable f64 interpolation.
