@@ -28,7 +28,18 @@
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
-    "miso_engine_web_v1_status_ptr"
+    "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_response_close",
+    "miso_engine_web_v1_response_effect_id_capacity",
+    "miso_engine_web_v1_response_effect_id_ptr",
+    "miso_engine_web_v1_response_parameter_bytes",
+    "miso_engine_web_v1_response_parameter_capacity",
+    "miso_engine_web_v1_response_parameter_ptr",
+    "miso_engine_web_v1_response_query",
+    "miso_engine_web_v1_response_request_bytes",
+    "miso_engine_web_v1_response_request_ptr",
+    "miso_engine_web_v1_response_result_bytes",
+    "miso_engine_web_v1_response_result_ptr"
   ],
   "structures": {
     "bootOptions": {
@@ -123,6 +134,75 @@
         { "name": "appliedAtSample", "offset": 24, "type": "u64" },
         { "name": "reserved", "offset": 32, "type": "u64[2]" }
       ]
+    },
+    "responseRequest": {
+      "bytes": 128,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "target", "offset": 8, "type": "u32" },
+        { "name": "grid", "offset": 12, "type": "u32" },
+        { "name": "channels", "offset": 16, "type": "u32" },
+        { "name": "fields", "offset": 20, "type": "u32" },
+        { "name": "quality", "offset": 24, "type": "u32" },
+        { "name": "linkMode", "offset": 28, "type": "u32" },
+        { "name": "bypass", "offset": 32, "type": "u32" },
+        { "name": "effectIdBytes", "offset": 36, "type": "u32" },
+        { "name": "parameterCount", "offset": 40, "type": "u32" },
+        { "name": "points", "offset": 44, "type": "u32" },
+        { "name": "sampleRateHz", "offset": 48, "type": "u32" },
+        { "name": "quantumFrames", "offset": 52, "type": "u32" },
+        { "name": "minimumHz", "offset": 56, "type": "f32" },
+        { "name": "maximumHz", "offset": 60, "type": "f32" },
+        { "name": "leftHpfHz", "offset": 64, "type": "f32" },
+        { "name": "leftLpfHz", "offset": 68, "type": "f32" },
+        { "name": "rightHpfHz", "offset": 72, "type": "f32" },
+        { "name": "rightLpfHz", "offset": 76, "type": "f32" },
+        { "name": "configurationId", "offset": 80, "type": "u64" },
+        { "name": "maximumPreparedBytes", "offset": 88, "type": "u64" },
+        { "name": "maximumTotalStateBytes", "offset": 96, "type": "u64" },
+        { "name": "maximumScratchBytes", "offset": 104, "type": "u64" },
+        { "name": "maximumAutomationSpansPerBlock", "offset": 112, "type": "u32" },
+        { "name": "maximumResultBytes", "offset": 116, "type": "u32" },
+        { "name": "reserved", "offset": 120, "type": "u32[2]" }
+      ]
+    },
+    "responseParameter": {
+      "bytes": 16,
+      "fields": [
+        { "name": "parameterId", "offset": 0, "type": "u32" },
+        { "name": "channel", "offset": 4, "type": "u32" },
+        { "name": "value", "offset": 8, "type": "f32" },
+        { "name": "reserved", "offset": 12, "type": "u32" }
+      ]
+    },
+    "responseResult": {
+      "bytes": 112,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "result", "offset": 8, "type": "u32" },
+        { "name": "target", "offset": 12, "type": "u32" },
+        { "name": "channels", "offset": 16, "type": "u32" },
+        { "name": "fields", "offset": 20, "type": "u32" },
+        { "name": "points", "offset": 24, "type": "u32" },
+        { "name": "sectionCount", "offset": 28, "type": "u32" },
+        { "name": "sampleRateHz", "offset": 32, "type": "u32" },
+        { "name": "reserved0", "offset": 36, "type": "u32" },
+        { "name": "configurationId", "offset": 40, "type": "u64" },
+        { "name": "floorDb", "offset": 48, "type": "f32" },
+        { "name": "bypass", "offset": 52, "type": "u32" },
+        { "name": "enabledLeft", "offset": 56, "type": "u32" },
+        { "name": "enabledRight", "offset": 60, "type": "u32" },
+        { "name": "retainedBytes", "offset": 64, "type": "u64" },
+        { "name": "resultBytes", "offset": 72, "type": "u64" },
+        { "name": "frequenciesOffset", "offset": 80, "type": "u32" },
+        { "name": "totalLeftOffset", "offset": 84, "type": "u32" },
+        { "name": "totalRightOffset", "offset": 88, "type": "u32" },
+        { "name": "sectionsLeftOffset", "offset": 92, "type": "u32" },
+        { "name": "sectionsRightOffset", "offset": 96, "type": "u32" },
+        { "name": "reserved", "offset": 100, "type": "u32[3]" }
+      ]
     }
   },
   "commandRecord": {
@@ -150,12 +230,19 @@
     "bufferKinds": [{ "value": 2, "name": "sourceId" }, { "value": 3, "name": "sourcePcm" }, { "value": 4, "name": "diagnostic" }, { "value": 5, "name": "outputPcm" }, { "value": 6, "name": "command" }, { "value": 7, "name": "meterFrame" }],
     "wireCommandKinds": [{ "value": 1, "name": "pan" }, { "value": 2, "name": "matrix" }, { "value": 3, "name": "faderDb" }, { "value": 4, "name": "mute" }, { "value": 5, "name": "effectParam" }, { "value": 6, "name": "effectBypass" }, { "value": 7, "name": "observeSubscribe" }, { "value": 8, "name": "observeUnsubscribe" }, { "value": 9, "name": "solo" }, { "value": 10, "name": "trimDb" }, { "value": 11, "name": "polarityInvert" }],
     "commandReasons": [{ "value": 0, "name": "none" }, { "value": 1, "name": "malformed" }, { "value": 2, "name": "unknownTrack" }, { "value": 3, "name": "unknownRack" }, { "value": 4, "name": "unknownEffect" }, { "value": 5, "name": "unknownParameter" }, { "value": 6, "name": "domain" }, { "value": 7, "name": "unsupportedKind" }, { "value": 8, "name": "backpressure" }, { "value": 9, "name": "wrongState" }, { "value": 10, "name": "unknownTap" }, { "value": 11, "name": "observationUnbound" }],
+    "responseTargets": [{ "value": 1, "name": "effect" }, { "value": 2, "name": "inputFilters" }],
+    "responseGrids": [{ "value": 1, "name": "linear" }, { "value": 2, "name": "logarithmic" }],
+    "responseChannels": [{ "value": 1, "name": "left" }, { "value": 2, "name": "right" }, { "value": 3, "name": "both" }],
+    "responseFields": [{ "value": 1, "name": "total" }, { "value": 2, "name": "sections" }],
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "diagnosticBytes": 16384,
     "defaultCommandQueueRecords": 64,
     "defaultMeterBlocks": 12,
     "maximumObservationTaps": 16,
+    "maximumResponseEffectIdBytes": 127,
+    "maximumResponseParameterOverrides": 256,
+    "maximumResponseResultBytes": 16777216,
     "defaultMaximumMemoryBytes": 536870912,
     "sourceRing": { "stallToleranceMs": 100, "reserveQuanta": 2 }
   }

@@ -250,6 +250,25 @@ function normalizedConfiguration(configuration: ResponsePreviewConfiguration): R
   }) as ResponsePreviewConfiguration;
 }
 
+function responseParameterRows(
+  descriptor: (typeof CATALOG.effects)[number],
+  name: string,
+  value: unknown,
+  channel: Channel,
+  path: string,
+): readonly ReturnType<typeof parameterRows>[number][] {
+  const rows = parameterRows(descriptor, name, value, channel, path);
+  const declaration = descriptor.parameters.find((candidate) => candidate.name === name);
+  if (declaration?.channelPolicyName === "perLane" && channel === "both"
+      && rows.length === 1 && rows[0]?.channel === "both") {
+    return [
+      ...parameterRows(descriptor, name, value, "left", path),
+      ...parameterRows(descriptor, name, value, "right", path),
+    ];
+  }
+  return rows;
+}
+
 /** A synchronous query client around one analysis-only Wasm instance. */
 export class ResponsePreviewModule {
   readonly #exports: RawExports;
@@ -355,7 +374,13 @@ export class ResponsePreviewModule {
       const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
       if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
       const rows = Object.entries(configuration.parameters)
-        .flatMap(([name, value]) => parameterRows(descriptor, name, value, configuration.options.channel, `response.${name}`));
+        .flatMap(([name, value]) => responseParameterRows(
+          descriptor,
+          name,
+          value,
+          configuration.options.channel,
+          `response.${name}`,
+        ));
       const parameterBytes = Number(ABI_LAYOUT.structures.responseParameter.bytes);
       if (rows.length > Number(ABI_LAYOUT.constants.maximumResponseParameterOverrides)) throw new MisoUsageError("too many response parameter overrides");
       for (const row of rows) {
