@@ -175,3 +175,9 @@ PR #765 owns delivery of both children. Required final-head CI and merge remain 
 #770 passed Astra medium attempt 2 at `a5db34217ff7f656765121463c7acd8247f65e1b`: existing native factories now discover owner response capability and prepare a common immutable caller-buffer provider for EQ and input filters. Legacy descriptor bytes and DSP arithmetic remain unchanged. #772 artifact qualification passed attempt 1 at `9d28680d5a1963c0f5fe74547cf168954f7c9570`, including all existing source-consumer/SDK/resource and fresh three-browser gates. New linked Wasm digest: `68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee`.
 
 Both children await combined PR/main qualification and merge. The next bounded session catalog will resolve stable target IDs and generate engine-owned grids; actual host publication, composition, generated SDK preview and live/spectrum/transport/join stages stay required.
+
+## Common native provider delivered; session binding active
+
+#770 and #772 are merged through PR #773 at main `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`, following exact-head qualification `34732244490` SUCCESS and the recorded Astra medium source/artifact verdicts. Both children close with upstream evidence and synchronized GitHub records. Post-merge qualification `34732546015` is running.
+
+#774 is the sole active feature: native selected session bindings, explicit requested-configuration identity, bounded retained storage, and engine-owned frequency grids. Astra xhigh approved the amended brief; Luna max implements attempt 1. Composition, real host publication, generated SDK previews, live observation, spectrum capture/worker processing, transports and sample-time joins remain mandatory and open.

@@ -251,3 +251,7 @@ Also directly read the completed attempt-2 broad exit files and terminal results
 ## Delivery boundary
 
 This SOURCE PASS permits the separately scoped artifact qualification/delivery work. It does not claim artifact/required PR or main CI, merge, GitHub synchronization/closure or cleanup have completed. Parent #763 stays open; session binding, composition, generated metadata/SDK access, live analysis and integrated parity remain required successors.
+
+## Merged delivery
+
+PR #773 merged accepted delivery head `5b8ecc19e332b08a63e0ff198cbda29e41fcda32` into main as `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`. Required exact-head qualification `34732244490` passed, including three-browser qualification. Accepted source and artifact reviews above remain authoritative. The evidence commit is upstream; this child closes with synchronized GitHub evidence. Post-merge qualification `34732546015` is running and will be recorded separately.
