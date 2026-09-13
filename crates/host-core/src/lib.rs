@@ -142,9 +142,11 @@ pub use source::{
 };
 pub use spectrum::{
     SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
+    SpectrumAnalysisHistory, SpectrumAnalysisHistoryResources, SpectrumAnalysisMetadata,
     SpectrumAnalyzer, SpectrumCapture, SpectrumCaptureError, SpectrumCaptureReadError,
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumChannels, SpectrumOutput,
-    SpectrumPrepareError, SpectrumTarget, SpectrumWindow, spectrum_capture_resources,
+    SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget,
+    SpectrumWindow, spectrum_analysis_history_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
 };
 

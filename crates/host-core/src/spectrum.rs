@@ -117,6 +117,29 @@ pub struct SpectrumCaptureResources {
     pub largest_allocation_bytes: u64,
 }
 
+/// The separately budgeted worker-side state retained by power smoothing.
+///
+/// This report is intentionally separate from [`SpectrumCaptureResources`]: the arrays belong to
+/// the control/worker analyzer and are never retained by the graph observer or touched by render.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpectrumAnalysisHistoryResources {
+    /// Bytes retained by one analyzer history state.
+    pub retained_bytes: u64,
+    /// The largest individual worker allocation represented by this state.
+    pub largest_allocation_bytes: u64,
+}
+
+/// Return the bounded worker-side storage cost of one smoothing history.
+#[must_use]
+pub fn spectrum_analysis_history_resources() -> SpectrumAnalysisHistoryResources {
+    let bytes = u64::try_from(core::mem::size_of::<SpectrumAnalysisHistory>())
+        .expect("spectrum history bytes fit u64");
+    SpectrumAnalysisHistoryResources {
+        retained_bytes: bytes,
+        largest_allocation_bytes: bytes,
+    }
+}
+
 /// Return the fixed storage cost of one prepared spectrum observer.
 #[must_use]
 pub fn spectrum_capture_resources() -> SpectrumCaptureResources {
@@ -1472,6 +1495,150 @@ pub struct SpectrumOutput<'a> {
     pub right_dbfs: Option<&'a mut [f32]>,
 }
 
+const SPECTRUM_DEFAULT_SMOOTHING_MS: f64 = 100.0;
+const SPECTRUM_MAX_SMOOTHING_MS: f64 = 10_000.0;
+
+/// The bounded smoothing requested by a managed spectrum analyzer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectrumSmoothingConfig {
+    smoothing_ms: f64,
+}
+
+impl SpectrumSmoothingConfig {
+    /// The normalized service default, in milliseconds.
+    pub const DEFAULT_SMOOTHING_MS: f64 = SPECTRUM_DEFAULT_SMOOTHING_MS;
+
+    /// Validate and normalize one smoothing duration.
+    pub fn new(smoothing_ms: f64) -> Result<Self, SpectrumSmoothingConfigError> {
+        if !smoothing_ms.is_finite() || !(0.0..=SPECTRUM_MAX_SMOOTHING_MS).contains(&smoothing_ms) {
+            return Err(SpectrumSmoothingConfigError::OutOfRange);
+        }
+        Ok(Self { smoothing_ms })
+    }
+
+    /// Return the normalized duration in milliseconds.
+    #[must_use]
+    pub const fn smoothing_ms(self) -> f64 {
+        self.smoothing_ms
+    }
+}
+
+impl Default for SpectrumSmoothingConfig {
+    fn default() -> Self {
+        Self {
+            smoothing_ms: SPECTRUM_DEFAULT_SMOOTHING_MS,
+        }
+    }
+}
+
+/// Refusal for a smoothing duration outside the bounded service range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumSmoothingConfigError {
+    /// Smoothing must be finite and within 0 through 10,000 milliseconds.
+    OutOfRange,
+}
+
+/// Stateful worker-side power history for one continuous analyzer.
+///
+/// The history is deliberately bounded to the two 1025-bin channel planes.  It is only mutated
+/// after a complete output has been validated, and it is never reachable from graph render.
+#[derive(Clone, Debug)]
+pub struct SpectrumAnalysisHistory {
+    left_power: [f64; SPECTRUM_BIN_COUNT],
+    right_power: [f64; SPECTRUM_BIN_COUNT],
+    initialized: bool,
+    analysis_epoch: u64,
+    history_start_sample: Option<u64>,
+    stream_epoch: Option<u64>,
+    sequence: Option<u64>,
+    configuration: Option<SpectrumAnalysisConfiguration>,
+}
+
+impl SpectrumAnalysisHistory {
+    /// Create an empty history that will initialize on the first valid window.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            left_power: [0.0; SPECTRUM_BIN_COUNT],
+            right_power: [0.0; SPECTRUM_BIN_COUNT],
+            initialized: false,
+            analysis_epoch: 0,
+            history_start_sample: None,
+            stream_epoch: None,
+            sequence: None,
+            configuration: None,
+        }
+    }
+
+    /// Reset history and advance its analysis epoch.
+    pub fn reset(&mut self) -> Result<(), SpectrumAnalysisError> {
+        let Some(next_epoch) = self.analysis_epoch.checked_add(1) else {
+            self.clear();
+            return Err(SpectrumAnalysisError::Numerical);
+        };
+        self.clear();
+        self.analysis_epoch = next_epoch;
+        Ok(())
+    }
+
+    /// The epoch of the currently retained smoothing history.
+    #[must_use]
+    pub const fn analysis_epoch(&self) -> u64 {
+        self.analysis_epoch
+    }
+
+    /// The first sample represented by the currently retained history, if initialized.
+    #[must_use]
+    pub const fn history_start_sample(&self) -> Option<u64> {
+        self.history_start_sample
+    }
+
+    fn clear(&mut self) {
+        self.left_power = [0.0; SPECTRUM_BIN_COUNT];
+        self.right_power = [0.0; SPECTRUM_BIN_COUNT];
+        self.initialized = false;
+        self.history_start_sample = None;
+        self.stream_epoch = None;
+        self.sequence = None;
+        self.configuration = None;
+    }
+}
+
+impl Default for SpectrumAnalysisHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SpectrumAnalysisConfiguration {
+    sample_rate_hz: u32,
+    hop_frames: u32,
+    channels: SpectrumChannels,
+    smoothing_ms: f64,
+}
+
+/// Metadata for one successfully analyzed continuous window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectrumAnalysisMetadata {
+    /// Analysis-history epoch, which changes after a gap, capture epoch or configuration reset.
+    pub analysis_epoch: u64,
+    /// First absolute sample retained by this analysis history.
+    pub history_start_sample: u64,
+    /// First absolute sample in the latest FFT window.
+    pub fft_first_sample: u64,
+    /// Exclusive absolute sample at the end of the latest FFT window.
+    pub fft_end_sample: u64,
+    /// Native capture epoch of the latest window.
+    pub stream_epoch: u64,
+    /// Scheduled-window sequence of the latest window.
+    pub sequence: u64,
+    /// Effective smoothing duration used for this result.
+    pub smoothing_ms: f64,
+    /// Whether the source graph reported an underrun during this window.
+    pub source_underrun: bool,
+}
+
 /// A portable, allocation-free analyzer for one captured window.
 pub struct SpectrumAnalyzer {
     weights: [f32; SPECTRUM_WINDOW_FRAMES],
@@ -1504,35 +1671,184 @@ impl SpectrumAnalyzer {
         sample_rate_hz: u32,
         output: &mut SpectrumOutput<'_>,
     ) -> Result<(), SpectrumAnalysisError> {
-        if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
-            return Err(SpectrumAnalysisError::UnsupportedRate);
+        let mut scratch = SpectrumAnalysisScratch::default();
+        let (left_requested, right_requested) =
+            self.prepare_analysis(window, sample_rate_hz, output, &mut scratch)?;
+        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        for bin in 0..SPECTRUM_BIN_COUNT {
+            if left_requested {
+                left_dbfs[bin] = amplitude_db(scratch.left_amplitudes[bin])?;
+            }
+            if right_requested {
+                right_dbfs[bin] = amplitude_db(scratch.right_amplitudes[bin])?;
+            }
         }
-        let left_requested = window.channels.includes_left();
-        let right_requested = window.channels.includes_right();
-        if output.frequencies_hz.len() != SPECTRUM_BIN_COUNT
-            || output
-                .left_dbfs
-                .as_ref()
-                .is_some_and(|values| values.len() != SPECTRUM_BIN_COUNT)
-            || output
-                .right_dbfs
-                .as_ref()
-                .is_some_and(|values| values.len() != SPECTRUM_BIN_COUNT)
-            || output.left_dbfs.is_some() != left_requested
-            || output.right_dbfs.is_some() != right_requested
-        {
-            return Err(SpectrumAnalysisError::OutputShape);
+        output.frequencies_hz.copy_from_slice(&scratch.frequencies);
+        if let Some(values) = output.left_dbfs.as_deref_mut() {
+            values.copy_from_slice(&left_dbfs);
         }
-        if window.end_sample().is_none()
-            || window
-                .left
-                .iter()
-                .chain(window.right.iter())
-                .any(|value| !value.is_finite())
-        {
-            return Err(SpectrumAnalysisError::InvalidWindow);
+        if let Some(values) = output.right_dbfs.as_deref_mut() {
+            values.copy_from_slice(&right_dbfs);
+        }
+        Ok(())
+    }
+
+    /// Analyze a continuous window and apply bounded off-render power smoothing.
+    pub fn analyze_continuous(
+        &self,
+        window: &SpectrumContinuousWindow,
+        cadence: SpectrumCadence,
+        smoothing: SpectrumSmoothingConfig,
+        history: &mut SpectrumAnalysisHistory,
+        output: &mut SpectrumOutput<'_>,
+    ) -> Result<SpectrumAnalysisMetadata, SpectrumAnalysisError> {
+        let spectrum_window = window.as_window();
+        let mut scratch = SpectrumAnalysisScratch::default();
+        let (left_requested, right_requested) = match self.prepare_analysis(
+            &spectrum_window,
+            cadence.sample_rate_hz,
+            output,
+            &mut scratch,
+        ) {
+            Ok(requested) => requested,
+            Err(error) => {
+                if matches!(
+                    error,
+                    SpectrumAnalysisError::InvalidWindow | SpectrumAnalysisError::Numerical
+                ) {
+                    let _ = history.reset();
+                }
+                return Err(error);
+            }
+        };
+        let fft_end_sample = match spectrum_window.end_sample() {
+            Some(end_sample) => end_sample,
+            None => {
+                let _ = history.reset();
+                return Err(SpectrumAnalysisError::InvalidWindow);
+            }
+        };
+        let configuration = SpectrumAnalysisConfiguration {
+            sample_rate_hz: cadence.sample_rate_hz,
+            hop_frames: cadence.hop_frames,
+            channels: window.channels,
+            smoothing_ms: smoothing.smoothing_ms,
+        };
+        if let Some(previous) = history.configuration {
+            let sequence_contiguous = history
+                .sequence
+                .and_then(|sequence| sequence.checked_add(1))
+                == Some(window.sequence);
+            if (previous != configuration
+                || history.stream_epoch != Some(window.stream_epoch)
+                || !sequence_contiguous)
+                && history.reset().is_err()
+            {
+                return Err(SpectrumAnalysisError::Numerical);
+            }
         }
 
+        let smoothing_factor = if smoothing.smoothing_ms == 0.0 {
+            0.0
+        } else {
+            let tau_seconds = smoothing.smoothing_ms / 1_000.0;
+            let exponent =
+                -f64::from(cadence.hop_frames) / (f64::from(cadence.sample_rate_hz) * tau_seconds);
+            let factor = math::exp(exponent);
+            if !factor.is_finite() || !(0.0..=1.0).contains(&factor) {
+                let _ = history.reset();
+                return Err(SpectrumAnalysisError::Numerical);
+            }
+            factor
+        };
+
+        let mut next_left_power = history.left_power;
+        let mut next_right_power = history.right_power;
+        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        for bin in 0..SPECTRUM_BIN_COUNT {
+            if left_requested {
+                let power = scratch.left_amplitudes[bin] * scratch.left_amplitudes[bin];
+                let smoothed_power = if smoothing.smoothing_ms == 0.0 || !history.initialized {
+                    power
+                } else {
+                    smoothing_factor * history.left_power[bin] + (1.0 - smoothing_factor) * power
+                };
+                if !smoothed_power.is_finite() || smoothed_power < 0.0 {
+                    let _ = history.reset();
+                    return Err(SpectrumAnalysisError::Numerical);
+                }
+                next_left_power[bin] = smoothed_power;
+                match power_db(smoothed_power) {
+                    Ok(value) => left_dbfs[bin] = value,
+                    Err(error) => {
+                        let _ = history.reset();
+                        return Err(error);
+                    }
+                }
+            }
+            if right_requested {
+                let power = scratch.right_amplitudes[bin] * scratch.right_amplitudes[bin];
+                let smoothed_power = if smoothing.smoothing_ms == 0.0 || !history.initialized {
+                    power
+                } else {
+                    smoothing_factor * history.right_power[bin] + (1.0 - smoothing_factor) * power
+                };
+                if !smoothed_power.is_finite() || smoothed_power < 0.0 {
+                    let _ = history.reset();
+                    return Err(SpectrumAnalysisError::Numerical);
+                }
+                next_right_power[bin] = smoothed_power;
+                match power_db(smoothed_power) {
+                    Ok(value) => right_dbfs[bin] = value,
+                    Err(error) => {
+                        let _ = history.reset();
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        output.frequencies_hz.copy_from_slice(&scratch.frequencies);
+        if let Some(values) = output.left_dbfs.as_deref_mut() {
+            values.copy_from_slice(&left_dbfs);
+        }
+        if let Some(values) = output.right_dbfs.as_deref_mut() {
+            values.copy_from_slice(&right_dbfs);
+        }
+
+        let history_start_sample = history
+            .history_start_sample
+            .unwrap_or(spectrum_window.first_sample);
+        history.left_power = next_left_power;
+        history.right_power = next_right_power;
+        history.initialized = true;
+        history.history_start_sample = Some(history_start_sample);
+        history.stream_epoch = Some(window.stream_epoch);
+        history.sequence = Some(window.sequence);
+        history.configuration = Some(configuration);
+        Ok(SpectrumAnalysisMetadata {
+            analysis_epoch: history.analysis_epoch,
+            history_start_sample,
+            fft_first_sample: spectrum_window.first_sample,
+            fft_end_sample,
+            stream_epoch: window.stream_epoch,
+            sequence: window.sequence,
+            smoothing_ms: smoothing.smoothing_ms,
+            source_underrun: spectrum_window.source_underrun,
+        })
+    }
+
+    fn prepare_analysis(
+        &self,
+        window: &SpectrumWindow,
+        sample_rate_hz: u32,
+        output: &SpectrumOutput<'_>,
+        scratch: &mut SpectrumAnalysisScratch,
+    ) -> Result<(bool, bool), SpectrumAnalysisError> {
+        let (left_requested, right_requested) =
+            validate_analysis_request(window, sample_rate_hz, output)?;
         let mut left = [0.0; SPECTRUM_WINDOW_FRAMES];
         let mut right = [0.0; SPECTRUM_WINDOW_FRAMES];
         for index in 0..SPECTRUM_WINDOW_FRAMES {
@@ -1545,11 +1861,8 @@ impl SpectrumAnalyzer {
         }
         let left_fft = left_requested.then(|| microfft::real::rfft_2048(&mut left));
         let right_fft = right_requested.then(|| microfft::real::rfft_2048(&mut right));
-        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
-        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
-        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
         for bin in 0..SPECTRUM_BIN_COUNT {
-            frequencies[bin] =
+            scratch.frequencies[bin] =
                 (bin as f64 * sample_rate_hz as f64 / SPECTRUM_WINDOW_FRAMES as f64) as f32;
             let factor = if bin == 0 || bin == SPECTRUM_WINDOW_FRAMES / 2 {
                 1.0
@@ -1557,22 +1870,21 @@ impl SpectrumAnalyzer {
                 2.0
             };
             if let Some(left_fft) = left_fft.as_ref() {
-                let left_magnitude = fft_magnitude(left_fft, bin);
-                left_dbfs[bin] = amplitude_db(left_magnitude * factor / self.weight_sum)?;
+                let amplitude = fft_magnitude(left_fft, bin) * factor / self.weight_sum;
+                if !amplitude.is_finite() || amplitude < 0.0 {
+                    return Err(SpectrumAnalysisError::Numerical);
+                }
+                scratch.left_amplitudes[bin] = amplitude;
             }
             if let Some(right_fft) = right_fft.as_ref() {
-                let right_magnitude = fft_magnitude(right_fft, bin);
-                right_dbfs[bin] = amplitude_db(right_magnitude * factor / self.weight_sum)?;
+                let amplitude = fft_magnitude(right_fft, bin) * factor / self.weight_sum;
+                if !amplitude.is_finite() || amplitude < 0.0 {
+                    return Err(SpectrumAnalysisError::Numerical);
+                }
+                scratch.right_amplitudes[bin] = amplitude;
             }
         }
-        output.frequencies_hz.copy_from_slice(&frequencies);
-        if let Some(values) = output.left_dbfs.as_deref_mut() {
-            values.copy_from_slice(&left_dbfs);
-        }
-        if let Some(values) = output.right_dbfs.as_deref_mut() {
-            values.copy_from_slice(&right_dbfs);
-        }
-        Ok(())
+        Ok((left_requested, right_requested))
     }
 }
 
@@ -1594,6 +1906,73 @@ fn amplitude_db(amplitude: f64) -> Result<f32, SpectrumAnalysisError> {
         return Err(SpectrumAnalysisError::Numerical);
     }
     Ok((db.max(f64::from(SPECTRUM_FLOOR_DB))) as f32)
+}
+
+fn power_db(power: f64) -> Result<f32, SpectrumAnalysisError> {
+    if !power.is_finite() || power < 0.0 {
+        return Err(SpectrumAnalysisError::Numerical);
+    }
+    if power == 0.0 {
+        return Ok(SPECTRUM_FLOOR_DB);
+    }
+    let db = 10.0 * math::log10(power);
+    if !db.is_finite() {
+        return Err(SpectrumAnalysisError::Numerical);
+    }
+    Ok((db.max(f64::from(SPECTRUM_FLOOR_DB))) as f32)
+}
+
+#[derive(Clone, Copy)]
+struct SpectrumAnalysisScratch {
+    frequencies: [f32; SPECTRUM_BIN_COUNT],
+    left_amplitudes: [f64; SPECTRUM_BIN_COUNT],
+    right_amplitudes: [f64; SPECTRUM_BIN_COUNT],
+}
+
+impl Default for SpectrumAnalysisScratch {
+    fn default() -> Self {
+        Self {
+            frequencies: [0.0; SPECTRUM_BIN_COUNT],
+            left_amplitudes: [0.0; SPECTRUM_BIN_COUNT],
+            right_amplitudes: [0.0; SPECTRUM_BIN_COUNT],
+        }
+    }
+}
+
+fn validate_analysis_request(
+    window: &SpectrumWindow,
+    sample_rate_hz: u32,
+    output: &SpectrumOutput<'_>,
+) -> Result<(bool, bool), SpectrumAnalysisError> {
+    if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+        return Err(SpectrumAnalysisError::UnsupportedRate);
+    }
+    let left_requested = window.channels.includes_left();
+    let right_requested = window.channels.includes_right();
+    if output.frequencies_hz.len() != SPECTRUM_BIN_COUNT
+        || output
+            .left_dbfs
+            .as_ref()
+            .is_some_and(|values| values.len() != SPECTRUM_BIN_COUNT)
+        || output
+            .right_dbfs
+            .as_ref()
+            .is_some_and(|values| values.len() != SPECTRUM_BIN_COUNT)
+        || output.left_dbfs.is_some() != left_requested
+        || output.right_dbfs.is_some() != right_requested
+    {
+        return Err(SpectrumAnalysisError::OutputShape);
+    }
+    if window.end_sample().is_none()
+        || window
+            .left
+            .iter()
+            .chain(window.right.iter())
+            .any(|value| !value.is_finite())
+    {
+        return Err(SpectrumAnalysisError::InvalidWindow);
+    }
+    Ok((left_requested, right_requested))
 }
 
 fn fft_magnitude(fft: &[microfft::Complex32; SPECTRUM_WINDOW_FRAMES / 2], bin: usize) -> f64 {
@@ -1626,9 +2005,10 @@ pub enum SpectrumAnalysisError {
 mod tests {
     use super::{
         ARMED, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
-        SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCadence, SpectrumCapture,
-        SpectrumCaptureObserver, SpectrumCaptureReadError, SpectrumChannels,
-        SpectrumContinuousReadError, SpectrumTarget, SpectrumWindow,
+        SpectrumAnalysisError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
+        SpectrumCapture, SpectrumCaptureObserver, SpectrumCaptureReadError, SpectrumChannels,
+        SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumSmoothingConfig,
+        SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
     use engine::realtime::{QueueGeneration, bounded_spsc};
@@ -1641,6 +2021,25 @@ mod tests {
             first_sample: 17,
             channels: SpectrumChannels::Stereo,
             source_underrun: false,
+        }
+    }
+
+    fn continuous_window(
+        fill: f32,
+        first_sample: u64,
+        stream_epoch: u64,
+        sequence: u64,
+    ) -> SpectrumContinuousWindow {
+        let base = window(fill);
+        SpectrumContinuousWindow {
+            left: base.left,
+            right: base.right,
+            first_sample,
+            channels: base.channels,
+            source_underrun: false,
+            stream_epoch,
+            sequence,
+            dropped_captures: 0,
         }
     }
 
@@ -2308,6 +2707,275 @@ mod tests {
         assert_eq!(recovered.stream_epoch, 2);
         assert_eq!(recovered.sequence, 0);
         assert_eq!(recovered.first_sample, 2_432);
+    }
+
+    #[test]
+    fn continuous_analysis_smooths_power_and_reports_history_separately_from_fft_span() {
+        let analyzer = SpectrumAnalyzer::new();
+        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
+        let smoothing = SpectrumSmoothingConfig::new(100.0).expect("bounded smoothing");
+        let mut history = SpectrumAnalysisHistory::new();
+        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut right = [0.0; SPECTRUM_BIN_COUNT];
+        let first = continuous_window(0.5, 10, 4, 7);
+        let first_metadata = {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&first, cadence, smoothing, &mut history, &mut output)
+                .expect("first smoothed window")
+        };
+        assert_eq!(first_metadata.analysis_epoch, 0);
+        assert_eq!(first_metadata.history_start_sample, 10);
+        assert_eq!(first_metadata.fft_first_sample, 10);
+        assert_eq!(first_metadata.fft_end_sample, 2_058);
+        assert_eq!(first_metadata.stream_epoch, 4);
+        assert_eq!(first_metadata.sequence, 7);
+        assert_eq!(first_metadata.smoothing_ms, 100.0);
+        assert!((left[0] + 6.0206).abs() < 0.01);
+
+        let second = continuous_window(1.0, 2_058, 4, 8);
+        let second_metadata = {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&second, cadence, smoothing, &mut history, &mut output)
+                .expect("second smoothed window")
+        };
+        let factor = math::exp(-2_048.0 / (48_000.0 * 0.1));
+        let expected_power = factor * 0.25 + (1.0 - factor);
+        let expected_db = 10.0 * math::log10(expected_power);
+        assert!((f64::from(left[0]) - expected_db).abs() < 0.01);
+        assert_eq!(second_metadata.history_start_sample, 10);
+        assert_eq!(second_metadata.fft_first_sample, 2_058);
+        assert_eq!(history.history_start_sample(), Some(10));
+    }
+
+    #[test]
+    fn continuous_analysis_zero_smoothing_matches_one_shot_and_configures_defaults() {
+        assert_eq!(SpectrumSmoothingConfig::default().smoothing_ms(), 100.0);
+        assert_eq!(
+            SpectrumSmoothingConfig::new(10_001.0).expect_err("duration is bounded"),
+            SpectrumSmoothingConfigError::OutOfRange
+        );
+        assert_eq!(
+            SpectrumSmoothingConfig::new(f64::NAN).expect_err("nonfinite duration refuses"),
+            SpectrumSmoothingConfigError::OutOfRange
+        );
+        let history_resources = super::spectrum_analysis_history_resources();
+        assert!(history_resources.retained_bytes >= (2 * SPECTRUM_BIN_COUNT * 8) as u64);
+        assert_eq!(
+            history_resources.retained_bytes,
+            history_resources.largest_allocation_bytes
+        );
+        let analyzer = SpectrumAnalyzer::new();
+        let window = continuous_window(0.25, 17, 2, 3);
+        let cadence = SpectrumCadence::new(96_000, 192).expect("launch cadence");
+        let mut one_frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut one_left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut one_right = [0.0; SPECTRUM_BIN_COUNT];
+        let mut continuous_frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut continuous_left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut continuous_right = [0.0; SPECTRUM_BIN_COUNT];
+        let mut history = SpectrumAnalysisHistory::new();
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut one_frequencies,
+                left_dbfs: Some(&mut one_left),
+                right_dbfs: Some(&mut one_right),
+            };
+            analyzer
+                .analyze(&window.as_window(), 96_000, &mut output)
+                .expect("one-shot analysis");
+        }
+        let metadata = {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut continuous_frequencies,
+                left_dbfs: Some(&mut continuous_left),
+                right_dbfs: Some(&mut continuous_right),
+            };
+            analyzer
+                .analyze_continuous(
+                    &window,
+                    cadence,
+                    SpectrumSmoothingConfig::new(0.0).expect("zero smoothing"),
+                    &mut history,
+                    &mut output,
+                )
+                .expect("zero-smoothing analysis")
+        };
+        assert_eq!(one_frequencies, continuous_frequencies);
+        for (one, continuous) in one_left.iter().zip(continuous_left.iter()) {
+            assert!((one - continuous).abs() < 0.0001, "{one} vs {continuous}");
+        }
+        for (one, continuous) in one_right.iter().zip(continuous_right.iter()) {
+            assert!((one - continuous).abs() < 0.0001, "{one} vs {continuous}");
+        }
+        assert_eq!(metadata.smoothing_ms, 0.0);
+        assert_eq!(history.analysis_epoch(), 0);
+    }
+
+    #[test]
+    fn continuous_analysis_resets_on_gap_epoch_and_smoothing_change() {
+        let analyzer = SpectrumAnalyzer::new();
+        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
+        let smoothing = SpectrumSmoothingConfig::default();
+        let mut history = SpectrumAnalysisHistory::new();
+        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut right = [0.0; SPECTRUM_BIN_COUNT];
+        let first = continuous_window(0.25, 0, 5, 0);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&first, cadence, smoothing, &mut history, &mut output)
+                .expect("continuous analysis");
+        }
+        let gap = continuous_window(1.0, 2_048, 5, 2);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&gap, cadence, smoothing, &mut history, &mut output)
+                .expect("gap analysis");
+        }
+        assert_eq!(history.analysis_epoch(), 1);
+        assert_eq!(history.history_start_sample(), Some(2_048));
+        assert!(
+            left[0] > -0.01,
+            "gap starts a fresh power history: {}",
+            left[0]
+        );
+
+        let epoch_change = continuous_window(0.25, 4_096, 6, 0);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&epoch_change, cadence, smoothing, &mut history, &mut output)
+                .expect("epoch-change analysis");
+        }
+        assert_eq!(history.analysis_epoch(), 2);
+        assert_eq!(history.history_start_sample(), Some(4_096));
+        assert!((left[0] + 12.0412).abs() < 0.02);
+
+        let config_change = continuous_window(1.0, 6_144, 6, 1);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(
+                    &config_change,
+                    cadence,
+                    SpectrumSmoothingConfig::new(200.0).expect("new smoothing"),
+                    &mut history,
+                    &mut output,
+                )
+                .expect("configuration-change analysis");
+        }
+        assert_eq!(history.analysis_epoch(), 3);
+        assert_eq!(history.history_start_sample(), Some(6_144));
+        assert!(left[0] > -0.01, "config reset starts with current power");
+    }
+
+    #[test]
+    fn continuous_analysis_resets_after_invalid_input_without_partial_output_or_history() {
+        let analyzer = SpectrumAnalyzer::new();
+        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
+        let smoothing = SpectrumSmoothingConfig::default();
+        let mut history = SpectrumAnalysisHistory::new();
+        let mut frequencies = [7.0; SPECTRUM_BIN_COUNT];
+        let mut left = [8.0; SPECTRUM_BIN_COUNT];
+        let mut right = [9.0; SPECTRUM_BIN_COUNT];
+        let first = continuous_window(0.25, 0, 3, 0);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&first, cadence, smoothing, &mut history, &mut output)
+                .expect("initial history");
+        }
+        let mut invalid = continuous_window(1.0, 2_048, 3, 1);
+        invalid.left[11] = f32::NAN;
+        let epoch_before_shape = history.analysis_epoch();
+        let mut malformed_frequencies = [4.0; SPECTRUM_BIN_COUNT];
+        let mut malformed_left = [5.0; SPECTRUM_BIN_COUNT];
+        let mut malformed_right = [6.0; SPECTRUM_BIN_COUNT - 1];
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut malformed_frequencies,
+                left_dbfs: Some(&mut malformed_left),
+                right_dbfs: Some(&mut malformed_right),
+            };
+            assert_eq!(
+                analyzer
+                    .analyze_continuous(&invalid, cadence, smoothing, &mut history, &mut output)
+                    .expect_err("malformed output refuses before history mutation"),
+                SpectrumAnalysisError::OutputShape
+            );
+        }
+        assert_eq!(history.analysis_epoch(), epoch_before_shape);
+        assert_eq!(history.history_start_sample(), Some(0));
+
+        let epoch_before_error = history.analysis_epoch();
+        frequencies.fill(7.0);
+        left.fill(8.0);
+        right.fill(9.0);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            assert_eq!(
+                analyzer
+                    .analyze_continuous(&invalid, cadence, smoothing, &mut history, &mut output)
+                    .expect_err("nonfinite continuous input refuses"),
+                SpectrumAnalysisError::InvalidWindow
+            );
+        }
+        assert_eq!(history.analysis_epoch(), epoch_before_error + 1);
+        assert_eq!(history.history_start_sample(), None);
+        assert!(frequencies.iter().all(|value| *value == 7.0));
+        assert!(left.iter().all(|value| *value == 8.0));
+        assert!(right.iter().all(|value| *value == 9.0));
+
+        let recovered = continuous_window(1.0, 2_048, 9, 0);
+        {
+            let mut output = super::SpectrumOutput {
+                frequencies_hz: &mut frequencies,
+                left_dbfs: Some(&mut left),
+                right_dbfs: Some(&mut right),
+            };
+            analyzer
+                .analyze_continuous(&recovered, cadence, smoothing, &mut history, &mut output)
+                .expect("history recovers after invalid input");
+        }
+        assert_eq!(history.history_start_sample(), Some(2_048));
+        assert!(left[0] > -0.01, "recovery starts with current power");
     }
 
     #[test]
