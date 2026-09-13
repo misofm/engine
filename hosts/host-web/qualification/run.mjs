@@ -263,6 +263,47 @@ function validateSdkResponse(browserName, response) {
     && observations.windows[0]?.endSample > observations.windows[0]?.firstSample
     && observations.windows[0]?.blocks === 2,
   "SDK observation endpoint did not return an actual resident window");
+  const resident = observations?.resident;
+  gate(browserName, "sdk-observation-subscription", Array.isArray(resident?.mapBindings)
+    && resident.mapBindings.includes("comp") && resident.mapBindings.includes("gate")
+    && JSON.stringify(resident.selectionEffectSlots) === JSON.stringify(["comp", "gate"])
+    && JSON.stringify(resident.pendingStatuses) === JSON.stringify(["pending", "pending"]),
+  "resident observation subscription did not acquire the compressor and gate bindings");
+  gate(browserName, "sdk-observation-subscription", JSON.stringify(resident.readyStatuses)
+    === JSON.stringify(["ready", "ready"])
+    && JSON.stringify(resident.readyChannels) === JSON.stringify(["both", "left"])
+    && resident.readyValuesFinite === true
+    && resident.ownedReadStable === true
+    && Array.isArray(resident.windows) && resident.windows.length === 2
+    && resident.windows.every((window) => window !== null
+      && window.endSample > window.firstSample && window.blocks === 2),
+  "resident observation subscription did not return stable owned two-effect windows");
+  gate(browserName, "sdk-observation-subscription", resident.automaticDelivery === true
+    && resident.callbackCount >= 1 && resident.callbackAvailable === true
+    && resident.callbackOwner === resident.owner && resident.callbackEpoch === resident.epoch
+    && resident.callbackRows?.some((rows) => Array.isArray(rows)
+      && rows.every((row) => row.status === "ready")),
+  "browser resident observation subscription did not deliver an automatic ready notification");
+  gate(browserName, "sdk-observation-subscription", liveU64(resident.subscriptionId)
+    && liveU64(resident.owner) && liveU64(resident.epoch)
+    && typeof resident.appliedAtSample === "string"
+    && resident.bounds?.maximumHandles > 0
+    && resident.bounds?.maximumBindings > 0
+    && resident.bounds?.maximumSelections > 0
+    && resident.bounds?.maximumWindowBlocks > 0
+    && resident.bounds?.maximumCadenceMs > 0,
+  "resident observation subscription did not publish bounded owner identity and limits");
+  gate(browserName, "sdk-observation-subscription", resident.sharedBinding === true
+    && resident.firstCloseKeepsLive === true
+    && resident.invalidUpdateRefused === true
+    && resident.invalidUpdatePreserved === true
+    && JSON.stringify(resident.updatedSelections) === JSON.stringify([
+      { effectSlotId: "comp", channels: "right" },
+    ])
+    && resident.updatedRightOnly === true
+    && resident.firstSnapshotRetained === true
+    && resident.staleReadRefused === true,
+  "resident observation subscription did not preserve shared, update, and close lifecycle semantics");
   const spectrum = response?.spectrum;
   const spectrumRows = Array.isArray(spectrum?.targets) ? spectrum.targets : [];
   const expectedSpectrumTargets = [

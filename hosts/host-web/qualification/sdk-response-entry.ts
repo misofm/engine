@@ -1,6 +1,8 @@
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
+import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect } from "../../../sdk/src/core/session.ts";
+import type { ObservationReadResult } from "../../../sdk/src/core/observation.ts";
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
 import { createEngine } from "../../../sdk/src/browser/engine.ts";
 import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
@@ -37,6 +39,75 @@ function observationPlanes(block: number): Float32Array[] {
   left.fill(0.5 + block * 0.001);
   right.fill(0.5 + block * 0.001);
   return [left, right];
+}
+
+function observationRowKey(row: ObservationReadResult): string {
+  const window = row.window;
+  return JSON.stringify([
+    row.effectSlotId,
+    row.channels,
+    row.status,
+    row.left,
+    row.right,
+    window?.firstSample.toString(),
+    window?.endSample.toString(),
+    window?.sequence.toString(),
+    window?.blocks,
+  ]);
+}
+
+function observationRowsEqual(
+  left: readonly ObservationReadResult[],
+  right: readonly ObservationReadResult[],
+): boolean {
+  return left.length === right.length && left.every((row, index) => {
+    const other = right[index];
+    return other !== undefined && observationRowKey(row) === observationRowKey(other);
+  });
+}
+
+function serializeObservationRows(rows: readonly ObservationReadResult[]) {
+  return rows.map((row) => ({
+    effectSlotId: row.effectSlotId,
+    nativeEffectId: row.nativeEffectId,
+    channels: row.channels,
+    status: row.status,
+    left: row.left,
+    right: row.right,
+    window: row.window === undefined ? null : {
+      firstSample: row.window.firstSample.toString(),
+      endSample: row.window.endSample.toString(),
+      sequence: row.window.sequence.toString(),
+      blocks: row.window.blocks,
+    },
+  }));
+}
+
+/** Keep the browser probe on the same compressor/gate fixture as the headless evals. */
+function observationDocumentWithGate(raw: string): Uint8Array {
+  const document = JSON.parse(raw);
+  const track = document.tracks?.find((candidate: { id?: string }) => candidate.id === "track");
+  const gate = CATALOG.effects.find((candidate) => candidate.id === "miso.gate-expander");
+  if (track === undefined || gate === undefined) throw new Error("observation gate fixture is unavailable");
+  const gateEntry = {
+    id: "gate",
+    identity: { kind: "native", effect_id: gate.id },
+    quality: "normal",
+    bypass: false,
+    link_mode: "dual_mono",
+    params: gate.parameters.map((parameter) => ({
+      parameter_id: parameter.id,
+      channel: "both",
+      unit: parameter.unitName,
+      value: parameter.default,
+    })),
+    sidechain: { kind: "none" },
+  };
+  track.dynamic.effects = [
+    ...track.dynamic.effects.filter((entry: { id?: string }) => entry.id !== "gate"),
+    gateEntry,
+  ];
+  return new TextEncoder().encode(JSON.stringify(document));
 }
 
 function spectrumPlanes(block: number): Float32Array[] {
@@ -221,7 +292,179 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
   };
 }
 
+async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<typeof createEngine>>> {
+  const document = observationDocumentWithGate(
+    await (await fetch("/qualification/observation-session.json")).text(),
+  );
+  const browser = await createEngine({
+    document,
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+      commandQueueRecords: 64, observationTaps: 4,
+    } },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: OBSERVATION_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      tracks: ["track"],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  return browser;
+}
+
+async function runResidentObservationQualification(): Promise<Record<string, unknown>> {
+  const browser = await createResidentObservationBrowser();
+  const selections = [observationSelection("comp"), observationSelection("gate", "left")];
+  const callbackRows: ReturnType<typeof serializeObservationRows>[] = [];
+  let callbackCount = 0;
+  let callbackAvailable = false;
+  let callbackOwner = "";
+  let callbackEpoch = "";
+  let resolveCallback: (() => void) | undefined;
+  const callbackDelivered = new Promise<void>((resolve) => { resolveCallback = resolve; });
+  try {
+    const map = await browser.observationMap();
+    const subscription = await browser.subscribeObservations({
+      selections,
+      windowBlocks: 2,
+      cadenceMs: 10,
+      onUpdate: (notification) => {
+        callbackCount += 1;
+        callbackAvailable ||= notification.available;
+        callbackOwner = notification.owner.toString();
+        callbackEpoch = notification.epoch.toString();
+        callbackRows.push(serializeObservationRows(notification.handle.readLatest()));
+        resolveCallback?.();
+      },
+    });
+    const pending = subscription.readLatest();
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const planes = observationPlanes(block);
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "console-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes,
+        frames: 128,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("SDK resident observation source submission refused");
+    }
+    await browser.context.startRendering();
+    const timerDelivered = await Promise.race([
+      callbackDelivered.then(() => true),
+      new Promise<boolean>((resolve) => globalThis.setTimeout(() => resolve(false), 500)),
+    ]);
+    let pumped = false;
+    if (!timerDelivered) pumped = (await subscription.pump())?.available === true;
+    const ready = subscription.readLatest();
+    const repeated = subscription.readLatest();
+    const firstSnapshot = ready.map(observationRowKey);
+
+    const shared = await browser.subscribeObservations({
+      selections,
+      windowBlocks: 2,
+      cadenceMs: 10,
+    });
+    const sharedBinding = shared.owner === subscription.owner
+      && shared.epoch === subscription.epoch
+      && observationRowsEqual(shared.readLatest(), ready);
+    await subscription.close();
+    const firstCloseKeepsLive = observationRowsEqual(shared.readLatest(), ready);
+
+    let invalidUpdateRefused = false;
+    try {
+      await shared.update({
+        selections: [observationSelection("missing")],
+        windowBlocks: 2,
+        cadenceMs: 10,
+      });
+    } catch {
+      invalidUpdateRefused = true;
+    }
+    const invalidUpdatePreserved = observationRowsEqual(shared.readLatest(), ready);
+    const updatedReceipt = await shared.update({
+      selections: [observationSelection("comp", "right")],
+      windowBlocks: 2,
+      cadenceMs: 10,
+    });
+    const updated = shared.readLatest();
+    const firstSnapshotRetained = JSON.stringify(firstSnapshot) === JSON.stringify(ready.map(observationRowKey));
+    const updatedRightOnly = updated.length === 1
+      && updated[0]?.channels === "right"
+      && updated[0]?.left === undefined
+      && updated[0]?.right !== undefined
+      && Number.isFinite(updated[0].right);
+    await shared.close();
+    let staleReadRefused = false;
+    try {
+      shared.readLatest();
+    } catch {
+      staleReadRefused = true;
+    }
+    return {
+      mapBindings: map.bindings.map((binding) => binding.effectSlotId),
+      selectionEffectSlots: selections.map((selection) => selection.effectSlotId),
+      pendingStatuses: pending.map((row) => row.status),
+      readyStatuses: ready.map((row) => row.status),
+      readyChannels: ready.map((row) => row.channels),
+      readyRows: serializeObservationRows(ready),
+      readyValuesFinite: ready.length === 2 && ready.every((row) =>
+        (row.left === undefined || Number.isFinite(row.left))
+        && (row.right === undefined || Number.isFinite(row.right))),
+      windows: ready.map((row) => row.window === undefined ? null : {
+        firstSample: row.window.firstSample.toString(),
+        endSample: row.window.endSample.toString(),
+        sequence: row.window.sequence.toString(),
+        blocks: row.window.blocks,
+      }),
+      ownedReadStable: observationRowsEqual(ready, repeated),
+      callbackCount,
+      callbackAvailable,
+      callbackOwner,
+      callbackEpoch,
+      callbackRows,
+      automaticDelivery: timerDelivered,
+      pumpDelivered: pumped,
+      subscriptionId: subscription.id.toString(),
+      owner: subscription.owner.toString(),
+      epoch: subscription.epoch.toString(),
+      appliedAtSample: subscription.appliedAtSample.toString(),
+      bounds: subscription.bounds,
+      sharedBinding,
+      firstCloseKeepsLive,
+      invalidUpdateRefused,
+      invalidUpdatePreserved,
+      updatedSelections: updatedReceipt.configuration.selections.map((selection) => ({
+        effectSlotId: selection.effectSlotId,
+        channels: selection.channels,
+      })),
+      updatedRightOnly,
+      firstSnapshotRetained,
+      staleReadRefused,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
 async function runSdkObservationQualification(): Promise<Record<string, unknown>> {
+  const resident = await runResidentObservationQualification();
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
@@ -376,6 +619,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
         pendingRefused: livePendingRefused,
         closedRefused: liveClosedRefused,
       },
+      resident,
     };
   } finally {
     await browser.close();
