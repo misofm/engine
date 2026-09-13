@@ -183,3 +183,45 @@ only the candidate lineage and Wasm digest to this accepted source and
 The unconditional `generate-matrix.mjs --check` and `git diff --check` both exited `0`; authentic
 output, stderr and exit are `/tmp/issue772-attempt1-final-checks.stdout`,
 `/tmp/issue772-attempt1-final-checks.stderr` and `/tmp/issue772-attempt1-final-checks.exit`.
+
+# Issue #772 artifact qualification attempt 1 review
+
+Verdict: **PASS — bounded artifact qualification**.
+
+Reviewed delivery head: `9d28680d5a1963c0f5fe74547cf168954f7c9570` in `/tmp/miso-engine-770`.
+Accepted #770 source: `a5db34217ff7f656765121463c7acd8247f65e1b` (Astra medium attempt-2 SOURCE PASS).
+Delivered reference: `5d8fe1401983da9bd1c731522b9a201f74244261`.
+Reviewer: Astra, medium. This is one coherent attempt-1 verdict. Read the full #772 spec, discovery correction, source/tool records, gate logs/exits and allowed diff; independently checked current artifact hashes, original candidate bytes, pin, authorities and JSON lineage. No source edits, agents, GitHub actions, commits or expensive gate reruns were performed.
+
+## Scope, identity and discovery correction
+
+The worktree was clean. Since accepted source, only #770/#772 records, the pin, results JSON and generated matrix change; source/tests, dependency/lock/toolchain/build inputs, generated SDK assets, ABI, policies, browser versions/floors and resource/PCM expectations are unchanged. Source identity logs record only docs ancestry between the accepted source and discovery head. Tool records show Rust/Cargo 1.97.1, Node v22.23.2, npm 10.9.8 and wasm-objdump 1.0.34 with the unchanged official builder. Prerequisite exits are zero.
+
+The original diagnostic prints `digest_record_shape=False` while exiting zero. That diagnostic alone is invalid evidence of shape validation and is not counted as a successful predicate check. It remains preserved and candidly identified in the issue. Root's separate verification of the original builder stdout enforces the canonical shape, exact pin equality, empty probe and actual builder exit before the ordinary build; its log reports all true, 65 bytes, and exit zero. I independently repeated only these cheap original-byte comparisons and confirmed the result. The correction repeats neither candidate discovery nor a build and does not guess a new pin. This adequately resolves the diagnostic error without weakening a production gate.
+
+## Artifact verification
+
+The ordinary artifact contains exactly the six expected regular nonsymlink files. The original discovery stdout is canonical lowercase 64-hex plus LF, equals the current pin byte-for-byte, and matches the independently recomputed ordinary Wasm SHA-256:
+
+`68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee`
+
+All six recomputed hashes agree with the issue record. The probe remains empty. Both discovery and ordinary builder logs show completed release builds and their actual exit files are zero; the ordinary invocation explicitly unsets report mode. Each of the five non-Wasm payloads independently compares byte-identically with both its current authority and the authority's delivered-reference Git blob. No authority was updated to accommodate candidate drift.
+
+## Qualification and lineage
+
+All eight prescribed gates have preserved successful execution evidence, and no check is replaced by the discovery correction:
+
+- Static AudioWorklet/module/callgraph/metadata/ABI/vocabulary and boot-budget checks pass.
+- Resource/native-witness parity passes with the existing 26 negative controls.
+- Hermetic worklet/host/mutation checks pass; expected mutation diagnostics in stderr are not outer-gate failures.
+- SDK type, headless and publishable-package checks pass.
+- Because the Wasm digest changed, a fresh single all-browser run used this ordinary artifact, accepted candidate `a5db34217ff7f656765121463c7acd8247f65e1b`, matrix recording and existing self-test mutations. Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5 all pass before results/matrix generation.
+- Matrix consistency and whitespace checks each report exit zero in the final-check record.
+
+Read all relevant saved exit files under `/tmp/issue772-attempt1-*` and the root verification exit; they are zero, with the original diagnostic's predicate caveat handled above. Parsed old/new result JSON differs only in `candidateCommit` and `wasmSha256`, equal to the accepted source and recomputed artifact. The matrix changes only its corresponding lineage sentence. No old browser run is relabeled and no browser/resource/PCM expectation changes.
+
+No correction is required. These results qualify existing representative production consumer boundaries; they do not establish layout-only changes, universal PCM equivalence or browser execution of #770's new native response-provider API.
+
+## Delivery boundary
+
+Root may record this evidence and open the combined #770/#772 PR. Exact final PR qualification, merge/main qualification, GitHub synchronization/closure and clean worktree removal remain required delivery steps; this PASS does not claim them completed. Parent #763 remains open for its remaining integration and analysis capabilities.

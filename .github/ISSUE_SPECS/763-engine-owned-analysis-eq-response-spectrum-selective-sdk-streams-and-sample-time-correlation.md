@@ -169,3 +169,9 @@ PR #765 owns delivery of both children. Required final-head CI and merge remain 
 #767/#768/#771 are delivered by PR #769, merged main `5d8fe1401983da9bd1c731522b9a201f74244261`, with required PR `34730464919` and post-main `34730813104` qualification successful. Native input HPF/LPF requested-configuration response queries now complement the delivered parametric-EQ queries. All three child issues close with synchronized evidence.
 
 #770 owns common native owner-response discovery/providers. Attempt 1 passed commands but failed adversarial review on metadata consistency, diagnostic spelling and adapter assertion coverage; bounded attempt 2 is active. Remaining session binding/composition/generated SDK/live/spectrum/transport/join stages remain required and open.
+
+## Common native provider accepted; delivery pending
+
+#770 passed Astra medium attempt 2 at `a5db34217ff7f656765121463c7acd8247f65e1b`: existing native factories now discover owner response capability and prepare a common immutable caller-buffer provider for EQ and input filters. Legacy descriptor bytes and DSP arithmetic remain unchanged. #772 artifact qualification passed attempt 1 at `9d28680d5a1963c0f5fe74547cf168954f7c9570`, including all existing source-consumer/SDK/resource and fresh three-browser gates. New linked Wasm digest: `68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee`.
+
+Both children await combined PR/main qualification and merge. The next bounded session catalog will resolve stable target IDs and generate engine-owned grids; actual host publication, composition, generated SDK preview and live/spectrum/transport/join stages stay required.
