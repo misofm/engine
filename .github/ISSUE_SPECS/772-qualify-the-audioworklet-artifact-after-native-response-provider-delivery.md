@@ -92,3 +92,36 @@ Astra xhigh, 2026-09-13: **APPROVED without workflow changes.** The brief preser
 ## Accepted source freeze
 
 #770 earned Astra medium SOURCE PASS on attempt 2 at `a5db34217ff7f656765121463c7acd8247f65e1b`, with Luna max implementation. That exact source/test checkpoint is upstream and is `PROVIDER_ARTIFACT_SOURCE`. Focused/Clippy/policy/full-contract/conformance/workspace/scalar-SIMD Wasm gates passed. Later evidence commits do not change source attribution. #770 is now a passive source dependency and #772 owns qualification. Candidate discovery has not yet run.
+
+## Attempt 1 discovery checkpoint
+
+The accepted source identity is `a5db34217ff7f656765121463c7acd8247f65e1b`. At discovery time the
+current branch head was `9a1a4a74`, with only the expected docs ancestry after the accepted source;
+the source-to-head identity and status audit is preserved at
+`/tmp/issue772-attempt1-source-identity.log` with exit
+`/tmp/issue772-attempt1-source-identity.exit` (`0`). Tool identities, Rust target details, and
+relevant environment settings are at `/tmp/issue772-attempt1-tool-versions.log` with exit
+`/tmp/issue772-attempt1-tool-versions.exit` (`0`).
+
+The authorized missing prerequisites were installed successfully: SDK npm CI
+(`/tmp/issue772-attempt1-prereq-sdk.log` and `.exit`), qualification npm CI
+(`/tmp/issue772-attempt1-prereq-qualification.log` and `.exit`), and Chromium/Firefox/WebKit
+Playwright installation (`/tmp/issue772-attempt1-prereq-playwright.log` and `.exit`). Fresh empty
+nonsymlink directories were `/tmp/issue772-attempt1-probe` and
+`/tmp/issue772-attempt1-artifact`.
+
+Exactly one official report-mode discovery ran with the accepted source and exited `0`:
+
+```text
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue772-attempt1-probe
+```
+
+Its stdout, stderr and exit are `/tmp/issue772-attempt1-discovery.stdout`,
+`/tmp/issue772-attempt1-discovery.stderr` and `/tmp/issue772-attempt1-discovery.exit`. The stdout
+was exactly one lowercase 64-hex digest plus LF, and the probe remained empty; validation is
+preserved at `/tmp/issue772-attempt1-discovery-validation.log` with exit
+`/tmp/issue772-attempt1-discovery-validation.exit` (`0`). The observed digest
+`68040d1e0089705b18fc43db51a81e36366c9da275178d5993902a708b458bee` differs from the prior pin,
+so the pin file now contains exactly that observed digest plus LF as an **unqualified provisional
+pin**. No ordinary artifact build or qualification gate has run. This tranche stops for the root
+checkpoint before the ordinary build.
