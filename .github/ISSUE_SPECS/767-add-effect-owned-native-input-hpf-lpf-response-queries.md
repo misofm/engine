@@ -245,3 +245,21 @@ exited `0`, and `git diff --check` exited `0`; their authentic streams and statu
 `/tmp/miso-engine-767-attempt2-fmt.{stdout,stderr,exit}` and
 `/tmp/miso-engine-767-attempt2-diff.{stdout,stderr,exit}`. No production arithmetic or DSP files
 changed in this attempt.
+
+# Issue #767 attempt 2 adversarial review
+
+Verdict: **PASS — native source contract and evidence**.
+
+Reviewed frozen source: `dc070bcda506896fe05b4dfefb931841b6d6caa3`, `/tmp/miso-engine-767`. Reviewer: Astra, medium. This is the single coherent attempt-2 verdict. Reviewed the bounded delta against `2aa7c26090439b517d5b909a151c78e58f82598a`, latest #767 evidence, and recorded focused/Clippy/format/diff outcomes. Worktree was clean. No source edits, agents, commits, external actions, or repeated expensive gates were performed.
+
+All prior findings are addressed:
+
+- The refusal table now tests empty, duplicate, NaN, infinity, negative, above-Nyquist and descending grids. Total and both optional section buffers have appropriate shapes except in deliberately malformed-shape cases. All arrays remain at their sentinels, typed errors are asserted, and allocation/free/reallocation counts are zero around each query.
+- The four-rate oracle corpus now configures actual 10 Hz HPF and LPF designs, high ordinary cutoff pairs, and exact-maximum HPF/LPF designs. The existing independent comparisons apply to every total and both section positions for both channels. A separate four-rate boundary test admits exact maxima, rejects each filter's immediate f32 successor, and rejects equal enabled cutoffs, complementing existing inversion coverage.
+- Configuration and unsupported-rate refusals now retain and check both total and section sentinels and measure zero allocations/frees/reallocations. Both one-sided successful queries assert the returned `u64::MAX`, alongside existing `2^53+1` evidence. The safe f32 slice allocation bound correctly explains why the defensive `2*len` overflow arm cannot be reached using a valid slice; no unsafe artificial slice or unnecessary helper was added.
+
+The correction changes tests and issue records only. Production response/designer/validator/kernel code, Cargo dev edge, lockfile, tolerances and original response tests are unchanged. Owner-local coefficient preparation and full validation, requested filter-subtotal semantics, unfloored composition, numerical preflight, independent oracle/PCM evidence, and actual seeded-state/in-flight trim-polarity ramp/twin proof retain the conclusions recorded in the previous review. No new defect was found in this bounded delta.
+
+Directly read the captured evidence: 8 focused tests passed, none failed/ignored; all-target Clippy, formatting and diff-check exited 0. Logs are `/tmp/miso-engine-767-attempt2-{focused,all-clippy,fmt,diff}.{stdout,stderr,exit}`. Prior full builtin tests, builtin/realtime policy and Wasm scalar/SIMD build passes apply to unchanged production as authorized by root; they were not rerun or claimed as current-head executions. Wasm build checks do not prove portable-query runtime parity.
+
+This SOURCE PASS does not establish integrated artifact/CI delivery. Proceed with the separately briefed artifact qualification successor and required delivery gates; synchronize evidence and GitHub status before declaring #767 delivered. Parent #763 remains open and its engine/SDK/live-analysis milestones remain outstanding.
