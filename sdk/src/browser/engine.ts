@@ -23,15 +23,30 @@ import { createTrackResponse } from "./response.ts";
 import type { BrowserTrackResponse } from "./response.ts";
 import { createSpectrum } from "./response.ts";
 import type { BrowserSpectrum } from "./response.ts";
-import type { TrackResponseHostRequest, TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
+import {
+  parseTrackResponseState,
+  sameTrackResponseState,
+} from "../core/live-response.ts";
+import type {
+  TrackResponseHostRequest,
+  TrackResponseObservedState,
+  TrackResponseQuery,
+  TrackResponseRead,
+  TrackResponseResult,
+} from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
 import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumQuery, SpectrumResult } from "../core/spectrum.ts";
-import { ObservationSubscriptionOwner } from "../core/observation-subscriptions.ts";
+import {
+  ObservationSubscriptionOwner,
+} from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
   ObservationSubscriptionLimits,
   ObservationSubscriptionRequest,
+  TrackResponseSubscription,
+  TrackResponseSubscriptionLimits,
+  TrackResponseSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 import {
   decodeObservationRows,
@@ -116,6 +131,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly spectrum?: SpectrumQuery;
   /** Finite SDK-side bounds for resident observation subscriptions. */
   readonly observationSubscriptionLimits?: ObservationSubscriptionLimits;
+  /** Finite SDK-side bounds for managed live track-response subscriptions. */
+  readonly responseSubscriptionLimits?: TrackResponseSubscriptionLimits;
   readonly requestDeadlineMs?: number;
   readonly signal?: AbortSignal;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
@@ -152,6 +169,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
   /** Subscribe to bounded resident observation rows; browser delivery is off-render. */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
+  /** Subscribe to one selected track response; browser delivery is off-render. */
+  subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription>;
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
   /** Arm, capture and analyze one complete 2048-frame spectrum window. */
@@ -478,11 +497,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         console: getConsole,
+        responseRead: readTrackResponse,
         scheduler: {
           setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
           clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
         },
-      }, options.observationSubscriptionLimits);
+      }, options.observationSubscriptionLimits, options.responseSubscriptionLimits);
     const cancelSpectrumCapture = (): Promise<void> => {
       try {
         return Promise.resolve(host.cancelSpectrum?.()).then(() => undefined, () => undefined);
@@ -498,7 +518,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       spectrumCleanup = held;
     };
-    const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
+    const readTrackResponse = async (
+      request: TrackResponseQuery,
+      previousState?: TrackResponseObservedState,
+    ): Promise<TrackResponseRead> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       if (trackResponsePending) throw new MisoUsageError("a live track response query is already in flight");
       trackResponsePending = true;
@@ -516,6 +539,34 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             result: capture.result,
           });
         }
+        let state: TrackResponseObservedState;
+        try {
+          state = parseTrackResponseState(capture.snapshot);
+        } catch (error) {
+          // One-shot queries retain the Worker as the authoritative payload validator. Managed
+          // reads must validate before dispatch because their unchanged path never reaches it.
+          if (previousState !== undefined) throw error;
+          state = Object.freeze({ words: Object.freeze([]) });
+        }
+        const status = async (): Promise<void> => {
+          const current = await host.status();
+          if (current.result !== constantValue("resultCodes", "ok")
+              || current.state !== constantValue("states", "ready")) {
+            const lifecycleResult = current.result !== constantValue("resultCodes", "ok")
+              ? current.result
+              : constantValue("resultCodes", "wrongState");
+            throw new MisoEngineError("the browser host no longer owns a ready live response boundary", {
+              phase: "lifecycle",
+              code: resultName(lifecycleResult, "call"),
+              result: lifecycleResult,
+            });
+          }
+        };
+        if (previousState !== undefined && sameTrackResponseState(previousState, state)) {
+          await status();
+          if (closed) throw new MisoUsageError("the browser engine is closed");
+          return Object.freeze({ changed: false, state });
+        }
         trackResponsePromise ??= createTrackResponse({
           ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
           ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
@@ -532,26 +583,22 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           await client.close();
           throw new MisoUsageError("the browser engine is closed");
         }
-        const status = await host.status();
-        if (status.result !== constantValue("resultCodes", "ok")
-            || status.state !== constantValue("states", "ready")) {
-          const lifecycleResult = status.result !== constantValue("resultCodes", "ok")
-            ? status.result
-            : constantValue("resultCodes", "wrongState");
-          throw new MisoEngineError("the browser host no longer owns a ready live response boundary", {
-            phase: "lifecycle",
-            code: resultName(lifecycleResult, "call"),
-            result: lifecycleResult,
-          });
-        }
+        await status();
         if (closed) {
           await client.close();
           throw new MisoUsageError("the browser engine is closed");
         }
-        return result;
+        return Object.freeze({ changed: true, state, result });
       } finally {
         trackResponsePending = false;
       }
+    };
+    const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
+      const read = await readTrackResponse(request);
+      if (read.result === undefined) throw new MisoEngineError("the live response query returned no result", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+      return read.result;
     };
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -710,6 +757,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       observationMap,
       readObservations,
       subscribeObservations: (request: ObservationSubscriptionRequest) => observationOwner().subscribe(request)
+        .then((receipt) => receipt.handle),
+      subscribeTrackResponse: (request: TrackResponseSubscriptionRequest) => observationOwner().subscribeTrackResponse(request)
         .then((receipt) => receipt.handle),
       queryTrackResponse,
       querySpectrum,

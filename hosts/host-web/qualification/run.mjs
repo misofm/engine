@@ -28,6 +28,7 @@ const MUTATIONS = [
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
+  "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum",
 ];
 
@@ -38,6 +39,25 @@ function option(name) {
 
 function gate(browserName, name, condition, detail) {
   if (!condition) throw new Error(`${browserName}: ${name}: ${detail}`);
+}
+
+const MAX_U64 = 18_446_744_073_709_551_615n;
+
+function canonicalU64(value) {
+  if (typeof value !== "string" || value.length > 20 || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    return undefined;
+  }
+  const parsed = BigInt(value);
+  return parsed <= MAX_U64 ? parsed : undefined;
+}
+
+function validResidentWindow(window) {
+  if (window === null || typeof window !== "object") return false;
+  const firstSample = canonicalU64(window.firstSample);
+  const endSample = canonicalU64(window.endSample);
+  const sequence = canonicalU64(window.sequence);
+  return firstSample !== undefined && endSample !== undefined && sequence !== undefined
+    && endSample > firstSample && window.blocks === 2;
 }
 
 async function sha256(file) {
@@ -246,6 +266,76 @@ function validateSdkResponse(browserName, response) {
     && JSON.stringify(liveMemberOrder) === JSON.stringify(expectedLiveMemberOrder)
     && live.excludedMemberCount === 1,
   "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
+  const managedResponse = observations?.managedResponse;
+  const managedInitial = managedResponse?.initial;
+  const managedAfterRender = managedResponse?.afterRender;
+  const managedUpdated = managedResponse?.updated;
+  const managedLeftOnly = managedResponse?.leftOnly;
+  const managedMemberOrder = managedInitial?.members?.map((member) => [
+    member.nativeId, member.stableId, member.rack, member.kind, member.available, member.bypassed,
+  ]);
+  const expectedManagedMemberOrder = [
+    ["miso.builtin.input-filters", "input-filters", "input", "inputFilters", true, false],
+    ["miso.parametric-eq", "eq-simd1", "simd1", "parametricEq", true, false],
+    ["miso.compressor", "comp", "dynamic", "unavailable", false, false],
+    ["miso.parametric-eq", "eq-simd2", "simd2", "parametricEq", true, true],
+  ];
+  const finiteArray = (values) => Array.isArray(values) && values.length > 0
+    && values.every(Number.isFinite);
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.parityWithOneShot === true
+    && JSON.stringify(managedMemberOrder) === JSON.stringify(expectedManagedMemberOrder)
+    && managedInitial?.points === 5 && finiteArray(managedInitial?.frequencies)
+    && finiteArray(managedInitial?.left) && finiteArray(managedInitial?.right)
+    && managedInitial.frequencies.length === 5
+    && managedInitial.left.length === 5 && managedInitial.right.length === 5
+    && managedInitial.capturedSample === "0"
+    && liveU64(managedInitial.snapshotToken),
+  "managed track-response subscription did not match the one-shot owner membership and values");
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedBeforeRender === true
+    && managedResponse.unchangedNotificationCount === 0
+    && managedResponse.changedPublication === true
+    && managedResponse.callbackCount >= 1
+    && managedResponse.callbackOwner === managedResponse.owner
+    && managedResponse.callbackEpoch === managedResponse.epoch
+    && managedResponse.callbackJob === managedResponse.job
+    && BigInt(managedResponse.callbackRevision) > 1n
+    && managedResponse.callbackMatches === true
+    && managedResponse.automaticDelivery === true
+    && managedAfterRender?.points === 5
+    && finiteArray(managedAfterRender?.left)
+    && finiteArray(managedAfterRender?.right),
+  "managed track-response subscription did not suppress unchanged captures or publish the captured edit");
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.workerInitializations === 1
+    && managedResponse.workerQueries === 4
+    && managedResponse.unchangedPollSuppressed === true
+    && managedResponse.sharedJob === true
+    && managedResponse.arraysIsolated === true
+    && managedResponse.firstCloseKeepsJob === true
+    && managedResponse.invalidUpdateRefused === true
+    && managedResponse.invalidUpdatePreserved === true
+    && managedResponse.gridUpdated === true
+    && managedResponse.independentChannelJob === true
+    && managedResponse.lastCloseStoppedCapture === true
+    && managedResponse.staleReadRefused === true,
+  "managed track-response subscription did not preserve bounded shared-job and close/update semantics");
+  gate(browserName, "sdk-track-response-subscription", managedUpdated?.points === 7
+    && finiteArray(managedUpdated?.frequencies)
+    && finiteArray(managedUpdated?.left) && finiteArray(managedUpdated?.right)
+    && managedUpdated.frequencies.length === 7
+    && managedUpdated.left.length === 7 && managedUpdated.right.length === 7
+    && managedLeftOnly?.points === 7
+    && finiteArray(managedLeftOnly?.left)
+    && managedLeftOnly?.right === undefined
+    && managedLeftOnly.left.length === 7
+    && liveU64(managedResponse.owner) && liveU64(managedResponse.epoch)
+    && liveU64(managedResponse.job) && liveU64(managedResponse.revision)
+    && managedResponse.bounds?.maximumHandles > 0
+    && managedResponse.bounds?.maximumJobs > 0
+    && managedResponse.bounds?.maximumRetainedBytes > 0
+    && managedResponse.bounds?.maximumCaptureAttempts > 0
+    && managedResponse.bounds?.maximumPoints > 0
+    && managedResponse.bounds?.maximumCaptureBytes > 0,
+  "managed track-response subscription did not expose updated grids, channel ownership, or bounds");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
     && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
     && observations.pendingBeforeArm?.every((status) => status === "unarmed")
@@ -275,8 +365,7 @@ function validateSdkResponse(browserName, response) {
     && resident.readyValuesFinite === true
     && resident.ownedReadStable === true
     && Array.isArray(resident.windows) && resident.windows.length === 2
-    && resident.windows.every((window) => window !== null
-      && window.endSample > window.firstSample && window.blocks === 2),
+    && resident.windows.every(validResidentWindow),
   "resident observation subscription did not return stable owned two-effect windows");
   gate(browserName, "sdk-observation-subscription", resident.automaticDelivery === true
     && resident.callbackCount >= 1 && resident.callbackAvailable === true
@@ -347,6 +436,13 @@ function mutate(result, mutation) {
   if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
+  if (mutation === "sdk-observation-window-reversed") {
+    const window = copy.sdkResponse.observations.resident.windows[0];
+    window.endSample = window.firstSample;
+  }
+  if (mutation === "sdk-observation-window-malformed") {
+    copy.sdkResponse.observations.resident.windows[0].endSample = "1024x";
+  }
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
@@ -355,7 +451,7 @@ function mutate(result, mutation) {
 
 function mutationProofs(browserName, result) {
   const mutations = result.sdkResponse === null
-    ? MUTATIONS.filter((mutation) => mutation !== "sdk-response")
+    ? MUTATIONS.filter((mutation) => !mutation.startsWith("sdk-"))
     : MUTATIONS;
   for (const mutation of mutations) {
     assert.throws(
@@ -364,6 +460,20 @@ function mutationProofs(browserName, result) {
       `${browserName}: ${mutation}: red mutation escaped its gate`,
     );
   }
+  if (result.sdkResponse === null) return;
+  const resident = result.sdkResponse.observations?.resident;
+  const original = resident?.windows?.[0];
+  if (original === undefined) return;
+  const widthCrossing = structuredClone(result);
+  widthCrossing.sdkResponse.observations.resident.windows[0] = {
+    ...original,
+    firstSample: "768",
+    endSample: "1024",
+  };
+  assert.doesNotThrow(
+    () => validate(browserName, widthCrossing),
+    `${browserName}: sdk-observation-window-width: valid decimal-width-crossing span was refused`,
+  );
 }
 
 // Issue #280: the served artifact set is *exact*, and both halves of that are proved here.

@@ -12,7 +12,12 @@ import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 import { TrackResponseModule } from "./live-response.ts";
-import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
+import type {
+  TrackResponseObservedState,
+  TrackResponseQuery,
+  TrackResponseRead,
+  TrackResponseResult,
+} from "./live-response.ts";
 import {
   SpectrumModule,
   cloneSpectrumQuery,
@@ -574,6 +579,15 @@ export class WasmBoundary {
   queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
     this.#trackResponse ??= new TrackResponseModule(this.#exports);
     return this.#trackResponse.queryActive(request, this.#live());
+  }
+
+  /** Internal managed read: capture state first and evaluate only after a semantic change. */
+  queryTrackResponseIfChanged(
+    request: TrackResponseQuery,
+    previousState?: TrackResponseObservedState,
+  ): TrackResponseRead {
+    this.#trackResponse ??= new TrackResponseModule(this.#exports);
+    return this.#trackResponse.queryActiveIfChanged(request, this.#live(), previousState);
   }
 
   /** Arm the one prepared spectrum boundary for its next complete window. */
