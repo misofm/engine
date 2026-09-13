@@ -33,13 +33,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
-    PreparedEffectMetadata, PreparedNativeEffect, SeamSide, TailSamples,
+    PreparedEffectMetadata, PreparedNativeEffect, ResponseAnalysisError, ResponseSnapshotRequest,
+    ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::{
     QuantumFrames,
     realtime::{
         BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
         PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
+        ResponseSnapshotError, ResponseSnapshotSink,
     },
 };
 use lane::Backend;
@@ -800,6 +802,15 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// Copy one bank member's retained response words without advancing render state.
+    fn copy_response_snapshot_lane(
+        &self,
+        _lane: usize,
+        _sample_rate_hz: u32,
+        _request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
     /// Cumulative `[process_calls, frames_processed]` after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
@@ -1675,6 +1686,15 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// may read the block it is given.
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
 
+    /// Copy this scalar owner's retained response words without advancing render state.
+    fn copy_response_snapshot(
+        &self,
+        _sample_rate_hz: u32,
+        _request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        Err(ResponseAnalysisError::UnsupportedCapability)
+    }
+
     /// This bound processor's channel-symmetry witness for the track it renders.
     ///
     /// The scalar-tail sibling of `GraphPreparedBuiltinBankProcessor::lane_symmetry`, defaulted to
@@ -1771,6 +1791,7 @@ pub struct PreparedTrackDelay {
 struct GraphExecutor {
     runtime: runtime::Runtime,
     output: u32,
+    sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
     source_input_buffers: Box<[(usize, u32)]>,
@@ -1783,6 +1804,7 @@ struct GraphExecutor {
 struct GraphExecutorWithoutSplitPairTable {
     runtime: runtime::RuntimeWithoutSplitPairTable,
     output: u32,
+    sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
 }
@@ -1808,6 +1830,7 @@ impl GraphExecutor {
         planning: runtime::SequentialPlan,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
+        let sample_rate_hz = plan.envelope.sample_rate.0;
         let source_inputs: BTreeSet<_> = source_set
             .as_ref()
             .map(|set| {
@@ -1854,6 +1877,7 @@ impl GraphExecutor {
         Self {
             runtime,
             output,
+            sample_rate_hz,
             source_set,
             source_input_buffers,
         }
@@ -1874,6 +1898,16 @@ impl PreparedPlanExecutor for GraphExecutor {
         })
     }
 
+    fn copy_response_snapshot(
+        &self,
+        track_id: &str,
+        _captured_sample: u64,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<u32, ResponseSnapshotError> {
+        self.runtime
+            .copy_response_snapshot(track_id, self.sample_rate_hz, sink)
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
@@ -1885,6 +1919,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         let Self {
             runtime,
             output: output_buffer,
+            sample_rate_hz: _,
             source_set,
             source_input_buffers,
         } = self;

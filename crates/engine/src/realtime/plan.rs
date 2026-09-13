@@ -6,6 +6,89 @@ use super::{BufferArena, BufferArenaError, PlanarBufferMut, PlanarBufferRef};
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{cell::Cell, num::NonZeroUsize};
 
+/// Why an exclusive live-response capture was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseSnapshotError {
+    /// The active runtime has no owner that can provide the requested snapshot.
+    Unsupported,
+    /// The requested stable track is absent from the active plan.
+    MissingTrack,
+    /// Caller-owned snapshot storage cannot hold the selected owners or sections.
+    Capacity,
+    /// The owner or sink rejected a section shape or other immutable capture detail.
+    InvalidShape,
+    /// A retained owner returned a typed failure while its words were being copied.
+    Owner,
+}
+
+/// Stable metadata for one owner emitted into a response snapshot sink.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSnapshotOwnerInfo<'a> {
+    /// The selected track's stable graph identity.
+    pub track_id: &'a str,
+    /// The owner's stable slot/effect identity.
+    pub stable_id: &'a str,
+    /// Native rack/stage identity, with zero reserved for the input filter owner.
+    pub rack: u8,
+    /// Signal-chain order among the selected track's response-capable owners.
+    pub slot: u32,
+    /// Owner-specific response kind.
+    pub kind: u32,
+    /// Bypass state at the same boundary as the copied words.
+    pub bypassed: bool,
+}
+
+/// One bounded section in an opaque response snapshot copy.
+///
+/// The engine owns this fixed-size record so an executor can hand borrowed sections to a caller
+/// sink without exposing graph or effect-contract types. `word_count` is validated before the
+/// record crosses the seam; unused words remain zero for deterministic caller storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSnapshotSection {
+    /// Stable section identifier within the owner.
+    pub id: u32,
+    /// Owner-specific response kind.
+    pub kind: u32,
+    /// Whether this section is currently enabled.
+    pub enabled: bool,
+    /// Number of meaningful words in `words`.
+    pub word_count: u8,
+    /// Fixed bounded payload copied from the prepared owner.
+    pub words: [u32; 7],
+}
+
+/// Caller-owned destination for an exclusive response snapshot.
+///
+/// The engine knows only this bounded callback surface. A host implements the sink with its own
+/// preallocated section/identity buffers; graph and effect crates remain below the engine crate.
+pub trait ResponseSnapshotSink {
+    /// Copy one owner in actual graph order. The slices borrow fixed records owned by the
+    /// prepared executor and are valid only for the duration of this callback.
+    fn copy_owner(
+        &mut self,
+        owner: ResponseSnapshotOwnerInfo<'_>,
+        left: &[ResponseSnapshotSection],
+        right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError>;
+}
+
+/// Caller-owned request passed to the exclusive prepared-plan owner.
+pub struct ResponseSnapshotRequest<'a> {
+    /// Stable graph track identity to select.
+    pub track_id: &'a str,
+    /// Bounded destination that receives the immutable owner copy.
+    pub sink: &'a mut dyn ResponseSnapshotSink,
+}
+
+/// Boundary metadata for one completed response capture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSnapshotCapture {
+    /// The active plan's actual next sample at capture.
+    pub captured_sample: u64,
+    /// Number of response-capable owners copied in graph order.
+    pub owners: u32,
+}
+
 /// Exact rate, quantum, and external I/O shape accepted by a plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderEnvelope {
@@ -179,6 +262,17 @@ pub trait PreparedPlanExecutor: Send {
     /// Apply an admitted source seek without rendering or advancing any sample clock.
     fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
         false
+    }
+    /// Copy one selected track's retained response owners at an already-established block
+    /// boundary. The executor receives only the engine-owned sink surface, so this crate does not
+    /// depend on graph or effect types.
+    fn copy_response_snapshot(
+        &self,
+        _track_id: &str,
+        _captured_sample: u64,
+        _sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<u32, ResponseSnapshotError> {
+        Err(ResponseSnapshotError::Unsupported)
     }
     /// Render one already-validated block using only preallocated state.
     fn render(
@@ -436,6 +530,7 @@ pub struct PreparedRenderPlan {
     arena: BufferArena,
     rendered_blocks: u64,
     next_absolute_sample: u64,
+    response_snapshot_valid: bool,
     executor: Option<Box<dyn PreparedPlanExecutor>>,
     _not_sync: Cell<()>,
     #[cfg(test)]
@@ -469,6 +564,7 @@ impl PreparedRenderPlan {
             arena: BufferArena::try_new(request.scratch)?,
             rendered_blocks: 0,
             next_absolute_sample: 0,
+            response_snapshot_valid: true,
             executor: None,
             _not_sync: Cell::new(()),
             #[cfg(test)]
@@ -562,6 +658,30 @@ impl PreparedRenderPlan {
         self.executor
             .as_mut()
             .is_some_and(|executor| executor.prepare_source_seek(source_index, generation, frame))
+    }
+
+    /// Copy one selected track's retained response owners at the current exclusive boundary.
+    ///
+    /// The call neither drains queued controls nor advances render state. It is valid before the
+    /// first render at sample zero and after a successful render; a failed render poisons this
+    /// boundary until a later successful block establishes a new one.
+    pub fn copy_response_snapshot(
+        &mut self,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotCapture, ResponseSnapshotError> {
+        if !self.response_snapshot_valid {
+            return Err(ResponseSnapshotError::Owner);
+        }
+        let captured_sample = self.next_absolute_sample;
+        let Some(executor) = self.executor.as_deref() else {
+            return Err(ResponseSnapshotError::Unsupported);
+        };
+        let owners =
+            executor.copy_response_snapshot(request.track_id, captured_sample, request.sink)?;
+        Ok(ResponseSnapshotCapture {
+            captured_sample,
+            owners,
+        })
     }
 
     /// The plan's internal executor, for the block-boundary hand-over in `plan_exchange`.
@@ -769,6 +889,7 @@ impl PreparedRenderPlan {
         mut io: RenderIo<'_>,
         time: RenderTime,
     ) -> Result<RenderReport, RenderError> {
+        self.response_snapshot_valid = false;
         let envelope = self.program.envelope;
         let frames = envelope.quantum.0 as usize;
         if io.output.frames() != frames || io.output.channels() != envelope.output_channels.get() {
@@ -795,6 +916,7 @@ impl PreparedRenderPlan {
         }
         self.rendered_blocks = self.rendered_blocks.saturating_add(1);
         self.next_absolute_sample = next;
+        self.response_snapshot_valid = true;
         Ok(RenderReport {
             plan_id: self.program.plan_id,
             next_absolute_sample: next,

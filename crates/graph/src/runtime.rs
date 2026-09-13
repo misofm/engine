@@ -38,7 +38,10 @@ use std::collections::BTreeMap;
 
 use core::num::NonZeroUsize;
 
-use engine::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
+use engine::realtime::{
+    ArenaLease, ArenaLeaseSetBuilder, RenderError, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+};
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
@@ -182,7 +185,9 @@ fn test_only_record_selected_split_fader(node: GraphNodeId, buffer: u32) {
 }
 use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
-    ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
+    ObservationSample, PreparedAutomationSpan, PreparedNativeEffect, ResponseAnalysisError,
+    ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest,
+    ResponseSnapshotSection as OwnerSnapshotSection, ResponseSnapshotSummary,
 };
 use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
@@ -657,6 +662,188 @@ pub(crate) enum RuntimeUnitWithoutSplitPairSlot {
     },
 }
 
+fn response_snapshot_error(error: ResponseAnalysisError) -> ResponseSnapshotError {
+    match error {
+        ResponseAnalysisError::UnsupportedMode | ResponseAnalysisError::UnsupportedCapability => {
+            ResponseSnapshotError::Unsupported
+        }
+        ResponseAnalysisError::Capacity | ResponseAnalysisError::ResourceLimit => {
+            ResponseSnapshotError::Capacity
+        }
+        ResponseAnalysisError::InvalidFrequencyGrid | ResponseAnalysisError::OutputShape => {
+            ResponseSnapshotError::InvalidShape
+        }
+        ResponseAnalysisError::Configuration(_) | ResponseAnalysisError::Numerical => {
+            ResponseSnapshotError::Owner
+        }
+    }
+}
+
+const fn empty_response_snapshot_section() -> ResponseSnapshotSection {
+    ResponseSnapshotSection {
+        id: 0,
+        kind: 0,
+        enabled: false,
+        word_count: 0,
+        words: [0; 7],
+    }
+}
+
+fn response_snapshot_kind_code(kind: ResponseSnapshotKind) -> u32 {
+    match kind {
+        ResponseSnapshotKind::ParametricEq => 1,
+        ResponseSnapshotKind::BuiltinInputFilters => 2,
+    }
+}
+
+fn emit_response_snapshot_owner(
+    binding: &ResponseOwnerBinding,
+    sample_rate_hz: u32,
+    summary: ResponseSnapshotSummary,
+    left: &[OwnerSnapshotSection; 4],
+    right: &[OwnerSnapshotSection; 4],
+    sink: &mut dyn ResponseSnapshotSink,
+) -> Result<(), ResponseSnapshotError> {
+    if summary.sample_rate_hz != sample_rate_hz {
+        return Err(ResponseSnapshotError::Owner);
+    }
+    let sections =
+        usize::try_from(summary.sections).map_err(|_| ResponseSnapshotError::Capacity)?;
+    if sections == 0 || sections > left.len() || sections > right.len() {
+        return Err(ResponseSnapshotError::InvalidShape);
+    }
+    let mut copied_left = [empty_response_snapshot_section(); 4];
+    let mut copied_right = [empty_response_snapshot_section(); 4];
+    for index in 0..sections {
+        let source_left = left[index];
+        let source_right = right[index];
+        if usize::from(source_left.word_count) > source_left.words.len()
+            || usize::from(source_right.word_count) > source_right.words.len()
+        {
+            return Err(ResponseSnapshotError::InvalidShape);
+        }
+        copied_left[index] = ResponseSnapshotSection {
+            id: source_left.id,
+            kind: source_left.kind,
+            enabled: source_left.enabled,
+            word_count: source_left.word_count,
+            words: source_left.words,
+        };
+        copied_right[index] = ResponseSnapshotSection {
+            id: source_right.id,
+            kind: source_right.kind,
+            enabled: source_right.enabled,
+            word_count: source_right.word_count,
+            words: source_right.words,
+        };
+    }
+    sink.copy_owner(
+        ResponseSnapshotOwnerInfo {
+            track_id: &binding.track_id,
+            stable_id: &binding.stable_id,
+            rack: binding.rack,
+            slot: binding.slot,
+            kind: response_snapshot_kind_code(summary.kind),
+            bypassed: summary.bypassed,
+        },
+        &copied_left[..sections],
+        &copied_right[..sections],
+    )
+}
+
+fn copy_scalar_response_snapshot(
+    op: &RuntimeOp,
+    binding: &ResponseOwnerBinding,
+    sample_rate_hz: u32,
+    sink: &mut dyn ResponseSnapshotSink,
+) -> Result<(), ResponseSnapshotError> {
+    let mut left = [OwnerSnapshotSection {
+        id: 0,
+        kind: 0,
+        enabled: false,
+        word_count: 0,
+        words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+    }; 4];
+    let mut right = left;
+    let summary = match &op.kind {
+        NodeKind::Bound(processor) => processor
+            .copy_response_snapshot(
+                sample_rate_hz,
+                OwnerSnapshotRequest {
+                    bypassed: false,
+                    left: &mut left,
+                    right: &mut right,
+                },
+            )
+            .map_err(response_snapshot_error)?,
+        NodeKind::Effect(effect) => effect
+            .processor
+            .copy_response_snapshot(OwnerSnapshotRequest {
+                bypassed: effect.metadata.bypass,
+                left: &mut left,
+                right: &mut right,
+            })
+            .map_err(response_snapshot_error)?,
+        NodeKind::ConsoleEffect(console) => console
+            .effect
+            .processor
+            .copy_response_snapshot(OwnerSnapshotRequest {
+                bypassed: console.control.bypassed(),
+                left: &mut left,
+                right: &mut right,
+            })
+            .map_err(response_snapshot_error)?,
+        _ => return Err(ResponseSnapshotError::Unsupported),
+    };
+    emit_response_snapshot_owner(binding, sample_rate_hz, summary, &left, &right, sink)
+}
+
+impl RuntimeUnit {
+    fn copy_response_snapshot(
+        &self,
+        binding: &ResponseOwnerBinding,
+        sample_rate_hz: u32,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<(), ResponseSnapshotError> {
+        match self {
+            Self::Op(op) => copy_scalar_response_snapshot(op, binding, sample_rate_hz, sink),
+            Self::Bank {
+                members,
+                lanes,
+                chain,
+                ..
+            } => {
+                if *lanes == 0 || binding.member >= members.len() {
+                    return Err(ResponseSnapshotError::Owner);
+                }
+                let slot = binding.member / *lanes;
+                let lane = binding.member % *lanes;
+                let mut left = [OwnerSnapshotSection {
+                    id: 0,
+                    kind: 0,
+                    enabled: false,
+                    word_count: 0,
+                    words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+                }; 4];
+                let mut right = left;
+                let summary = chain
+                    .copy_response_snapshot_lane(
+                        slot,
+                        lane,
+                        sample_rate_hz,
+                        OwnerSnapshotRequest {
+                            bypassed: false,
+                            left: &mut left,
+                            right: &mut right,
+                        },
+                    )
+                    .map_err(response_snapshot_error)?;
+                emit_response_snapshot_owner(binding, sample_rate_hz, summary, &left, &right, sink)
+            }
+        }
+    }
+}
+
 pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
     (
         u64::try_from(
@@ -1037,6 +1224,20 @@ pub(crate) struct UnitIdentity {
     pub(crate) lane_tracks: Box<[Box<str>]>,
 }
 
+/// The compact bind-time relation from a declared response owner to its runtime unit and lane.
+///
+/// The owner list is built by walking the lowered program in declared signal order. Runtime unit
+/// execution may hoist bank members, but this table retains the caller-visible order and only
+/// stores the indices needed to reach the already-owned processor.
+pub(crate) struct ResponseOwnerBinding {
+    track_id: Box<str>,
+    stable_id: Box<str>,
+    rack: u8,
+    slot: u32,
+    unit: usize,
+    member: usize,
+}
+
 /// Which side of the fader/matrix seam one graph node's stage sits on.
 ///
 /// The seam is `effect_contract::SeamSide`'s: the 2x2 matrix is the earliest
@@ -1089,6 +1290,7 @@ pub(crate) struct Runtime {
     split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
     pub(crate) identity: Box<[UnitIdentity]>,
+    response_bindings: Box<[ResponseOwnerBinding]>,
     /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
@@ -1141,6 +1343,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     track_delays: Box<[TrackDelayLine]>,
     units: Box<[RuntimeUnit]>,
     identity: Box<[UnitIdentity]>,
+    response_bindings: Box<[ResponseOwnerBinding]>,
     bank_inputs: Box<[u32]>,
     bank_outputs: Box<[u32]>,
     redirects: u64,
@@ -1239,6 +1442,7 @@ impl Runtime {
         units: Vec<RuntimeUnit>,
         split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
         identity: Vec<UnitIdentity>,
+        response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
         folds: u64,
     ) -> Self {
@@ -1274,11 +1478,42 @@ impl Runtime {
             units: units.into_boxed_slice(),
             split_pairs: split_pairs.into_boxed_slice(),
             identity: identity.into_boxed_slice(),
+            response_bindings: response_bindings.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
             redirects,
             folds,
         }
+    }
+
+    /// Copy the selected track's response-capable owners in the declared program order. This is
+    /// a boundary-only walk: it borrows prepared state, never touches the audio lease, and leaves
+    /// all caller-owned storage behind the opaque engine sink.
+    pub(crate) fn copy_response_snapshot(
+        &self,
+        track_id: &str,
+        sample_rate_hz: u32,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<u32, ResponseSnapshotError> {
+        let mut owners = 0_u32;
+        for binding in self
+            .response_bindings
+            .iter()
+            .filter(|binding| binding.track_id.as_ref() == track_id)
+        {
+            let unit = self
+                .units
+                .get(binding.unit)
+                .ok_or(ResponseSnapshotError::Owner)?;
+            unit.copy_response_snapshot(binding, sample_rate_hz, sink)?;
+            owners = owners
+                .checked_add(1)
+                .ok_or(ResponseSnapshotError::Capacity)?;
+        }
+        if owners == 0 {
+            return Err(ResponseSnapshotError::MissingTrack);
+        }
+        Ok(owners)
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1810,6 +2045,15 @@ impl BankStage for BuiltinStage {
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.0
             .process(block.left, block.right, block.frames, block.first_sample)
+    }
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        sample_rate_hz: u32,
+        request: OwnerSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.0
+            .copy_response_snapshot_lane(lane, sample_rate_hz, request)
     }
     // REALTIME_POLICY_END
     /// The drain, forwarded. `BankChain::run` calls this on every slot before it reads the
@@ -3116,6 +3360,7 @@ pub(crate) fn build_sequential(
         &units,
         &mut identity,
     );
+    let response_bindings = response_owner_bindings(program, spec, &op_slot, &units, &retired);
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -3134,9 +3379,64 @@ pub(crate) fn build_sequential(
         units,
         split_pairs,
         identity,
+        response_bindings,
         redirects.len() as u64,
         folds,
     )
+}
+
+fn response_owner_bindings(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    op_slot: &[Option<(usize, usize)>],
+    units: &[RuntimeUnit],
+    retired: &std::collections::BTreeSet<usize>,
+) -> Vec<ResponseOwnerBinding> {
+    let mut next_slot = BTreeMap::<String, u32>::new();
+    program
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(op_index, op)| {
+            if retired.contains(&op_index) {
+                return None;
+            }
+            let node = &spec.nodes[op.node as usize].id;
+            let (track_id, stable_id, rack) = match node {
+                GraphNodeId::TrackStage {
+                    track_id,
+                    stage: TrackStage::PostInputBuiltins,
+                } => (track_id.as_str(), "input-filters", 0),
+                GraphNodeId::Effect(effect) => (
+                    effect.track_id.as_str(),
+                    effect.effect_id.as_str(),
+                    effect.rack as u8,
+                ),
+                _ => return None,
+            };
+            let (unit, member) = op_slot.get(op_index).copied().flatten()?;
+            let runtime_member = match units.get(unit)? {
+                RuntimeUnit::Op(_) => 0,
+                RuntimeUnit::Bank { lanes, members, .. } => {
+                    if *lanes == 0 || member >= members.len() {
+                        return None;
+                    }
+                    member
+                }
+            };
+            let slot = next_slot.entry(track_id.to_owned()).or_default();
+            let signal_slot = *slot;
+            *slot = slot.saturating_add(1);
+            Some(ResponseOwnerBinding {
+                track_id: Box::from(track_id),
+                stable_id: Box::from(stable_id),
+                rack,
+                slot: signal_slot,
+                unit,
+                member: runtime_member,
+            })
+        })
+        .collect()
 }
 
 /// The admission walk uses emitted adjacency: a retired run owns no execution boundary.
@@ -4359,6 +4659,119 @@ mod tests {
     };
 
     #[test]
+    fn runtime_response_capture_uses_declared_owner_mapping_and_opaque_sink() {
+        struct Owner;
+        impl GraphRuntimeProcessor for Owner {
+            fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+
+            fn copy_response_snapshot(
+                &self,
+                sample_rate_hz: u32,
+                request: OwnerSnapshotRequest<'_>,
+            ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+                assert!(!request.bypassed);
+                assert_eq!(request.left.len(), 4);
+                assert_eq!(request.right.len(), 4);
+                request.left[0] = OwnerSnapshotSection {
+                    id: 9,
+                    kind: 3,
+                    enabled: true,
+                    word_count: 1,
+                    words: [0x1234_5678; effect_contract::RESPONSE_SNAPSHOT_WORDS],
+                };
+                request.right[0] = request.left[0];
+                Ok(ResponseSnapshotSummary {
+                    kind: ResponseSnapshotKind::ParametricEq,
+                    sample_rate_hz,
+                    bypassed: false,
+                    sections: 1,
+                })
+            }
+        }
+
+        struct Sink {
+            calls: usize,
+            owner: Option<(String, String, u8, u32, u32)>,
+            word: u32,
+        }
+        impl ResponseSnapshotSink for Sink {
+            fn copy_owner(
+                &mut self,
+                owner: ResponseSnapshotOwnerInfo<'_>,
+                left: &[ResponseSnapshotSection],
+                right: &[ResponseSnapshotSection],
+            ) -> Result<(), ResponseSnapshotError> {
+                assert_eq!(left, right);
+                assert_eq!(left.len(), 1);
+                self.calls += 1;
+                self.owner = Some((
+                    owner.track_id.to_owned(),
+                    owner.stable_id.to_owned(),
+                    owner.rack,
+                    owner.slot,
+                    owner.kind,
+                ));
+                self.word = left[0].words[0];
+                Ok(())
+            }
+        }
+
+        let runtime = Runtime::new(
+            stereo_lease(1, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![RuntimeUnit::Op(RuntimeOp {
+                inputs: Box::new([]),
+                staged: Box::new([]),
+                sidechain: None,
+                output: ARENA_BASE,
+                kind: NodeKind::Bound(Box::new(Owner)),
+                split_pair: None,
+                observers: Box::new([]),
+            })],
+            Vec::new(),
+            vec![UnitIdentity {
+                banked: false,
+                resident_input: false,
+                stages: 1,
+                upstream_of_seam_stages: 1,
+                lane_tracks: Box::new([Box::from("track")]),
+            }],
+            vec![ResponseOwnerBinding {
+                track_id: Box::from("track"),
+                stable_id: Box::from("eq"),
+                rack: 2,
+                slot: 4,
+                unit: 0,
+                member: 0,
+            }],
+            0,
+            0,
+        );
+        let mut sink = Sink {
+            calls: 0,
+            owner: None,
+            word: 0,
+        };
+        assert_eq!(
+            runtime.copy_response_snapshot("track", 48_000, &mut sink),
+            Ok(1)
+        );
+        assert_eq!(sink.calls, 1);
+        assert_eq!(sink.word, 0x1234_5678);
+        assert_eq!(
+            sink.owner,
+            Some(("track".to_owned(), "eq".to_owned(), 2, 4, 1))
+        );
+        assert_eq!(
+            runtime.copy_response_snapshot("missing", 48_000, &mut sink),
+            Err(ResponseSnapshotError::MissingTrack)
+        );
+    }
+
+    #[test]
     fn resident_meter_dispatch_preserves_binding_order_lazy_fallback_and_accepted_errors() {
         struct Observer {
             handle: u64,
@@ -4997,6 +5410,7 @@ mod tests {
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
             }],
+            Vec::new(),
             0,
             0,
         );

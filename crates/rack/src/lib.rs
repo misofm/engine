@@ -390,6 +390,16 @@ impl<'a> BankPlaneViews<'a> {
 /// validated once at prepare - so `Err` is the stage's own render failure.
 pub trait BankStage: Send {
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError>;
+    /// Copy one prepared lane's response sections without advancing render state.
+    fn copy_response_snapshot_lane(
+        &self,
+        _lane: usize,
+        _sample_rate_hz: u32,
+        _request: effect_contract::ResponseSnapshotRequest<'_>,
+    ) -> Result<effect_contract::ResponseSnapshotSummary, effect_contract::ResponseAnalysisError>
+    {
+        Err(effect_contract::ResponseAnalysisError::UnsupportedCapability)
+    }
     /// Cumulative `[process_calls, kernel_calls]`, read only after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
@@ -592,6 +602,24 @@ impl EffectBankStage {
 }
 
 impl BankStage for EffectBankStage {
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        _sample_rate_hz: u32,
+        request: effect_contract::ResponseSnapshotRequest<'_>,
+    ) -> Result<effect_contract::ResponseSnapshotSummary, effect_contract::ResponseAnalysisError>
+    {
+        let effect_contract::ResponseSnapshotRequest { left, right, .. } = request;
+        self.processor.copy_response_snapshot_lane(
+            lane,
+            effect_contract::ResponseSnapshotRequest {
+                bypassed: self.processor.metadata().program_key.bypass,
+                left,
+                right,
+            },
+        )
+    }
+
     /// A console-free bank has no live channel at all, so the two live terms cannot be false and
     /// the whole witness is the effect's own designed-word comparison.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
@@ -895,6 +923,29 @@ const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
 };
 
 impl BankStage for ConsoleEffectBankStage {
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        _sample_rate_hz: u32,
+        request: effect_contract::ResponseSnapshotRequest<'_>,
+    ) -> Result<effect_contract::ResponseSnapshotSummary, effect_contract::ResponseAnalysisError>
+    {
+        let effect_contract::ResponseSnapshotRequest { left, right, .. } = request;
+        let bypassed = self
+            .lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .is_some_and(EffectControlLane::bypassed);
+        self.processor.copy_response_snapshot_lane(
+            lane,
+            effect_contract::ResponseSnapshotRequest {
+                bypassed,
+                left,
+                right,
+            },
+        )
+    }
+
     /// The designed-word comparison, conjoined with the lane's own live terms.
     ///
     /// The live half comes from [`EffectControlLane::symmetry`], which the drain in
@@ -2017,6 +2068,30 @@ impl BankChain {
         first_sample: u64,
     ) -> Result<(), RenderError> {
         self.run_with_input(members, frames, first_sample, Some(predecessor))
+    }
+
+    /// Copy one prepared lane's response sections without touching resident audio or render
+    /// state. The graph supplies the chain slot and lane from its immutable op mapping.
+    pub fn copy_response_snapshot_lane(
+        &self,
+        slot: usize,
+        lane: usize,
+        sample_rate_hz: u32,
+        request: effect_contract::ResponseSnapshotRequest<'_>,
+    ) -> Result<effect_contract::ResponseSnapshotSummary, effect_contract::ResponseAnalysisError>
+    {
+        if !self.active.get(lane).copied().unwrap_or(false) {
+            return Err(effect_contract::ResponseAnalysisError::UnsupportedCapability);
+        }
+        let Some(prepared) = self.slots.get(slot) else {
+            return Err(effect_contract::ResponseAnalysisError::UnsupportedCapability);
+        };
+        if !prepared.lane_active(lane) {
+            return Err(effect_contract::ResponseAnalysisError::UnsupportedCapability);
+        }
+        prepared
+            .stage
+            .copy_response_snapshot_lane(lane, sample_rate_hz, request)
     }
 
     fn run_with_input<M: BankMembers + ?Sized>(

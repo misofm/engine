@@ -23,7 +23,8 @@ use builtins::{
     MeterTap, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
+    BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, ResponseAnalysisError,
+    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent,
 };
 use engine::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -459,6 +460,16 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
         Ok(())
+    }
+
+    fn copy_response_snapshot_lane(
+        &self,
+        lane: usize,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.bank
+            .copy_response_snapshot_lane(lane, sample_rate_hz, request)
     }
 
     fn qualification_counters(&self) -> [u64; 2] {
@@ -3730,6 +3741,13 @@ impl GraphRuntimeProcessor for InputProcessor {
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         self.0.channel_symmetry()
     }
+    fn copy_response_snapshot(
+        &self,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.0.copy_response_snapshot(sample_rate_hz, request)
+    }
 }
 struct FaderProcessor(FaderMuteBuiltins);
 impl GraphRuntimeProcessor for FaderProcessor {
@@ -3808,6 +3826,13 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
     }
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         self.input.channel_symmetry().and(self.live)
+    }
+    fn copy_response_snapshot(
+        &self,
+        sample_rate_hz: u32,
+        request: ResponseSnapshotRequest<'_>,
+    ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
+        self.input.copy_response_snapshot(sample_rate_hz, request)
     }
 }
 
