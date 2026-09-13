@@ -317,11 +317,21 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
     spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
   }, undefined, undefined, {});
   const subscription = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 })).handle;
-  const losses = [];
-  for (let index = 0; index < 6; index += 1) {
-    losses.push((await subscription.pump())?.nativeMissedWindows);
-  }
-  assert.deepEqual(losses, [1n, 0n, 0n, undefined, 0n, 1n]);
+  const first = await subscription.pump();
+  assert.equal(first.nativeMissedWindows, 1n);
+  const historical = await subscription.pump();
+  assert.equal(historical.nativeMissedWindows, 0n);
+  const job = subscription.job;
+  const revision = subscription.revision;
+  const updated = await subscription.update({ ...prepared, cadenceMs: 101 });
+  assert.equal(updated.job, job);
+  assert.equal(updated.revision, revision);
+  assert.equal(updated.configuration.cadenceMs, 101);
+  const recovery = await subscription.pump();
+  assert.equal(recovery.nativeMissedWindows, 0n);
+  assert.equal(await subscription.pump(), undefined);
+  assert.equal((await subscription.pump()).nativeMissedWindows, 0n);
+  assert.equal((await subscription.pump()).nativeMissedWindows, 1n);
   await subscription.close();
 });
 

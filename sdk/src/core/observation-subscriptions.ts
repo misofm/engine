@@ -1213,8 +1213,10 @@ export class ObservationSubscriptionOwner {
       state.configuration = normalized.configuration;
       state.callback = normalized.callback;
       state.cursor = state.job.publicationSequence;
-      state.nativeMissedEpoch = state.job.metadata.captureEpoch;
-      state.nativeMissedSeen = state.job.metadata.droppedCaptures;
+      if (state.job !== current) {
+        state.nativeMissedEpoch = state.job.metadata.captureEpoch;
+        state.nativeMissedSeen = state.job.metadata.droppedCaptures;
+      }
       state.nextDeliveryAt = 0;
       this.#restartTimer();
       return this.#spectrumReceipt(state);
