@@ -200,6 +200,20 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_seek \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr \
+  miso_engine_web_v1_spectrum_analysis \
+  miso_engine_web_v1_spectrum_arm \
+  miso_engine_web_v1_spectrum_cancel \
+  miso_engine_web_v1_spectrum_capture_bytes \
+  miso_engine_web_v1_spectrum_capture_capacity \
+  miso_engine_web_v1_spectrum_capture_ptr \
+  miso_engine_web_v1_spectrum_capture_set_bytes \
+  miso_engine_web_v1_spectrum_close \
+  miso_engine_web_v1_spectrum_request_bytes \
+  miso_engine_web_v1_spectrum_request_ptr \
+  miso_engine_web_v1_spectrum_result_bytes \
+  miso_engine_web_v1_spectrum_result_ptr \
+  miso_engine_web_v1_spectrum_target_id_capacity \
+  miso_engine_web_v1_spectrum_target_id_ptr \
   miso_engine_web_v1_track_response_analysis \
   miso_engine_web_v1_track_response_capture \
   miso_engine_web_v1_track_response_close \

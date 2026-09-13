@@ -82,6 +82,20 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_spectrum_analysis",
+    "miso_engine_web_v1_spectrum_arm",
+    "miso_engine_web_v1_spectrum_cancel",
+    "miso_engine_web_v1_spectrum_capture_bytes",
+    "miso_engine_web_v1_spectrum_capture_capacity",
+    "miso_engine_web_v1_spectrum_capture_ptr",
+    "miso_engine_web_v1_spectrum_capture_set_bytes",
+    "miso_engine_web_v1_spectrum_close",
+    "miso_engine_web_v1_spectrum_request_bytes",
+    "miso_engine_web_v1_spectrum_request_ptr",
+    "miso_engine_web_v1_spectrum_result_bytes",
+    "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_target_id_capacity",
+    "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
     "miso_engine_web_v1_track_response_analysis",
     "miso_engine_web_v1_track_response_capture",
@@ -947,6 +961,216 @@ export const ABI_LAYOUT = deepFreeze(
         }
       ]
     },
+    "spectrumRequest": {
+      "bytes": 40,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "target",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "targetIdBytes",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "maximumCaptureBytes",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 32,
+          "type": "u32[2]"
+        }
+      ]
+    },
+    "spectrumWindow": {
+      "bytes": 64,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "target",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "sampleRateHz",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "frames",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "sourceUnderrun",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "capturedSample",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "endSample",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "snapshotToken",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "leftOffset",
+          "offset": 56,
+          "type": "u32"
+        },
+        {
+          "name": "rightOffset",
+          "offset": 60,
+          "type": "u32"
+        }
+      ]
+    },
+    "spectrumResult": {
+      "bytes": 88,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "result",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "target",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "sampleRateHz",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "windowFrames",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "binCount",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "sourceUnderrun",
+          "offset": 32,
+          "type": "u32"
+        },
+        {
+          "name": "floorDb",
+          "offset": 36,
+          "type": "f32"
+        },
+        {
+          "name": "capturedSample",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "endSample",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "snapshotToken",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "resultBytes",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "frequenciesOffset",
+          "offset": 72,
+          "type": "u32"
+        },
+        {
+          "name": "leftOffset",
+          "offset": 76,
+          "type": "u32"
+        },
+        {
+          "name": "rightOffset",
+          "offset": 80,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 84,
+          "type": "u32"
+        }
+      ]
+    },
     "liveResponseOwner": {
       "bytes": 64,
       "fields": [
@@ -1530,6 +1754,34 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "eqFilterSubtotal"
       }
     ],
+    "spectrumTargets": [
+      {
+        "value": 1,
+        "name": "trackPostInputBuiltins"
+      },
+      {
+        "value": 2,
+        "name": "trackPostMatrix"
+      },
+      {
+        "value": 3,
+        "name": "output"
+      }
+    ],
+    "spectrumChannels": [
+      {
+        "value": 1,
+        "name": "left"
+      },
+      {
+        "value": 2,
+        "name": "right"
+      },
+      {
+        "value": 3,
+        "name": "both"
+      }
+    ],
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "diagnosticBytes": 16384,
@@ -1543,6 +1795,13 @@ export const ABI_LAYOUT = deepFreeze(
     "maximumLiveResponseIdBytes": 127,
     "maximumLiveResponsePoints": 4096,
     "liveResponseCaptureBytes": 1048576,
+    "spectrumCaptureBytes": 1048576,
+    "spectrumRequestBytes": 40,
+    "spectrumWindowHeaderBytes": 64,
+    "spectrumResultHeaderBytes": 88,
+    "spectrumWindowFrames": 2048,
+    "spectrumBinCount": 1025,
+    "maximumSpectrumIdBytes": 127,
     "defaultMaximumMemoryBytes": 536870912,
     "sourceRing": {
       "stallToleranceMs": 100,

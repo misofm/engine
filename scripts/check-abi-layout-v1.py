@@ -86,6 +86,8 @@ RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
 RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 RESPONSE_FIELDS = [(1, "total"), (2, "sections")]
+SPECTRUM_TARGETS = [(1, "trackPostInputBuiltins"), (2, "trackPostMatrix"), (3, "output")]
+SPECTRUM_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 
 STAGING_SEQUENCE = [
     "miso_engine_web_v1_abi_version",
@@ -149,6 +151,20 @@ EXPORTS = [
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_spectrum_analysis",
+    "miso_engine_web_v1_spectrum_arm",
+    "miso_engine_web_v1_spectrum_cancel",
+    "miso_engine_web_v1_spectrum_capture_bytes",
+    "miso_engine_web_v1_spectrum_capture_capacity",
+    "miso_engine_web_v1_spectrum_capture_ptr",
+    "miso_engine_web_v1_spectrum_capture_set_bytes",
+    "miso_engine_web_v1_spectrum_close",
+    "miso_engine_web_v1_spectrum_request_bytes",
+    "miso_engine_web_v1_spectrum_request_ptr",
+    "miso_engine_web_v1_spectrum_result_bytes",
+    "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_target_id_capacity",
+    "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_track_response_analysis",
     "miso_engine_web_v1_track_response_capture",
     "miso_engine_web_v1_track_response_close",
@@ -178,6 +194,9 @@ STRUCTURES = {
     "responseRequest": 128,
     "responseParameter": 16,
     "responseResult": 112,
+    "spectrumRequest": 40,
+    "spectrumWindow": 64,
+    "spectrumResult": 88,
     "liveResponseRequest": 48,
     "liveResponseOwner": 64,
     "liveResponseSection": 44,
@@ -230,6 +249,21 @@ LIVE_RESPONSE_RESULT_FIELDS = [
     "excludedCount", "sampleRateHz", "reserved0", "reserved1", "capturedSample", "snapshotToken",
     "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset", "ownersOffset",
     "ownerRecordBytes", "sectionRecordBytes", "reserved",
+]
+SPECTRUM_REQUEST_FIELDS = [
+    "structSize", "abiVersion", "target", "channels", "targetIdBytes", "reserved0",
+    "maximumCaptureBytes", "reserved",
+]
+SPECTRUM_WINDOW_FIELDS = [
+    "structSize", "abiVersion", "target", "channels", "sampleRateHz", "frames",
+    "sourceUnderrun", "reserved0", "capturedSample", "endSample", "snapshotToken",
+    "leftOffset", "rightOffset",
+]
+SPECTRUM_RESULT_FIELDS = [
+    "structSize", "abiVersion", "result", "target", "channels", "sampleRateHz",
+    "windowFrames", "binCount", "sourceUnderrun", "floorDb", "capturedSample", "endSample",
+    "snapshotToken", "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset",
+    "reserved0",
 ]
 OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
@@ -360,6 +394,9 @@ def validate(document: object) -> None:
         ("responseRequest", RESPONSE_REQUEST_FIELDS),
         ("responseParameter", RESPONSE_PARAMETER_FIELDS),
         ("responseResult", RESPONSE_RESULT_FIELDS),
+        ("spectrumRequest", SPECTRUM_REQUEST_FIELDS),
+        ("spectrumWindow", SPECTRUM_WINDOW_FIELDS),
+        ("spectrumResult", SPECTRUM_RESULT_FIELDS),
         ("liveResponseRequest", LIVE_RESPONSE_REQUEST_FIELDS),
         ("liveResponseOwner", LIVE_RESPONSE_OWNER_FIELDS),
         ("liveResponseSection", LIVE_RESPONSE_SECTION_FIELDS),
@@ -385,7 +422,9 @@ def validate(document: object) -> None:
         "responseGrids", "responseChannels", "responseFields", "observationChannels",
         "observationStatuses", "liveResponseModes", "liveResponseMeanings",
         "maximumLiveResponseOwners", "maximumLiveResponseIdBytes", "maximumLiveResponsePoints",
-        "liveResponseCaptureBytes",
+        "liveResponseCaptureBytes", "spectrumTargets", "spectrumChannels", "spectrumCaptureBytes",
+        "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
+        "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -399,6 +438,8 @@ def validate(document: object) -> None:
     check_named(document, "responseGrids", RESPONSE_GRIDS)
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
     check_named(document, "responseFields", RESPONSE_FIELDS)
+    check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
+    check_named(document, "spectrumChannels", SPECTRUM_CHANNELS)
     check_named(document, "liveResponseModes", [(1, "target")])
     check_named(document, "liveResponseMeanings", [(1, "eqFilterSubtotal")])
     check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
@@ -431,6 +472,13 @@ def validate(document: object) -> None:
         ("maximumLiveResponseIdBytes", 127),
         ("maximumLiveResponsePoints", 4096),
         ("liveResponseCaptureBytes", 1 << 20),
+        ("spectrumCaptureBytes", 1 << 20),
+        ("spectrumRequestBytes", 40),
+        ("spectrumWindowHeaderBytes", 64),
+        ("spectrumResultHeaderBytes", 88),
+        ("spectrumWindowFrames", 2048),
+        ("spectrumBinCount", 1025),
+        ("maximumSpectrumIdBytes", 127),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):
         require(constants[name] == expected,

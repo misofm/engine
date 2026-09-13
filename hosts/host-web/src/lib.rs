@@ -34,9 +34,14 @@ use host_core::{
     HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics,
     PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, compile_host_model,
     compiled_session_shape, control_table_bytes, parse_host_session,
+    prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
-use host_core::{ResponseSnapshotError, ResponseSnapshotSink};
+use host_core::{
+    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCapture, SpectrumCaptureError,
+    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
+    SpectrumWindow,
+};
 use session::CompileCaps;
 
 pub use host_core::EffectRack;
@@ -172,6 +177,114 @@ pub const LIVE_RESPONSE_CAPTURE_BYTES: usize = 1 << 20;
 pub const LIVE_RESPONSE_MODE_TARGET: u32 = 1;
 /// Live response result meaning (`eqFilterSubtotal`).
 pub const LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL: u32 = 1;
+
+/// Spectrum capture target immediately after the selected track's input builtins.
+pub const SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS: u32 = 1;
+/// Spectrum capture target immediately after the selected track's matrix stage.
+pub const SPECTRUM_TARGET_TRACK_POST_MATRIX: u32 = 2;
+/// Spectrum capture target at the designated final output node.
+pub const SPECTRUM_TARGET_OUTPUT: u32 = 3;
+/// Capture the left plane.
+pub const SPECTRUM_CHANNEL_LEFT: u32 = 1;
+/// Capture the right plane.
+pub const SPECTRUM_CHANNEL_RIGHT: u32 = 2;
+/// Capture both planes.
+pub const SPECTRUM_CHANNEL_BOTH: u32 = SPECTRUM_CHANNEL_LEFT | SPECTRUM_CHANNEL_RIGHT;
+/// Maximum stable target identity accepted by the browser bridge.
+pub const SPECTRUM_MAXIMUM_ID_BYTES: usize = LIVE_RESPONSE_MAXIMUM_ID_BYTES;
+/// Maximum one-shot raw spectrum payload retained by the browser bridge.
+pub const SPECTRUM_CAPTURE_BYTES: usize = 1 << 20;
+/// Fixed 2048-sample raw capture header.
+pub const SPECTRUM_WINDOW_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
+/// Fixed analyzed spectrum result header.
+pub const SPECTRUM_RESULT_BYTES: u32 = size_of::<WebSpectrumResult>() as u32;
+/// Fixed one-shot spectrum output bin count.
+pub const SPECTRUM_BIN_COUNT: u32 = host_core::SPECTRUM_BIN_COUNT as u32;
+/// Fixed one-shot spectrum window length.
+pub const SPECTRUM_WINDOW_FRAMES: u32 = host_core::SPECTRUM_WINDOW_FRAMES as u32;
+/// Maximum bytes of a serialized one-shot capture.
+pub const SPECTRUM_MAXIMUM_RESULT_BYTES: u32 =
+    SPECTRUM_WINDOW_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32 * 2;
+
+/// Preparation request staged before boot when the caller wants one spectrum boundary.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumRequest {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub target: u32,
+    pub channels: u32,
+    pub target_id_bytes: u32,
+    pub reserved0: u32,
+    pub maximum_capture_bytes: u64,
+    pub reserved: [u32; 2],
+}
+
+/// Raw one-shot 2048-frame spectrum window header.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumWindow {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub target: u32,
+    pub channels: u32,
+    pub sample_rate_hz: u32,
+    pub frames: u32,
+    pub source_underrun: u32,
+    pub reserved0: u32,
+    pub captured_sample: u64,
+    pub end_sample: u64,
+    pub snapshot_token: u64,
+    pub left_offset: u32,
+    pub right_offset: u32,
+}
+
+/// Analyzed one-shot spectrum header followed by owned `f32` vectors.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub target: u32,
+    pub channels: u32,
+    pub sample_rate_hz: u32,
+    pub window_frames: u32,
+    pub bin_count: u32,
+    pub source_underrun: u32,
+    pub floor_db: f32,
+    pub captured_sample: u64,
+    pub end_sample: u64,
+    pub snapshot_token: u64,
+    pub result_bytes: u64,
+    pub frequencies_offset: u32,
+    pub left_offset: u32,
+    pub right_offset: u32,
+    pub reserved0: u32,
+}
+
+/// Byte sizes of the fixed spectrum ABI records.
+#[allow(missing_docs)]
+pub const SPECTRUM_REQUEST_BYTES: u32 = size_of::<WebSpectrumRequest>() as u32;
+#[allow(missing_docs)]
+pub const SPECTRUM_WINDOW_HEADER_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
+#[allow(missing_docs)]
+pub const SPECTRUM_RESULT_HEADER_BYTES: u32 = size_of::<WebSpectrumResult>() as u32;
+
+fn spectrum_target_raw(target: &SpectrumTarget) -> u32 {
+    match target {
+        SpectrumTarget::TrackPostInputBuiltins(_) => SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS,
+        SpectrumTarget::TrackPostMatrix(_) => SPECTRUM_TARGET_TRACK_POST_MATRIX,
+        SpectrumTarget::Output(_) => SPECTRUM_TARGET_OUTPUT,
+    }
+}
+
+fn spectrum_channels_raw(channels: SpectrumChannels) -> u32 {
+    channels as u32
+}
 
 /// Fixed request header for a live selected-track response query.
 #[allow(missing_docs)]
@@ -1031,6 +1144,11 @@ struct ReadyOwnership {
     /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
     /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
     rack_effects: Box<[[u32; 3]]>,
+    /// The optional one-shot spectrum observer's control-side consumer. It is declared before the
+    /// prepared host so the consumer is released before the plan's producer on teardown.
+    spectrum_capture: Option<SpectrumCapture>,
+    /// Channel mask selected when that observer was prepared.
+    spectrum_channels: u32,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
     /// when `console_meter_blocks` was zero, in which case no observer exists at all.
@@ -1317,6 +1435,8 @@ pub struct AudioWorkletEngineHost {
     meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
+    /// Host-scoped monotonic token for completed spectrum windows.
+    spectrum_token: u64,
     diagnostic_len: usize,
 }
 
@@ -1326,6 +1446,18 @@ impl AudioWorkletEngineHost {
     /// The document is interpreted once. Every refusal is typed and nothing is published until
     /// both the shared runtime and all bridge staging buffers exist.
     pub fn boot(document: &[u8], options: WebBootOptions) -> Result<Self, BootFailure> {
+        Self::boot_with_spectrum(document, options, None)
+    }
+
+    /// Prepare one optional graph spectrum observer alongside the existing console/meter plan.
+    ///
+    /// The request is supplied before boot because observer bindings are part of the immutable
+    /// prepared graph. A replacement/reboot creates a fresh request and a fresh capture owner.
+    pub(crate) fn boot_with_spectrum(
+        document: &[u8],
+        options: WebBootOptions,
+        spectrum_request: Option<SpectrumCaptureRequest>,
+    ) -> Result<Self, BootFailure> {
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
         })?;
@@ -1413,7 +1545,13 @@ impl AudioWorkletEngineHost {
             ));
         }
         let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
-        let (ready, resources) = compile_ready(session, &caps, options, projection.report)?;
+        let (ready, resources) = compile_ready(
+            session,
+            &caps,
+            options,
+            projection.report,
+            spectrum_request.as_ref(),
+        )?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
             return Err(BootFailure::exact_budget(
@@ -1445,6 +1583,7 @@ impl AudioWorkletEngineHost {
             meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
+            spectrum_token: 0,
             diagnostic_len: 0,
         })
     }
@@ -1580,6 +1719,82 @@ impl AudioWorkletEngineHost {
             return Err(ResponseSnapshotError::Owner);
         };
         ready.host.copy_response_snapshot(track_id, sink)
+    }
+
+    /// Arm the prepared one-shot spectrum observer for its next complete window.
+    pub fn arm_spectrum(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Some(capture) = ready.spectrum_capture.as_ref() else {
+            return RESULT_UNSUPPORTED;
+        };
+        match capture.arm() {
+            Ok(()) => RESULT_OK,
+            Err(SpectrumCaptureError::Busy) => RESULT_BACKPRESSURE,
+        }
+    }
+
+    /// Read the completed spectrum window, if the observer has finished its fixed capture.
+    pub fn read_spectrum(&mut self) -> Result<Option<(SpectrumWindow, u64)>, u32> {
+        if self.status.state != STATE_READY {
+            return Err(RESULT_WRONG_STATE);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(RESULT_WRONG_STATE);
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return Err(RESULT_UNSUPPORTED);
+        };
+        match capture.try_read() {
+            Ok(window) => {
+                let Some(token) = self.spectrum_token.checked_add(1) else {
+                    return Err(RESULT_REFUSED_BUDGET);
+                };
+                self.spectrum_token = token;
+                Ok(Some((window, token)))
+            }
+            Err(SpectrumCaptureReadError::Pending) => Ok(None),
+            Err(SpectrumCaptureReadError::NotArmed) => Err(RESULT_WRONG_STATE),
+            Err(SpectrumCaptureReadError::Invalid) => Err(RESULT_RENDER_REJECTED),
+        }
+    }
+
+    /// Cancel a pending spectrum capture and discard any completed window.
+    pub fn cancel_spectrum(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return RESULT_UNSUPPORTED;
+        };
+        capture.cancel();
+        RESULT_OK
+    }
+
+    /// The target kind configured for this prepared host, or zero when no spectrum observer exists.
+    #[must_use]
+    pub fn spectrum_target(&self) -> u32 {
+        self.ready
+            .as_ref()
+            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .map(|capture| spectrum_target_raw(capture.target()))
+            .unwrap_or(0)
+    }
+
+    /// The channel mask configured for this prepared host, or zero when no observer exists.
+    #[must_use]
+    pub fn spectrum_channels(&self) -> u32 {
+        self.ready
+            .as_ref()
+            .map(|ready| ready.spectrum_channels)
+            .unwrap_or(0)
     }
 
     /// Read one bounded batch of selected resident observation taps.
@@ -3598,6 +3813,7 @@ fn project_buffers(
         .checked_add(plane_reference_bytes)
         .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .and_then(|bytes| bytes.checked_add(crate::ffi::live_response_staging_retained_bytes()))
+        .and_then(|bytes| bytes.checked_add(crate::ffi::spectrum_staging_retained_bytes()))
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3624,7 +3840,8 @@ fn project_buffers(
         .max(host_shell_bytes)
         .max(plane_reference_bytes)
         .max(crate::ffi::observation_staging_largest_allocation_bytes())
-        .max(crate::ffi::live_response_staging_largest_allocation_bytes());
+        .max(crate::ffi::live_response_staging_largest_allocation_bytes())
+        .max(crate::ffi::spectrum_staging_largest_allocation_bytes());
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;
@@ -3837,6 +4054,7 @@ fn compile_ready(
     caps: &HostPrepareCaps,
     options: WebBootOptions,
     mut report: WebResourceReport,
+    spectrum_request: Option<&SpectrumCaptureRequest>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
@@ -3854,10 +4072,21 @@ fn compile_ready(
     } else {
         Vec::new()
     };
-    let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-        &session, caps, &console, &meters,
-    )
-    .map_err(BootFailure::preparation)?;
+    let (host, handles, spectrum_capture) = match spectrum_request {
+        Some(request) => {
+            let (host, handles, capture) =
+                prepare_host_runtime_with_console_and_spectrum(&session, caps, &console, request)
+                    .map_err(BootFailure::preparation)?;
+            (host, handles, Some(capture))
+        }
+        None => {
+            let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+                &session, caps, &console, &meters,
+            )
+            .map_err(BootFailure::preparation)?;
+            (host, handles, None)
+        }
+    };
     let engine = host.report;
 
     let control_table = control_table_bytes(engine.source_count as usize)
@@ -4116,6 +4345,9 @@ fn compile_ready(
         has_in_flight_commands: false,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
+        spectrum_channels: spectrum_request
+            .map_or(0, |request| spectrum_channels_raw(request.channels)),
+        spectrum_capture,
         host,
         meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(track_count)?,
