@@ -30,7 +30,15 @@ export type {
   TrackResponseSubscriptionNotification,
   TrackResponseSubscriptionReceipt,
   TrackResponseSubscriptionRequest,
+  SpectrumSubscription,
+  SpectrumSubscriptionBounds,
+  SpectrumSubscriptionConfiguration,
+  SpectrumSubscriptionLimits,
+  SpectrumSubscriptionNotification,
+  SpectrumSubscriptionReceipt,
+  SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
+export { DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS } from "../core/observation-subscriptions.ts";
 export type {
   TrackResponseGrid,
   TrackResponseLimits,
@@ -39,6 +47,12 @@ export type {
   TrackResponseResult,
 } from "../core/live-response.ts";
 export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "../core/spectrum.ts";
+export type {
+  SpectrumStreamMetadata,
+  SpectrumStreamRead,
+  SpectrumStreamStart,
+  SpectrumStreamStatus,
+} from "../core/spectrum.ts";
 
 export { scratchBootWithWorker, prepareBrowserSessionWithWorker } from "./scratch.ts";
 export type { ScratchWorker, ScratchWorkerFactory, ScratchBootWorkerOptions, PreparedBrowserSession } from "./scratch.ts";

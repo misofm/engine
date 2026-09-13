@@ -21,6 +21,16 @@ import type {
   TrackResponseRead,
   TrackResponseResult,
 } from "./live-response.ts";
+import { cloneSpectrumQuery } from "./spectrum.ts";
+import type {
+  SpectrumQuery,
+  SpectrumResult,
+  SpectrumStreamMetadata,
+  SpectrumStreamRead,
+  SpectrumStreamStart,
+  SpectrumStreamStatus,
+} from "./spectrum.ts";
+import type { EngineCallResult } from "./boundary.ts";
 
 /** The bounded configuration accepted by `subscribeObservations`. */
 export interface ObservationSubscriptionLimits {
@@ -117,6 +127,10 @@ export interface ObservationSubscriptionTransport {
     request: TrackResponseQuery,
     previousState?: TrackResponseObservedState,
   ) => MaybePromise<TrackResponseRead>;
+  /** Optional managed spectrum stream owned by this same engine lifetime. */
+  readonly spectrumStart?: (smoothingMs: number) => MaybePromise<SpectrumStreamStart>;
+  readonly spectrumRead?: () => MaybePromise<SpectrumStreamRead>;
+  readonly spectrumStop?: () => MaybePromise<EngineCallResult | void>;
   readonly scheduler?: ObservationSubscriptionScheduler;
 }
 
@@ -372,20 +386,60 @@ class ObservationSubscriptionImpl implements ObservationSubscription {
   }
 }
 
+class SpectrumSubscriptionImpl implements SpectrumSubscription {
+  readonly #owner: ObservationSubscriptionOwner;
+  readonly #state: SpectrumHandleState;
+
+  constructor(owner: ObservationSubscriptionOwner, state: SpectrumHandleState) {
+    this.#owner = owner;
+    this.#state = state;
+  }
+
+  get id(): bigint { return this.#state.id; }
+  get handle(): SpectrumSubscription { return this; }
+  get owner(): bigint { return this.#state.owner; }
+  get epoch(): bigint { return this.#state.epoch; }
+  get job(): bigint { return this.#state.job.id; }
+  get revision(): bigint { return this.#state.job.revision; }
+  get configuration(): SpectrumSubscriptionConfiguration { return this.#state.configuration; }
+  get bounds(): SpectrumSubscriptionBounds { return this.#owner.spectrumBounds; }
+
+  readLatest(): SpectrumResult | undefined {
+    return this.#owner.readLatestSpectrum(this.#state);
+  }
+
+  pump(): Promise<SpectrumSubscriptionNotification | undefined> {
+    return this.#owner.pumpSpectrum(this.#state);
+  }
+
+  update(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscriptionReceipt> {
+    return this.#owner.updateSpectrum(this.#state, request);
+  }
+
+  close(): Promise<void> {
+    return this.#owner.closeSpectrum(this.#state);
+  }
+}
+
 /** One engine-local owner shared by all resident-observation handles. */
 export class ObservationSubscriptionOwner {
   readonly #transport: ObservationSubscriptionTransport;
   readonly #subscriptionLimits: EffectiveLimits;
   readonly #responseSubscriptionLimits: ResponseSubscriptionEffectiveLimits | undefined;
+  readonly #spectrumSubscriptionLimits: SpectrumSubscriptionEffectiveLimits | undefined;
   readonly #owner = nextOwner++;
   #epoch = 1n;
   #nextHandle = 1n;
   #nextResponseHandle = 1n;
   #nextResponseJob = 1n;
+  #nextSpectrumHandle = 1n;
+  #nextSpectrumJob = 1n;
   #handles = new Map<bigint, HandleState>();
   #bindings = new Map<string, BindingState>();
   #responseHandles = new Map<bigint, ResponseHandleState>();
   #responseJobs = new Map<string, ResponseJobState>();
+  #spectrumHandles = new Map<bigint, SpectrumHandleState>();
+  #spectrumJob: SpectrumJobState | undefined;
   #mutation: Promise<void> = Promise.resolve();
   #polling: Promise<void> | undefined;
   #mutationBusy = false;
@@ -397,12 +451,17 @@ export class ObservationSubscriptionOwner {
     transport: ObservationSubscriptionTransport,
     subscriptionLimits?: ObservationSubscriptionLimits,
     responseSubscriptionLimits?: TrackResponseSubscriptionLimits,
+    spectrumSubscriptionLimits?: SpectrumSubscriptionLimits,
   ) {
     this.#transport = transport;
     this.#subscriptionLimits = canonicalLimits(subscriptionLimits);
     this.#responseSubscriptionLimits = transport.responseRead === undefined
       ? undefined
       : canonicalResponseSubscriptionLimits(responseSubscriptionLimits);
+    this.#spectrumSubscriptionLimits = transport.spectrumStart === undefined
+      || transport.spectrumRead === undefined || transport.spectrumStop === undefined
+      ? undefined
+      : canonicalSpectrumSubscriptionLimits(spectrumSubscriptionLimits);
   }
 
   get bounds(): ObservationSubscriptionBounds {
@@ -422,6 +481,20 @@ export class ObservationSubscriptionOwner {
       ...subscriptionLimits,
       maximumPoints: ABI_LAYOUT.constants.maximumLiveResponsePoints,
       maximumCaptureBytes: ABI_LAYOUT.constants.liveResponseCaptureBytes,
+    });
+  }
+
+  get spectrumBounds(): SpectrumSubscriptionBounds {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      throw new MisoUsageError("managed spectrum subscriptions are not configured on this owner");
+    }
+    const hopFrames = this.#spectrumJob?.metadata.hopFrames ?? 0;
+    return Object.freeze({
+      ...subscriptionLimits,
+      maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+      maximumResultBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+      hopFrames,
     });
   }
 
@@ -633,10 +706,17 @@ export class ObservationSubscriptionOwner {
     this.#epoch += 1n;
     for (const state of this.#handles.values()) state.closed = true;
     for (const state of this.#responseHandles.values()) state.closed = true;
+    for (const state of this.#spectrumHandles.values()) state.closed = true;
+    if (this.#spectrumJob !== undefined && this.#spectrumJob.refs > 0) {
+      const stop = this.#transport.spectrumStop?.();
+      if (stop !== undefined) void Promise.resolve(stop).catch(() => undefined);
+    }
     this.#handles.clear();
     this.#bindings.clear();
     this.#responseHandles.clear();
     this.#responseJobs.clear();
+    this.#spectrumHandles.clear();
+    this.#spectrumJob = undefined;
     this.#stopTimer();
     if (disposed) this.#disposed = true;
   }
@@ -789,6 +869,7 @@ export class ObservationSubscriptionOwner {
     const epoch = this.#epoch;
     const work = this.#refresh(epoch)
       .then(() => this.#refreshResponseJobs(epoch))
+      .then(() => this.#refreshSpectrumJobs(epoch))
       .then(() => { this.#assertEpoch(epoch); });
     const settled = work.finally(() => {
       if (this.#polling === settled) this.#polling = undefined;
@@ -850,11 +931,14 @@ export class ObservationSubscriptionOwner {
 
   #startTimer(): void {
     const scheduler = this.#transport.scheduler;
-    if (scheduler === undefined || (this.#handles.size === 0 && this.#responseHandles.size === 0)) return;
-    const cadence = Math.min(
+    if (scheduler === undefined || (this.#handles.size === 0 && this.#responseHandles.size === 0
+      && this.#spectrumHandles.size === 0)) return;
+    const cadences = [
       ...[...this.#handles.values()].map((state) => state.configuration.cadenceMs),
       ...[...this.#responseHandles.values()].map((state) => state.configuration.cadenceMs),
-    );
+      ...(this.#spectrumJob === undefined ? [] : [this.#spectrumJob.captureCadenceMs]),
+    ];
+    const cadence = Math.max(1, Math.round(Math.min(...cadences)));
     if (this.#timer !== undefined && this.#timerCadence === cadence) return;
     this.#stopTimer();
     this.#timerCadence = cadence;
@@ -864,6 +948,7 @@ export class ObservationSubscriptionOwner {
         .then(() => {
           this.#notify([...this.#handles.values()], true);
           for (const state of this.#responseHandles.values()) this.#notifyResponse(state, true);
+          for (const state of this.#spectrumHandles.values()) this.#notifySpectrum(state, true);
         })
         .catch(() => undefined);
     }, cadence);
@@ -872,7 +957,7 @@ export class ObservationSubscriptionOwner {
   #restartTimer(): void { this.#startTimer(); }
 
   #stopTimerIfIdle(): void {
-    if (this.#handles.size === 0 && this.#responseHandles.size === 0) this.#stopTimer();
+    if (this.#handles.size === 0 && this.#responseHandles.size === 0 && this.#spectrumHandles.size === 0) this.#stopTimer();
     else this.#startTimer();
   }
 
@@ -1011,6 +1096,329 @@ export class ObservationSubscriptionOwner {
     });
     state.closing = retryable;
     return retryable;
+  }
+
+  /** Subscribe to the one prepared managed spectrum stream. */
+  subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscriptionReceipt> {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      return Promise.reject(new MisoUsageError("managed spectrum subscriptions are not configured on this owner"));
+    }
+    const normalized = normalizedSpectrumSubscription(request, subscriptionLimits);
+    return this.#enqueue(async () => {
+      this.#assertOpen();
+      const epoch = this.#epoch;
+      if (this.#spectrumHandles.size >= subscriptionLimits.maximumHandles) {
+        throw new MisoUsageError(`spectrum subscriptions are capped at ${subscriptionLimits.maximumHandles}`);
+      }
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      const job = await this.#ensureSpectrumJob(normalized.configuration, epoch);
+      this.#assertEpoch(epoch);
+      this.#assertSpectrumDeliveryBudget(job, normalized.configuration.cadenceMs);
+      job.refs += 1;
+      const state = this.#newSpectrumHandle(normalized.configuration, normalized.callback, job);
+      this.#spectrumHandles.set(state.id, state);
+      this.#startTimer();
+      return this.#spectrumReceipt(state);
+    });
+  }
+
+  updateSpectrum(
+    state: SpectrumHandleState,
+    request: SpectrumSubscriptionRequest,
+  ): Promise<SpectrumSubscriptionReceipt> {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits;
+    if (subscriptionLimits === undefined) {
+      return Promise.reject(new MisoUsageError("managed spectrum subscriptions are not configured on this owner"));
+    }
+    const normalized = normalizedSpectrumSubscription(request, subscriptionLimits);
+    return this.#enqueue(async () => {
+      this.#assertSpectrumHandle(state);
+      const epoch = this.#epoch;
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      const current = state.job;
+      const desiredKey = spectrumJobKey(normalized.configuration);
+      if (desiredKey !== current.key && current.refs > 1) {
+        throw new MisoUsageError("spectrum smoothing conflicts with a shared managed subscriber");
+      }
+      if (desiredKey !== current.key) {
+        const stop = await this.#transport.spectrumStop!();
+        this.#assertSpectrumStop(stop);
+        this.#assertEpoch(epoch);
+        this.#spectrumJob = undefined;
+        current.refs = 0;
+        const replacement = await this.#ensureSpectrumJob(normalized.configuration, epoch);
+        this.#assertEpoch(epoch);
+        this.#assertSpectrumDeliveryBudget(replacement, normalized.configuration.cadenceMs, state);
+        replacement.refs = 1;
+        state.job = replacement;
+      } else {
+        this.#assertSpectrumDeliveryBudget(current, normalized.configuration.cadenceMs, state);
+      }
+      state.configuration = normalized.configuration;
+      state.callback = normalized.callback;
+      state.cursor = state.job.publicationSequence;
+      state.nativeMissedSeen = state.job.metadata.droppedCaptures;
+      state.nextDeliveryAt = 0;
+      this.#restartTimer();
+      return this.#spectrumReceipt(state);
+    });
+  }
+
+  pumpSpectrum(state: SpectrumHandleState): Promise<SpectrumSubscriptionNotification | undefined> {
+    return this.#enqueue(async () => {
+      this.#assertSpectrumHandle(state);
+      const epoch = this.#epoch;
+      await this.#waitForPoll();
+      this.#assertEpoch(epoch);
+      if (this.#spectrumJob === state.job) state.job.nextCaptureAt = 0;
+      await this.#poll();
+      this.#assertEpoch(epoch);
+      return this.#notifySpectrum(state, false);
+    });
+  }
+
+  closeSpectrum(state: SpectrumHandleState): Promise<void> {
+    if (state.closing !== undefined) return state.closing;
+    const pending = this.#enqueue(async () => {
+      if (state.closed) return;
+      this.#assertSpectrumHandle(state);
+      const job = state.job;
+      if (job.refs === 1) {
+        const stop = await this.#transport.spectrumStop!();
+        this.#assertSpectrumStop(stop);
+        this.#assertEpoch(state.epoch);
+      }
+      state.closed = true;
+      this.#spectrumHandles.delete(state.id);
+      job.refs -= 1;
+      if (job.refs === 0 && this.#spectrumJob === job) this.#spectrumJob = undefined;
+      this.#stopTimerIfIdle();
+    });
+    const retryable = pending.catch((error: unknown) => {
+      if (state.closing === retryable) state.closing = undefined;
+      throw error;
+    });
+    state.closing = retryable;
+    return retryable;
+  }
+
+  readLatestSpectrum(state: SpectrumHandleState): SpectrumResult | undefined {
+    this.#assertSpectrumHandle(state);
+    return copySpectrumResult(state.job.result);
+  }
+
+  #newSpectrumHandle(
+    configuration: SpectrumSubscriptionConfiguration,
+    callback: ((notification: SpectrumSubscriptionNotification) => void) | undefined,
+    job: SpectrumJobState,
+  ): SpectrumHandleState {
+    const state: SpectrumHandleState = {
+      id: this.#nextSpectrumHandle++, owner: this.#owner, epoch: this.#epoch,
+      job, configuration, callback, cursor: job.publicationSequence,
+      nativeMissedSeen: job.metadata.droppedCaptures,
+      nextDeliveryAt: 0, closed: false, closing: undefined, publicHandle: undefined,
+    };
+    state.publicHandle = new SpectrumSubscriptionImpl(this, state);
+    return state;
+  }
+
+  #spectrumReceipt(state: SpectrumHandleState): SpectrumSubscriptionReceipt {
+    return Object.freeze({
+      handle: state.publicHandle!, owner: state.owner, epoch: state.epoch, job: state.job.id,
+      revision: state.job.revision, configuration: state.configuration, bounds: this.spectrumBounds,
+    });
+  }
+
+  async #ensureSpectrumJob(
+    configuration: SpectrumSubscriptionConfiguration,
+    epoch: bigint,
+  ): Promise<SpectrumJobState> {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits!;
+    const spectrumStart = this.#transport.spectrumStart;
+    if (spectrumStart === undefined || this.#transport.spectrumRead === undefined
+        || this.#transport.spectrumStop === undefined) {
+      throw new MisoUsageError("managed spectrum subscriptions are not configured on this owner");
+    }
+    const key = spectrumJobKey(configuration);
+    const existing = this.#spectrumJob;
+    if (existing !== undefined) {
+      if (existing.key !== key) {
+        throw new MisoUsageError("the prepared spectrum stream has a conflicting configuration");
+      }
+      return existing;
+    }
+    const started = await spectrumStart(configuration.smoothingMs);
+    this.#assertEpoch(epoch);
+    if (!started.ok) {
+      throw new MisoEngineError("the engine refused the spectrum stream start", {
+        phase: started.code === "wrongState" ? "lifecycle" : "output",
+        code: started.code as never,
+        result: started.result,
+      });
+    }
+    const metadata = started.metadata;
+    if (metadata.status !== "warming" && metadata.status !== "pending") {
+      throw new MisoEngineError("the spectrum stream returned an invalid start state", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+    }
+    if (metadata.target !== undefined && spectrumTargetKey(metadata.target) !== spectrumTargetKey(configuration.target)) {
+      throw new MisoEngineError("the spectrum stream target differs from the prepared target", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+    }
+    if (metadata.channels !== undefined && metadata.channels !== configuration.channels) {
+      throw new MisoUsageError("the spectrum stream channels were not prepared");
+    }
+    const captureCadenceMs = metadata.sampleRateHz > 0 && metadata.hopFrames > 0
+      ? metadata.hopFrames * 1000 / metadata.sampleRateHz : 0;
+    if (!Number.isFinite(captureCadenceMs) || captureCadenceMs <= 0) {
+      throw new MisoEngineError("the spectrum stream returned an invalid cadence", {
+        phase: "output", code: "abiMismatch", result: 2,
+      });
+    }
+    const job: SpectrumJobState = {
+      id: this.#nextSpectrumJob++, key, query: Object.freeze({
+        target: configuration.target,
+        channels: configuration.channels,
+        ...(configuration.spectrumLimits === undefined ? {} : { spectrumLimits: configuration.spectrumLimits }),
+      }), smoothingMs: configuration.smoothingMs, refs: 0, metadata,
+      result: undefined, revision: 0n, publicationSequence: 0n,
+      retainedBytes: 0, captureCadenceMs, nextCaptureAt: 0,
+      publicationStamp: spectrumPublicationStamp(metadata),
+    };
+    this.#assertSpectrumRetainedBytes(job.retainedBytes);
+    this.#spectrumJob = job;
+    return job;
+  }
+
+  #assertSpectrumResultBounds(result: SpectrumResult): void {
+    const subscriptionLimits = this.#spectrumSubscriptionLimits!;
+    const retainedBytes = spectrumResultRetainedBytes(result);
+    if (retainedBytes > subscriptionLimits.maximumRetainedBytes) {
+      throw new MisoUsageError("the spectrum result exceeds the retained-byte bound");
+    }
+  }
+
+  #assertSpectrumDeliveryBudget(
+    candidate: SpectrumJobState,
+    candidateCadenceMs?: number,
+    replacing?: SpectrumHandleState,
+  ): void {
+    const maximum = this.#spectrumSubscriptionLimits!.maximumDeliveredBytesPerSecond;
+    let delivered = 0;
+    for (const handle of this.#spectrumHandles.values()) {
+      if (handle === replacing) continue;
+      const bytes = handle.job.result === undefined
+        ? spectrumVectorBytes(handle.configuration.channels) : spectrumResultVectorBytes(handle.job.result);
+      delivered += spectrumDeliveryRate(bytes, handle.configuration.cadenceMs);
+    }
+    if (candidateCadenceMs !== undefined) {
+      const bytes = candidate.result === undefined
+        ? spectrumVectorBytes((replacing?.configuration ?? { channels: "both" }).channels)
+        : spectrumResultVectorBytes(candidate.result);
+      delivered += spectrumDeliveryRate(bytes, candidateCadenceMs);
+    }
+    if (!Number.isFinite(delivered) || delivered > maximum) {
+      throw new MisoUsageError("the spectrum vectors exceed the delivery bound");
+    }
+  }
+
+  #assertSpectrumRetainedBytes(additional: number): void {
+    const maximum = this.#spectrumSubscriptionLimits!.maximumRetainedBytes;
+    const existing = this.#spectrumJob?.retainedBytes ?? 0;
+    if (!Number.isSafeInteger(existing + additional) || existing + additional > maximum) {
+      throw new MisoUsageError("the spectrum result exceeds the retained-byte bound");
+    }
+  }
+
+  async #refreshSpectrumJobs(epoch: bigint): Promise<void> {
+    const job = this.#spectrumJob;
+    const spectrumRead = this.#transport.spectrumRead;
+    if (job === undefined || job.refs === 0 || spectrumRead === undefined) return;
+    if (Date.now() < job.nextCaptureAt) return;
+    const read = await spectrumRead();
+    this.#assertEpoch(epoch);
+    job.nextCaptureAt = Date.now() + job.captureCadenceMs;
+    const metadata = read.metadata;
+    const stamp = spectrumPublicationStamp(metadata);
+    if (read.result !== undefined) {
+      this.#assertSpectrumResultBounds(read.result);
+      if (metadata.status !== "ready") {
+        throw new MisoEngineError("the spectrum stream result has an invalid status", {
+          phase: "output", code: "abiMismatch", result: 2,
+        });
+      }
+      if (job.publicationStamp !== stamp || job.result === undefined) {
+        const retainedBytes = spectrumResultRetainedBytes(read.result);
+        job.result = copySpectrumResult(read.result);
+        job.retainedBytes = retainedBytes;
+        job.metadata = metadata;
+        job.revision += 1n;
+        job.publicationSequence += 1n;
+        job.publicationStamp = stamp;
+      }
+      return;
+    }
+    if (job.publicationStamp !== stamp && (metadata.status === "gap" || metadata.status === "failed")) {
+      job.metadata = metadata;
+      job.revision += 1n;
+      job.publicationSequence += 1n;
+      job.publicationStamp = stamp;
+    } else {
+      job.metadata = metadata;
+    }
+  }
+
+  #notifySpectrum(
+    state: SpectrumHandleState,
+    respectCadence: boolean,
+  ): SpectrumSubscriptionNotification | undefined {
+    if (state.closed || state.publicHandle === undefined) return undefined;
+    const job = this.#spectrumJob;
+    if (job === undefined || state.job !== job) return undefined;
+    const now = Date.now();
+    if (respectCadence && now < state.nextDeliveryAt) return undefined;
+    if (job.publicationSequence <= state.cursor) return undefined;
+    const skippedPublications = job.publicationSequence - state.cursor - 1n;
+    const nativeMissedWindows = job.metadata.droppedCaptures >= state.nativeMissedSeen
+      ? job.metadata.droppedCaptures - state.nativeMissedSeen : 0n;
+    state.cursor = job.publicationSequence;
+    state.nativeMissedSeen = job.metadata.droppedCaptures;
+    if (respectCadence) state.nextDeliveryAt = now + state.configuration.cadenceMs;
+    const notification = Object.freeze({
+      handle: state.publicHandle,
+      owner: this.#owner,
+      epoch: this.#epoch,
+      job: job.id,
+      revision: job.revision,
+      status: job.metadata.status,
+      metadata: job.metadata,
+      available: job.result !== undefined && job.metadata.status === "ready",
+      nativeMissedWindows,
+      skippedPublications,
+    });
+    try { state.callback?.(notification); } catch { /* callbacks cannot break the owner */ }
+    return notification;
+  }
+
+  #assertSpectrumStop(stop: EngineCallResult | void): void {
+    if (stop === undefined || stop.ok) return;
+    throw new MisoEngineError("the spectrum stream stop was refused", {
+      phase: stop.code === "wrongState" ? "lifecycle" : "output",
+      code: stop.code as never,
+      result: stop.result,
+    });
+  }
+
+  #assertSpectrumHandle(state: SpectrumHandleState): void {
+    this.#assertOpen();
+    if (state.closed || state.epoch !== this.#epoch || this.#spectrumHandles.get(state.id) !== state) {
+      throw new MisoUsageError("the spectrum subscription handle is closed or stale");
+    }
   }
 
   readLatestTrackResponse(state: ResponseHandleState): TrackResponseResult | undefined {
@@ -1306,6 +1714,81 @@ export interface TrackResponseSubscription {
   close(): Promise<void>;
 }
 
+/** Finite SDK-side limits for the one prepared managed spectrum job. */
+export interface SpectrumSubscriptionLimits {
+  readonly maximumHandles?: number;
+  readonly maximumRetainedBytes?: number;
+  readonly maximumDeliveredBytesPerSecond?: number;
+  readonly maximumCadenceMs?: number;
+}
+
+export const DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS = Object.freeze({
+  maximumHandles: 64,
+  maximumRetainedBytes: 16 * 1024 * 1024,
+  maximumDeliveredBytesPerSecond: 16 * 1024 * 1024,
+  maximumCadenceMs: 60_000,
+});
+
+export interface SpectrumSubscriptionRequest extends SpectrumQuery {
+  readonly smoothingMs?: number;
+  readonly cadenceMs?: number;
+  readonly onUpdate?: (notification: SpectrumSubscriptionNotification) => void;
+}
+
+export interface SpectrumSubscriptionConfiguration extends SpectrumQuery {
+  readonly channels: NonNullable<SpectrumQuery["channels"]>;
+  readonly smoothingMs: number;
+  readonly cadenceMs: number;
+}
+
+export interface SpectrumSubscriptionBounds {
+  readonly maximumHandles: number;
+  readonly maximumRetainedBytes: number;
+  readonly maximumDeliveredBytesPerSecond: number;
+  readonly maximumCadenceMs: number;
+  readonly maximumCaptureBytes: number;
+  readonly maximumResultBytes: number;
+  readonly hopFrames: number;
+}
+
+export interface SpectrumSubscriptionNotification {
+  readonly handle: SpectrumSubscription;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  readonly revision: bigint;
+  readonly status: SpectrumStreamStatus;
+  readonly metadata: SpectrumStreamMetadata;
+  readonly available: boolean;
+  readonly nativeMissedWindows: bigint;
+  readonly skippedPublications: bigint;
+}
+
+export interface SpectrumSubscriptionReceipt {
+  readonly handle: SpectrumSubscription;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  readonly revision: bigint;
+  readonly configuration: SpectrumSubscriptionConfiguration;
+  readonly bounds: SpectrumSubscriptionBounds;
+}
+
+export interface SpectrumSubscription {
+  readonly handle: SpectrumSubscription;
+  readonly id: bigint;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  readonly job: bigint;
+  readonly revision: bigint;
+  readonly configuration: SpectrumSubscriptionConfiguration;
+  readonly bounds: SpectrumSubscriptionBounds;
+  readLatest(): SpectrumResult | undefined;
+  pump(): Promise<SpectrumSubscriptionNotification | undefined>;
+  update(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscriptionReceipt>;
+  close(): Promise<void>;
+}
+
 /** One capture/evaluation seam shared by browser and headless managed response owners. */
 export interface TrackResponseSubscriptionTransport {
   responseRead(
@@ -1350,6 +1833,44 @@ interface ResponseHandleState {
   closed: boolean;
   closing: Promise<void> | undefined;
   publicHandle: TrackResponseSubscriptionImpl | undefined;
+}
+
+interface SpectrumSubscriptionEffectiveLimits {
+  readonly maximumHandles: number;
+  readonly maximumRetainedBytes: number;
+  readonly maximumDeliveredBytesPerSecond: number;
+  readonly maximumCadenceMs: number;
+}
+
+interface SpectrumJobState {
+  readonly id: bigint;
+  key: string;
+  query: SpectrumQuery;
+  smoothingMs: number;
+  refs: number;
+  metadata: SpectrumStreamMetadata;
+  result: SpectrumResult | undefined;
+  revision: bigint;
+  publicationSequence: bigint;
+  retainedBytes: number;
+  captureCadenceMs: number;
+  nextCaptureAt: number;
+  publicationStamp: string;
+}
+
+interface SpectrumHandleState {
+  readonly id: bigint;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  job: SpectrumJobState;
+  configuration: SpectrumSubscriptionConfiguration;
+  callback: ((notification: SpectrumSubscriptionNotification) => void) | undefined;
+  cursor: bigint;
+  nativeMissedSeen: bigint;
+  nextDeliveryAt: number;
+  closed: boolean;
+  closing: Promise<void> | undefined;
+  publicHandle: SpectrumSubscriptionImpl | undefined;
 }
 
 function canonicalResponseSubscriptionLimits(overrides: TrackResponseSubscriptionLimits | undefined): ResponseSubscriptionEffectiveLimits {
@@ -1398,6 +1919,129 @@ function normalizedTrackResponseSubscription(
     }),
     callback: request.onUpdate,
   };
+}
+
+function canonicalSpectrumSubscriptionLimits(
+  overrides: SpectrumSubscriptionLimits | undefined,
+): SpectrumSubscriptionEffectiveLimits {
+  const positive = (name: keyof SpectrumSubscriptionEffectiveLimits, fallback: number): number => {
+    const requested = overrides?.[name];
+    if (requested === undefined) return fallback;
+    if (!Number.isSafeInteger(requested) || requested <= 0) {
+      throw new MisoUsageError(`${name} must be a positive safe integer`);
+    }
+    return requested;
+  };
+  return Object.freeze({
+    maximumHandles: positive("maximumHandles", DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS.maximumHandles),
+    maximumRetainedBytes: positive("maximumRetainedBytes", DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS.maximumRetainedBytes),
+    maximumDeliveredBytesPerSecond: positive(
+      "maximumDeliveredBytesPerSecond",
+      DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS.maximumDeliveredBytesPerSecond,
+    ),
+    maximumCadenceMs: positive("maximumCadenceMs", DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS.maximumCadenceMs),
+  });
+}
+
+function spectrumTargetKey(target: SpectrumQuery["target"]): string {
+  return target.kind === "output"
+    ? `${target.kind}\u0000${target.outputId}`
+    : `${target.kind}\u0000${target.trackId}`;
+}
+
+function normalizedSpectrumSubscription(
+  request: SpectrumSubscriptionRequest,
+  subscriptionLimits: SpectrumSubscriptionEffectiveLimits,
+): { readonly configuration: SpectrumSubscriptionConfiguration; readonly callback: ((notification: SpectrumSubscriptionNotification) => void) | undefined } {
+  if (request === null || typeof request !== "object") {
+    throw new MisoUsageError("spectrum subscription request must be an object");
+  }
+  const channels = request.channels ?? "both";
+  const query = cloneSpectrumQuery({
+    target: request.target,
+    channels,
+    ...(request.spectrumLimits === undefined ? {} : { spectrumLimits: request.spectrumLimits }),
+  });
+  const smoothingMs = request.smoothingMs ?? 100;
+  if (typeof smoothingMs !== "number" || !Number.isFinite(smoothingMs)
+      || smoothingMs < 0 || smoothingMs > 10_000) {
+    throw new MisoUsageError("smoothingMs must be finite and in 0..=10000");
+  }
+  const cadenceMs = request.cadenceMs ?? 100;
+  if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0 || cadenceMs > subscriptionLimits.maximumCadenceMs) {
+    throw new MisoUsageError(
+      `spectrum cadenceMs must be an integer in 1..=${subscriptionLimits.maximumCadenceMs}`,
+    );
+  }
+  if (request.onUpdate !== undefined && typeof request.onUpdate !== "function") {
+    throw new MisoUsageError("spectrum onUpdate must be a function");
+  }
+  return {
+    configuration: Object.freeze({
+      target: query.target,
+      channels: query.channels!,
+      ...(query.spectrumLimits === undefined ? {} : { spectrumLimits: query.spectrumLimits }),
+      smoothingMs,
+      cadenceMs,
+    }),
+    callback: request.onUpdate,
+  };
+}
+
+function spectrumJobKey(configuration: SpectrumSubscriptionConfiguration): string {
+  return JSON.stringify([
+    spectrumTargetKey(configuration.target),
+    configuration.channels,
+    configuration.smoothingMs,
+  ]);
+}
+
+function spectrumVectorBytes(channels: SpectrumSubscriptionConfiguration["channels"]): number {
+  const channelCount = channels === "both" ? 2 : 1;
+  return ABI_LAYOUT.constants.spectrumBinCount * Float32Array.BYTES_PER_ELEMENT * (channelCount + 1);
+}
+
+function spectrumDeliveryRate(bytes: number, cadenceMs: number): number {
+  const rate = bytes * 1000 / cadenceMs;
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new MisoUsageError("the spectrum vectors exceed the delivery bound");
+  }
+  return rate;
+}
+
+function copySpectrumResult(result: SpectrumResult | undefined): SpectrumResult | undefined {
+  if (result === undefined) return undefined;
+  const target = result.target.kind === "output"
+    ? Object.freeze({ kind: result.target.kind, outputId: result.target.outputId })
+    : Object.freeze({ kind: result.target.kind, trackId: result.target.trackId });
+  return Object.freeze({
+    ...result,
+    target,
+    frequenciesHz: result.frequenciesHz.slice(),
+    ...(result.leftDb === undefined ? {} : { leftDb: result.leftDb.slice() }),
+    ...(result.rightDb === undefined ? {} : { rightDb: result.rightDb.slice() }),
+  });
+}
+
+function spectrumResultVectorBytes(result: SpectrumResult): number {
+  return result.frequenciesHz.byteLength
+    + (result.leftDb?.byteLength ?? 0)
+    + (result.rightDb?.byteLength ?? 0);
+}
+
+function spectrumResultRetainedBytes(result: SpectrumResult): number {
+  return spectrumResultVectorBytes(result);
+}
+
+function spectrumPublicationStamp(metadata: SpectrumStreamMetadata): string {
+  return [
+    metadata.status,
+    metadata.captureEpoch.toString(),
+    metadata.sequence.toString(),
+    metadata.droppedCaptures.toString(),
+    metadata.analysisEpoch.toString(),
+    metadata.capturedSample.toString(),
+  ].join("\u0000");
 }
 
 function responseJobKey(query: TrackResponseQuery): string {

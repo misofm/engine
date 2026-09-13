@@ -95,6 +95,14 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_spectrum_request_ptr",
     "miso_engine_web_v1_spectrum_result_bytes",
     "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_stream_analysis",
+    "miso_engine_web_v1_spectrum_stream_analysis_configure",
+    "miso_engine_web_v1_spectrum_stream_metadata_bytes",
+    "miso_engine_web_v1_spectrum_stream_metadata_ptr",
+    "miso_engine_web_v1_spectrum_stream_read",
+    "miso_engine_web_v1_spectrum_stream_reset",
+    "miso_engine_web_v1_spectrum_stream_start",
+    "miso_engine_web_v1_spectrum_stream_stop",
     "miso_engine_web_v1_spectrum_target_id_capacity",
     "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
@@ -1172,6 +1180,116 @@ export const ABI_LAYOUT = deepFreeze(
         }
       ]
     },
+    "spectrumStreamMetadata": {
+      "bytes": 120,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "result",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "target",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "sampleRateHz",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "quantumFrames",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "hopFrames",
+          "offset": 32,
+          "type": "u32"
+        },
+        {
+          "name": "sourceUnderrun",
+          "offset": 36,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 40,
+          "type": "u32"
+        },
+        {
+          "name": "reserved1",
+          "offset": 44,
+          "type": "u32"
+        },
+        {
+          "name": "captureEpoch",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "sequence",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "droppedCaptures",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "windows",
+          "offset": 72,
+          "type": "u64"
+        },
+        {
+          "name": "capturedSample",
+          "offset": 80,
+          "type": "u64"
+        },
+        {
+          "name": "endSample",
+          "offset": 88,
+          "type": "u64"
+        },
+        {
+          "name": "analysisEpoch",
+          "offset": 96,
+          "type": "u64"
+        },
+        {
+          "name": "historyStartSample",
+          "offset": 104,
+          "type": "u64"
+        },
+        {
+          "name": "smoothingMs",
+          "offset": 112,
+          "type": "f64"
+        }
+      ]
+    },
     "liveResponseOwner": {
       "bytes": 64,
       "fields": [
@@ -1783,6 +1901,36 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "both"
       }
     ],
+    "spectrumStreamStatuses": [
+      {
+        "value": 0,
+        "name": "inactive"
+      },
+      {
+        "value": 1,
+        "name": "warming"
+      },
+      {
+        "value": 2,
+        "name": "pending"
+      },
+      {
+        "value": 3,
+        "name": "gap"
+      },
+      {
+        "value": 4,
+        "name": "failed"
+      },
+      {
+        "value": 5,
+        "name": "stopped"
+      },
+      {
+        "value": 6,
+        "name": "ready"
+      }
+    ],
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "diagnosticBytes": 16384,
@@ -1801,6 +1949,7 @@ export const ABI_LAYOUT = deepFreeze(
     "spectrumRequestBytes": 40,
     "spectrumWindowHeaderBytes": 64,
     "spectrumResultHeaderBytes": 88,
+    "spectrumStreamMetadataBytes": 120,
     "spectrumWindowFrames": 2048,
     "spectrumBinCount": 1025,
     "maximumSpectrumIdBytes": 127,

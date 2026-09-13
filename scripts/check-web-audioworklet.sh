@@ -236,6 +236,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_spectrum_result_bytes \
   miso_engine_web_v1_spectrum_result_ptr \
   miso_engine_web_v1_spectrum_stream_analysis \
+  miso_engine_web_v1_spectrum_stream_analysis_configure \
   miso_engine_web_v1_spectrum_stream_metadata_bytes \
   miso_engine_web_v1_spectrum_stream_metadata_ptr \
   miso_engine_web_v1_spectrum_stream_read \

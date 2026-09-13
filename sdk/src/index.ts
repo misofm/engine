@@ -17,7 +17,16 @@ export type {
   TrackResponseQuery,
   TrackResponseResult,
 } from "./core/live-response.ts";
-export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "./core/spectrum.ts";
+export type {
+  SpectrumLimits,
+  SpectrumQuery,
+  SpectrumResult,
+  SpectrumStreamMetadata,
+  SpectrumStreamRead,
+  SpectrumStreamStart,
+  SpectrumStreamStatus,
+  SpectrumTarget,
+} from "./core/spectrum.ts";
 export * from "./core/observation.ts";
 export { DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS } from "./core/observation-subscriptions.ts";
 export type {
@@ -38,6 +47,16 @@ export type {
   TrackResponseSubscriptionNotification,
   TrackResponseSubscriptionReceipt,
   TrackResponseSubscriptionRequest,
+} from "./core/observation-subscriptions.ts";
+export { DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS } from "./core/observation-subscriptions.ts";
+export type {
+  SpectrumSubscription,
+  SpectrumSubscriptionBounds,
+  SpectrumSubscriptionConfiguration,
+  SpectrumSubscriptionLimits,
+  SpectrumSubscriptionNotification,
+  SpectrumSubscriptionReceipt,
+  SpectrumSubscriptionRequest,
 } from "./core/observation-subscriptions.ts";
 export * from "./core/session.ts";
 export * from "./core/writer.ts";

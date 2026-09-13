@@ -43,6 +43,51 @@ export interface SpectrumResult {
   readonly resultBytes: bigint;
 }
 
+/** Native availability state for one managed continuous spectrum capture. */
+export type SpectrumStreamStatus =
+  | "inactive"
+  | "warming"
+  | "pending"
+  | "gap"
+  | "failed"
+  | "stopped"
+  | "ready";
+
+/** Copied metadata for one managed spectrum stream state or window. */
+export interface SpectrumStreamMetadata {
+  readonly result: number;
+  readonly status: SpectrumStreamStatus;
+  readonly target?: SpectrumTarget;
+  readonly channels?: Channel;
+  readonly sampleRateHz: number;
+  readonly quantumFrames: number;
+  readonly hopFrames: number;
+  readonly sourceUnderrun: boolean;
+  readonly captureEpoch: bigint;
+  readonly sequence: bigint;
+  readonly droppedCaptures: bigint;
+  readonly windows: bigint;
+  readonly capturedSample: bigint;
+  readonly endSample: bigint;
+  readonly analysisEpoch: bigint;
+  readonly historyStartSample: bigint;
+  readonly smoothingMs: number;
+}
+
+/** One copied result of a managed stream read; availability states may have no result yet. */
+export interface SpectrumStreamRead {
+  readonly metadata: SpectrumStreamMetadata;
+  readonly result?: SpectrumResult;
+}
+
+/** Native profile acknowledgement returned when a managed spectrum stream starts. */
+export interface SpectrumStreamStart {
+  readonly ok: boolean;
+  readonly result: number;
+  readonly code: string;
+  readonly metadata: SpectrumStreamMetadata;
+}
+
 type SpectrumExport = (...args: number[]) => number | bigint;
 type SpectrumExports = Record<string, unknown> & { readonly memory: WebAssembly.Memory };
 type AbiField = Readonly<{ readonly name: string; readonly offset: number; readonly type?: string }>;
@@ -51,7 +96,7 @@ type AbiStructure = Readonly<{ readonly bytes: number; readonly fields: readonly
 const TARGETS = ABI_LAYOUT.constants.spectrumTargets;
 const CHANNELS = ABI_LAYOUT.constants.spectrumChannels;
 
-function structure(name: "spectrumRequest" | "spectrumWindow" | "spectrumResult"): AbiStructure {
+function structure(name: "spectrumRequest" | "spectrumWindow" | "spectrumResult" | "spectrumStreamMetadata"): AbiStructure {
   const value = ABI_LAYOUT.structures[name];
   if (value === undefined || !Number.isSafeInteger(value.bytes) || !Array.isArray(value.fields)) {
     throw new MisoUsageError(`the generated ABI layout has no valid ${name} structure`);
@@ -78,6 +123,8 @@ const RESULT_ABI_MISMATCH = value(ABI_LAYOUT.constants.resultCodes, "abiMismatch
 const RESULT_REFUSED_BUDGET = value(ABI_LAYOUT.constants.resultCodes, "refusedBudget");
 const RESULT_WRONG_STATE = value(ABI_LAYOUT.constants.resultCodes, "wrongState");
 
+const STREAM_STATUSES = ABI_LAYOUT.constants.spectrumStreamStatuses;
+
 function exportFunction(exports: SpectrumExports, name: string): SpectrumExport {
   const value = exports[name];
   if (typeof value !== "function") throw new MisoUsageError(`the engine asset does not export ${name}`);
@@ -101,6 +148,12 @@ function channelName(raw: number): Channel {
   if (raw === value(CHANNELS, "right")) return "right";
   if (raw === value(CHANNELS, "both")) return "both";
   throw malformed("the engine returned an unknown spectrum channel mask");
+}
+
+function streamStatusName(raw: number): SpectrumStreamStatus {
+  const row = STREAM_STATUSES.find((candidate) => candidate.value === raw);
+  if (row === undefined) throw malformed("the engine returned an unknown spectrum stream status");
+  return row.name as SpectrumStreamStatus;
 }
 
 function targetValue(target: SpectrumTarget): number {
@@ -292,6 +345,9 @@ export class SpectrumModule {
   readonly #resultPtr: SpectrumExport;
   readonly #resultBytes: SpectrumExport;
   readonly #close: SpectrumExport;
+  readonly #streamAnalysis: SpectrumExport;
+  readonly #streamMetadataPtr: SpectrumExport;
+  readonly #streamMetadataBytes: SpectrumExport;
   readonly #contract = contract();
   #closed = false;
 
@@ -307,6 +363,9 @@ export class SpectrumModule {
     this.#resultPtr = exportFunction(table, "miso_engine_web_v1_spectrum_result_ptr");
     this.#resultBytes = exportFunction(table, "miso_engine_web_v1_spectrum_result_bytes");
     this.#close = exportFunction(table, "miso_engine_web_v1_spectrum_close");
+    this.#streamAnalysis = exportFunction(table, "miso_engine_web_v1_spectrum_stream_analysis");
+    this.#streamMetadataPtr = exportFunction(table, "miso_engine_web_v1_spectrum_stream_metadata_ptr");
+    this.#streamMetadataBytes = exportFunction(table, "miso_engine_web_v1_spectrum_stream_metadata_bytes");
   }
 
   close(): void {
@@ -348,13 +407,78 @@ export class SpectrumModule {
     return this.#analyzeCurrent(query);
   }
 
+  /** Read the copied metadata for the current managed stream state. */
+  streamMetadata(query: SpectrumQuery): SpectrumStreamMetadata {
+    if (this.#closed) throw new MisoUsageError("the spectrum module is closed");
+    const layout = structure("spectrumStreamMetadata");
+    const pointer = Number(this.#streamMetadataPtr());
+    const bytesLength = Number(this.#streamMetadataBytes());
+    if (pointer <= 0 || bytesLength !== layout.bytes) {
+      throw malformed("invalid spectrum stream metadata staging");
+    }
+    const bytes = bytesView(this.#exports);
+    range(bytes, pointer, layout.bytes, "stream metadata");
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const at = (name: string) => field(layout, name).offset;
+    const u32 = (name: string) => view.getUint32(pointer + at(name), true);
+    const u64 = (name: string) => view.getBigUint64(pointer + at(name), true);
+    const structSize = u32("structSize");
+    const abiVersion = u32("abiVersion");
+    if (structSize !== layout.bytes || abiVersion !== this.#contract.abiVersion
+        || u32("reserved0") !== 0 || u32("reserved1") !== 0) {
+      throw malformed("the engine returned a malformed spectrum stream metadata record");
+    }
+    const rawTarget = u32("target");
+    const target = rawTarget === 0 ? undefined : copyTarget(query.target);
+    if (target !== undefined && rawTarget !== targetValue(query.target)) {
+      throw malformed("the engine returned a spectrum stream target different from the prepared target");
+    }
+    const rawChannels = u32("channels");
+    const channels = rawChannels === 0 ? undefined : channelName(rawChannels);
+    const smoothingMs = view.getFloat64(pointer + at("smoothingMs"), true);
+    if (!Number.isFinite(smoothingMs) || smoothingMs < 0 || smoothingMs > 10_000) {
+      throw malformed("the engine returned an invalid spectrum smoothing duration");
+    }
+    return Object.freeze({
+      result: u32("result"),
+      status: streamStatusName(u32("status")),
+      ...(target === undefined ? {} : { target }),
+      ...(channels === undefined ? {} : { channels }),
+      sampleRateHz: u32("sampleRateHz"),
+      quantumFrames: u32("quantumFrames"),
+      hopFrames: u32("hopFrames"),
+      sourceUnderrun: u32("sourceUnderrun") !== 0,
+      captureEpoch: u64("captureEpoch"),
+      sequence: u64("sequence"),
+      droppedCaptures: u64("droppedCaptures"),
+      windows: u64("windows"),
+      capturedSample: u64("capturedSample"),
+      endSample: u64("endSample"),
+      analysisEpoch: u64("analysisEpoch"),
+      historyStartSample: u64("historyStartSample"),
+      smoothingMs,
+    });
+  }
+
+  /** Analyze the raw window staged by a managed stream read and return its owned result/metadata. */
+  analyzeStreamCurrent(query: SpectrumQuery): SpectrumStreamRead {
+    if (this.#closed) throw new MisoUsageError("the spectrum module is closed");
+    const result = Number(this.#streamAnalysis());
+    const metadata = this.streamMetadata(query);
+    if (result !== RESULT_OK) throw refusal("the spectrum stream analyzer refused the capture", result);
+    return Object.freeze({ metadata, result: this.#decodeCurrent(query, result) });
+  }
+
   #analyzeCurrent(query: SpectrumQuery): SpectrumResult {
+    return this.#decodeCurrent(query, Number(this.#analysis()));
+  }
+
+  #decodeCurrent(query: SpectrumQuery, result: number): SpectrumResult {
     const captureBytes = Number(this.#captureBytes());
     if (!Number.isSafeInteger(captureBytes) || captureBytes < this.#contract.window.bytes
         || captureBytes > this.#contract.maximumCaptureBytes) {
       throw malformed("invalid spectrum capture length");
     }
-    const result = Number(this.#analysis());
     const pointer = Number(this.#resultPtr());
     const length = Number(this.#resultBytes());
     const bytes = bytesView(this.#exports);

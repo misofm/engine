@@ -210,3 +210,32 @@ test("candidate Wasm spectrum honors a selected channel and explicit capture lim
     engine.dispose();
   }
 });
+
+test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const engine = await makeEngine(asset, query);
+  let subscription;
+  try {
+    subscription = await engine.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 1 });
+    assert.equal(subscription.readLatest(), undefined);
+    for (let block = 0; block < WINDOW_FRAMES / engine.shape().quantumFrames; block += 1) {
+      feedAndRender(engine, block);
+    }
+    const notification = await subscription.pump();
+    assert.ok(notification);
+    assert.equal(notification.status, "ready");
+    assert.equal(notification.available, true);
+    assert.equal(notification.metadata.capturedSample, 0n);
+    const result = subscription.readLatest();
+    assert.ok(result);
+    assertSpectrumResult(result, query, 0);
+    assert.notEqual(result.frequenciesHz, result.leftDb);
+    assert.notEqual(result.leftDb, result.rightDb);
+  } finally {
+    await subscription?.close();
+    engine.dispose();
+  }
+});

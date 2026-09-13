@@ -27,6 +27,9 @@ import type {
   TrackResponseSubscription,
   TrackResponseSubscriptionLimits,
   TrackResponseSubscriptionRequest,
+  SpectrumSubscription,
+  SpectrumSubscriptionLimits,
+  SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -93,6 +96,8 @@ export interface OfflineEngineOptions extends BootOptions {
   readonly observationSubscriptionLimits?: ObservationSubscriptionLimits;
   /** Finite SDK-side bounds for managed live track-response subscriptions. */
   readonly responseSubscriptionLimits?: TrackResponseSubscriptionLimits;
+  /** Finite SDK-side bounds for managed spectrum subscriptions. */
+  readonly spectrumSubscriptionLimits?: SpectrumSubscriptionLimits;
 }
 
 /** A booted headless session. */
@@ -102,17 +107,20 @@ export class OfflineEngine {
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
+  readonly #spectrumLimits: SpectrumSubscriptionLimits | undefined;
 
   private constructor(
     asset: MisoEngineAsset,
     boundary: WasmBoundary,
     observationLimits: ObservationSubscriptionLimits | undefined,
     responseLimits: TrackResponseSubscriptionLimits | undefined,
+    spectrumLimits: SpectrumSubscriptionLimits | undefined,
   ) {
     this.#asset = asset;
     this.#boundary = boundary;
     this.#observationLimits = observationLimits;
     this.#responseLimits = responseLimits;
+    this.#spectrumLimits = spectrumLimits;
   }
 
   static async create(
@@ -123,6 +131,7 @@ export class OfflineEngine {
       asset: suppliedAsset,
       observationSubscriptionLimits,
       responseSubscriptionLimits,
+      spectrumSubscriptionLimits,
       ...boot
     } = options;
     const spectrumQuery = boot.spectrum === undefined ? undefined : cloneSpectrumQuery(boot.spectrum);
@@ -133,6 +142,7 @@ export class OfflineEngine {
       await WasmBoundary.boot(asset, documentBytes(document), bootOptions),
       observationSubscriptionLimits,
       responseSubscriptionLimits,
+      spectrumSubscriptionLimits,
     );
   }
 
@@ -182,6 +192,11 @@ export class OfflineEngine {
   /** Subscribe to one selected track response; values are refreshed by `pump()`. */
   subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription> {
     return this.#observationOwner().subscribeTrackResponse(request).then((receipt) => receipt.handle);
+  }
+
+  /** Subscribe to the prepared continuous spectrum boundary; values are refreshed by `pump()`. */
+  subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription> {
+    return this.#observationOwner().subscribeSpectrum(request).then((receipt) => receipt.handle);
   }
 
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
@@ -288,7 +303,10 @@ export class OfflineEngine {
       console: () => this.console(),
       responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
         this.#boundary.queryTrackResponseIfChanged(request, previousState),
-    }, this.#observationLimits, this.#responseLimits);
+      spectrumStart: (smoothingMs) => this.#boundary.startSpectrumStream(smoothingMs),
+      spectrumRead: () => this.#boundary.readSpectrumStream(),
+      spectrumStop: () => this.#boundary.stopSpectrumStream(),
+    }, this.#observationLimits, this.#responseLimits, this.#spectrumLimits);
   }
 }
 
