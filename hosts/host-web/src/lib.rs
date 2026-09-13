@@ -197,8 +197,11 @@ pub const SPECTRUM_CHANNEL_BOTH: u32 = SPECTRUM_CHANNEL_LEFT | SPECTRUM_CHANNEL_
 pub const SPECTRUM_MAXIMUM_ID_BYTES: usize = LIVE_RESPONSE_MAXIMUM_ID_BYTES;
 /// Maximum one-shot raw spectrum payload retained by the browser bridge.
 pub const SPECTRUM_CAPTURE_BYTES: usize = 1 << 20;
-/// Maximum explicitly prepared spectrum targets in one bounded host request.
-pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 256;
+/// Compatibility metadata value for the prepared-target collection.
+///
+/// Zero means the collection is caller-sized and has no compiled target-count ceiling. The
+/// bridge returns the checked capacity after the caller stages its entry count.
+pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 0;
 /// Fixed 2048-sample raw capture header.
 pub const SPECTRUM_WINDOW_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
 /// Fixed analyzed spectrum result header.
@@ -358,11 +361,12 @@ pub const SPECTRUM_STREAM_METADATA_BYTES: u32 = size_of::<WebSpectrumStreamMetad
 pub const SPECTRUM_COLLECTION_REQUEST_BYTES: u32 = size_of::<WebSpectrumCollectionRequest>() as u32;
 #[allow(missing_docs)]
 pub const SPECTRUM_COLLECTION_ENTRY_BYTES: u32 = size_of::<WebSpectrumCollectionEntry>() as u32;
+/// Zero denotes caller-sized collection entry staging.
 #[allow(missing_docs)]
 pub const SPECTRUM_COLLECTION_ENTRY_CAPACITY: u32 = SPECTRUM_MAXIMUM_PREPARED_TARGETS;
+/// Zero denotes caller-sized packed target-ID staging.
 #[allow(missing_docs)]
-pub const SPECTRUM_COLLECTION_TARGET_IDS_BYTES: u32 =
-    SPECTRUM_MAXIMUM_PREPARED_TARGETS * SPECTRUM_MAXIMUM_ID_BYTES as u32;
+pub const SPECTRUM_COLLECTION_TARGET_IDS_BYTES: u32 = 0;
 
 fn spectrum_target_raw(target: &SpectrumTarget) -> u32 {
     match target {
@@ -1710,6 +1714,8 @@ impl AudioWorkletEngineHost {
                 "web.options.source_ring_frames",
             ));
         }
+        let (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes) =
+            spectrum_collection_staging_bytes(spectrum_request.as_ref())?;
         let projection = project_buffers(
             document_bytes,
             shape.sample_rate_hz,
@@ -1720,6 +1726,8 @@ impl AudioWorkletEngineHost {
                 .max(shape.longest_track_id_bytes),
             options,
             spectrum_request.is_some(),
+            spectrum_collection_entry_bytes,
+            spectrum_collection_target_id_bytes,
         )?;
         let retained_projection = projected_retained_bytes(
             &session,
@@ -4082,6 +4090,34 @@ struct PreparedBufferProjection {
     report: WebResourceReport,
 }
 
+fn spectrum_collection_staging_bytes(
+    spectrum_request: Option<&SpectrumPreparationRequest>,
+) -> Result<(u64, u64), BootFailure> {
+    let Some(SpectrumPreparationRequest::Collection(request)) = spectrum_request else {
+        return Ok((0, 0));
+    };
+    let entry_count = u64::try_from(request.entries.len())
+        .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+    let entry_bytes = entry_count
+        .checked_mul(size_of::<WebSpectrumCollectionEntry>() as u64)
+        .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+    let target_id_bytes = request.entries.iter().try_fold(0_u64, |total, entry| {
+        let id_bytes = match &entry.target {
+            SpectrumTarget::TrackPostInputBuiltins(id)
+            | SpectrumTarget::TrackPostMatrix(id)
+            | SpectrumTarget::Output(id) => u64::try_from(id.len()).ok(),
+        }?;
+        total.checked_add(id_bytes)
+    });
+    let Some(target_id_bytes) = target_id_bytes else {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_BUDGET,
+            "host.budget.arithmetic",
+        ));
+    };
+    Ok((entry_bytes, target_id_bytes))
+}
+
 fn project_buffers(
     document_bytes: u32,
     sample_rate_hz: u32,
@@ -4090,6 +4126,8 @@ fn project_buffers(
     id_staging_bytes: u64,
     options: WebBootOptions,
     spectrum_configured: bool,
+    spectrum_collection_entry_bytes: u64,
+    spectrum_collection_target_id_bytes: u64,
 ) -> Result<PreparedBufferProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let source_samples = u64::from(maximum_source_channels)
@@ -4122,6 +4160,8 @@ fn project_buffers(
         .and_then(|bytes| {
             bytes.checked_add(crate::ffi::spectrum_staging_retained_bytes(
                 spectrum_configured,
+                spectrum_collection_entry_bytes,
+                spectrum_collection_target_id_bytes,
             ))
         })
         .and_then(|bytes| {
@@ -4158,6 +4198,8 @@ fn project_buffers(
         .max(crate::ffi::live_response_staging_largest_allocation_bytes())
         .max(crate::ffi::spectrum_staging_largest_allocation_bytes(
             spectrum_configured,
+            spectrum_collection_entry_bytes,
+            spectrum_collection_target_id_bytes,
         ))
         .max(crate::ffi::spectrum_analysis_history_retained_bytes(
             spectrum_configured,

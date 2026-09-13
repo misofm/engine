@@ -171,6 +171,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
             .max(shape.longest_track_id_bytes),
         options,
         false,
+        0,
+        0,
     )
     .expect("bridge projection");
     projected_retained_bytes(
