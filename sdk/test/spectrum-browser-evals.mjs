@@ -522,3 +522,37 @@ test("initial collection selection has a deadline and cancels its late arm befor
     await engine.close();
   }
 });
+
+test("last spectrum close waits for the owner's automatic in-flight read", async () => {
+  let completeRead;
+  let markRead;
+  const readStarted = new Promise((resolve) => { markRead = resolve; });
+  let stops = 0;
+  const host = hostWithCapture({
+    async startSpectrumStream() { return { result: 0, metadata: streamMetadata(1) }; },
+    readSpectrumStream(buffer) {
+      markRead();
+      return new Promise((resolve) => {
+        completeRead = () => resolve({ result: 6, byteLength: 0, buffer, metadata: streamMetadata(2) });
+      });
+    },
+    async stopSpectrumStream() { stops += 1; return { result: 0, metadata: streamMetadata(5) }; },
+  });
+  const engine = await browserEngine(host, new SpectrumWorker());
+  try {
+    const handle = await engine.subscribeSpectrum({ ...PREPARED, smoothingMs: 0 });
+    await readStarted;
+    let closed = false;
+    const closing = handle.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stops, 0, "close must not race native cancellation with an owned read");
+    assert.equal(closed, false);
+    completeRead();
+    await closing;
+    assert.equal(stops, 1);
+    await assert.rejects(handle.pump(), /closed|stale/);
+  } finally {
+    completeRead?.();
+    await engine.close();
+  }
+});

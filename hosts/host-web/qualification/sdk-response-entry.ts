@@ -536,7 +536,6 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       || callbackGap;
     const readyNotification = notifications.find((notification) => notification.available);
     const sharedAfterFirstClose = (await subscription.close(), shared.readLatest() !== undefined);
-    await shared.pump();
     await shared.close();
     let staleReadRefused = false;
     try { shared.readLatest(); } catch { staleReadRefused = true; }
@@ -812,7 +811,6 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
       && result.frequenciesHz !== result.rightDb
       && result.leftDb !== result.rightDb;
     const resultTarget = spectrumTargetKey(result.target);
-    await subscription.pump();
     await subscription.close();
     const audioContinued = context.state === "running" && secondClock >= firstClock && finalClock >= secondClock;
     return {
@@ -1017,7 +1015,6 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const leftOnlyResult = leftOnly.readLatest();
     const independentChannelJob = leftOnly.job !== shared.job
       && leftOnlyResult?.leftDb !== undefined && leftOnlyResult.rightDb === undefined;
-    await shared.pump();
     await shared.close();
     await leftOnly.close();
     const queriesAtLastClose = stats.queries;
@@ -1189,7 +1186,6 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
       && updated[0]?.left === undefined
       && updated[0]?.right !== undefined
       && Number.isFinite(updated[0].right);
-    await shared.pump();
     await shared.close();
     let staleReadRefused = false;
     try {

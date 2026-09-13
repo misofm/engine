@@ -1322,6 +1322,9 @@ export class ObservationSubscriptionOwner {
     const pending = this.#enqueue(async () => {
       if (state.closed) return;
       this.#assertSpectrumHandle(state);
+      await this.#waitForPoll();
+      if (state.closed) return;
+      this.#assertSpectrumHandle(state);
       const job = state.job;
       if (job.refs === 1) {
         const stop = await this.#transport.spectrumStop!();
