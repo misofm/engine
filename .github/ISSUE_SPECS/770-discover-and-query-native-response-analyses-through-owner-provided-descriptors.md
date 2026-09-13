@@ -152,3 +152,57 @@ Root commits each coherent tranche promptly, records Astra medium PASS/FAIL agai
 ## Attempt 1 focused checkpoint
 
 Luna max implemented the additive owner response descriptor/provider interface, native factory discovery/registry companion validation, and thin EQ/builtin adapters. Existing descriptor wire contracts and numerical evaluators remain outside the change. Focused owner/contract/registry tests report EQ13, builtins11, effect-contract2, and effect-compiler1 passing. Targeted four-crate all-target Clippy and workspace formatting pass after implementation debugging; raw logs/exits are `/tmp/issue770-focused-{eq-response-final-2,builtins-filter-final,contract-final,compiler-final,clippy-final-3,fmt-final-2}.{log,exit}`. Root checked the exact allowed-path diff and `git diff --check`; no production dependency/ABI/generated asset changes are present. Remaining full/workspace/policy/target gates and the attempt's adversarial verdict are pending. This tranche pauses for root checkpoint before further work.
+
+## Attempt 1 remaining gate evidence
+
+After root checkpoint `c864ffa263a84be627945ff7290446080a18b6a4`, all remaining specified commands
+exited 0. Raw stdout/stderr and exit status are preserved outside the repository:
+
+- `cargo test --locked -p parametric-eq --test response --test conformance` — `/tmp/issue770-gate-eq-response-conformance.log` and `.exit` (`0`)
+- `cargo test --locked -p builtins --test filter_response --test determinism` — `/tmp/issue770-gate-builtins-response-determinism.log` and `.exit` (`0`)
+- `cargo test --locked -p effect-contract --lib --tests` — `/tmp/issue770-gate-effect-contract-full.log` and `.exit` (`0`)
+- `cargo check --locked --workspace --all-targets` — `/tmp/issue770-gate-workspace-check.log` and `.exit` (`0`)
+- `bash scripts/check-effect-runtime-policy.sh` — `/tmp/issue770-gate-effect-runtime-policy.log` and `.exit` (`0`)
+- `bash scripts/check-builtins-policy.sh` — `/tmp/issue770-gate-builtins-policy.log` and `.exit` (`0`)
+- `bash scripts/check-realtime-policy.sh` — `/tmp/issue770-gate-realtime-policy.log` and `.exit` (`0`)
+- scalar Wasm check — `/tmp/issue770-gate-wasm-scalar.log` and `.exit` (`0`)
+- SIMD Wasm check — `/tmp/issue770-gate-wasm-simd.log` and `.exit` (`0`)
+
+No source, test, dependency, or build-input edits were made after the focused checkpoint.
+
+# Issue #770 attempt 1 adversarial review
+
+Verdict: **FAIL**.
+
+Reviewed frozen head: `c864ffa263a84be627945ff7290446080a18b6a4` in `/tmp/miso-engine-770` (feature checkpoint `413794b6`, followed by ancestry-only main merge). Reviewer: Astra, medium. Read the full #770 stateless brief, allowed diff against delivered main, complete companion contract, registry seam, owner adapter implementations, focused tests, relevant existing builtin error authority and supplied gates. No source edits, agents, GitHub actions, commits, or repeated expensive gates were performed.
+
+## Findings and minimal corrections
+
+1. **Contradictory companion semantics are admitted.** `crates/effect-contract/src/response.rs::validate_response_analysis_descriptor` checks axis/unit/cost and the single-variant enums, but never checks the `total_scope`/`bypass` combination. An otherwise valid `BuiltinInputFilterSubtotal` declaration with `EffectWideIdentityWithSections`, or `ParametricEqCascade` with `NoEffectBypass`, returns `Ok(())` and enters the registry, although neither is the implemented contract frozen by this brief. Add validation for the two supported scope/bypass combinations. The contract tests currently exercise only `id == 0`; BAD_RESPONSE's disordered sections are masked by that earlier failure, and the test named allocation-free contains no measurement. Add independent valid-base mutations for section ID/order, bounds/names/floor, axis/unit/cost and the contradictory pairings, and verify malformed companion admission is rejected. Validate the actual builtin declaration in its owner test as explicitly required. This remains a small companion validator/test change; do not change legacy descriptor validation or its diagnostic set.
+
+2. **The builtin adapter replaces established preparation diagnostic spellings.** `crates/builtins/src/filter_response.rs::builtin_configuration_error` invents strings such as `effect.builtin.filter_cutoff`, `effect.builtin.gain` and `effect.builtin.matrix`. The existing translation in `crates/builtins-compiler/src/lib.rs:4426`–4431 is `builtin.gain.domain`, `builtin.filter.cutoff`, `builtin.filter.order`, `builtin.filter.coefficients`, `builtin.matrix.coefficient` and `builtin.matrix.smoothing`. The native builtin owner itself returns the enum and has no pre-existing static-string method; the cited compiler mapping is the existing public diagnostic spelling authority, not another response API. Root confirmed these six existing spellings must be preserved within the new owner adapter under the brief's original-code requirement. Use them directly in the allowed adapter and assert representative exact gain/cutoff/matrix codes, plus exact forwarded EQ preparation codes instead of only matching `Configuration(_)`. No compiler dependency, generic error refactor or compiler edit is needed. Render-only enum variants are unreachable from response preparation; if retaining their arms, the existing compiler fallback is `builtin.resource.arithmetic_overflow`, rather than newly invented strings. Unsupported query rate is already explicitly mapped/tested as `effect.quality.unsupported` and is separate from these six mappings.
+
+3. **Several explicit adapter-only evidence claims are not discriminated.** Correct these together in the current owner test files:
+
+   - `common_eq_adapter_preserves_input_ownership_capacity_and_refusal_sentinels` mutates `values[2]`, then only makes refused queries; there is no successful before/after equality assertion. The builtin adapter has no source-mutation check. Query both immutable providers successfully before/after mutating valid caller configuration fields and compare the results and configuration views. The existing direct-owner mutation test cannot test a newly added adapter's ownership.
+   - Both new adapter parity corpora enable every section. Add an asymmetric mixed enabled/disabled configuration at the four launch rates and assert exact enabled-mask contents against descriptor order, floor/scope/bypass metadata and output. Current EQ views mostly assert rate/bypass; builtin only checks one enabled-slice length. Include builtin right-only optional output (currently absent) and EQ's normal left-only case alongside its existing bypass-left-only case.
+   - The brief requires bit identity, but parity assertions use float `assert_eq!`, which does not distinguish signed zeros. Compare `to_bits` (existing builtin `bits` helper is available), especially disabled-section/total identities and one-sided modes. Preserve the old independent DSP tests and thresholds.
+   - Common-interface refusal tests should retain both optional output arrays when checking grid/budget errors, and cover malformed right-section output as well as left. Builtin common refusal tests currently supply no section output at all. Measure representative refused trait-object queries, and descriptor/configuration/retained-byte reads, with the existing allocator alongside the first-success query measurement. This proves the new wrapper paths, not merely the unchanged direct APIs. Exercise `2^53+1` as well as the already checked maximum correlation identity through the common interface.
+
+The source implementation already uses owned fixed data and correct delegation; finding 3 concerns the frozen adapter acceptance evidence, not a demonstrated current DSP or ownership defect. Reuse current small fixtures/helpers without expanding the DSP corpus or adding a framework.
+
+## Verified positive source conclusions
+
+- The additive default `NativeEffectFactory::response_analysis` seam and launch-registry integration expose EQ without concrete-EQ imports in the integration test; a compressor explicitly returns no capability. No field was added to EffectDescriptor or ObservationDescriptor, and no existing descriptor serialization/digest routine or render/state trait layout changed.
+- Both adapters delegate directly to their accepted owner query implementations, translating only shapes and metadata/errors. No coefficient math, transfer arithmetic, flooring order, render path or PCM expectation changed.
+- Concrete `size_of::<PreparedEqResponse>()`/`size_of::<PreparedInputFilterResponse>()` checks precede allocation (and preparation validation), and returned retained bytes are `size_of::<Self>()`. Fixed owned payloads have no retained caller slice or vector. The documented accounting excludes the caller's Box handle/catalog; at-size and one-byte-below tests pass.
+- EQ wraps its existing immutable prepared words; builtin retains a copied fixed configuration and enable flags, using existing complete owner validation and query. Read-only views borrow their provider lifetime. No mutable state or cache is introduced, and no production dependency is added.
+- Query refusal translations otherwise remain typed; first trait-object queries measure zero allocation/free/reallocation. Owners retain finite output, input/grid/shape admission and transactional preflight behavior.
+
+## Gate evidence
+
+Focused supplied results report EQ response 13, builtin filter response 11, companion contract 2, and registry integration 1 passing. The final targeted Clippy and format exit records are zero. I also read the remaining saved zero exit records and terminal results under `/tmp/issue770-gate-{eq-response-conformance,builtins-response-determinism,effect-contract-full,workspace-check,effect-runtime-policy,builtins-policy,realtime-policy,wasm-scalar,wasm-simd}.{log,exit}`: conformance/determinism/full-contract tests, workspace all-target check, policies and both Wasm builds pass. Earlier implementation-debugging failures remain separate preserved logs; they are not the frozen gate result. No reviewer rerun is claimed, and Wasm builds do not establish runtime response parity.
+
+This is the one coherent attempt-1 FAIL verdict. The corrections stay within existing allowed companion/owner/test/spec paths, with unchanged DSP and no generic architecture expansion. Artifact delivery remains a separate successor after SOURCE PASS; parent #763 remains open.
+
+Root authorizes attempt 2 for the three bounded findings, within the existing allowed paths. Preserve legacy descriptors, DSP arithmetic, dependencies and gates. Use the existing builtin diagnostic spellings directly in the owner adapter; no compiler refactor. Complete all adapter assertions in one coherent pass, then focused/Clippy/policy green checkpoint and a single adversarial verdict.
