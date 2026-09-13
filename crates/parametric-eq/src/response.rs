@@ -5,13 +5,58 @@
 //! state-space arithmetic is an independent implementation of the recurrence in `lane::kernels`.
 //! It never reads a prepared effect or any mutable render state.
 
-use effect_contract::{EffectPrepareError, PrepareEffectRequest, expected_prepared_metadata};
+use core::mem::size_of;
+
+use effect_contract::{
+    EffectPrepareError, NativeEffectResponseFactory, ParameterUnit, PrepareEffectRequest,
+    PreparedResponseAnalysis, ResponseAmplitudeReference, ResponseAnalysisDescriptor,
+    ResponseAnalysisError, ResponseAnalysisMode, ResponseBypassSemantics, ResponseChannelLayout,
+    ResponseConfigurationView, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
+    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
+    ResponseTotalScope, expected_prepared_metadata,
+};
 use engine::{SampleRateHz, is_launch_sample_rate};
 
 use super::{BandTarget, EQ_SECTION_COUNT, EqSvfWords, PARAMETRIC_EQ_DESCRIPTOR, band_targets};
 
 /// The fixed magnitude floor returned by this query, in dB relative to unit amplitude.
-const EQ_RESPONSE_FLOOR_DB: f32 = -120.0;
+pub(crate) const EQ_RESPONSE_FLOOR_DB: f32 = -120.0;
+
+static EQ_RESPONSE_SECTIONS: [ResponseSectionDescriptor; EQ_SECTION_COUNT] = [
+    ResponseSectionDescriptor {
+        id: 1,
+        name: "Band 1",
+    },
+    ResponseSectionDescriptor {
+        id: 2,
+        name: "Band 2",
+    },
+    ResponseSectionDescriptor {
+        id: 3,
+        name: "Band 3",
+    },
+    ResponseSectionDescriptor {
+        id: 4,
+        name: "Band 4",
+    },
+];
+
+pub(crate) static EQ_RESPONSE_DESCRIPTOR: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
+    id: 1,
+    name: "Parametric EQ Response",
+    sections: &EQ_RESPONSE_SECTIONS,
+    axis_unit: ParameterUnit::Hz,
+    unit: ParameterUnit::Db,
+    amplitude_reference: ResponseAmplitudeReference::Unity,
+    channels: ResponseChannelLayout::Independent,
+    mode: ResponseAnalysisMode::RequestedConfiguration,
+    cadence: ResponseQueryCadence::ExplicitQuery,
+    section_output: ResponseSectionOutput::TotalAndOptionalSections,
+    cost: effect_contract::ObservationCost::Computed,
+    floor_db: EQ_RESPONSE_FLOOR_DB,
+    total_scope: ResponseTotalScope::ParametricEqCascade,
+    bypass: ResponseBypassSemantics::EffectWideIdentityWithSections,
+};
 
 /// A caller-owned request for one stationary EQ response.
 #[derive(Clone, Copy, Debug)]
@@ -423,4 +468,93 @@ pub fn query_response_into(
         enabled_left: request.configuration.enabled_left,
         enabled_right: request.configuration.enabled_right,
     })
+}
+
+fn common_response_error(error: EqResponseError) -> ResponseAnalysisError {
+    match error {
+        EqResponseError::Configuration(error) => ResponseAnalysisError::Configuration(error),
+        EqResponseError::InvalidFrequencyGrid => ResponseAnalysisError::InvalidFrequencyGrid,
+        EqResponseError::Capacity => ResponseAnalysisError::Capacity,
+        EqResponseError::OutputShape => ResponseAnalysisError::OutputShape,
+        EqResponseError::Numerical => ResponseAnalysisError::Numerical,
+    }
+}
+
+struct PreparedEqResponse {
+    configuration: EqResponseConfiguration,
+}
+
+impl NativeEffectResponseFactory for super::ParametricEqFactory {
+    fn analysis_descriptor(&self) -> &'static ResponseAnalysisDescriptor {
+        &EQ_RESPONSE_DESCRIPTOR
+    }
+
+    fn prepare_response(
+        &self,
+        request: PrepareEffectRequest<'_>,
+        limits: ResponsePrepareLimits,
+    ) -> Result<Box<dyn PreparedResponseAnalysis>, ResponseAnalysisError> {
+        if size_of::<PreparedEqResponse>() > limits.maximum_prepared_bytes {
+            return Err(ResponseAnalysisError::ResourceLimit);
+        }
+        let configuration =
+            EqResponseConfiguration::prepare(request).map_err(|error| match error {
+                EqResponseError::Configuration(error) => {
+                    ResponseAnalysisError::Configuration(error)
+                }
+                EqResponseError::InvalidFrequencyGrid
+                | EqResponseError::Capacity
+                | EqResponseError::OutputShape
+                | EqResponseError::Numerical => ResponseAnalysisError::Numerical,
+            })?;
+        Ok(Box::new(PreparedEqResponse { configuration }))
+    }
+}
+
+impl PreparedResponseAnalysis for PreparedEqResponse {
+    fn analysis_descriptor(&self) -> &'static ResponseAnalysisDescriptor {
+        &EQ_RESPONSE_DESCRIPTOR
+    }
+
+    fn configuration(&self) -> ResponseConfigurationView<'_> {
+        ResponseConfigurationView {
+            sample_rate_hz: self.configuration.sample_rate_hz,
+            enabled_left: &self.configuration.enabled_left,
+            enabled_right: &self.configuration.enabled_right,
+            bypass: Some(self.configuration.bypass),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+    }
+
+    fn query_into(
+        &self,
+        query: ResponseQuery<'_>,
+        output: ResponseOutput<'_>,
+    ) -> Result<ResponseSummary, ResponseAnalysisError> {
+        let summary = query_response_into(
+            EqResponseRequest {
+                configuration_id: query.configuration_id,
+                configuration: &self.configuration,
+                frequencies_hz: query.frequencies_hz,
+                maximum_points: query.maximum_points,
+            },
+            EqResponseOutput {
+                total_left_db: output.total_left_db,
+                total_right_db: output.total_right_db,
+                sections_left_db: output.sections_left_db,
+                sections_right_db: output.sections_right_db,
+            },
+        )
+        .map_err(common_response_error)?;
+        Ok(ResponseSummary {
+            configuration_id: summary.configuration_id,
+            mode: ResponseAnalysisMode::RequestedConfiguration,
+            sample_rate_hz: summary.sample_rate_hz,
+            points: summary.points,
+            floor_db: summary.floor_db,
+        })
+    }
 }

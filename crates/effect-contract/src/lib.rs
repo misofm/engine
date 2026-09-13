@@ -5,9 +5,18 @@
 #![allow(missing_docs)]
 
 mod live;
+mod response;
 mod step;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
+pub use response::{
+    NativeEffectResponseFactory, PreparedResponseAnalysis, ResponseAmplitudeReference,
+    ResponseAnalysisDescriptor, ResponseAnalysisError, ResponseAnalysisMode,
+    ResponseBypassSemantics, ResponseChannelLayout, ResponseConfigurationView,
+    ResponseDescriptorError, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
+    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
+    ResponseTotalScope, validate_response_analysis_descriptor,
+};
 pub use step::{
     DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
     NearestLatticeValues, ParameterLattice, StepLadder, canonical_descriptor_decimal,
@@ -1459,6 +1468,15 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectRequest<'_>,
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError>;
 
+    /// Returns this owner's optional native requested-configuration response capability.
+    ///
+    /// The companion descriptor is validated when the factory enters a [`NativeEffectRegistry`].
+    /// Effects without this capability retain the default `None` and all existing descriptor
+    /// bytes remain unchanged.
+    fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
+        None
+    }
+
     /// Binds `width` tracks into one homogeneous bank, or declines.
     ///
     /// # The three-outcome rule (issue #95; frozen for every implementation)
@@ -1945,6 +1963,14 @@ impl NativeEffectRegistry {
             if validate_descriptor(d).is_err() {
                 return Err(RegistryError {
                     code: "effect.descriptor.invalid",
+                    id: Some(d.id),
+                });
+            }
+            if let Some(response) = x.response_analysis()
+                && validate_response_analysis_descriptor(response.analysis_descriptor()).is_err()
+            {
+                return Err(RegistryError {
+                    code: "effect.response.descriptor.invalid",
                     id: Some(d.id),
                 });
             }

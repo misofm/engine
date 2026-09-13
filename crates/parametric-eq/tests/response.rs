@@ -8,7 +8,11 @@ mod support;
 
 use bench_support::alloc as bench_alloc;
 use dsp_reference::ReferenceSvfStateSpace;
-use effect_contract::{EffectProcessBlock, NativeEffectFactory, ParameterChannel};
+use effect_contract::{
+    EffectProcessBlock, NativeEffectFactory, ParameterChannel, PreparedResponseAnalysis,
+    ResponseAnalysisError, ResponseAnalysisMode, ResponseBypassSemantics, ResponseOutput,
+    ResponsePrepareLimits, ResponseQuery, ResponseTotalScope,
+};
 use parametric_eq::{
     EQ_SECTION_COUNT, EqBandKind, EqResponseConfiguration, EqResponseError, EqResponseMode,
     EqResponseOutput, EqResponseRequest, ParametricEqFactory, design_svf, query_response_into,
@@ -28,6 +32,13 @@ fn prepared(
 ) -> EqResponseConfiguration {
     EqResponseConfiguration::prepare(request_at_rate(values, bypass, rate))
         .expect("valid response configuration")
+}
+
+fn assert_bits_equal(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
 }
 
 fn realized(words: parametric_eq::EqSvfWords) -> ReferenceSvfStateSpace {
@@ -1057,4 +1068,489 @@ fn response_query_allocates_nothing_after_caller_setup() {
         delta.reallocations, 0,
         "response query reallocated: {delta:?}"
     );
+}
+
+fn common_prepared(
+    values: &[effect_contract::InitialParameterValue],
+    bypass: bool,
+    rate: u32,
+    maximum_prepared_bytes: usize,
+) -> Result<Box<dyn PreparedResponseAnalysis>, ResponseAnalysisError> {
+    let factory = ParametricEqFactory;
+    factory
+        .response_analysis()
+        .expect("EQ response owner")
+        .prepare_response(
+            support::request_at_rate(values, bypass, rate),
+            ResponsePrepareLimits {
+                maximum_prepared_bytes,
+            },
+        )
+}
+
+#[test]
+fn common_eq_adapter_is_bit_identical_for_asymmetric_sections_and_all_launch_rates() {
+    for rate in LAUNCH_RATES {
+        let mut configured = configured_four_sections(rate);
+        set_initial(&mut configured, 3, ParameterChannel::Right, -6.0);
+        set_initial(&mut configured, 6, ParameterChannel::Left, 0.0);
+        set_initial(&mut configured, 12, ParameterChannel::Right, 0.0);
+        set_initial(&mut configured, 18, ParameterChannel::Left, 0.0);
+        let direct_configuration = prepared(&configured, false, rate);
+        let provider = common_prepared(&configured, false, rate, usize::MAX).expect("provider");
+        let descriptor = provider.analysis_descriptor();
+        assert_eq!(descriptor.sections.len(), EQ_SECTION_COUNT);
+        assert_eq!(descriptor.floor_db, -120.0);
+        assert_eq!(
+            descriptor.total_scope,
+            ResponseTotalScope::ParametricEqCascade
+        );
+        assert_eq!(
+            descriptor.bypass,
+            ResponseBypassSemantics::EffectWideIdentityWithSections
+        );
+        assert_eq!(provider.configuration().sample_rate_hz, rate);
+        assert_eq!(provider.configuration().bypass, Some(false));
+        assert_eq!(
+            provider.configuration().enabled_left,
+            &[true, false, true, false]
+        );
+        assert_eq!(
+            provider.configuration().enabled_right,
+            &[true, true, false, true]
+        );
+
+        let frequencies = [0.0_f32, 120.0, 1_000.0, 8_000.0, rate as f32 * 0.5];
+        let mut direct_left = [f32::NAN; 5];
+        let mut direct_right = [f32::NAN; 5];
+        let mut direct_sections_left = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let mut direct_sections_right = [f32::NAN; EQ_SECTION_COUNT * 5];
+        query_response_into(
+            EqResponseRequest {
+                configuration_id: u64::MAX,
+                configuration: &direct_configuration,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            EqResponseOutput {
+                total_left_db: &mut direct_left,
+                total_right_db: &mut direct_right,
+                sections_left_db: Some(&mut direct_sections_left),
+                sections_right_db: Some(&mut direct_sections_right),
+            },
+        )
+        .expect("direct query");
+
+        let mut common_left = [f32::NAN; 5];
+        let mut common_right = [f32::NAN; 5];
+        let mut common_sections_left = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let mut common_sections_right = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let summary = provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: u64::MAX,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut common_left,
+                    total_right_db: &mut common_right,
+                    sections_left_db: Some(&mut common_sections_left),
+                    sections_right_db: Some(&mut common_sections_right),
+                },
+            )
+            .expect("common query");
+        assert_eq!(summary.mode, ResponseAnalysisMode::RequestedConfiguration);
+        assert_eq!(summary.configuration_id, u64::MAX);
+        assert_bits_equal(&common_left, &direct_left);
+        assert_bits_equal(&common_right, &direct_right);
+        assert_bits_equal(&common_sections_left, &direct_sections_left);
+        assert_bits_equal(&common_sections_right, &direct_sections_right);
+
+        let mut total_only_left = [f32::NAN; 5];
+        let mut total_only_right = [f32::NAN; 5];
+        provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 1,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut total_only_left,
+                    total_right_db: &mut total_only_right,
+                    sections_left_db: None,
+                    sections_right_db: None,
+                },
+            )
+            .expect("total-only common query");
+        assert_bits_equal(&total_only_left, &direct_left);
+        assert_bits_equal(&total_only_right, &direct_right);
+
+        let mut left_only = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let mut left_only_left = [f32::NAN; 5];
+        let mut left_only_right = [f32::NAN; 5];
+        provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 2,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut left_only_left,
+                    total_right_db: &mut left_only_right,
+                    sections_left_db: Some(&mut left_only),
+                    sections_right_db: None,
+                },
+            )
+            .expect("left-only common query");
+        assert_bits_equal(&left_only_left, &direct_left);
+        assert_bits_equal(&left_only_right, &direct_right);
+        assert_bits_equal(&left_only, &direct_sections_left);
+
+        let mut right_only = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let mut right_only_left = [f32::NAN; 5];
+        let mut right_only_right = [f32::NAN; 5];
+        provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 2,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut right_only_left,
+                    total_right_db: &mut right_only_right,
+                    sections_left_db: None,
+                    sections_right_db: Some(&mut right_only),
+                },
+            )
+            .expect("right-only common query");
+        assert_bits_equal(&right_only_left, &direct_left);
+        assert_bits_equal(&right_only_right, &direct_right);
+        assert_bits_equal(&right_only, &direct_sections_right);
+
+        let bypass = common_prepared(&configured, true, rate, usize::MAX).expect("bypass provider");
+        let mut bypass_left = [f32::NAN; 5];
+        let mut bypass_right = [f32::NAN; 5];
+        let mut bypass_sections = [f32::NAN; EQ_SECTION_COUNT * 5];
+        bypass
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 3,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut bypass_left,
+                    total_right_db: &mut bypass_right,
+                    sections_left_db: Some(&mut bypass_sections),
+                    sections_right_db: None,
+                },
+            )
+            .expect("bypass common query");
+        assert!(bypass_left.iter().all(|value| value.to_bits() == 0));
+        assert!(bypass_right.iter().all(|value| value.to_bits() == 0));
+        assert_bits_equal(&bypass_sections, &direct_sections_left);
+    }
+}
+
+#[test]
+fn common_eq_adapter_preserves_input_ownership_capacity_and_refusal_sentinels() {
+    let mut values = configured_four_sections(48_000);
+    let provider = common_prepared(&values, false, 48_000, usize::MAX).expect("provider");
+    let retained = provider.retained_bytes();
+    assert!(retained > 0);
+    assert!(matches!(
+        common_prepared(&values, false, 48_000, retained - 1),
+        Err(ResponseAnalysisError::ResourceLimit)
+    ));
+    assert!(common_prepared(&values, false, 48_000, retained).is_ok());
+    let frequencies = [100.0_f32, 1_000.0];
+    let enabled_left_before = provider.configuration().enabled_left.to_owned();
+    let enabled_right_before = provider.configuration().enabled_right.to_owned();
+    let mut before_left = [f32::NAN; 2];
+    let mut before_right = [f32::NAN; 2];
+    provider
+        .query_into(
+            ResponseQuery {
+                configuration_id: 1,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            ResponseOutput {
+                total_left_db: &mut before_left,
+                total_right_db: &mut before_right,
+                sections_left_db: None,
+                sections_right_db: None,
+            },
+        )
+        .expect("pre-mutation common query");
+    values[2].value = 20_000.0;
+    values[3].value = -12.0;
+    let mut after_left = [f32::NAN; 2];
+    let mut after_right = [f32::NAN; 2];
+    provider
+        .query_into(
+            ResponseQuery {
+                configuration_id: 2,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            ResponseOutput {
+                total_left_db: &mut after_left,
+                total_right_db: &mut after_right,
+                sections_left_db: None,
+                sections_right_db: None,
+            },
+        )
+        .expect("post-mutation common query");
+    assert_bits_equal(&after_left, &before_left);
+    assert_bits_equal(&after_right, &before_right);
+    assert_eq!(provider.configuration().enabled_left, &enabled_left_before);
+    assert_eq!(
+        provider.configuration().enabled_right,
+        &enabled_right_before
+    );
+
+    let mut invalid_left = [47.0_f32; 1];
+    let mut invalid_right = [48.0_f32; 1];
+    let mut invalid_sections_left = [49.0_f32; EQ_SECTION_COUNT];
+    let mut invalid_sections_right = [50.0_f32; EQ_SECTION_COUNT];
+    let invalid = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &[f32::NAN],
+            maximum_points: 1,
+        },
+        ResponseOutput {
+            total_left_db: &mut invalid_left,
+            total_right_db: &mut invalid_right,
+            sections_left_db: Some(&mut invalid_sections_left),
+            sections_right_db: Some(&mut invalid_sections_right),
+        },
+    );
+    assert_eq!(invalid, Err(ResponseAnalysisError::InvalidFrequencyGrid));
+    assert_eq!(invalid_left, [47.0]);
+    assert_eq!(invalid_right, [48.0]);
+    assert_eq!(invalid_sections_left, [49.0; EQ_SECTION_COUNT]);
+    assert_eq!(invalid_sections_right, [50.0; EQ_SECTION_COUNT]);
+
+    let mut left = [41.0_f32; 2];
+    let mut right = [42.0_f32; 2];
+    let mut sections_left = [43.0_f32; EQ_SECTION_COUNT * 2];
+    let mut sections_right = [44.0_f32; EQ_SECTION_COUNT * 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &[1_000.0, 100.0],
+            maximum_points: 2,
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: Some(&mut sections_left),
+            sections_right_db: Some(&mut sections_right),
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::InvalidFrequencyGrid));
+    assert_eq!(left, [41.0; 2]);
+    assert_eq!(right, [42.0; 2]);
+    assert_eq!(sections_left, [43.0; EQ_SECTION_COUNT * 2]);
+    assert_eq!(sections_right, [44.0; EQ_SECTION_COUNT * 2]);
+
+    let mut left = [43.0_f32; 2];
+    let mut right = [44.0_f32; 2];
+    let mut sections_left = [45.0_f32; EQ_SECTION_COUNT * 2];
+    let mut sections_right = [46.0_f32; EQ_SECTION_COUNT * 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: 1,
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: Some(&mut sections_left),
+            sections_right_db: Some(&mut sections_right),
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::Capacity));
+    assert_eq!(left, [43.0; 2]);
+    assert_eq!(right, [44.0; 2]);
+    assert_eq!(sections_left, [45.0; EQ_SECTION_COUNT * 2]);
+    assert_eq!(sections_right, [46.0; EQ_SECTION_COUNT * 2]);
+
+    let mut left = [45.0_f32; 2];
+    let mut right = [46.0_f32; 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: 2,
+        },
+        ResponseOutput {
+            total_left_db: &mut left[..1],
+            total_right_db: &mut right,
+            sections_left_db: None,
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::OutputShape));
+    assert_eq!(left, [45.0; 2]);
+    assert_eq!(right, [46.0; 2]);
+
+    let mut left = [49.0_f32; 2];
+    let mut right = [50.0_f32; 2];
+    let mut sections = [51.0_f32; 8];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: frequencies.len(),
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: Some(&mut sections[..7]),
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::OutputShape));
+    assert_eq!(left, [49.0; 2]);
+    assert_eq!(right, [50.0; 2]);
+    assert_eq!(sections, [51.0; 8]);
+
+    let mut left = [52.0_f32; 2];
+    let mut right = [53.0_f32; 2];
+    let mut sections = [54.0_f32; 9];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: frequencies.len(),
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: Some(&mut sections),
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::OutputShape));
+    assert_eq!(left, [52.0; 2]);
+    assert_eq!(right, [53.0; 2]);
+    assert_eq!(sections, [54.0; 9]);
+
+    let mut left = [55.0_f32; 2];
+    let mut right = [56.0_f32; 2];
+    let mut right_sections = [57.0_f32; 9];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: frequencies.len(),
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: None,
+            sections_right_db: Some(&mut right_sections[..7]),
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::OutputShape));
+    assert_eq!(left, [55.0; 2]);
+    assert_eq!(right, [56.0; 2]);
+    assert_eq!(right_sections, [57.0; 9]);
+
+    let mut invalid = values.clone();
+    set_initial(&mut invalid, 2, ParameterChannel::Left, f32::NAN);
+    assert!(matches!(
+        common_prepared(&invalid, false, 48_000, usize::MAX),
+        Err(ResponseAnalysisError::Configuration(
+            effect_contract::EffectPrepareError {
+                code: "effect.parameter.initial"
+            }
+        ))
+    ));
+}
+
+#[test]
+fn common_eq_trait_object_query_is_allocation_free() {
+    bench_alloc::assert_installed();
+    let configured = configured_four_sections(48_000);
+    let provider = common_prepared(&configured, false, 48_000, usize::MAX).expect("provider");
+    let frequencies = [0.0_f32, 120.0, 1_000.0, 8_000.0, 24_000.0];
+    let mut left = [f32::NAN; 5];
+    let mut right = [f32::NAN; 5];
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    let trait_provider = &*provider as &dyn PreparedResponseAnalysis;
+    let mark = bench_alloc::current_thread_counters();
+    assert_eq!(trait_provider.analysis_descriptor().floor_db, -120.0);
+    let view = trait_provider.configuration();
+    assert_eq!(view.sample_rate_hz, 48_000);
+    assert_eq!(view.enabled_left.len(), EQ_SECTION_COUNT);
+    assert_eq!(trait_provider.retained_bytes(), provider.retained_bytes());
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert_eq!(delta.allocations, 0, "trait metadata allocated: {delta:?}");
+    assert_eq!(delta.deallocations, 0, "trait metadata freed: {delta:?}");
+    assert_eq!(
+        delta.reallocations, 0,
+        "trait metadata reallocated: {delta:?}"
+    );
+
+    let mut refused_left = [31.0_f32; 5];
+    let mut refused_right = [32.0_f32; 5];
+    let mut refused_sections_left = [33.0_f32; EQ_SECTION_COUNT * 5];
+    let mut refused_sections_right = [34.0_f32; EQ_SECTION_COUNT * 5];
+    let mark = bench_alloc::current_thread_counters();
+    let refusal = trait_provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &[1_000.0, 100.0],
+            maximum_points: 2,
+        },
+        ResponseOutput {
+            total_left_db: &mut refused_left[..2],
+            total_right_db: &mut refused_right[..2],
+            sections_left_db: Some(&mut refused_sections_left[..EQ_SECTION_COUNT * 2]),
+            sections_right_db: Some(&mut refused_sections_right[..EQ_SECTION_COUNT * 2]),
+        },
+    );
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert_eq!(refusal, Err(ResponseAnalysisError::InvalidFrequencyGrid));
+    assert_eq!(delta.allocations, 0, "trait refusal allocated: {delta:?}");
+    assert_eq!(delta.deallocations, 0, "trait refusal freed: {delta:?}");
+    assert_eq!(
+        delta.reallocations, 0,
+        "trait refusal reallocated: {delta:?}"
+    );
+    assert_eq!(refused_left, [31.0; 5]);
+    assert_eq!(refused_right, [32.0; 5]);
+    assert_eq!(refused_sections_left, [33.0; EQ_SECTION_COUNT * 5]);
+    assert_eq!(refused_sections_right, [34.0; EQ_SECTION_COUNT * 5]);
+
+    let mark = bench_alloc::current_thread_counters();
+    let summary = trait_provider
+        .query_into(
+            ResponseQuery {
+                configuration_id: 9_007_199_254_740_993,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            ResponseOutput {
+                total_left_db: &mut left,
+                total_right_db: &mut right,
+                sections_left_db: None,
+                sections_right_db: None,
+            },
+        )
+        .expect("trait-object query");
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert_eq!(summary.configuration_id, 9_007_199_254_740_993);
+    assert_eq!(delta.allocations, 0, "trait query allocated: {delta:?}");
+    assert_eq!(delta.deallocations, 0, "trait query freed: {delta:?}");
+    assert_eq!(delta.reallocations, 0, "trait query reallocated: {delta:?}");
 }

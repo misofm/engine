@@ -35,13 +35,14 @@
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EnumChoice,
-    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, QualityDescriptor, ResetKind,
-    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    TailSamples, expected_prepared_metadata,
+    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
+    NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, QualityDescriptor, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     BLOCK_LIMIT, block_is_positive_zero, check_block, lane_is_positive_zero, nonfinite_lane_mask,
@@ -2094,6 +2095,10 @@ impl NativeEffectFactory for ParametricEqFactory {
             BankWidth::Four,
             &[request],
         )?))
+    }
+
+    fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
+        Some(self)
     }
 
     fn bind_homogeneous_bank(

@@ -67,3 +67,7 @@ Directly read the six stored exits: all are 0. The response suite reports 8 pass
 No shipped artifact input, pin, result lineage, browser matrix, dependency or workflow changed. #767's substantive source PASS and #768's artifact qualification remain applicable; no artifact rebuild or browser rerun is justified for this correction, and the historical candidate identity must remain unchanged.
 
 Root may synchronize the corrected basis and resume #770. This PASS does not claim PR #769's final exact-head qualification, merge/main qualification, or GitHub delivery closure is complete. Those delivery steps remain required; parent #763 stays open.
+
+## Delivered through PR #769
+
+Merged main `5d8fe1401983da9bd1c731522b9a201f74244261`. Required final-PR qualification `34730464919` and post-main qualification `34730813104` both succeeded. #767 source passed Astra medium attempt 2 at `dc070bcda506896fe05b4dfefb931841b6d6caa3`; #768 artifact qualification passed attempt 1 at `b92e72160b34329a354244a3d1edfa6441fc149b`; #771's comment-only correction passed its sole review at `7f18c2cfc72bf7f8cc99d6939c4558187e4857bf`. Root synchronizes and closes these three delivered children. The capability is native requested-configuration HPF/LPF response with independent L/R and bounded caller outputs, plus qualified linked artifact; no browser query endpoint is claimed. Parent #763 stays open.
