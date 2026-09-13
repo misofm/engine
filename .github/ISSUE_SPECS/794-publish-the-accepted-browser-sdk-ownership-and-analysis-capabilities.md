@@ -1,7 +1,7 @@
 # Publish the accepted browser SDK ownership and analysis capabilities
 
 Amends the existing release issue; no duplicate release issue. Product inputs:
-accepted misofm/engine#789/#791/#793 and misofm/engine#796. Downstream:
+accepted misofm/engine#789/misofm/engine#791/misofm/engine#793 and misofm/engine#796. Downstream:
 misofm/engine-web-adapter#95 and misofm/app#210.
 
 ## Current state and smallest outcome
@@ -62,7 +62,7 @@ existing release qualification build is still required. Do not add build loops.
   Wasm SHA-256, archive SHA-256/SHA-512 integrity and workflow run IDs.
 - Completion requires registry public access, exact version/latest tag and
   shasum/integrity, fresh registry public imports/CLI, and verified attestation
-  binding exact package bytes, trusted workflow and source SHA. Give misofm/engine-web-adapter#95/#210
+  binding exact package bytes, trusted workflow and source SHA. Give misofm/engine-web-adapter#95/misofm/app#210
   these identities. Source version strings or a local tarball are insufficient.
 
 Luna XHIGH implements any necessary release metadata. A fresh Astra MEDIUM

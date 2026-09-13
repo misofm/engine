@@ -11,7 +11,7 @@ The same engine owns the semantic console, managed observations and measurement
 leases, and its close terminates them. This is one browser SDK ownership slice.
 
 Inspection baseline: engine main `69c268f240bf30b2a43b43dd521120cd89dcc0b9`
-(accepted #793/PR #795); adapter main
+(accepted misofm/engine#793/PR #795); adapter main
 `f833303f146de7cbe1705fe88ae68a6d6e0d4e45`. This is source evidence, not a
 reported runtime incident or a claim that new tests passed. Adapter
 `src/console.ts` currently owns `HostFeed`, maps meters and constructs
@@ -93,7 +93,7 @@ lease-race cases. Do not edit adapter production code under this issue.
   current hook. This proves the shared route, not a newly invented runtime bug.
 - In the existing fresh packed consumer, import these public types and obtain
   one real SDK meter using the existing direct-PCM/browser fixture, without
-  installing the FLAC adapter. Exercise close. Reuse accepted #793 browser
+  installing the FLAC adapter. Exercise close. Reuse accepted misofm/engine#793 browser
   artifacts/DSP evidence if unchanged; no new multi-browser or DSP matrix.
 - Run focused existing SDK tests, TypeScript/generated-surface checks and the
   existing package check against the accepted artifact. Required changed-source
@@ -103,7 +103,7 @@ lease-race cases. Do not edit adapter production code under this issue.
 
 No Rust DSP/Worklet transport rewrite, headless/native parity expansion, codecs,
 storage, source policy changes, feed extraction, UI or new plugin abstraction.
-Existing #789/#791/#793 acceptance is preserved. Parent #763's remaining
+Existing misofm/engine#789/misofm/engine#791/misofm/engine#793 acceptance is preserved. Parent misofm/engine#763's remaining
 multi-target/discovery/identity/transport promises stay open.
 
 User workflow overrides repository model defaults: Luna XHIGH implements;
@@ -115,7 +115,7 @@ Root checkpoints focused-green tranches before layering, integrates current
 main, records commands/results and source SHAs, and synchronizes local/GitHub
 evidence. Close this source issue only after independent PASS, merged delivery
 and required CI with evidence upstream; verify GitHub CLOSED. Registry
-publication belongs to #794 and is not implied by source acceptance.
+publication belongs to misofm/engine#794 and is not implied by source acceptance.
 
 ## Decision record
 
@@ -131,21 +131,21 @@ Do not implement the previously proposed three adapter analysis wrappers.
 
 | Work | Authoritative issue | Dependency |
 | --- | --- | --- |
-| SDK measurement/console ownership | https://github.com/misofm/engine/issues/796 | Accepted engine #793 |
-| Exact SDK release | https://github.com/misofm/engine/issues/794 | #796 PASS, merged source and required CI |
-| Adapter uses/exposes the same SDK engine | https://github.com/misofm/engine-web-adapter/issues/95 | #796 API; #794 registry for final publication |
+| SDK measurement/console ownership | https://github.com/misofm/engine/issues/796 | Accepted engine misofm/engine#793 |
+| Exact SDK release | https://github.com/misofm/engine/issues/794 | misofm/engine#796 PASS, merged source and required CI |
+| Adapter uses/exposes the same SDK engine | https://github.com/misofm/engine-web-adapter/issues/95 | misofm/engine#796 API; misofm/engine#794 registry for final publication |
 | App direct SDK measurements and EQ visualizer | https://github.com/misofm/app/issues/210 | Published SDK and adapter pair |
-| SDK generic PCM readiness | https://github.com/misofm/engine/issues/797 | Existing SDK ring/feed; independent of #796 |
-| Adapter adopts SDK readiness | https://github.com/misofm/engine-web-adapter/issues/101 | #797 and its published SDK before final acceptance |
+| SDK generic PCM readiness | https://github.com/misofm/engine/issues/797 | Existing SDK ring/feed; independent of misofm/engine#796 |
+| Adapter adopts SDK readiness | https://github.com/misofm/engine-web-adapter/issues/101 | misofm/engine#797 and its published SDK before final acceptance |
 | Backend-specific capability checks | https://github.com/misofm/engine-web-adapter/issues/102 | Independent of measurement/plotting work |
 
-Primary order: #796 → #794 → adapter #95 → app #210. Accepted exact tarballs
+Primary order: misofm/engine#796 → misofm/engine#794 → adapter misofm/engine-web-adapter#95 → app misofm/app#210. Accepted exact tarballs
 may support downstream source preparation after independent API PASS; final
 pins, publication and deployment use verified registry packages. Do not publish
-the old 0.2.5 first and require another release solely for #796: 0.2.5 was still
+the old 0.2.5 first and require another release solely for misofm/engine#796: 0.2.5 was still
 unused at scoping, so reuse it if a fresh registry check confirms that. Already
 accepted siblings may share a frozen release cut, but plotting never waits for
-the PCM/backend issues. If #797 needs a later package, create its ordinary
+the PCM/backend issues. If misofm/engine#797 needs a later package, create its ordinary
 bounded release issue before claiming availability; source PASS is not npm
 publication. No extra codec/backend or new release framework is authorized.
 
@@ -163,9 +163,9 @@ Source state at this scoping checkpoint: engine main
 `f833303f146de7cbe1705fe88ae68a6d6e0d4e45`, app main
 `7d876e2569b3f40c416663e4bf780fe41e2ee328`; registry latest SDK 0.2.4,
 adapter 0.5.4. These are baselines to refresh, not pins against future main.
-Engine #793 is delivered and CLOSED: PR #795 and merged-main required CI
+Engine misofm/engine#793 is delivered and CLOSED: PR #795 and merged-main required CI
 34788089349 passed, including the existing three-browser qualification. Engine
-#763 remains OPEN for its larger stated scope; do not silently absorb or close
+misofm/engine#763 remains OPEN for its larger stated scope; do not silently absorb or close
 that program as part of this handoff.
 
 Scoping changed documentation only. In the shared workspace, engine specs are
@@ -174,7 +174,7 @@ adapter specs are on `codex/engine-analysis-forwarding` at
 `/tmp/miso-adapter-engine-analysis-integration`, incorporating current main;
 app specs are on local `codex/engine-analysis-integration` at
 `/tmp/miso-app-engine-analysis-integration`, incorporating current main. The app
-scope checkpoint has not been pushed: its AGENTS requires lint/typecheck/test/
+scope checkpoint `0cd7eaf` has not been pushed: its AGENTS requires lint/typecheck/test/
 build before any push, and no app implementation/testing is claimed by scoping.
 The GitHub issue body is synchronized and sufficient in a fresh environment.
 Audit/preserve these branches and any unpushed work before starting. Leave the
