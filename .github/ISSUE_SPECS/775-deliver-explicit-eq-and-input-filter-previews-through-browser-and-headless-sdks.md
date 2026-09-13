@@ -202,3 +202,44 @@ Root delivery boundary: accepted production source `559c23a36e6827f715798aa82d9a
 PR qualification `34737581447` failed on three integration causes: unsorted generated export names, the legacy SDK deletion rule for generic `limits` properties, and a third duplicate `normalize_zero` definition. Original job logs are `/tmp/issue775-ci-{workspace,sdk,lint,audit}-failure.log`. The last two Rust policy jobs share the same duplicate-helper cause.
 
 Luna corrected the generated export order and regenerated its ABI assets/fixture; named the new analysis-specific option `responseLimits`; and removed the duplicate helper in favor of `effect_contract::normalize_zero`. No validation rule was weakened and no DSP or response algorithm changed. Full parameter-metadata tests, SDK deletion/self-tests, effect-runtime policy, fmt, types, generated check and focused candidate-2 SDK regressions pass (all actual exit 0, `/tmp/issue775-attempt3-focused/`). Candidate 2 proves the unchanged behavior; a current artifact will verify the final Rust/metadata inputs before delivery. This bounded third attempt adds no feature or optimization.
+
+
+# Issue #775 — Astra medium review, attempt 3
+
+**Verdict: PASS for the bounded source correction** at `a51f1be2f6f0a907b7c03797be2e175572d6e669`, compared with `d6509e4c`, in `/tmp/miso-engine-775`.
+
+This review covers only the three CI integration failures and their fixes, as requested. No new product scope, architecture, numerical matrix or optimization is required.
+
+- **Canonical exports:** the Rust generator and generated ABI assets/fixture now place response exports in lexical order. Independent parsed-JSON comparison confirms that both the SDK ABI asset and self-test fixture contain exactly the same export names and are otherwise semantically identical to the baseline. No ABI layout, symbol identity or callable behavior changed.
+- **Analysis-specific option:** `responseLimits` replaces the prohibited generic `limits` property consistently in browser/headless options, Worker initialization messages, shared adapter storage, qualification entry and focused tests. The same values still reach the same request fields and timeout handling. The deletion rule and its self-test were not weakened.
+- **Shared zero normalization:** host-core now imports `effect_contract::normalize_zero` instead of defining a third copy. The existing helper has the identical implementation: either signed zero becomes positive zero, and every other value is returned unchanged. No coefficient, grid, response or render algorithm changed.
+
+All nine recorded focused checks under `/tmp/issue775-attempt3-focused/` have actual exit 0: parameter-metadata tests, SDK deletion gate and self-test, effect-runtime policy, formatting, SDK types, generated check, response evals and diff check. The response eval evidence uses candidate 2 and is attributed to that candidate; it is useful regression evidence for the unchanged response behavior, not proof of a candidate-3 artifact that had not finished qualification at review time.
+
+No concrete defect was found in these three corrections. Attempt-2 numerical/resource/lifecycle acceptance remains applicable to the unchanged algorithms. Candidate 3's final artifact qualification and exact-head required CI remain delivery work for root; this source PASS does not assert those pending results or close parent #763.
+
+No source edits, commits, GitHub mutations, agent delegation or expensive gate reruns were performed by this reviewer. The report itself is the sole file written for this review.
+
+
+## Candidate 3 final consumer evidence
+
+Built from `a51f1be2f6f0a907b7c03797be2e175572d6e669`. Official discovery and ordinary build exit 0; the Wasm digest remains `e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab`, exactly the existing pin. The six-file set and all five current companion authorities match (`/tmp/issue775-candidate3-logs/`). Generated ABI names are now canonically ordered.
+
+Actual candidate-3 SDK execution passes in Chromium, Firefox and WebKit (`/tmp/issue775-candidate3-browser-qualification.{log,exit}`). Headless 198/198 with zero skips, package 11/11 plus tarball smoke, expected resources, deployment matrix and SDK types all pass (`/tmp/issue775-candidate3-remaining-gates/`). The static check found one stale independent whitelist order in `check-abi-layout-v1.py`; its original failure is preserved in that directory. This does not change the engine artifact. Attempt 4 is restricted to bringing that expected list into the same canonical order while retaining exact equality and the unsorted mutation check. No broader scope is authorized by this correction.
+
+
+# Issue #775 — Astra medium review, attempt 4
+
+**Verdict: PASS** at `2c80bb12fc9e5fd277f022c40bb64fb82c1cf21e` in `/tmp/miso-engine-775`.
+
+This bounded revision changes only `scripts/check-abi-layout-v1.py`: it reorders the existing expected export names into the canonical lexical order already emitted by the accepted generator, and updates the explanatory comment. The commit does not change the equality check, mutation guards, symbol set, ABI layouts, production code or artifact inputs. No implementation expansion was requested or needed.
+
+Independent AST/JSON inspection confirms that the before/after validator lists contain exactly the same names, the new list is sorted, and it exactly matches candidate 3's ABI document. The validator and its existing self-test both pass; the self-test reports **17 mutations caught**. The final static/object gate also passes against `/tmp/issue775-candidate3-artifact`. All three exit files `/tmp/issue775-attempt4-{validator,validator-self-test,static}.log.exit` contain 0.
+
+Candidate 3 was built from `a51f1be2f6f0a907b7c03797be2e175572d6e669`; attempt 4 changes only its independent validator and therefore does not require relabeling or rebuilding that artifact. Independently calculated Wasm SHA-256 is `e1025f509f77554d4fdbd76507cecd3f5566b5c2f06e5df50ef88185aeb109ab`, agreeing with the recorded candidate and current pin. The candidate-3 discovery/build, exact six-file set and five companion-authority evidence remain in `/tmp/issue775-candidate3-logs/`.
+
+Fresh candidate-3 browser qualification passes in Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5; its log/exit are `/tmp/issue775-candidate3-browser-qualification.{log,exit}`. Candidate-3 headless, package, resource, SDK type and deployment-matrix exit files under `/tmp/issue775-candidate3-remaining-gates/` are all 0; recorded counts are 198 headless tests with no skips and 11 package tests plus tarball smoke. The original `web_audioworklet.exit` in that directory remains **1**, preserving the stale-whitelist failure. Only that static result is superseded by the passing attempt-4 static log; no other gate is substituted or relabeled.
+
+The narrow validator correction resolves the remaining known local integration failure. Earlier accepted response correctness, resource and lifecycle fixes remain unchanged. Root still owns committing the pending spec/result/matrix evidence, exact-head required CI, merge and GitHub synchronization; this verdict does not assert remote completion or close parent #763.
+
+No source edits, commits, GitHub mutations, agent delegation or expensive qualification reruns were performed by this reviewer. This report is the sole file written.
