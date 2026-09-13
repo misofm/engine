@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
+import type { SpectrumQuery } from "../core/spectrum.ts";
 
 /**
  * The bridge from the SDK's `BootOptions` to the shipped host factory's `MisoWebBootOptions`.
@@ -69,6 +70,11 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     );
   }
 
+  let spectrum: MisoWebBootOptions["spectrum"] = null;
+  if (options.spectrum !== undefined) {
+    spectrum = toWebSpectrumOptions(options.spectrum);
+  }
+
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
@@ -76,5 +82,36 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     consoleMeterBlocks: word("console.meterBlocks", console?.meterBlocks),
     consoleObservationTaps: observationTaps,
     consoleMasterTrackPlusOne: masterTrackPlusOne,
+    spectrum,
+  };
+}
+
+function toWebSpectrumOptions(query: SpectrumQuery): NonNullable<MisoWebBootOptions["spectrum"]> {
+  const id = query.target.kind === "output" ? query.target.outputId : query.target.trackId;
+  if (typeof id !== "string" || id.length === 0) {
+    throw new MisoUsageError("spectrum target identity must be a nonempty string");
+  }
+  const idBytes = new TextEncoder().encode(id).byteLength;
+  const maximumIdBytes = ABI_LAYOUT.constants.maximumSpectrumIdBytes;
+  if (idBytes > maximumIdBytes) {
+    throw new MisoUsageError("spectrum target identity exceeds its bound");
+  }
+  const channels = query.channels ?? "both";
+  if (channels !== "left" && channels !== "right" && channels !== "both") {
+    throw new MisoUsageError("spectrum channels must be left, right, or both");
+  }
+  const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
+    ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
+      || maximumCaptureBytes > ABI_LAYOUT.constants.spectrumCaptureBytes) {
+    throw new MisoUsageError(
+      `maximumCaptureBytes must be an integer in 1..=${ABI_LAYOUT.constants.spectrumCaptureBytes}`,
+    );
+  }
+  return {
+    target: query.target.kind,
+    targetId: id,
+    channels,
+    maximumCaptureBytes,
   };
 }

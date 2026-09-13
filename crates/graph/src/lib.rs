@@ -1393,13 +1393,15 @@ impl PreparedGraphPlan {
                     .chain(bindings.observers.iter())
                     .map(|binding| (&binding.node, binding.handle)),
             );
-            let valid_observers = observer_pairs
-                .iter()
-                .all(|(node, _)| matches!(node, GraphNodeId::TrackStage { .. }))
-                && {
-                    observer_pairs.sort_unstable();
-                    observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
-                };
+            let valid_observers = observer_pairs.iter().all(|(node, _)| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
+                )
+            }) && {
+                observer_pairs.sort_unstable();
+                observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
+            };
 
             (
                 supplied.len() != supplied_count,
@@ -1547,6 +1549,10 @@ pub trait GraphPreparedSourceSetDriver: Send {
         left: &mut [f32],
         right: &mut [f32],
     ) -> Result<(), RenderError>;
+    /// Source facts for the graph block most recently admitted by `begin_block`.
+    fn observation_validity(&self) -> GraphObservationValidity {
+        GraphObservationValidity::CLEAR
+    }
     fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
         0
     }
@@ -1624,6 +1630,11 @@ impl GraphPreparedSourceSet {
             return Err(RenderError::InvalidEnvelope);
         }
         self.driver.copy_track_input(claim_index, left, right)
+    }
+
+    /// Source facts for the graph block most recently admitted by the source driver.
+    pub(crate) fn observation_validity(&self) -> GraphObservationValidity {
+        self.driver.observation_validity()
     }
 
     /// Copy bounded render-owner telemetry only after the prepared plan is disarmed.
@@ -1779,15 +1790,49 @@ pub struct GraphObservationBlock<'a> {
     pub right: &'a [f32],
     pub first_sample: u64,
 }
+
+/// Source facts covering the graph block offered to an observer.
+///
+/// The source layer supplies these facts at the same exclusive render boundary as the copied
+/// graph block. A graph-wide flag is intentional: source-to-track attribution is not available at
+/// this seam, so consumers must not present it as a target-specific guarantee.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphObservationValidity {
+    /// At least one source emitted an in-region underrun during this block.
+    pub source_underrun: bool,
+    /// At least one source applied a new generation at this block boundary.
+    pub source_generation_changed: bool,
+}
+
+impl GraphObservationValidity {
+    /// No source invalidity or underrun facts were observed.
+    pub const CLEAR: Self = Self {
+        source_underrun: false,
+        source_generation_changed: false,
+    };
+}
+
 /// Immutable final bank output, offered at the same post-node observation point.
 #[derive(Clone, Copy)]
 pub struct GraphResidentObservationBlock<'a> {
     pub lane: rack::ResidentOutputLane<'a>,
     pub first_sample: u64,
+    /// Source facts for the graph block containing this resident lane.
+    pub validity: GraphObservationValidity,
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
+
+    /// Observe one planar block with source validity facts from the same render boundary.
+    /// Existing observers ignore the additional facts by default.
+    fn observe_with_validity(
+        &mut self,
+        block: GraphObservationBlock<'_>,
+        _validity: GraphObservationValidity,
+    ) -> Result<(), RenderError> {
+        self.observe(block)
+    }
 
     /// `None` declines without mutation and requests the ordinary planar observation.
     /// Both `Some` results accept once; an accepted error propagates without retry.
@@ -1796,6 +1841,20 @@ pub trait GraphRuntimeObserver: Send {
         _block: GraphResidentObservationBlock<'_>,
     ) -> Option<Result<(), RenderError>> {
         None
+    }
+
+    /// Invalidate a pending capture after a failed graph render.
+    ///
+    /// The default keeps existing meter and observer implementations unchanged.
+    fn invalidate(&mut self) {}
+
+    /// Invalidate a capture after a graph render failed at this block's sample boundary.
+    ///
+    /// Observers that can complete during a block may use the boundary to discard a result
+    /// completed by the failed block while preserving an older completed result.
+    #[doc(hidden)]
+    fn invalidate_after_failure(&mut self, _failed_sample: u64) {
+        self.invalidate();
     }
 }
 /// One immutable prepared observer binding, ordered by its stable meter handle.
@@ -1965,6 +2024,11 @@ impl PreparedPlanExecutor for GraphExecutor {
             .copy_response_snapshot(track_id, self.sample_rate_hz, sink)
     }
 
+    #[doc(hidden)]
+    fn invalidate_observers(&mut self) {
+        self.runtime.invalidate_observers();
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
@@ -1980,15 +2044,27 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
         } = self;
-        if let Some(source_set) = source_set {
-            source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
+        let source_validity = if let Some(source_set) = source_set.as_mut() {
+            if let Err(error) =
+                source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
+            {
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
+                return Err(error);
+            }
             for &(claim, buffer) in source_input_buffers.iter() {
                 let (left, right) = runtime.buffer_mut(buffer);
-                source_set.copy_track_input(claim, left, right)?;
+                if let Err(error) = source_set.copy_track_input(claim, left, right) {
+                    runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    return Err(error);
+                }
             }
-        }
+            source_set.observation_validity()
+        } else {
+            GraphObservationValidity::CLEAR
+        };
         for unit in 0..runtime.units.len() {
             if let Err(error) = runtime.execute(unit, time.absolute_sample) {
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
@@ -1999,7 +2075,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
-            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {
+            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity) {
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
@@ -3429,8 +3506,10 @@ mod tests {
             let (plan, bindings, input) = binding_plan();
             let mut bad = source_bindings(bindings, &input);
             bad.observers.push(GraphNodeObserverBinding::new(
-                GraphNodeId::Output {
-                    output_id: StableGraphId::parse("main").expect("ID"),
+                GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(GraphEdgeId::TrackMain {
+                        target: input.clone(),
+                    }),
                 },
                 1,
                 Box::new(W4OrderObserver {

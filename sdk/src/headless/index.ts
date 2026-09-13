@@ -10,6 +10,7 @@ export type {
   TrackResponseQuery,
   TrackResponseResult,
 } from "../core/live-response.ts";
+export type { SpectrumLimits, SpectrumQuery, SpectrumResult, SpectrumTarget } from "../core/spectrum.ts";
 export { EngineConsole } from "../core/console.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {

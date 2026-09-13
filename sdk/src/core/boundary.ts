@@ -14,6 +14,13 @@ import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from ".
 import { TrackResponseModule } from "./live-response.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
 import {
+  SpectrumModule,
+  cloneSpectrumQuery,
+  spectrumChannelsRaw,
+  stageSpectrumRequest,
+} from "./spectrum.ts";
+import type { SpectrumQuery, SpectrumResult } from "./spectrum.ts";
+import {
   decodeObservationRows,
   enrichObservationMap,
   resolveObservationAddressesWithTracks,
@@ -160,17 +167,21 @@ export class WasmBoundary {
   #optionBytes: Uint8Array;
   #metersAttached: boolean;
   #trackResponse: TrackResponseModule | undefined;
+  #spectrum: SpectrumModule | undefined;
+  #spectrumQuery: SpectrumQuery | undefined;
 
   private constructor(
     exports: ExportTable,
     handle: number,
     optionBytes: Uint8Array,
     metersAttached: boolean,
+    spectrumQuery: SpectrumQuery | undefined,
   ) {
     this.#exports = exports;
     this.#handle = handle;
     this.#optionBytes = optionBytes;
     this.#metersAttached = metersAttached;
+    this.#spectrumQuery = spectrumQuery;
   }
 
   /**
@@ -185,13 +196,16 @@ export class WasmBoundary {
     document: Uint8Array,
     options: BootOptions = {},
   ): Promise<WasmBoundary> {
+    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
+    const bootOptions = spectrumQuery === undefined ? options : { ...options, spectrum: spectrumQuery };
     const exports = exportsOf(await asset.instantiate());
-    const staged = stage(exports, document, options);
+    const staged = stage(exports, document, bootOptions);
     return new WasmBoundary(
       exports,
       staged.handle,
       staged.optionBytes,
-      (options.console?.meterBlocks ?? 0) > 0,
+      (bootOptions.console?.meterBlocks ?? 0) > 0,
+      spectrumQuery,
     );
   }
 
@@ -207,11 +221,14 @@ export class WasmBoundary {
    * boot v1 has no verb that mutates a live session's document.
    */
   reboot(document: Uint8Array, options: BootOptions = {}): void {
+    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
+    const bootOptions = spectrumQuery === undefined ? options : { ...options, spectrum: spectrumQuery };
     this.dispose();
-    const staged = stage(this.#exports, document, options);
+    const staged = stage(this.#exports, document, bootOptions);
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
-    this.#metersAttached = (options.console?.meterBlocks ?? 0) > 0;
+    this.#metersAttached = (bootOptions.console?.meterBlocks ?? 0) > 0;
+    this.#spectrumQuery = spectrumQuery;
   }
 
   /** The exact bytes written to the options block, for the scratch/worklet equality rule. */
@@ -559,6 +576,52 @@ export class WasmBoundary {
     return this.#trackResponse.queryActive(request, this.#live());
   }
 
+  /** Arm the one prepared spectrum boundary for its next complete window. */
+  armSpectrum(): EngineCallResult {
+    if (this.#spectrumQuery === undefined) {
+      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_arm(this.#live()));
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+    });
+  }
+
+  /** Read and analyze a completed spectrum window; `undefined` means the fixed window is pending. */
+  readSpectrum(): SpectrumResult | undefined {
+    const query = this.#spectrumQuery;
+    if (query === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_read(
+      this.#live(),
+      spectrumChannelsRaw(query.channels),
+    ));
+    if (result === constantValue("resultCodes", "backpressure")) return undefined;
+    if (result !== constantValue("resultCodes", "ok")) {
+      throw new MisoEngineError("the engine refused the spectrum capture read", {
+        phase: result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    this.#spectrum ??= new SpectrumModule(this.#exports);
+    return this.#spectrum.analyzeCurrent(query);
+  }
+
+  /** Cancel a pending spectrum capture. */
+  cancelSpectrum(): EngineCallResult {
+    if (this.#spectrumQuery === undefined) {
+      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_spectrum_cancel(this.#live()));
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+    });
+  }
+
   /**
    * Submit one quantum-sized block of planar source PCM.
    *
@@ -775,6 +838,9 @@ export class WasmBoundary {
     if (this.#handle === 0) return;
     this.#trackResponse?.close();
     this.#trackResponse = undefined;
+    this.#spectrum?.close();
+    this.#spectrum = undefined;
+    this.#spectrumQuery = undefined;
     const result = Number(this.#exports.miso_engine_web_v1_dispose(this.#handle));
     this.#handle = 0;
     if (result !== constantValue("resultCodes", "ok")) {
@@ -833,6 +899,7 @@ function stage(
   // 2. `boot_options_ptr` -- module-owned, zero-default, stable for the module's lifetime.
   const optionsPointer = Number(exports.miso_engine_web_v1_boot_options_ptr());
   const optionBytes = writeBootOptions(exports.memory, optionsPointer, options);
+  stageSpectrumRequest(exports, options.spectrum);
 
   // 3. `document_ptr(len)` -- the admission gate. A document over the engine's maximum is refused
   //    *here*, before a byte is copied and before any staging is allocated, which is what makes

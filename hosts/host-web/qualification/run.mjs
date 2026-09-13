@@ -28,7 +28,7 @@ const MUTATIONS = [
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
-  "sdk-response", "sdk-observation",
+  "sdk-response", "sdk-observation", "sdk-spectrum",
 ];
 
 function option(name) {
@@ -263,6 +263,32 @@ function validateSdkResponse(browserName, response) {
     && observations.windows[0]?.endSample > observations.windows[0]?.firstSample
     && observations.windows[0]?.blocks === 2,
   "SDK observation endpoint did not return an actual resident window");
+  const spectrum = response?.spectrum;
+  const spectrumRows = Array.isArray(spectrum?.targets) ? spectrum.targets : [];
+  const expectedSpectrumTargets = [
+    "trackPostInputBuiltins:track",
+    "trackPostMatrix:track",
+    "output:main-out",
+  ];
+  const spectrumU64 = (value) => typeof value === "string"
+    && /^[0-9]+$/.test(value) && BigInt(value) > 0n;
+  gate(browserName, "sdk-spectrum", spectrumRows.length === 3
+    && JSON.stringify(spectrum?.targetKeys) === JSON.stringify(expectedSpectrumTargets)
+    && spectrum?.allTargetsDistinct === true,
+  "SDK spectrum query did not exercise the three prepared graph targets in order");
+  gate(browserName, "sdk-spectrum", spectrumRows.every((row) => row.channels === "both"
+    && row.sampleRateHz === 48_000 && row.windowFrames === 2_048 && row.binCount === 1_025
+    && row.capturedSample === "0" && row.endSample === "2048"
+    && spectrumU64(row.snapshotToken) && spectrumU64(row.resultBytes)
+    && Number.isFinite(row.floorDb) && row.sourceUnderrun === false
+    && row.finite === true && Array.isArray(row.frequencies) && row.frequencies.length === 1_025
+    && Array.isArray(row.left) && row.left.length === 1_025
+    && Array.isArray(row.right) && row.right.length === 1_025),
+  "SDK spectrum Worker result did not preserve the complete bounded L/R window and sample span");
+  gate(browserName, "sdk-spectrum", spectrum?.allFinite === true
+    && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
+    && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
+  "SDK spectrum query did not prove owned arrays, graph-boundary distinction, or lifecycle refusals");
 }
 
 function mutate(result, mutation) {
@@ -282,6 +308,7 @@ function mutate(result, mutation) {
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
+  if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
   return copy;
 }
 

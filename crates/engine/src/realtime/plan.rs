@@ -291,6 +291,12 @@ pub trait PreparedPlanExecutor: Send {
     ) -> Result<u32, ResponseSnapshotError> {
         Err(ResponseSnapshotError::Unsupported)
     }
+    /// Invalidate owner-side observers after a render refusal that happened before dispatch.
+    ///
+    /// This is an internal hook so a prepared executor can discard a partial capture without
+    /// exposing graph types through the engine foundation seam.
+    #[doc(hidden)]
+    fn invalidate_observers(&mut self) {}
     /// Render one already-validated block using only preallocated state.
     fn render(
         &mut self,
@@ -881,7 +887,13 @@ impl PreparedRenderPlan {
         io: RenderIo<'_>,
         time: RenderTime,
     ) -> Result<RenderReport, RenderError> {
-        super::audit::in_render_scope(|| self.render_inner(io, time))
+        let result = super::audit::in_render_scope(|| self.render_inner(io, time));
+        if result.is_err()
+            && let Some(executor) = self.executor.as_deref_mut()
+        {
+            executor.invalidate_observers();
+        }
+        result
     }
 
     /// Render the block that must start at [`Self::next_absolute_sample`].
@@ -894,6 +906,9 @@ impl PreparedRenderPlan {
         absolute_sample: u64,
     ) -> Result<RenderReport, RenderError> {
         if absolute_sample != self.next_absolute_sample {
+            if let Some(executor) = self.executor.as_deref_mut() {
+                executor.invalidate_observers();
+            }
             return Err(RenderError::TimeDiscontinuity {
                 expected: self.next_absolute_sample,
             });

@@ -77,10 +77,16 @@ use host_web::{
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
     RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
     RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
-    STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport,
-    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection, WebResourceReport,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebStatus,
+    SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
+    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS,
+    SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
+    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
+    STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
+    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebMeterHeader,
+    WebObservationResult, WebObservationSelection, WebResourceReport, WebResponseParameter,
+    WebResponseRequest, WebResponseResult, WebSpectrumRequest, WebSpectrumResult,
+    WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -114,7 +120,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 64] = [
+pub const EXPORTS: [&str; 79] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -166,6 +172,21 @@ pub const EXPORTS: [&str; 64] = [
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_spectrum_analysis",
+    "miso_engine_web_v1_spectrum_arm",
+    "miso_engine_web_v1_spectrum_cancel",
+    "miso_engine_web_v1_spectrum_capture_bytes",
+    "miso_engine_web_v1_spectrum_capture_capacity",
+    "miso_engine_web_v1_spectrum_capture_ptr",
+    "miso_engine_web_v1_spectrum_capture_set_bytes",
+    "miso_engine_web_v1_spectrum_close",
+    "miso_engine_web_v1_spectrum_read",
+    "miso_engine_web_v1_spectrum_request_bytes",
+    "miso_engine_web_v1_spectrum_request_ptr",
+    "miso_engine_web_v1_spectrum_result_bytes",
+    "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_target_id_capacity",
+    "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
     "miso_engine_web_v1_track_response_analysis",
     "miso_engine_web_v1_track_response_capture",
@@ -860,6 +881,168 @@ fn live_response_request_fields() -> [Field; 10] {
     ]
 }
 
+fn spectrum_request_fields() -> [Field; 8] {
+    [
+        (
+            "structSize",
+            offset_of!(WebSpectrumRequest, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebSpectrumRequest, abi_version),
+            "u32",
+        ),
+        ("target", offset_of!(WebSpectrumRequest, target), "u32"),
+        ("channels", offset_of!(WebSpectrumRequest, channels), "u32"),
+        (
+            "targetIdBytes",
+            offset_of!(WebSpectrumRequest, target_id_bytes),
+            "u32",
+        ),
+        (
+            "reserved0",
+            offset_of!(WebSpectrumRequest, reserved0),
+            "u32",
+        ),
+        (
+            "maximumCaptureBytes",
+            offset_of!(WebSpectrumRequest, maximum_capture_bytes),
+            "u64",
+        ),
+        (
+            "reserved",
+            offset_of!(WebSpectrumRequest, reserved),
+            "u32[2]",
+        ),
+    ]
+}
+
+fn spectrum_window_fields() -> [Field; 13] {
+    [
+        (
+            "structSize",
+            offset_of!(WebSpectrumWindow, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebSpectrumWindow, abi_version),
+            "u32",
+        ),
+        ("target", offset_of!(WebSpectrumWindow, target), "u32"),
+        ("channels", offset_of!(WebSpectrumWindow, channels), "u32"),
+        (
+            "sampleRateHz",
+            offset_of!(WebSpectrumWindow, sample_rate_hz),
+            "u32",
+        ),
+        ("frames", offset_of!(WebSpectrumWindow, frames), "u32"),
+        (
+            "sourceUnderrun",
+            offset_of!(WebSpectrumWindow, source_underrun),
+            "u32",
+        ),
+        ("reserved0", offset_of!(WebSpectrumWindow, reserved0), "u32"),
+        (
+            "capturedSample",
+            offset_of!(WebSpectrumWindow, captured_sample),
+            "u64",
+        ),
+        (
+            "endSample",
+            offset_of!(WebSpectrumWindow, end_sample),
+            "u64",
+        ),
+        (
+            "snapshotToken",
+            offset_of!(WebSpectrumWindow, snapshot_token),
+            "u64",
+        ),
+        (
+            "leftOffset",
+            offset_of!(WebSpectrumWindow, left_offset),
+            "u32",
+        ),
+        (
+            "rightOffset",
+            offset_of!(WebSpectrumWindow, right_offset),
+            "u32",
+        ),
+    ]
+}
+
+fn spectrum_result_fields() -> [Field; 18] {
+    [
+        (
+            "structSize",
+            offset_of!(WebSpectrumResult, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebSpectrumResult, abi_version),
+            "u32",
+        ),
+        ("result", offset_of!(WebSpectrumResult, result), "u32"),
+        ("target", offset_of!(WebSpectrumResult, target), "u32"),
+        ("channels", offset_of!(WebSpectrumResult, channels), "u32"),
+        (
+            "sampleRateHz",
+            offset_of!(WebSpectrumResult, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "windowFrames",
+            offset_of!(WebSpectrumResult, window_frames),
+            "u32",
+        ),
+        ("binCount", offset_of!(WebSpectrumResult, bin_count), "u32"),
+        (
+            "sourceUnderrun",
+            offset_of!(WebSpectrumResult, source_underrun),
+            "u32",
+        ),
+        ("floorDb", offset_of!(WebSpectrumResult, floor_db), "f32"),
+        (
+            "capturedSample",
+            offset_of!(WebSpectrumResult, captured_sample),
+            "u64",
+        ),
+        (
+            "endSample",
+            offset_of!(WebSpectrumResult, end_sample),
+            "u64",
+        ),
+        (
+            "snapshotToken",
+            offset_of!(WebSpectrumResult, snapshot_token),
+            "u64",
+        ),
+        (
+            "resultBytes",
+            offset_of!(WebSpectrumResult, result_bytes),
+            "u64",
+        ),
+        (
+            "frequenciesOffset",
+            offset_of!(WebSpectrumResult, frequencies_offset),
+            "u32",
+        ),
+        (
+            "leftOffset",
+            offset_of!(WebSpectrumResult, left_offset),
+            "u32",
+        ),
+        (
+            "rightOffset",
+            offset_of!(WebSpectrumResult, right_offset),
+            "u32",
+        ),
+        ("reserved0", offset_of!(WebSpectrumResult, reserved0), "u32"),
+    ]
+}
+
 fn live_response_owner_fields() -> [Field; 16] {
     [
         (
@@ -1225,6 +1408,27 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
+        "spectrumRequest",
+        SPECTRUM_REQUEST_BYTES,
+        &spectrum_request_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "spectrumWindow",
+        SPECTRUM_WINDOW_HEADER_BYTES,
+        &spectrum_window_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "spectrumResult",
+        SPECTRUM_RESULT_HEADER_BYTES,
+        &spectrum_result_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
         "liveResponseOwner",
         LIVE_RESPONSE_OWNER_BYTES,
         &live_response_owner_fields(),
@@ -1319,6 +1523,27 @@ pub fn render() -> String {
         "liveResponseMeanings",
         &[(LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, "eqFilterSubtotal")],
     );
+    render_named_constants(
+        &mut out,
+        "spectrumTargets",
+        &[
+            (
+                SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS,
+                "trackPostInputBuiltins",
+            ),
+            (SPECTRUM_TARGET_TRACK_POST_MATRIX, "trackPostMatrix"),
+            (SPECTRUM_TARGET_OUTPUT, "output"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "spectrumChannels",
+        &[
+            (SPECTRUM_CHANNEL_LEFT, "left"),
+            (SPECTRUM_CHANNEL_RIGHT, "right"),
+            (SPECTRUM_CHANNEL_BOTH, "both"),
+        ],
+    );
     out.push_str(&format!(
         "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     ));
@@ -1355,6 +1580,30 @@ pub fn render() -> String {
     ));
     out.push_str(&format!(
         "    \"liveResponseCaptureBytes\": {LIVE_RESPONSE_CAPTURE_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumWindowHeaderBytes\": {SPECTRUM_WINDOW_HEADER_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"
+    ));
+    out.push_str(&format!(
+        "    \"spectrumBinCount\": {SPECTRUM_BIN_COUNT},\n"
+    ));
+    out.push_str(&format!(
+        "    \"maximumSpectrumIdBytes\": {SPECTRUM_MAXIMUM_ID_BYTES},\n"
     ));
     out.push_str(&format!(
         "    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"

@@ -2713,8 +2713,10 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .iter()
             .chain(self.builtin_observers.iter())
             .all(|observer| {
-                matches!(observer.node, GraphNodeId::TrackStage { .. })
-                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+                matches!(
+                    observer.node,
+                    GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
+                ) && observer_pairs.insert((observer.node.clone(), observer.handle))
             });
         if bindings.envelope != self.graph.envelope
             || duplicate_nodes
@@ -2806,8 +2808,10 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .iter()
             .chain(self.builtin_observers.iter())
             .all(|observer| {
-                matches!(observer.node, GraphNodeId::TrackStage { .. })
-                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+                matches!(
+                    observer.node,
+                    GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
+                ) && observer_pairs.insert((observer.node.clone(), observer.handle))
             });
         if bindings.envelope != self.graph.envelope
             || duplicate_nodes
@@ -5022,11 +5026,16 @@ mod tests {
         }
         {
             let mut fixture = source_bind_fixture();
+            let invalid_node = GraphNodeId::CompensationDelay {
+                edge_id: Box::new(GraphEdgeId::TrackMain {
+                    target: fixture.output.clone(),
+                }),
+            };
             fixture
                 .bindings
                 .observers
                 .push(GraphNodeObserverBinding::new(
-                    fixture.output.clone(),
+                    invalid_node.clone(),
                     1,
                     Box::new(NoopObserver),
                 ));

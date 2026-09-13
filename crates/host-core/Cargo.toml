@@ -27,6 +27,7 @@ graph-compiler.workspace = true
 # the one started-session handle instead of each host re-deriving the pin.
 lane.workspace = true
 math.workspace = true
+microfft.workspace = true
 protocol = { workspace = true, optional = true }
 session.workspace = true
 source.workspace = true
@@ -35,6 +36,7 @@ source.workspace = true
 bench-support.workspace = true
 builtins.workspace = true
 builtins-compiler = { workspace = true, features = ["test-support"] }
+dsp-reference.workspace = true
 # Issue #143 E2: the observation eval compares a bank lane's published reduction against an
 # independently prepared scalar instance of the same effect. A dev-dependency only: nothing in the
 # facade's own source knows a concrete effect crate.

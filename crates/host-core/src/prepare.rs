@@ -33,6 +33,7 @@ use source::{
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
+use crate::spectrum::{SpectrumCapture, SpectrumCaptureRequest, SpectrumPrepareError};
 
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
@@ -240,6 +241,9 @@ pub struct HostPrepareReport {
     /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
     /// over the built runtime rather than computed from the request.
     pub observation_retained_bytes: u64,
+    /// Bytes retained by one prepared spectrum capture, including its graph observer binding.
+    /// Zero when this preparation did not request a spectrum capture.
+    pub spectrum_capture_retained_bytes: u64,
     /// Total source ID text bytes.
     pub source_id_bytes: u64,
     /// Largest single engine-owned allocation: the maximum over the graph, source and builtin
@@ -502,6 +506,29 @@ pub fn prepare_host_runtime_with_console(
     )
 }
 
+/// Prepare a host with live-console handles and one selected, fixed-size spectrum observer.
+///
+/// Meter configuration remains part of [`HostConsoleRequest`], so this entry keeps the console,
+/// meter and spectrum resources in one transactional preparation boundary.
+pub fn prepare_host_runtime_with_console_and_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    spectrum: &SpectrumCaptureRequest,
+) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCapture), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        None,
+        false,
+        Backend::current(),
+        Some(spectrum),
+    )?;
+    let capture = capture.ok_or_else(|| resource("host.spectrum.capture"))?;
+    Ok((prepared, handles, capture))
+}
+
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
 /// Production callers remain pinned to [`Backend::current`].
 #[cfg(test)]
@@ -575,6 +602,48 @@ fn prepare_host_runtime_with_console_policy(
     between_render_calls: bool,
     backend: Backend,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        selected_meters,
+        between_render_calls,
+        backend,
+        None,
+    )?;
+    Ok((prepared, handles))
+}
+
+/// Prepare the normal host path with one selected, fixed-size spectrum observer.
+pub fn prepare_host_runtime_with_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    request: &SpectrumCaptureRequest,
+) -> Result<(PreparedHost, SpectrumCapture), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        &HostConsoleRequest::default(),
+        None,
+        false,
+        Backend::current(),
+        Some(request),
+    )?;
+    debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
+    let capture = capture.ok_or_else(|| resource("host.spectrum.capture"))?;
+    Ok((prepared, capture))
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_host_runtime_with_console_policy_and_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    selected_meters: Option<&[HostMeterRequest]>,
+    between_render_calls: bool,
+    backend: Backend,
+    spectrum_request: Option<&SpectrumCaptureRequest>,
+) -> Result<(PreparedHost, HostConsoleHandles, Option<SpectrumCapture>), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -868,9 +937,14 @@ fn prepare_host_runtime_with_console_policy(
     let graph_report = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
     let session_resources = compiled.resource_estimate();
+    let spectrum_resources = spectrum_request
+        .map(|request| crate::spectrum::spectrum_capture_resources_for(&request.target));
+    let spectrum_capture_retained_bytes =
+        spectrum_resources.map_or(0, |resources| resources.retained_bytes);
     let admitted_graph_and_model = graph_resources
         .session_plus_plan_bytes
         .checked_add(session_resources.compiled_model_bytes)
+        .and_then(|bytes| bytes.checked_add(spectrum_capture_retained_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
         return Err(resource("host.graph.resource.limit"));
@@ -886,7 +960,8 @@ fn prepare_host_runtime_with_console_policy(
     let largest_engine_allocation_bytes = graph_resources
         .largest_allocation_bytes
         .max(source_resources.largest_allocation_bytes)
-        .max(builtin_resources.maximum_single_allocation_bytes);
+        .max(builtin_resources.maximum_single_allocation_bytes)
+        .max(spectrum_resources.map_or(0, |resources| resources.largest_allocation_bytes));
     if largest_engine_allocation_bytes.max(session_resources.single_allocation_bytes)
         > caps.maximum_named_allocation_bytes
         || builtin_resources.engine_owned_retained_payload_bytes
@@ -894,6 +969,26 @@ fn prepare_host_runtime_with_console_policy(
     {
         return Err(resource("host.resource.limit"));
     }
+
+    let (spectrum_observers, spectrum_capture) = match spectrum_request {
+        None => (Vec::new(), None),
+        Some(request) => {
+            let graph_nodes: Vec<GraphNodeId> = artifact
+                .graph()
+                .spec
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect();
+            let (observer, capture) = crate::spectrum::prepare_capture(
+                request,
+                &graph_nodes,
+                caps.maximum_named_allocation_bytes,
+            )
+            .map_err(spectrum_diagnostics)?;
+            (vec![observer], Some(capture))
+        }
+    };
 
     let bindings = GraphRuntimeBindings {
         envelope: artifact.envelope(),
@@ -911,7 +1006,7 @@ fn prepare_host_runtime_with_console_policy(
             .cloned()
             .map(GraphNodeBinding::identity)
             .collect(),
-        observers: Vec::new(),
+        observers: spectrum_observers,
     };
     let bound = artifact
         .into_bound_with_source_set(bindings, source_set)
@@ -1007,6 +1102,7 @@ fn prepare_host_runtime_with_console_policy(
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
         observation_retained_bytes,
+        spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
         largest_engine_allocation_bytes,
     };
@@ -1046,6 +1142,7 @@ fn prepare_host_runtime_with_console_policy(
             effect_observations,
             master_track,
         },
+        spectrum_capture,
     ))
 }
 
@@ -1083,6 +1180,16 @@ fn graph_failure(code: &str) -> PrepareDiagnostics {
 
 fn effect_failure(code: &str) -> PrepareDiagnostics {
     PrepareDiagnostics::fixed(PrepareRejection::Effect, code)
+}
+
+fn spectrum_diagnostics(error: SpectrumPrepareError) -> PrepareDiagnostics {
+    match error {
+        SpectrumPrepareError::UnknownTarget => shape("host.spectrum.target"),
+        SpectrumPrepareError::CaptureBudget => resource("host.spectrum.capture_budget"),
+        SpectrumPrepareError::AllocationBudget => resource("host.spectrum.allocation_budget"),
+        SpectrumPrepareError::QueueCapacity => resource("host.spectrum.queue"),
+        SpectrumPrepareError::NoChannels => shape("host.spectrum.channels"),
+    }
 }
 
 #[cfg(test)]

@@ -102,6 +102,7 @@ pub mod scalar_point_endpoint;
 pub mod shape;
 pub mod solo;
 pub mod source;
+pub mod spectrum;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
@@ -121,9 +122,9 @@ pub use prepare::{
     HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
     compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_console,
-    prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
-    prepare_host_session_with_console,
+    prepare_host_runtime_with_console, prepare_host_runtime_with_console_and_spectrum,
+    prepare_host_runtime_with_selected_meters_between_render_calls,
+    prepare_host_runtime_with_spectrum, prepare_host_session, prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -138,6 +139,13 @@ pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,
+};
+pub use spectrum::{
+    SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
+    SpectrumAnalyzer, SpectrumCapture, SpectrumCaptureError, SpectrumCaptureReadError,
+    SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumChannels, SpectrumOutput,
+    SpectrumPrepareError, SpectrumTarget, SpectrumWindow, spectrum_capture_resources,
+    spectrum_capture_resources_for,
 };
 
 /// The control-side half of one prepared effect's live-console channel (issue #140 A).
