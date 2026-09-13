@@ -39,6 +39,8 @@ use host_core::{
 };
 use host_core::{
     ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
+    SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
     SpectrumTarget, SpectrumWindow,
@@ -195,8 +197,8 @@ pub const SPECTRUM_CHANNEL_BOTH: u32 = SPECTRUM_CHANNEL_LEFT | SPECTRUM_CHANNEL_
 pub const SPECTRUM_MAXIMUM_ID_BYTES: usize = LIVE_RESPONSE_MAXIMUM_ID_BYTES;
 /// Maximum one-shot raw spectrum payload retained by the browser bridge.
 pub const SPECTRUM_CAPTURE_BYTES: usize = 1 << 20;
-/// This explicit-query slice prepares at most one selected spectrum target per host.
-pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 1;
+/// Maximum explicitly prepared spectrum targets in one bounded host request.
+pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 256;
 /// Fixed 2048-sample raw capture header.
 pub const SPECTRUM_WINDOW_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
 /// Fixed analyzed spectrum result header.
@@ -237,6 +239,30 @@ pub struct WebSpectrumRequest {
     pub reserved0: u32,
     pub maximum_capture_bytes: u64,
     pub reserved: [u32; 2],
+}
+
+/// Preparation header for several exact spectrum targets.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumCollectionRequest {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub entry_count: u32,
+    pub reserved0: u32,
+    pub maximum_capture_bytes: u64,
+    pub reserved: [u32; 2],
+}
+
+/// One fixed-slot target entry in a collection request.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebSpectrumCollectionEntry {
+    pub target: u32,
+    pub channels: u32,
+    pub target_id_bytes: u32,
+    pub reserved: [u32; 3],
 }
 
 /// Raw one-shot 2048-frame spectrum window header.
@@ -327,6 +353,16 @@ pub const SPECTRUM_RESULT_HEADER_BYTES: u32 = size_of::<WebSpectrumResult>() as 
 /// Byte size of the additive continuous-spectrum metadata record.
 #[allow(missing_docs)]
 pub const SPECTRUM_STREAM_METADATA_BYTES: u32 = size_of::<WebSpectrumStreamMetadata>() as u32;
+/// Byte sizes of the collection request records.
+#[allow(missing_docs)]
+pub const SPECTRUM_COLLECTION_REQUEST_BYTES: u32 = size_of::<WebSpectrumCollectionRequest>() as u32;
+#[allow(missing_docs)]
+pub const SPECTRUM_COLLECTION_ENTRY_BYTES: u32 = size_of::<WebSpectrumCollectionEntry>() as u32;
+#[allow(missing_docs)]
+pub const SPECTRUM_COLLECTION_ENTRY_CAPACITY: u32 = SPECTRUM_MAXIMUM_PREPARED_TARGETS;
+#[allow(missing_docs)]
+pub const SPECTRUM_COLLECTION_TARGET_IDS_BYTES: u32 =
+    SPECTRUM_MAXIMUM_PREPARED_TARGETS * SPECTRUM_MAXIMUM_ID_BYTES as u32;
 
 fn spectrum_target_raw(target: &SpectrumTarget) -> u32 {
     match target {
@@ -1155,6 +1191,106 @@ type FfiSourceStaging<'a> = (
     &'a mut [u8],
 );
 
+/// Spectrum observer preparation requested by the browser staging boundary.
+///
+/// The singular form remains the compatibility path. The collection form prepares every exact
+/// target/mask before the host is published and lets one control-side owner select among them.
+#[derive(Clone, Debug)]
+pub enum SpectrumPreparationRequest {
+    /// Prepare one fixed spectrum observer.
+    Single(SpectrumCaptureRequest),
+    /// Prepare several exact observers for atomic selection.
+    Collection(SpectrumCaptureCollectionRequest),
+}
+
+enum PreparedSpectrumCapture {
+    Single(SpectrumCapture),
+    Collection(SpectrumCaptureCollection),
+}
+
+impl PreparedSpectrumCapture {
+    fn arm(&self) -> Result<(), SpectrumCaptureError> {
+        match self {
+            Self::Single(capture) => capture.arm(),
+            Self::Collection(capture) => capture.arm_selected(),
+        }
+    }
+
+    fn try_read(&mut self) -> Result<SpectrumWindow, SpectrumCaptureReadError> {
+        match self {
+            Self::Single(capture) => capture.try_read(),
+            Self::Collection(capture) => capture.try_read().map_err(|error| match error {
+                SpectrumCaptureCollectionReadError::NoSelection => {
+                    SpectrumCaptureReadError::NotArmed
+                }
+                SpectrumCaptureCollectionReadError::Capture(error) => error,
+            }),
+        }
+    }
+
+    fn start_continuous(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        match self {
+            Self::Single(capture) => capture.start_continuous(sample_rate_hz, quantum_frames),
+            Self::Collection(capture) => capture.start_continuous(sample_rate_hz, quantum_frames),
+        }
+    }
+
+    fn try_read_continuous(
+        &mut self,
+    ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        match self {
+            Self::Single(capture) => capture.try_read_continuous(),
+            Self::Collection(capture) => capture.try_read_continuous(),
+        }
+    }
+
+    fn stop_continuous(&mut self) {
+        match self {
+            Self::Single(capture) => capture.stop_continuous(),
+            Self::Collection(capture) => capture.stop_continuous(),
+        }
+    }
+
+    fn cancel(&mut self) {
+        match self {
+            Self::Single(capture) => capture.cancel(),
+            Self::Collection(capture) => capture.cancel(),
+        }
+    }
+
+    fn cadence(&self) -> Option<SpectrumCadence> {
+        match self {
+            Self::Single(capture) => capture.cadence(),
+            Self::Collection(capture) => capture.cadence(),
+        }
+    }
+
+    fn stream_epoch(&self) -> Option<u64> {
+        match self {
+            Self::Single(capture) => capture.stream_epoch(),
+            Self::Collection(capture) => capture.stream_epoch(),
+        }
+    }
+
+    fn target(&self) -> Option<&SpectrumTarget> {
+        match self {
+            Self::Single(capture) => Some(capture.target()),
+            Self::Collection(capture) => capture.selected_target(),
+        }
+    }
+
+    fn channels(&self) -> Option<SpectrumChannels> {
+        match self {
+            Self::Single(capture) => Some(capture.channels()),
+            Self::Collection(capture) => capture.selected_entry().map(|entry| entry.channels),
+        }
+    }
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
@@ -1198,11 +1334,9 @@ struct ReadyOwnership {
     /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
     /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
     rack_effects: Box<[[u32; 3]]>,
-    /// The optional one-shot spectrum observer's control-side consumer. It is declared before the
-    /// prepared host so the consumer is released before the plan's producer on teardown.
-    spectrum_capture: Option<SpectrumCapture>,
-    /// Channel mask selected when that observer was prepared.
-    spectrum_channels: u32,
+    /// The optional one-shot spectrum observer or atomically selectable collection. It is
+    /// declared before the prepared host so consumers are released before the plan's producers.
+    spectrum_capture: Option<PreparedSpectrumCapture>,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
     /// when `console_meter_blocks` was zero, in which case no observer exists at all.
@@ -1510,7 +1644,7 @@ impl AudioWorkletEngineHost {
     pub(crate) fn boot_with_spectrum(
         document: &[u8],
         options: WebBootOptions,
-        spectrum_request: Option<SpectrumCaptureRequest>,
+        spectrum_request: Option<SpectrumPreparationRequest>,
     ) -> Result<Self, BootFailure> {
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
@@ -1882,7 +2016,7 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(SpectrumCapture::cadence)
+            .and_then(PreparedSpectrumCapture::cadence)
     }
 
     /// Return the native capture epoch for the active managed stream.
@@ -1891,7 +2025,7 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(SpectrumCapture::stream_epoch)
+            .and_then(PreparedSpectrumCapture::stream_epoch)
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
@@ -1915,7 +2049,8 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .and_then(|ready| ready.spectrum_capture.as_ref())
-            .map(|capture| spectrum_target_raw(capture.target()))
+            .and_then(PreparedSpectrumCapture::target)
+            .map(spectrum_target_raw)
             .unwrap_or(0)
     }
 
@@ -1924,8 +2059,47 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_channels(&self) -> u32 {
         self.ready
             .as_ref()
-            .map(|ready| ready.spectrum_channels)
+            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(PreparedSpectrumCapture::channels)
+            .map(spectrum_channels_raw)
             .unwrap_or(0)
+    }
+
+    /// Atomically select one exact prepared spectrum target and channel mask.
+    ///
+    /// The collection performs all fallible admission before retiring its current capture. A
+    /// refusal therefore leaves the old stream, queued window and effective configuration intact.
+    pub fn select_spectrum(&mut self, target: &SpectrumTarget, channels: SpectrumChannels) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Some(capture) = ready.spectrum_capture.as_mut() else {
+            return RESULT_UNSUPPORTED;
+        };
+        let PreparedSpectrumCapture::Collection(capture) = capture else {
+            return RESULT_UNSUPPORTED;
+        };
+        match capture.select(target, channels) {
+            Ok(_) => RESULT_OK,
+            Err(SpectrumCaptureCollectionSelectionError::UnknownEntry) => RESULT_INVALID_ARGUMENT,
+            Err(SpectrumCaptureCollectionSelectionError::Busy) => RESULT_BACKPRESSURE,
+            Err(SpectrumCaptureCollectionSelectionError::EpochOverflow) => RESULT_REFUSED_BUDGET,
+        }
+    }
+
+    /// Return the collection selection identity, or zero for the singular compatibility path.
+    #[must_use]
+    pub fn spectrum_selection_epoch(&self) -> u64 {
+        self.ready
+            .as_ref()
+            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .map_or(0, |capture| match capture {
+                PreparedSpectrumCapture::Single(_) => 0,
+                PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
+            })
     }
 
     /// Read one bounded batch of selected resident observation taps.
@@ -4200,7 +4374,7 @@ fn compile_ready(
     caps: &HostPrepareCaps,
     options: WebBootOptions,
     mut report: WebResourceReport,
-    spectrum_request: Option<&SpectrumCaptureRequest>,
+    spectrum_request: Option<&SpectrumPreparationRequest>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
@@ -4219,11 +4393,27 @@ fn compile_ready(
         Vec::new()
     };
     let (host, handles, spectrum_capture) = match spectrum_request {
-        Some(request) => {
+        Some(SpectrumPreparationRequest::Single(request)) => {
             let (host, handles, capture) =
                 prepare_host_runtime_with_console_and_spectrum(&session, caps, &console, request)
                     .map_err(BootFailure::preparation)?;
-            (host, handles, Some(capture))
+            (
+                host,
+                handles,
+                Some(PreparedSpectrumCapture::Single(capture)),
+            )
+        }
+        Some(SpectrumPreparationRequest::Collection(request)) => {
+            let (host, handles, capture) =
+                host_core::prepare_host_runtime_with_console_and_spectrum_collection(
+                    &session, caps, &console, request,
+                )
+                .map_err(BootFailure::preparation)?;
+            (
+                host,
+                handles,
+                Some(PreparedSpectrumCapture::Collection(capture)),
+            )
         }
         None => {
             let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
@@ -4491,8 +4681,6 @@ fn compile_ready(
         has_in_flight_commands: false,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
-        spectrum_channels: spectrum_request
-            .map_or(0, |request| spectrum_channels_raw(request.channels)),
         spectrum_capture,
         host,
         meters: handles.meters,

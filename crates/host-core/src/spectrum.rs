@@ -142,6 +142,8 @@ pub enum SpectrumCaptureCollectionSelectionError {
     UnknownEntry,
     /// The selected entry could not be armed after the old entry was left untouched.
     Busy,
+    /// The bounded selection identity could not advance without reuse.
+    EpochOverflow,
 }
 
 /// Refusal while reading the active entry in a prepared spectrum collection.
@@ -423,6 +425,20 @@ impl SpectrumCapture {
         }
         let cadence = SpectrumCadence::new(sample_rate_hz, quantum_frames)
             .map_err(SpectrumContinuousCaptureError::Cadence)?;
+        self.begin_continuous(cadence, false)?;
+        Ok(cadence)
+    }
+
+    fn begin_continuous(
+        &mut self,
+        cadence: SpectrumCadence,
+        replace_one_shot: bool,
+    ) -> Result<(), SpectrumContinuousCaptureError> {
+        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+            || (!replace_one_shot && self.state.load(Ordering::Acquire) != IDLE)
+        {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        }
         if self
             .shared
             .active
@@ -435,13 +451,17 @@ impl SpectrumCapture {
             self.shared.active.store(0, Ordering::Release);
             return Err(SpectrumContinuousCaptureError::EpochOverflow);
         };
+        // Every fallible admission check is complete before the selected one-shot state is
+        // cleared. Collection mode uses this path for an atomic mode replacement.
+        while self.consumer.try_pop().is_ok() {}
+        self.state.store(IDLE, Ordering::Release);
         self.shared.epoch.store(epoch, Ordering::Release);
         self.shared
             .sample_rate_hz
-            .store(u64::from(sample_rate_hz), Ordering::Release);
+            .store(u64::from(cadence.sample_rate_hz()), Ordering::Release);
         self.shared
             .quantum_frames
-            .store(u64::from(quantum_frames), Ordering::Release);
+            .store(u64::from(cadence.quantum_frames()), Ordering::Release);
         self.shared
             .hop_frames
             .store(u64::from(cadence.hop_frames()), Ordering::Release);
@@ -453,11 +473,10 @@ impl SpectrumCapture {
         self.shared.drops.store(0, Ordering::Release);
         self.shared.drop_epoch.store(epoch, Ordering::Release);
         self.shared.invalidated.store(0, Ordering::Release);
-        while self.consumer.try_pop().is_ok() {}
         self.seen_failures = 0;
         self.seen_drops = 0;
         self.mode.store(CONTINUOUS_MODE, Ordering::Release);
-        Ok(cadence)
+        Ok(())
     }
 
     /// Stop scheduled windows and discard queued continuous results.
@@ -574,6 +593,7 @@ impl SpectrumCapture {
 pub struct SpectrumCaptureCollection {
     captures: Box<[SpectrumCapture]>,
     selected: Option<usize>,
+    selection_epoch: u64,
 }
 
 impl SpectrumCaptureCollection {
@@ -581,6 +601,7 @@ impl SpectrumCaptureCollection {
         Self {
             captures: captures.into_boxed_slice(),
             selected: None,
+            selection_epoch: 0,
         }
     }
 
@@ -613,10 +634,37 @@ impl SpectrumCaptureCollection {
         self.selected.and_then(|index| self.entry(index))
     }
 
+    /// Return the selected target identity without cloning it.
+    #[must_use]
+    pub fn selected_target(&self) -> Option<&SpectrumTarget> {
+        self.selected.map(|index| self.captures[index].target())
+    }
+
     /// Return the selected entry index in preparation order.
     #[must_use]
     pub const fn selected_index(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// Monotonic identity of the last committed selection change.
+    #[must_use]
+    pub const fn selection_epoch(&self) -> u64 {
+        self.selection_epoch
+    }
+
+    /// Arm the currently selected entry for one fresh one-shot window.
+    pub fn arm_selected(&self) -> Result<(), SpectrumCaptureError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumCaptureError::Busy);
+        };
+        self.captures[index].arm()
+    }
+
+    /// Cancel every capture and leave the collection unarmed.
+    pub fn cancel(&mut self) {
+        for capture in &mut self.captures {
+            capture.cancel();
+        }
     }
 
     /// Atomically replace the selected one-shot capture with an exact prepared entry.
@@ -642,13 +690,26 @@ impl SpectrumCaptureCollection {
                 .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         }
 
+        let next_selection_epoch = self
+            .selection_epoch
+            .checked_add(1)
+            .ok_or(SpectrumCaptureCollectionSelectionError::EpochOverflow)?;
+
         // Prepare the new state before touching the old one. All checks that can fail therefore
         // preserve the old active capture and its queued result.
         let cadence = self.selected.and_then(|old| self.captures[old].cadence());
         if let Some(cadence) = cadence {
             self.captures[index]
                 .start_continuous(cadence.sample_rate_hz(), cadence.quantum_frames())
-                .map_err(|_| SpectrumCaptureCollectionSelectionError::Busy)?;
+                .map_err(|error| match error {
+                    SpectrumContinuousCaptureError::EpochOverflow => {
+                        SpectrumCaptureCollectionSelectionError::EpochOverflow
+                    }
+                    SpectrumContinuousCaptureError::Busy
+                    | SpectrumContinuousCaptureError::Cadence(_) => {
+                        SpectrumCaptureCollectionSelectionError::Busy
+                    }
+                })?;
         } else {
             self.captures[index]
                 .arm()
@@ -660,6 +721,7 @@ impl SpectrumCaptureCollection {
             }
         }
         self.selected = Some(index);
+        self.selection_epoch = next_selection_epoch;
         self.entry(index)
             .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
     }
@@ -673,11 +735,13 @@ impl SpectrumCaptureCollection {
         let Some(index) = self.selected else {
             return Err(SpectrumContinuousCaptureError::Busy);
         };
+        let cadence = SpectrumCadence::new(sample_rate_hz, quantum_frames)
+            .map_err(SpectrumContinuousCaptureError::Cadence)?;
         // `select` arms the entry so that the native replacement operation has the same semantics
-        // for one-shot and managed callers. Starting a managed stream explicitly replaces that
-        // just-armed one-shot state before enabling continuous mode.
-        self.captures[index].cancel();
-        self.captures[index].start_continuous(sample_rate_hz, quantum_frames)
+        // for one-shot and managed callers. This replacement preflights cadence, ownership and
+        // epoch before clearing that arm, preserving it when a reconfiguration is refused.
+        self.captures[index].begin_continuous(cadence, true)?;
+        Ok(cadence)
     }
 
     /// Stop continuous capture on the selected entry and leave the collection idle.
@@ -685,6 +749,20 @@ impl SpectrumCaptureCollection {
         if let Some(index) = self.selected {
             self.captures[index].stop_continuous();
         }
+    }
+
+    /// Return the selected entry's active managed cadence, if any.
+    #[must_use]
+    pub fn cadence(&self) -> Option<SpectrumCadence> {
+        self.selected
+            .and_then(|index| self.captures[index].cadence())
+    }
+
+    /// Return the selected entry's active managed epoch, if any.
+    #[must_use]
+    pub fn stream_epoch(&self) -> Option<u64> {
+        self.selected
+            .and_then(|index| self.captures[index].stream_epoch())
     }
 
     /// Read a completed one-shot window from the selected entry.

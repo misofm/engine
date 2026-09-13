@@ -90,11 +90,20 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_spectrum_capture_ptr",
     "miso_engine_web_v1_spectrum_capture_set_bytes",
     "miso_engine_web_v1_spectrum_close",
+    "miso_engine_web_v1_spectrum_collection_entry_bytes",
+    "miso_engine_web_v1_spectrum_collection_entry_capacity",
+    "miso_engine_web_v1_spectrum_collection_entry_ptr",
+    "miso_engine_web_v1_spectrum_collection_request_bytes",
+    "miso_engine_web_v1_spectrum_collection_request_ptr",
+    "miso_engine_web_v1_spectrum_collection_target_ids_capacity",
+    "miso_engine_web_v1_spectrum_collection_target_ids_ptr",
     "miso_engine_web_v1_spectrum_read",
     "miso_engine_web_v1_spectrum_request_bytes",
     "miso_engine_web_v1_spectrum_request_ptr",
     "miso_engine_web_v1_spectrum_result_bytes",
     "miso_engine_web_v1_spectrum_result_ptr",
+    "miso_engine_web_v1_spectrum_select",
+    "miso_engine_web_v1_spectrum_selection_epoch",
     "miso_engine_web_v1_spectrum_stream_analysis",
     "miso_engine_web_v1_spectrum_stream_analysis_configure",
     "miso_engine_web_v1_spectrum_stream_metadata_bytes",
@@ -1012,6 +1021,66 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 32,
           "type": "u32[2]"
+        }
+      ]
+    },
+    "spectrumCollectionRequest": {
+      "bytes": 32,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "entryCount",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "maximumCaptureBytes",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 24,
+          "type": "u32[2]"
+        }
+      ]
+    },
+    "spectrumCollectionEntry": {
+      "bytes": 24,
+      "fields": [
+        {
+          "name": "target",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "channels",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "targetIdBytes",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "reserved",
+          "offset": 12,
+          "type": "u32[3]"
         }
       ]
     },
@@ -1945,7 +2014,11 @@ export const ABI_LAYOUT = deepFreeze(
     "maximumLiveResponsePoints": 4096,
     "liveResponseCaptureBytes": 1048576,
     "spectrumCaptureBytes": 1048576,
-    "maximumPreparedSpectrumTargets": 1,
+    "maximumPreparedSpectrumTargets": 256,
+    "spectrumCollectionRequestBytes": 32,
+    "spectrumCollectionEntryBytes": 24,
+    "spectrumCollectionEntryCapacity": 256,
+    "spectrumCollectionTargetIdsBytes": 32512,
     "spectrumRequestBytes": 40,
     "spectrumWindowHeaderBytes": 64,
     "spectrumResultHeaderBytes": 88,
