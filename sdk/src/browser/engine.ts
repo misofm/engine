@@ -656,13 +656,37 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         throw new MisoUsageError("the browser host does not support spectrum collections");
       }
       const effectiveQuery = validateSpectrumCollectionQuery(query, collection);
-      const reply = await host.selectSpectrum(spectrumHostSelection(effectiveQuery));
-      if (reply.result === constantValue("resultCodes", "ok")) spectrumActiveQuery = effectiveQuery;
-      return Object.freeze({
-        ok: reply.result === constantValue("resultCodes", "ok"),
-        result: reply.result,
-        code: resultName(reply.result, "call"),
-      });
+      spectrumStreamPending = true;
+      try {
+        const started = Date.now();
+        const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs ?? options.requestDeadlineMs ?? 5_000;
+        // Preflight before the collection operation arms a capture, so Worker initialization
+        // refusal cannot leave an unowned selected capture behind.
+        await awaitSpectrum(ensureSpectrumWorker(effectiveQuery), started, deadline, options.signal);
+        spectrumStreamBuffer ??= new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
+        const selection = host.selectSpectrum(spectrumHostSelection(effectiveQuery));
+        let reply: Awaited<typeof selection>;
+        try {
+          reply = await awaitSpectrum(selection, started, deadline, options.signal);
+        } catch (error) {
+          // Initial selection arms a one-shot capture before stream activation. Hold its late
+          // cancellation so a replacement cannot inherit or race that unowned capture.
+          holdSpectrumCleanup(selection.then(
+            () => cancelSpectrumCapture(),
+            () => cancelSpectrumCapture(),
+          ));
+          throw error;
+        }
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        if (reply.result === constantValue("resultCodes", "ok")) spectrumActiveQuery = effectiveQuery;
+        return Object.freeze({
+          ok: reply.result === constantValue("resultCodes", "ok"),
+          result: reply.result,
+          code: resultName(reply.result, "call"),
+        });
+      } finally {
+        spectrumStreamPending = false;
+      }
     };
     const selectSpectrumStream = async (
       query: SpectrumQuery,

@@ -486,3 +486,39 @@ test("collection selection deadline retires only its stream and holds late clean
     await engine.close();
   }
 });
+
+test("initial collection selection has a deadline and cancels its late arm before retry", async () => {
+  let finishSelection;
+  let calls = 0;
+  let cancellations = 0;
+  let starts = 0;
+  const host = hostWithCapture({
+    selectSpectrum() {
+      calls += 1;
+      return calls === 1 ? new Promise((resolve) => { finishSelection = resolve; })
+        : Promise.resolve({ result: 0 });
+    },
+    async cancelSpectrum() { cancellations += 1; return { result: 0 }; },
+    async startSpectrumStream() { starts += 1; return { result: 0, metadata: streamMetadata(1) }; },
+    async stopSpectrumStream() { return { result: 0, metadata: streamMetadata(5) }; },
+  });
+  const engine = await browserEngine(host, new SpectrumWorker(), {
+    spectrum: undefined,
+    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
+  });
+  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
+  try {
+    await assert.rejects(engine.subscribeSpectrum(request), /deadline/);
+    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
+    assert.equal(starts, 0);
+    assert.equal(calls, 1);
+    finishSelection({ result: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancellations, 1);
+    const handle = await engine.subscribeSpectrum(request);
+    assert.equal(starts, 1);
+    await handle.close();
+  } finally {
+    await engine.close();
+  }
+});
