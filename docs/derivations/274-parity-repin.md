@@ -59,14 +59,14 @@ involved in any row:
 | `29538d71` *(last revision at which the Wasm pin was true)* | 46 | 10,416 | `0x88a8_ee6a_6d9e_4acc` |
 | `b454b230` `Track delay: regenerate the session corpus` | 46 | 10,480 | `0xeb7a_a549_b666_77a8` |
 | `04d291dd` #241 `Implement canonical PCM source schema` | 46 | 10,176 | `0xbdeb_b0f8_1c38_ec42` |
-| `bd260c90` *(`main` today)* | 46 | 10,176 | `0xbdeb_b0f8_1c38_ec42` |
+| `bd260c90` *(`#274` accepted revision)* | 46 | 10,176 | `0xbdeb_b0f8_1c38_ec42` |
 
 Each recomputed value reproduces the native pin that `crates/protocol/tests/
 conformance_corpus.rs` carried at that revision, and the 04d291dd row reproduces
 `docs/derivations/241-schema-repins.md` §3 independently — including its measured corpus total of
 10,176 bytes and its claim that exactly one frame moves.
 
-**The current value is therefore `0xbdeb_b0f8_1c38_ec42`**, and the Wasm pin was stale by *two*
+**The value established by #274 was therefore `0xbdeb_b0f8_1c38_ec42`**, and the Wasm pin was stale by *two*
 re-pins, not one. Issue #274 names #241; #241 is only the second half.
 
 ### 2.1 The two moves, as byte arithmetic
@@ -101,7 +101,7 @@ in the all-opcode fixture carry a builtins section: `UpsertTrack` (`0x0200`), wh
 
 ## 3. Was there a real divergence?
 
-No. With the gate repaired, the scalar and `simd128` guests both compute
+No. At the #274 revision, with the gate repaired, the scalar and `simd128` guests both compute
 `0xbdeb_b0f8_1c38_ec42` — the value derived in §2 from the corpus bytes alone — and return
 success. The native `conformance_corpus` test asserts the same value. Native and Wasm agree, and
 have agreed throughout; what drifted was a second hand-written copy of the answer.
