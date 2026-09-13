@@ -6,6 +6,16 @@
 //! in each channel. The stationary transfer is derived independently from the recurrence in
 //! `lane::kernels::svf_step`; no render call or mutable [`super::InputBuiltins`] is involved.
 
+use core::mem::size_of;
+
+use effect_contract::{
+    EffectPrepareError, ObservationCost, ParameterUnit, PreparedResponseAnalysis,
+    ResponseAmplitudeReference, ResponseAnalysisDescriptor, ResponseAnalysisError,
+    ResponseAnalysisMode, ResponseBypassSemantics, ResponseChannelLayout,
+    ResponseConfigurationView, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
+    ResponseQueryCadence, ResponseSectionDescriptor, ResponseSectionOutput, ResponseSummary,
+    ResponseTotalScope,
+};
 use engine::{SampleRateHz, is_launch_sample_rate};
 
 use super::{BuiltinParameterError, BuiltinParameters, SvfSection, prepare_sections};
@@ -13,6 +23,28 @@ use super::{BuiltinParameterError, BuiltinParameters, SvfSection, prepare_sectio
 /// The fixed public magnitude floor, in dB relative to unit amplitude.
 const INPUT_FILTER_RESPONSE_FLOOR_DB: f32 = -120.0;
 const SECTION_COUNT: usize = 2;
+
+static INPUT_FILTER_RESPONSE_SECTIONS: [ResponseSectionDescriptor; SECTION_COUNT] = [
+    ResponseSectionDescriptor { id: 1, name: "HPF" },
+    ResponseSectionDescriptor { id: 2, name: "LPF" },
+];
+
+static INPUT_FILTER_RESPONSE_DESCRIPTOR: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
+    id: 1,
+    name: "Input Filter Response",
+    sections: &INPUT_FILTER_RESPONSE_SECTIONS,
+    axis_unit: ParameterUnit::Hz,
+    unit: ParameterUnit::Db,
+    amplitude_reference: ResponseAmplitudeReference::Unity,
+    channels: ResponseChannelLayout::Independent,
+    mode: ResponseAnalysisMode::RequestedConfiguration,
+    cadence: ResponseQueryCadence::ExplicitQuery,
+    section_output: ResponseSectionOutput::TotalAndOptionalSections,
+    cost: ObservationCost::Computed,
+    floor_db: INPUT_FILTER_RESPONSE_FLOOR_DB,
+    total_scope: ResponseTotalScope::BuiltinInputFilterSubtotal,
+    bypass: ResponseBypassSemantics::NoEffectBypass,
+};
 
 /// A caller-owned request for one stationary input-filter response.
 #[derive(Clone, Copy, Debug)]
@@ -367,4 +399,117 @@ pub fn query_input_filter_response_into(
         enabled_left: [sections[0][0].enabled, sections[0][1].enabled],
         enabled_right: [sections[1][0].enabled, sections[1][1].enabled],
     })
+}
+
+/// Returns the builtin owner's immutable native response declaration.
+pub fn input_filter_response_descriptor() -> &'static ResponseAnalysisDescriptor {
+    &INPUT_FILTER_RESPONSE_DESCRIPTOR
+}
+
+fn builtin_configuration_error(error: BuiltinParameterError) -> ResponseAnalysisError {
+    let code = match error {
+        BuiltinParameterError::EmptyBlock => "effect.builtin.block",
+        BuiltinParameterError::LaneLength => "effect.builtin.lane_length",
+        BuiltinParameterError::SampleTimeOverflow => "effect.builtin.sample_time",
+        BuiltinParameterError::GainDomain => "effect.builtin.gain",
+        BuiltinParameterError::FilterCutoff => "effect.builtin.filter_cutoff",
+        BuiltinParameterError::FilterOrder => "effect.builtin.filter_order",
+        BuiltinParameterError::FilterCoefficients => "effect.builtin.filter_coefficients",
+        BuiltinParameterError::MatrixCoefficient => "effect.builtin.matrix",
+        BuiltinParameterError::MatrixSmoothing => "effect.builtin.smoothing",
+    };
+    ResponseAnalysisError::Configuration(EffectPrepareError { code })
+}
+
+fn builtin_response_error(error: InputFilterResponseError) -> ResponseAnalysisError {
+    match error {
+        InputFilterResponseError::UnsupportedSampleRate => {
+            ResponseAnalysisError::Configuration(EffectPrepareError {
+                code: "effect.quality.unsupported",
+            })
+        }
+        InputFilterResponseError::Configuration(error) => builtin_configuration_error(error),
+        InputFilterResponseError::InvalidFrequencyGrid => {
+            ResponseAnalysisError::InvalidFrequencyGrid
+        }
+        InputFilterResponseError::Capacity => ResponseAnalysisError::Capacity,
+        InputFilterResponseError::OutputShape => ResponseAnalysisError::OutputShape,
+        InputFilterResponseError::Numerical => ResponseAnalysisError::Numerical,
+    }
+}
+
+struct PreparedInputFilterResponse {
+    sample_rate_hz: u32,
+    configuration: BuiltinParameters,
+    enabled_left: [bool; SECTION_COUNT],
+    enabled_right: [bool; SECTION_COUNT],
+}
+
+/// Prepares the builtin owner's response provider from a complete immutable builtin configuration.
+pub fn prepare_input_filter_response(
+    sample_rate_hz: u32,
+    configuration: BuiltinParameters,
+    limits: ResponsePrepareLimits,
+) -> Result<Box<dyn PreparedResponseAnalysis>, ResponseAnalysisError> {
+    if size_of::<PreparedInputFilterResponse>() > limits.maximum_prepared_bytes {
+        return Err(ResponseAnalysisError::ResourceLimit);
+    }
+    let sections =
+        prepared_sections(sample_rate_hz, configuration).map_err(builtin_response_error)?;
+    let provider = PreparedInputFilterResponse {
+        sample_rate_hz,
+        configuration,
+        enabled_left: [sections[0][0].enabled, sections[0][1].enabled],
+        enabled_right: [sections[1][0].enabled, sections[1][1].enabled],
+    };
+    Ok(Box::new(provider))
+}
+
+impl PreparedResponseAnalysis for PreparedInputFilterResponse {
+    fn analysis_descriptor(&self) -> &'static ResponseAnalysisDescriptor {
+        &INPUT_FILTER_RESPONSE_DESCRIPTOR
+    }
+
+    fn configuration(&self) -> ResponseConfigurationView<'_> {
+        ResponseConfigurationView {
+            sample_rate_hz: self.sample_rate_hz,
+            enabled_left: &self.enabled_left,
+            enabled_right: &self.enabled_right,
+            bypass: None,
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+    }
+
+    fn query_into(
+        &self,
+        query: ResponseQuery<'_>,
+        output: ResponseOutput<'_>,
+    ) -> Result<ResponseSummary, ResponseAnalysisError> {
+        let summary = query_input_filter_response_into(
+            InputFilterResponseRequest {
+                configuration_id: query.configuration_id,
+                sample_rate_hz: self.sample_rate_hz,
+                configuration: self.configuration,
+                frequencies_hz: query.frequencies_hz,
+                maximum_points: query.maximum_points,
+            },
+            InputFilterResponseOutput {
+                total_left_db: output.total_left_db,
+                total_right_db: output.total_right_db,
+                sections_left_db: output.sections_left_db,
+                sections_right_db: output.sections_right_db,
+            },
+        )
+        .map_err(builtin_response_error)?;
+        Ok(ResponseSummary {
+            configuration_id: summary.configuration_id,
+            mode: ResponseAnalysisMode::RequestedConfiguration,
+            sample_rate_hz: summary.sample_rate_hz,
+            points: summary.points,
+            floor_db: summary.floor_db,
+        })
+    }
 }

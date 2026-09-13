@@ -31,7 +31,8 @@ pub mod corpus;
 mod filter_response;
 pub use filter_response::{
     InputFilterResponseError, InputFilterResponseMode, InputFilterResponseOutput,
-    InputFilterResponseRequest, InputFilterResponseSummary, query_input_filter_response_into,
+    InputFilterResponseRequest, InputFilterResponseSummary, input_filter_response_descriptor,
+    prepare_input_filter_response, query_input_filter_response_into,
 };
 
 use effect_contract::{BankWidth, ChannelSymmetryWitness};

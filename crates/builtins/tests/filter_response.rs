@@ -7,9 +7,14 @@ use builtins::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameterError, BuiltinParameters, ChannelParameters,
     DualMonoBlock, InputBuiltins, InputFilterResponseError, InputFilterResponseMode,
     InputFilterResponseOutput, InputFilterResponseRequest, InputFilterResponseSummary, Matrix2x2,
-    builtin_filter_cutoff_maximum_hz, query_input_filter_response_into,
+    builtin_filter_cutoff_maximum_hz, input_filter_response_descriptor,
+    prepare_input_filter_response, query_input_filter_response_into,
 };
 use dsp_reference::ReferenceSvfStateSpace;
+use effect_contract::{
+    EffectPrepareError, PreparedResponseAnalysis, ResponseAnalysisError, ResponseAnalysisMode,
+    ResponseOutput, ResponsePrepareLimits, ResponseQuery,
+};
 use engine::LAUNCH_SAMPLE_RATES;
 
 const FLOOR_DB: f64 = -120.0;
@@ -859,4 +864,244 @@ fn query_does_not_change_seeded_state_or_an_inflight_trim_polarity_ramp() {
     assert_eq!(bits(&left), bits(&twin_left));
     assert_eq!(bits(&right), bits(&twin_right));
     assert_eq!(input_snapshot(&queried), input_snapshot(&twin));
+}
+
+#[test]
+fn common_builtin_adapter_matches_direct_owner_for_all_launch_rates_and_sections() {
+    for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch maximum");
+        let configuration = filters(100.0, maximum, 1_000.0, 8_000.0);
+        let frequencies = probe_grid(rate, &[maximum]);
+        let (_, direct_left, direct_right, direct_sections_left, direct_sections_right) =
+            query_with_sections(rate, configuration, &frequencies, true);
+        let provider = prepare_input_filter_response(
+            rate,
+            configuration,
+            ResponsePrepareLimits {
+                maximum_prepared_bytes: usize::MAX,
+            },
+        )
+        .expect("builtin response provider");
+        let descriptor = provider.analysis_descriptor();
+        assert_eq!(descriptor, input_filter_response_descriptor());
+        assert_eq!(descriptor.sections.len(), 2);
+        assert_eq!(descriptor.sections[0].name, "HPF");
+        assert_eq!(descriptor.sections[1].name, "LPF");
+        assert_eq!(provider.configuration().sample_rate_hz, rate);
+        assert_eq!(provider.configuration().bypass, None);
+        assert_eq!(provider.configuration().enabled_left.len(), 2);
+
+        let mut common_left = vec![f32::NAN; frequencies.len()];
+        let mut common_right = vec![f32::NAN; frequencies.len()];
+        let mut common_sections_left = vec![f32::NAN; frequencies.len() * 2];
+        let mut common_sections_right = vec![f32::NAN; frequencies.len() * 2];
+        let summary = provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: u64::MAX,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut common_left,
+                    total_right_db: &mut common_right,
+                    sections_left_db: Some(&mut common_sections_left),
+                    sections_right_db: Some(&mut common_sections_right),
+                },
+            )
+            .expect("common builtin query");
+        assert_eq!(summary.configuration_id, u64::MAX);
+        assert_eq!(summary.mode, ResponseAnalysisMode::RequestedConfiguration);
+        assert_eq!(summary.sample_rate_hz, rate);
+        assert_eq!(common_left, direct_left);
+        assert_eq!(common_right, direct_right);
+        assert_eq!(common_sections_left, direct_sections_left);
+        assert_eq!(common_sections_right, direct_sections_right);
+
+        let mut total_only_left = vec![f32::NAN; frequencies.len()];
+        let mut total_only_right = vec![f32::NAN; frequencies.len()];
+        provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 1,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut total_only_left,
+                    total_right_db: &mut total_only_right,
+                    sections_left_db: None,
+                    sections_right_db: None,
+                },
+            )
+            .expect("total-only builtin query");
+        assert_eq!(total_only_left, direct_left);
+        assert_eq!(total_only_right, direct_right);
+
+        let mut left_only_sections = vec![f32::NAN; frequencies.len() * 2];
+        let mut left_only_total = vec![f32::NAN; frequencies.len()];
+        let mut left_only_right = vec![f32::NAN; frequencies.len()];
+        provider
+            .query_into(
+                ResponseQuery {
+                    configuration_id: 2,
+                    frequencies_hz: &frequencies,
+                    maximum_points: frequencies.len(),
+                },
+                ResponseOutput {
+                    total_left_db: &mut left_only_total,
+                    total_right_db: &mut left_only_right,
+                    sections_left_db: Some(&mut left_only_sections),
+                    sections_right_db: None,
+                },
+            )
+            .expect("left-section builtin query");
+        assert_eq!(left_only_total, direct_left);
+        assert_eq!(left_only_right, direct_right);
+        assert_eq!(left_only_sections, direct_sections_left);
+    }
+}
+
+#[test]
+fn common_builtin_adapter_preserves_resource_and_refusal_contract() {
+    let configuration = filters(100.0, 4_000.0, 1_000.0, 8_000.0);
+    let provider = prepare_input_filter_response(
+        48_000,
+        configuration,
+        ResponsePrepareLimits {
+            maximum_prepared_bytes: usize::MAX,
+        },
+    )
+    .expect("builtin provider");
+    let retained = provider.retained_bytes();
+    assert!(retained > 0);
+    assert!(matches!(
+        prepare_input_filter_response(
+            48_000,
+            configuration,
+            ResponsePrepareLimits {
+                maximum_prepared_bytes: retained - 1,
+            },
+        ),
+        Err(ResponseAnalysisError::ResourceLimit)
+    ));
+    assert!(
+        prepare_input_filter_response(
+            48_000,
+            configuration,
+            ResponsePrepareLimits {
+                maximum_prepared_bytes: retained,
+            },
+        )
+        .is_ok()
+    );
+
+    let frequencies = [100.0_f32, 1_000.0];
+    let mut left = [31.0_f32; 2];
+    let mut right = [32.0_f32; 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &[1_000.0, 100.0],
+            maximum_points: 2,
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: None,
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::InvalidFrequencyGrid));
+    assert_eq!(left, [31.0; 2]);
+    assert_eq!(right, [32.0; 2]);
+
+    let mut left = [33.0_f32; 2];
+    let mut right = [34.0_f32; 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: 1,
+        },
+        ResponseOutput {
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+            sections_left_db: None,
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::Capacity));
+    assert_eq!(left, [33.0; 2]);
+    assert_eq!(right, [34.0; 2]);
+
+    let mut left = [35.0_f32; 2];
+    let mut right = [36.0_f32; 2];
+    let result = provider.query_into(
+        ResponseQuery {
+            configuration_id: u64::MAX,
+            frequencies_hz: &frequencies,
+            maximum_points: frequencies.len(),
+        },
+        ResponseOutput {
+            total_left_db: &mut left[..1],
+            total_right_db: &mut right,
+            sections_left_db: None,
+            sections_right_db: None,
+        },
+    );
+    assert_eq!(result, Err(ResponseAnalysisError::OutputShape));
+    assert_eq!(left, [35.0; 2]);
+    assert_eq!(right, [36.0; 2]);
+
+    assert!(matches!(
+        prepare_input_filter_response(
+            176_400,
+            configuration,
+            ResponsePrepareLimits {
+                maximum_prepared_bytes: usize::MAX,
+            },
+        ),
+        Err(ResponseAnalysisError::Configuration(EffectPrepareError {
+            code: "effect.quality.unsupported"
+        }))
+    ));
+}
+
+#[test]
+fn common_builtin_trait_object_query_is_allocation_free() {
+    bench_alloc::assert_installed();
+    let configuration = filters(100.0, 4_000.0, 1_000.0, 8_000.0);
+    let provider = prepare_input_filter_response(
+        48_000,
+        configuration,
+        ResponsePrepareLimits {
+            maximum_prepared_bytes: usize::MAX,
+        },
+    )
+    .expect("builtin provider");
+    let frequencies = [0.0_f32, 100.0, 1_000.0, 4_000.0, 24_000.0];
+    let mut left = [f32::NAN; 5];
+    let mut right = [f32::NAN; 5];
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    let mark = bench_alloc::current_thread_counters();
+    (&*provider as &dyn PreparedResponseAnalysis)
+        .query_into(
+            ResponseQuery {
+                configuration_id: 1,
+                frequencies_hz: &frequencies,
+                maximum_points: frequencies.len(),
+            },
+            ResponseOutput {
+                total_left_db: &mut left,
+                total_right_db: &mut right,
+                sections_left_db: None,
+                sections_right_db: None,
+            },
+        )
+        .expect("trait-object builtin query");
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert_eq!(delta.allocations, 0, "trait query allocated: {delta:?}");
+    assert_eq!(delta.deallocations, 0, "trait query freed: {delta:?}");
+    assert_eq!(delta.reallocations, 0, "trait query reallocated: {delta:?}");
 }
