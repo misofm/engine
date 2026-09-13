@@ -179,6 +179,11 @@ struct PointResponse {
 ///
 /// For `A`, `B`, `C`, and `D`, see issue #764's frozen derivation. Identity words are handled
 /// before inversion because their state-space representation has a removable DC singularity.
+/// At DC and Nyquist, `z` is real and the adjugate/determinant path therefore remains a real
+/// endpoint evaluation; a low-frequency, high-Q section can still make the determinant small.
+/// Promoting the exact rounded words and all matrix products to `f64` preserves useful conditioning
+/// there, while a non-finite or genuinely singular determinant is reported as [`Numerical`] rather
+/// than turned into a plausible flat curve.
 #[inline]
 fn section_response(words: EqSvfWords, z: Complex) -> Result<Complex, EqResponseError> {
     if words == EqSvfWords::IDENTITY {

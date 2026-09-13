@@ -13,7 +13,10 @@ use parametric_eq::{
     EQ_SECTION_COUNT, EqBandKind, EqResponseConfiguration, EqResponseError, EqResponseMode,
     EqResponseOutput, EqResponseRequest, ParametricEqFactory, design_svf, query_response_into,
 };
-use support::{LAUNCH_RATES, request_at_rate, set_initial, single_section_values, values};
+use support::{
+    FROZEN_FREQUENCIES, GridRow, LAUNCH_RATES, frozen_grid, request_at_rate, set_initial,
+    single_section_values, values,
+};
 
 const FLOOR_DB: f64 = -120.0;
 const TOLERANCE_DB: f64 = 0.005;
@@ -56,6 +59,28 @@ fn oracle_db(
         .expect("probe must be inside Nyquist")
 }
 
+fn frozen_probe_grid(row: GridRow) -> ([f32; 5], usize) {
+    let nyquist = row.rate as f32 * 0.5;
+    let candidates = [
+        0.0,
+        row.frequency * 0.5,
+        row.frequency,
+        row.frequency * 1.5,
+        nyquist,
+    ];
+    let mut sorted = candidates;
+    sorted.sort_by(|left, right| left.partial_cmp(right).expect("finite probe"));
+    let mut probes = [0.0_f32; 5];
+    let mut points = 0;
+    for probe in sorted {
+        if probe <= nyquist && (points == 0 || probe > probes[points - 1]) {
+            probes[points] = probe;
+            points += 1;
+        }
+    }
+    (probes, points)
+}
+
 fn configured_four_sections(rate: u32) -> Vec<effect_contract::InitialParameterValue> {
     let mut configured = values();
     let rows = [
@@ -82,6 +107,19 @@ fn configured_four_sections(rate: u32) -> Vec<effect_contract::InitialParameterV
             set_initial(&mut configured, section * 6 + 4, channel, q);
             set_initial(&mut configured, section * 6 + 5, channel, slope);
         }
+    }
+    configured
+}
+
+fn values_for_frozen_row(row: GridRow) -> Vec<effect_contract::InitialParameterValue> {
+    let mut configured = values();
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(&mut configured, 0, channel, 1.0);
+        set_initial(&mut configured, 1, channel, row.kind as u32 as f32);
+        set_initial(&mut configured, 2, channel, row.frequency);
+        set_initial(&mut configured, 3, channel, row.gain);
+        set_initial(&mut configured, 4, channel, row.q);
+        set_initial(&mut configured, 5, channel, row.slope);
     }
     configured
 }
@@ -156,6 +194,87 @@ fn rounded_words_match_independent_oracle_for_all_families_and_launch_rates() {
         }
     }
     eprintln!("issue-764 oracle all-families worst_error_db={worst:.6e}");
+}
+
+#[test]
+fn production_query_covers_the_complete_frozen_1488_row_corpus() {
+    let rows = frozen_grid();
+    assert_eq!(rows.len(), 1_488);
+    assert!(FROZEN_FREQUENCIES.iter().all(|frequency| {
+        rows.iter()
+            .any(|row| row.frequency.to_bits() == frequency.to_bits())
+    }));
+    let mut worst_error = 0.0_f64;
+    let mut probes = 0_u64;
+    for row in rows {
+        let configured = values_for_frozen_row(row);
+        let configuration = prepared(&configured, false, row.rate);
+        let (frequencies, points) = frozen_probe_grid(row);
+        probes += points as u64;
+        let mut total_left = [f32::NAN; 5];
+        let mut total_right = [f32::NAN; 5];
+        let mut sections_left = [f32::NAN; EQ_SECTION_COUNT * 5];
+        let mut sections_right = [f32::NAN; EQ_SECTION_COUNT * 5];
+        query_response_into(
+            EqResponseRequest {
+                configuration_id: u64::from(row.rate),
+                configuration: &configuration,
+                frequencies_hz: &frequencies[..points],
+                maximum_points: points,
+            },
+            EqResponseOutput {
+                total_left_db: &mut total_left[..points],
+                total_right_db: &mut total_right[..points],
+                sections_left_db: Some(&mut sections_left[..EQ_SECTION_COUNT * points]),
+                sections_right_db: Some(&mut sections_right[..EQ_SECTION_COUNT * points]),
+            },
+        )
+        .expect("every frozen row is a valid production query");
+        for point in 0..points {
+            let reference = oracle_db(
+                row.kind,
+                row.rate,
+                row.frequency,
+                row.gain,
+                row.q,
+                row.slope,
+                frequencies[point],
+            );
+            assert!(
+                !reference.is_nan() && reference != f64::INFINITY,
+                "invalid independent oracle result for {row:?} f={}",
+                frequencies[point]
+            );
+            let expected = if reference == f64::NEG_INFINITY {
+                FLOOR_DB
+            } else {
+                reference.max(FLOOR_DB)
+            };
+            for (channel, actual) in [total_left[point], total_right[point]]
+                .into_iter()
+                .enumerate()
+            {
+                let error = (f64::from(actual) - expected).abs();
+                worst_error = worst_error.max(error);
+                assert!(
+                    error <= TOLERANCE_DB,
+                    "row={row:?} f={} channel={channel}: got={actual} expected={expected} error={error}",
+                    frequencies[point]
+                );
+            }
+            for section in 0..EQ_SECTION_COUNT {
+                let left = sections_left[section * points + point];
+                let right = sections_right[section * points + point];
+                let expected = if section == 0 { expected } else { 0.0 };
+                assert!((f64::from(left) - expected).abs() <= TOLERANCE_DB);
+                assert!((f64::from(right) - expected).abs() <= TOLERANCE_DB);
+            }
+        }
+    }
+    assert!(probes >= 1_488 * 4);
+    eprintln!(
+        "issue-764 production frozen rows=1488 probes={probes} worst_error_db={worst_error:.6e}"
+    );
 }
 
 #[test]
@@ -256,6 +375,7 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
     .expect("valid bypass query");
     assert!(bypass_total_left.iter().all(|value| value.to_bits() == 0));
     assert!(bypass_total_right.iter().all(|value| value.to_bits() == 0));
+    assert_eq!(bypass_sections_left, sections_left);
     assert!(bypass_sections_left.iter().any(|value| *value != 0.0));
     assert!(bypass_summary.bypass);
 
@@ -300,6 +420,7 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
     .expect("right-only section query");
     assert_eq!(right_only_left, total_left);
     assert_eq!(right_only_right, total_right);
+    assert_eq!(right_only_sections, sections_right);
 }
 
 #[test]
@@ -663,20 +784,50 @@ fn settled_pcm_impulse_matches_query_at_all_launch_rates() {
 }
 
 #[test]
-fn query_does_not_change_a_prepared_effect_state() {
-    let mut configured = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 0.7, 1.0);
-    let mut effect = ParametricEqFactory
-        .prepare(request_at_rate(&configured, false, 48_000))
+fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
+    let configured = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 0.7, 1.0);
+    let request = request_at_rate(&configured, false, 48_000);
+    let mut queried = ParametricEqFactory
+        .prepare(request)
         .expect("prepared effect");
+    let mut twin = ParametricEqFactory.prepare(request).expect("prepared twin");
     let automation = [support::point(3, ParameterChannel::Left, 0, -6.0)];
-    let mut left = [0.0_f32; 128];
-    let mut right = [0.0_f32; 128];
-    effect.process(
-        EffectProcessBlock::new(&mut left, &mut right, None, 0, &automation, 128)
-            .expect("automation block"),
+    let mut prefix_left = [0.125_f32; 16];
+    let mut prefix_right = [-0.25_f32; 16];
+    let mut twin_prefix_left = prefix_left;
+    let mut twin_prefix_right = prefix_right;
+    queried
+        .process(
+            EffectProcessBlock::new(
+                &mut prefix_left,
+                &mut prefix_right,
+                None,
+                0,
+                &automation,
+                128,
+            )
+            .expect("automation prefix"),
+        )
+        .nonfinite_left_blocks;
+    twin.process(
+        EffectProcessBlock::new(
+            &mut twin_prefix_left,
+            &mut twin_prefix_right,
+            None,
+            0,
+            &automation,
+            128,
+        )
+        .expect("twin automation prefix"),
+    )
+    .nonfinite_left_blocks;
+    let before = support::snapshot(queried.as_ref());
+    assert_eq!(before, support::snapshot(twin.as_ref()));
+    assert!(
+        support::band_word(&before.1, 0, 14) > 0,
+        "the prefix must leave the gain ramp in flight"
     );
-    let before = support::snapshot(effect.as_ref());
-    set_initial(&mut configured, 3, ParameterChannel::Left, -6.0);
+
     let configuration = prepared(&configured, false, 48_000);
     let frequencies = [0.0, 1_000.0, 12_000.0, 24_000.0];
     let mut total_left = [f32::NAN; 4];
@@ -696,8 +847,169 @@ fn query_does_not_change_a_prepared_effect_state() {
         },
     )
     .expect("response query");
-    let after = support::snapshot(effect.as_ref());
-    assert_eq!(before, after, "response query touched prepared state");
+    assert_eq!(before, support::snapshot(queried.as_ref()));
+
+    let mut continuation_left = [0.375_f32; 128];
+    let mut continuation_right = [-0.5_f32; 128];
+    let mut twin_continuation_left = continuation_left;
+    let mut twin_continuation_right = continuation_right;
+    queried
+        .process(
+            EffectProcessBlock::new(
+                &mut continuation_left,
+                &mut continuation_right,
+                None,
+                16,
+                &[],
+                128,
+            )
+            .expect("continued audio"),
+        )
+        .nonfinite_left_blocks;
+    twin.process(
+        EffectProcessBlock::new(
+            &mut twin_continuation_left,
+            &mut twin_continuation_right,
+            None,
+            16,
+            &[],
+            128,
+        )
+        .expect("twin continued audio"),
+    )
+    .nonfinite_left_blocks;
+    assert!(continuation_left.iter().any(|sample| *sample != 0.0));
+    assert!(continuation_right.iter().any(|sample| *sample != 0.0));
+    for (actual, expected) in continuation_left.iter().zip(twin_continuation_left) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+    for (actual, expected) in continuation_right.iter().zip(twin_continuation_right) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+    assert_eq!(
+        support::snapshot(queried.as_ref()),
+        support::snapshot(twin.as_ref()),
+        "query changed the continued effect state"
+    );
+}
+
+#[test]
+fn malformed_buffers_and_budgets_refuse_without_writes_or_allocations() {
+    #[derive(Clone, Copy, Debug)]
+    enum Refusal {
+        InvalidGrid,
+        ZeroBudget,
+        BudgetTooSmall,
+        LeftTotalShort,
+        RightTotalShort,
+        LeftTotalLong,
+        RightTotalLong,
+        LeftSectionsShort,
+        RightSectionsShort,
+        LeftSectionsLong,
+        RightSectionsLong,
+    }
+
+    let configured = values();
+    let configuration = prepared(&configured, false, 48_000);
+    let valid = [100.0_f32, 1_000.0];
+    let cases = [
+        Refusal::InvalidGrid,
+        Refusal::ZeroBudget,
+        Refusal::BudgetTooSmall,
+        Refusal::LeftTotalShort,
+        Refusal::RightTotalShort,
+        Refusal::LeftTotalLong,
+        Refusal::RightTotalLong,
+        Refusal::LeftSectionsShort,
+        Refusal::RightSectionsShort,
+        Refusal::LeftSectionsLong,
+        Refusal::RightSectionsLong,
+    ];
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    for case in cases {
+        let frequencies = if matches!(case, Refusal::InvalidGrid) {
+            [100.0_f32, 100.0]
+        } else {
+            valid
+        };
+        let maximum_points = match case {
+            Refusal::ZeroBudget => 0,
+            Refusal::BudgetTooSmall => 1,
+            _ => frequencies.len(),
+        };
+        let mut total_left = [11.0_f32; 3];
+        let mut total_right = [12.0_f32; 3];
+        let mut sections_left = [13.0_f32; EQ_SECTION_COUNT * 2 + 1];
+        let mut sections_right = [14.0_f32; EQ_SECTION_COUNT * 2 + 1];
+        let expected = match case {
+            Refusal::InvalidGrid => EqResponseError::InvalidFrequencyGrid,
+            Refusal::ZeroBudget | Refusal::BudgetTooSmall => EqResponseError::Capacity,
+            _ => EqResponseError::OutputShape,
+        };
+        let mark = bench_alloc::current_thread_counters();
+        let result = query_response_into(
+            EqResponseRequest {
+                configuration_id: 99,
+                configuration: &configuration,
+                frequencies_hz: &frequencies,
+                maximum_points,
+            },
+            EqResponseOutput {
+                total_left_db: match case {
+                    Refusal::LeftTotalShort => &mut total_left[..1],
+                    Refusal::LeftTotalLong => &mut total_left,
+                    _ => &mut total_left[..frequencies.len()],
+                },
+                total_right_db: match case {
+                    Refusal::RightTotalShort => &mut total_right[..1],
+                    Refusal::RightTotalLong => &mut total_right,
+                    _ => &mut total_right[..frequencies.len()],
+                },
+                sections_left_db: match case {
+                    Refusal::LeftSectionsShort => Some(&mut sections_left[..7]),
+                    Refusal::LeftSectionsLong => Some(&mut sections_left),
+                    Refusal::RightSectionsShort | Refusal::RightSectionsLong => None,
+                    _ => None,
+                },
+                sections_right_db: match case {
+                    Refusal::RightSectionsShort => Some(&mut sections_right[..7]),
+                    Refusal::RightSectionsLong => Some(&mut sections_right),
+                    Refusal::LeftSectionsShort | Refusal::LeftSectionsLong => None,
+                    _ => None,
+                },
+            },
+        );
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        assert_eq!(result, Err(expected), "unexpected result for {case:?}");
+        assert_eq!(
+            delta.allocations, 0,
+            "refusal allocated for {case:?}: {delta:?}"
+        );
+        assert_eq!(
+            delta.deallocations, 0,
+            "refusal freed for {case:?}: {delta:?}"
+        );
+        assert_eq!(
+            delta.reallocations, 0,
+            "refusal reallocated for {case:?}: {delta:?}"
+        );
+        assert_eq!(total_left, [11.0_f32; 3], "left total mutated for {case:?}");
+        assert_eq!(
+            total_right, [12.0_f32; 3],
+            "right total mutated for {case:?}"
+        );
+        assert_eq!(
+            sections_left,
+            [13.0_f32; EQ_SECTION_COUNT * 2 + 1],
+            "left sections mutated for {case:?}"
+        );
+        assert_eq!(
+            sections_right,
+            [14.0_f32; EQ_SECTION_COUNT * 2 + 1],
+            "right sections mutated for {case:?}"
+        );
+    }
 }
 
 #[test]

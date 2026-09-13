@@ -227,3 +227,32 @@ The issue records eight focused tests passing after the amendment. Root forwarde
 The next attempt can remain within the current allowed response source/test/support/spec paths: reuse existing fixtures and payload helpers, strengthen the discriminating assertions, add the numerical-conditioning explanation and lint fix, then obtain one new adversarial verdict. No architectural rescope, broader matrices, benchmark runner, or changed tolerance is justified by this review.
 
 Root authorizes attempt 2 within the unchanged allowed paths to address these four findings and complete the existing gates. The one-line Clippy correction is preserved in this review checkpoint; substantive test corrections follow only after this checkpoint is pushed. No tolerance or parent requirement changes.
+
+## Attempt 2 focused checkpoint evidence — Luna
+
+Attempt 2 changes remain within the approved paths `crates/parametric-eq/src/response.rs` and
+`crates/parametric-eq/tests/response.rs`. The evaluator now documents its `f64` endpoint and
+low-frequency conditioning, including the identity singularity exception and typed numerical
+failure behavior. The response tests now drive the production query through all 1,488 frozen rows,
+both channels and section outputs, with sorted/deduplicated DC, near-design, and Nyquist probes;
+they also assert right-side section values and bypass section curves against the non-bypassed
+configuration. The state gate uses a 16-frame prefix to leave the coefficient ramp unfinished,
+checks its serialized remaining count, queries between snapshots, then compares bit-identical
+continued nonzero audio and final state with an unqueried twin. A table-driven refusal gate covers
+invalid grids, zero/short budgets, short and oversized left/right totals, and short and oversized
+left/right section buffers; it checks every output sentinel and allocation counters for each
+refusal. The checked production multiplication remains the arithmetic overflow guard; no unsafe
+oversized slice is constructed.
+
+The focused command ran after formatting and exited 0:
+
+```
+cargo test --locked -p parametric-eq --test response -- --test-threads=1
+```
+
+Observed result: 10 passed, 0 failed, 0 ignored. Actual stdout, stderr, and exit status are
+preserved at `/tmp/miso-engine-763-response-attempt2-focused.stdout`,
+`/tmp/miso-engine-763-response-attempt2-focused.stderr`, and
+`/tmp/miso-engine-763-response-attempt2-focused.exit` (exit status `0`). No broad gates,
+benchmarks, Wasm checks, commits, or pushes ran after these changes; root must checkpoint and
+review this exact tranche before any further edits.
