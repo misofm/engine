@@ -42,16 +42,16 @@ fn source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_bo
     let base = fixture("canonical.json");
     let identity = base
         .lines()
-        .find(|line| line.contains("\"content\": \"sha256:"))
+        .find(|line| line.contains("\"content\": \"blake3:"))
         .and_then(|line| line.split("\"content\": \"").nth(1))
         .and_then(|tail| tail.split('"').next())
         .expect("canonical source identity");
     let mut non_hex = identity.to_owned();
     non_hex.replace_range(7..8, "g");
-    let uppercase = format!("sha256:{}", identity[7..].to_ascii_uppercase());
+    let uppercase = format!("blake3:{}", identity[7..].to_ascii_uppercase());
     for (label, replacement) in [
-        ("wrong-prefix", identity.replacen("sha256:", "sha512:", 1)),
-        ("wrong-length", "sha256:abc".to_owned()),
+        ("wrong-prefix", identity.replacen("blake3:", "sha512:", 1)),
+        ("wrong-length", "blake3:abc".to_owned()),
         ("uppercase", uppercase),
         ("non-hex", non_hex),
     ] {

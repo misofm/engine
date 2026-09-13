@@ -35,7 +35,7 @@ pub enum DiagnosticCode {
     MissingEntityReference,
     /// A string enum token is outside its closed schema set.
     InvalidEnum,
-    /// A source content identity does not match the canonical SHA-256 grammar.
+    /// A source content identity does not match the canonical BLAKE3-256 grammar.
     SourceContentIdentityFormat,
     /// A source bit-depth declaration is outside the closed token set.
     SourceBitDepthUnsupported,

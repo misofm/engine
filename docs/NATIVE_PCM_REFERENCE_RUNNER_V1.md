@@ -32,7 +32,7 @@ The session carries no locator. The runner canonicalizes the source root, enumer
 set of `.wav` entries in sorted order, and considers only regular nonsymlink files whose canonical
 paths remain under that root. For each declaration it parses RIFF/WAVE or RF64/WAVE, hashes the raw
 canonical sample bytes (never the wrapper), and selects the file whose digest matches the exact
-`sha256:<64 lowercase hexadecimal digits>` content identity. No session string becomes a path.
+`blake3:<64 lowercase hexadecimal digits>` content identity. No session string becomes a path.
 
 The selected file must exactly match the session root rate and the declaration's channels, bit
 depth, and full frame count. All identities, WAVE/RF64 structures, and declared shapes are checked
@@ -94,7 +94,7 @@ audio data, or unbounded product diagnostics.
 
 [`fixtures/native-pcm-runner/v1/MANIFEST.tsv`](../fixtures/native-pcm-runner/v1/MANIFEST.tsv)
 freezes RIFF files at all four launch rates, an RF64 `ds64` file, their strict sessions, sizes,
-canonical-content SHA-256 identities, and exact 8,192-byte output digests. The RF64 source asset is
+canonical-content BLAKE3-256 identities, and exact 8,192-byte output digests. The RF64 source asset is
 pre-sliced to the 514 decoded frames that the former region selected, so its full-source stream
 starts at zero and still has a two-frame final chunk. Source values include positive and negative
 zero, a NaN, a subnormal, and finite nonzero witnesses; the public decoder sanitizes the

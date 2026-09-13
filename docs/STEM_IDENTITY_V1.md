@@ -37,20 +37,19 @@ For `frames` frames, `channels` channels, and `bit_depth`:
    `frames * channels * bytes_per_sample(bit_depth)` bytes, where the widths for `16`, `24`, and
    `32f` are 2, 3, and 4 respectively. Implementations MUST use checked arithmetic and MUST reject
    a byte-length mismatch. This is also the stem store's mandatory open-time length check.
-5. Hash the complete serialization with SHA-256. The identity string is `sha256:` followed by the
+5. Hash the complete serialization with BLAKE3-256. The identity string is `blake3:` followed by the
    64 lowercase hexadecimal digest characters. The exact grammar is
-   `^sha256:[0-9a-f]{64}$`.
+   `^blake3:[0-9a-f]{64}$`.
 
 Container bytes never join the hash. A WAVE parser or external ingress adapter conforms only when
 it produces the exact serialization above before hashing. Integer samples MUST
 stay integer-valued through this boundary; an implementation may not make identity depend on a
 floating-point decoder's rounding behavior.
 
-SHA-256 is the existing repository identity vocabulary and is verifiable in the Sui framework via
-`std::hash::sha2_256`; Blake3 is not available there. No whole-stem residency is permitted, so a
+BLAKE3-256 is the canonical PCM identity vocabulary. No whole-stem residency is permitted, so a
 shipped incremental implementation is mandatory where one-shot WebCrypto cannot cover the input.
-The Rust reference oracle uses the pinned workspace `sha2` implementation. The choice does not
-rest on a claim of zero shipped hashing code.
+The Rust reference oracle uses the pinned workspace `blake3` implementation. Artifact, package,
+effect, and render hashes retain their own schemes and are outside this contract.
 
 ## Frozen conformance vectors
 
@@ -61,12 +60,12 @@ pin so each answer is independently hand-derivable.
 
 | Vector | Depth | Channels x frames | Samples by frame | Canonical bytes (hex) | Identity |
 | --- | ---: | ---: | --- | --- | --- |
-| `f32-mono-edge-bits` | 32f | 1 x 3 | `0x7fc00001 \| 0x00000001 \| 0x80000000` | `0100c07f0100000000000080` | `sha256:cdd5a52d167bad118aada8a9227170aea6cd41228916db521f575918fee38343` |
-| `f32-stereo-edge-bits` | 32f | 2 x 2 | `(0x7fc00001,0x80000000) \| (0x00000001,0xffc12345)` | `0100c07f00000080010000004523c1ff` | `sha256:55c2062d8bac6bc12052ccf49656482c92e3f4095392d69a3350aca6f88088b6` |
-| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 \| 32767 \| -32768 \| 1 \| -1` | `0000ff7f00800100ffff` | `sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c` |
-| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) \| (-32768,1) \| (-1,0)` | `0000ff7f00800100ffff0000` | `sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2` |
-| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 \| 8388607 \| -8388608 \| 1 \| -1` | `000000ffff7f000080010000ffffff` | `sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832` |
-| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) \| (-8388608,1) \| (-1,0)` | `000000ffff7f000080010000ffffff000000` | `sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6` |
+| `f32-mono-edge-bits` | 32f | 1 x 3 | `0x7fc00001 \| 0x00000001 \| 0x80000000` | `0100c07f0100000000000080` | `blake3:864e0348bd18954c2804d91b0c3c44fdc023617c2f111bdf7eeb84f7d85ba334` |
+| `f32-stereo-edge-bits` | 32f | 2 x 2 | `(0x7fc00001,0x80000000) \| (0x00000001,0xffc12345)` | `0100c07f00000080010000004523c1ff` | `blake3:4cdda9e6378fd2c56bc8aa22c59848729bbc7f9ddb45fc0ace156ee0ec5a60f2` |
+| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 \| 32767 \| -32768 \| 1 \| -1` | `0000ff7f00800100ffff` | `blake3:019f72841a70e06c516205a07deef8a3d4d42ab26faa3cd4bf18275f9b5eabe1` |
+| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) \| (-32768,1) \| (-1,0)` | `0000ff7f00800100ffff0000` | `blake3:41b5fff5e18a17133898edad06d13da6504aea16e283378ee6c13f6a3faed9fe` |
+| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 \| 8388607 \| -8388608 \| 1 \| -1` | `000000ffff7f000080010000ffffff` | `blake3:ab6cdfd122c457fca7c78a12b6a532de760905381edad178f234cee443051265` |
+| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) \| (-8388608,1) \| (-1,0)` | `000000ffff7f000080010000ffffff000000` | `blake3:cc7b9b00ad74b505b7e73e097f85cd196030cc954a47f628394ec721b1e8d1f5` |
 
 The `32f` sample text is exact hexadecimal IEEE-754 bits. Those rows cover NaN payloads, the least
 positive subnormal, and negative zero without relying on host-language float formatting.
@@ -127,6 +126,6 @@ what makes a future complete render-cache key well-defined.
 ## Artifact namespaces
 
 The ingest gate is phrased over every referenced content-addressed artifact, not only stems. The
-identity scheme-prefix rule covers both `sha256:` stems and the CID scheme used by third-party
+identity scheme-prefix rule covers both `blake3:` stems and the CID scheme used by third-party
 effect packages. Store layout must reserve a namespace for non-stem artifacts; package fetching
 and execution remain deferred to the effect-package workstream.

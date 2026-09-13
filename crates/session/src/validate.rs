@@ -166,7 +166,7 @@ fn validate_sources(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
                 diagnostics,
                 DiagnosticCode::SourceContentIdentityFormat,
                 &path.key("content"),
-                "source content must match sha256:[0-9a-f]{64}",
+                "source content must match blake3:[0-9a-f]{64}",
             );
         }
         if source.channels == 0 {
@@ -189,7 +189,7 @@ fn validate_sources(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
 }
 
 fn valid_source_content_identity(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
+    value.strip_prefix("blake3:").is_some_and(|digest| {
         digest.len() == 64
             && digest
                 .bytes()

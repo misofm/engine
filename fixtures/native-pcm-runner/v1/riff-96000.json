@@ -16,7 +16,7 @@
   "sources": [
     {
       "id": "fixture-source",
-      "content": "sha256:738956f9eb5f301b4b52d081518562a8f535b12f04919d23494afacfb9d5df14",
+      "content": "blake3:b1f6221c9090cf8f282674dd3094309232495b3a0de2ed03b09529337203d0e4",
       "channels": 2,
       "bit_depth": "32f",
       "frames": "1024"

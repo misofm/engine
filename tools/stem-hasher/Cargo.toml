@@ -12,7 +12,7 @@ name = "stem_hasher"
 [dependencies]
 engine.workspace = true
 source.workspace = true
-sha2.workspace = true
+blake3.workspace = true
 
 [lints]
 workspace = true

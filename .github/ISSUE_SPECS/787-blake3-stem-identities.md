@@ -1,0 +1,9 @@
+# Prelaunch BLAKE3 canonical PCM identities
+
+User authorized a clean prelaunch cutover from SHA-256 to BLAKE3 for canonical PCM stem content identities, including regeneration of published prelaunch sessions. No SHA-256 identity compatibility path. PCM serialization, byte-count checks, source maps and rendering semantics stay unchanged. Unrelated artifact, package, effect and render hashes remain unchanged.
+
+Scope approved by Sol: migrate current engine Session V1 source identity grammar and SDK validation to `blake3:<64 lowercase hex>`; migrate `stem-hasher` and canonical identity conformance vectors to BLAKE3-256; update affected runnable session fixtures, current reference host canonical stem verification where reachable, and authoritative identity/schema docs. Keep V1 wire names (prelaunch rule). Do not inspect legacy source. No DSP, render threading, delivery codec or UI changes.
+
+Gates: official BLAKE3 vectors and byte-exact canonical PCM cases, rejected SHA-256/invalid source identities, native/SDK session validation parity, stem-hasher CLI proofs, relevant workspace policy and browser asset qualification. Publish the engine SDK and browser assets needed by the adapter; provide a native session_validator/stem_hasher consumer build with source provenance. Retain bounded memory and all strict byte-count/integrity checks.
+
+Workflow: Sol brief, Terra first implementation, fresh Sol adversarial verification. Root owns commits, upstream, release and cross-repo integration. One coherent implementation tranche at a time. Start from engine main 6af7ff4b; adapter main 505c7b1 and app main 61812c3 are consumers. Benchmark evidence lives outside the repository at /tmp/miso-hash-wasm-eval/results.json (synthetic public input; hash-wasm4.12.0 BLAKE3 median62.1ms vs currentSHA146.4ms for37.25MB, not a load-time claim).

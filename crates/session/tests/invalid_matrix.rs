@@ -256,8 +256,8 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     parse_case(
         &mut count,
         &replaced(
-            "content = \"sha256:",
-            "content = false, old_content = \"sha256:",
+            "content = \"blake3:",
+            "content = false, old_content = \"blake3:",
         ),
         DiagnosticCode::WrongType,
         "$.sources[0].content",
@@ -596,7 +596,7 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content = "sha256:abc".to_owned(),
+        |s| s.sources[0].content = "blake3:abc".to_owned(),
         DiagnosticCode::SourceContentIdentityFormat,
         "$.sources[0].content",
     );
@@ -610,7 +610,7 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content = s.sources[0].content.replacen("sha256:", "sha512:", 1),
+        |s| s.sources[0].content = s.sources[0].content.replacen("blake3:", "sha512:", 1),
         DiagnosticCode::SourceContentIdentityFormat,
         "$.sources[0].content",
     );

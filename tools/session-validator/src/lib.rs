@@ -479,9 +479,9 @@ fn bounded_file(path: &str, maximum: usize) -> Result<Vec<u8>, FoldMonoError> {
     Ok(bytes)
 }
 
-fn valid_sha256_identity(value: &str) -> bool {
+fn valid_blake3_identity(value: &str) -> bool {
     value.len() == 71
-        && value.starts_with("sha256:")
+        && value.starts_with("blake3:")
         && value[7..]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -527,9 +527,9 @@ fn validate_replacement_identity<'a>(
     new: &str,
     old_identities: &mut HashSet<&'a str>,
 ) -> Result<(), FoldMonoError> {
-    if !valid_sha256_identity(old) || !valid_sha256_identity(new) {
+    if !valid_blake3_identity(old) || !valid_blake3_identity(new) {
         return Err(fold_error(
-            "replacement identities must be sha256: followed by 64 lowercase hex digits",
+            "replacement identities must be blake3: followed by 64 lowercase hex digits",
         ));
     }
     if old == new {

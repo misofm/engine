@@ -16,7 +16,7 @@
   "sources": [
     {
       "id": "stall-source",
-      "content": "sha256:938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7",
+      "content": "blake3:cdd579231aadf4a1c6d53b4bcaa435cd707bdc81fb8ec3377c3be0e2c25d2324",
       "channels": 2,
       "bit_depth": "32f",
       "frames": "5120"
