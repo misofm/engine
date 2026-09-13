@@ -27,6 +27,7 @@ graph-compiler.workspace = true
 # the one started-session handle instead of each host re-deriving the pin.
 lane.workspace = true
 math.workspace = true
+microfft.workspace = true
 protocol = { workspace = true, optional = true }
 session.workspace = true
 source.workspace = true

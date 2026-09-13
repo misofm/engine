@@ -1393,13 +1393,15 @@ impl PreparedGraphPlan {
                     .chain(bindings.observers.iter())
                     .map(|binding| (&binding.node, binding.handle)),
             );
-            let valid_observers = observer_pairs
-                .iter()
-                .all(|(node, _)| matches!(node, GraphNodeId::TrackStage { .. }))
-                && {
-                    observer_pairs.sort_unstable();
-                    observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
-                };
+            let valid_observers = observer_pairs.iter().all(|(node, _)| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
+                )
+            }) && {
+                observer_pairs.sort_unstable();
+                observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
+            };
 
             (
                 supplied.len() != supplied_count,
@@ -3429,8 +3431,10 @@ mod tests {
             let (plan, bindings, input) = binding_plan();
             let mut bad = source_bindings(bindings, &input);
             bad.observers.push(GraphNodeObserverBinding::new(
-                GraphNodeId::Output {
-                    output_id: StableGraphId::parse("main").expect("ID"),
+                GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(GraphEdgeId::TrackMain {
+                        target: input.clone(),
+                    }),
                 },
                 1,
                 Box::new(W4OrderObserver {
