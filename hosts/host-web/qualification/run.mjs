@@ -224,6 +224,15 @@ function validateSdkResponse(browserName, response) {
   );
   const liveU64 = (value) => typeof value === "string"
     && /^[0-9]+$/.test(value) && BigInt(value) > 0n;
+  const liveMemberOrder = liveMembers.map((member) => [
+    member.nativeId, member.stableId, member.rack, member.kind, member.available, member.bypassed,
+  ]);
+  const expectedLiveMemberOrder = [
+    ["miso.builtin.input-filters", "input-filters", "input", "inputFilters", true, false],
+    ["miso.parametric-eq", "eq-simd1", "simd1", "parametricEq", true, false],
+    ["miso.compressor", "comp", "dynamic", "unavailable", false, false],
+    ["miso.parametric-eq", "eq-simd2", "simd2", "parametricEq", true, true],
+  ];
   gate(browserName, "sdk-live-response", live?.trackId === "track"
     && live.mode === "target" && live.meaning === "eqFilterSubtotal"
     && live.sampleRateHz === 48_000 && live.points === 5
@@ -234,6 +243,7 @@ function validateSdkResponse(browserName, response) {
     && liveU64(live.resultBytes) && live.ownedAfterSecondQuery === true
     && live.pendingRefused === true && live.closedRefused === true
     && liveInputFilters !== undefined && liveCompressor !== undefined
+    && JSON.stringify(liveMemberOrder) === JSON.stringify(expectedLiveMemberOrder)
     && live.excludedMemberCount === 1,
   "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)

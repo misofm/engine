@@ -114,6 +114,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       slot: member.slot,
       kind: member.kind,
       available: member.available,
+      bypassed: member.bypassed,
       enabledLeft: member.enabledLeft.length,
       enabledRight: member.enabledRight.length,
     }));
