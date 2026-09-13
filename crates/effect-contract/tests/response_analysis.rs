@@ -86,7 +86,17 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     observations: &[],
 };
 
-static BAD_SECTIONS: [ResponseSectionDescriptor; 2] = [
+static VALID_SECTIONS: [ResponseSectionDescriptor; 2] = [
+    ResponseSectionDescriptor {
+        id: 1,
+        name: "first",
+    },
+    ResponseSectionDescriptor {
+        id: 2,
+        name: "second",
+    },
+];
+static DESCENDING_SECTIONS: [ResponseSectionDescriptor; 2] = [
     ResponseSectionDescriptor {
         id: 2,
         name: "second",
@@ -96,10 +106,53 @@ static BAD_SECTIONS: [ResponseSectionDescriptor; 2] = [
         name: "first",
     },
 ];
-static BAD_RESPONSE: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
-    id: 0,
-    name: "Bad Response",
-    sections: &BAD_SECTIONS,
+static DUPLICATE_SECTIONS: [ResponseSectionDescriptor; 2] = [
+    ResponseSectionDescriptor {
+        id: 1,
+        name: "first",
+    },
+    ResponseSectionDescriptor {
+        id: 1,
+        name: "second",
+    },
+];
+static ZERO_SECTION_ID: [ResponseSectionDescriptor; 2] = [
+    ResponseSectionDescriptor {
+        id: 0,
+        name: "first",
+    },
+    ResponseSectionDescriptor {
+        id: 2,
+        name: "second",
+    },
+];
+static EMPTY_SECTIONS: [ResponseSectionDescriptor; 0] = [];
+static MANY_SECTIONS: [ResponseSectionDescriptor; 65] = [ResponseSectionDescriptor {
+    id: 1,
+    name: "section",
+}; 65];
+static LONG_NAME: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static INVALID_SECTION_NAME: [ResponseSectionDescriptor; 2] = [
+    ResponseSectionDescriptor { id: 1, name: "" },
+    ResponseSectionDescriptor {
+        id: 2,
+        name: "second",
+    },
+];
+static LONG_SECTION_NAME: [ResponseSectionDescriptor; 2] = [
+    ResponseSectionDescriptor {
+        id: 1,
+        name: LONG_NAME,
+    },
+    ResponseSectionDescriptor {
+        id: 2,
+        name: "second",
+    },
+];
+static VALID_RESPONSE: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
+    id: 1,
+    name: "Valid Response",
+    sections: &VALID_SECTIONS,
     axis_unit: ParameterUnit::Hz,
     unit: ParameterUnit::Db,
     amplitude_reference: ResponseAmplitudeReference::Unity,
@@ -113,7 +166,9 @@ static BAD_RESPONSE: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
     bypass: ResponseBypassSemantics::EffectWideIdentityWithSections,
 };
 
-struct BadResponseFactory;
+struct BadResponseFactory {
+    response: &'static ResponseAnalysisDescriptor,
+}
 
 impl NativeEffectFactory for BadResponseFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
@@ -143,7 +198,7 @@ impl NativeEffectFactory for BadResponseFactory {
 
 impl NativeEffectResponseFactory for BadResponseFactory {
     fn analysis_descriptor(&self) -> &'static ResponseAnalysisDescriptor {
-        &BAD_RESPONSE
+        self.response
     }
 
     fn prepare_response(
@@ -156,9 +211,22 @@ impl NativeEffectResponseFactory for BadResponseFactory {
 }
 
 #[test]
-fn malformed_companion_response_prevents_registry_admission() {
+fn valid_companion_response_is_admissible() {
+    assert_eq!(
+        validate_response_analysis_descriptor(&VALID_RESPONSE),
+        Ok(())
+    );
+    assert!(
+        NativeEffectRegistry::new([Box::new(BadResponseFactory {
+            response: &VALID_RESPONSE,
+        }) as Box<dyn NativeEffectFactory>])
+        .is_ok()
+    );
+}
+
+fn assert_registry_rejects(response: &'static ResponseAnalysisDescriptor) {
     let error = match NativeEffectRegistry::new([
-        Box::new(BadResponseFactory) as Box<dyn NativeEffectFactory>
+        Box::new(BadResponseFactory { response }) as Box<dyn NativeEffectFactory>
     ]) {
         Ok(_) => panic!("malformed companion must not enter the registry"),
         Err(error) => error,
@@ -168,9 +236,75 @@ fn malformed_companion_response_prevents_registry_admission() {
 }
 
 #[test]
-fn response_descriptor_validation_is_allocation_free_and_typed() {
+fn companion_descriptor_mutations_are_independently_rejected() {
+    let mut zero_id = VALID_RESPONSE;
+    zero_id.id = 0;
+    let mut empty_name = VALID_RESPONSE;
+    empty_name.name = "";
+    let mut long_name = VALID_RESPONSE;
+    long_name.name = LONG_NAME;
+    let mut empty_sections = VALID_RESPONSE;
+    empty_sections.sections = &EMPTY_SECTIONS;
+    let mut many_sections = VALID_RESPONSE;
+    many_sections.sections = &MANY_SECTIONS;
+    let mut zero_section_id = VALID_RESPONSE;
+    zero_section_id.sections = &ZERO_SECTION_ID;
+    let mut duplicate_sections = VALID_RESPONSE;
+    duplicate_sections.sections = &DUPLICATE_SECTIONS;
+    let mut descending_sections = VALID_RESPONSE;
+    descending_sections.sections = &DESCENDING_SECTIONS;
+    let mut invalid_section_name = VALID_RESPONSE;
+    invalid_section_name.sections = &INVALID_SECTION_NAME;
+    let mut long_section_name = VALID_RESPONSE;
+    long_section_name.sections = &LONG_SECTION_NAME;
+    let mut nan_floor = VALID_RESPONSE;
+    nan_floor.floor_db = f32::NAN;
+    let mut zero_floor = VALID_RESPONSE;
+    zero_floor.floor_db = 0.0;
+    let mut wrong_axis = VALID_RESPONSE;
+    wrong_axis.axis_unit = ParameterUnit::Db;
+    let mut wrong_unit = VALID_RESPONSE;
+    wrong_unit.unit = ParameterUnit::Hz;
+    let mut wrong_cost = VALID_RESPONSE;
+    wrong_cost.cost = ObservationCost::Resident;
+    let mut eq_without_bypass = VALID_RESPONSE;
+    eq_without_bypass.bypass = ResponseBypassSemantics::NoEffectBypass;
+    let mut builtin_with_bypass = VALID_RESPONSE;
+    builtin_with_bypass.total_scope = ResponseTotalScope::BuiltinInputFilterSubtotal;
+    builtin_with_bypass.bypass = ResponseBypassSemantics::EffectWideIdentityWithSections;
+    let mut builtin_scope = VALID_RESPONSE;
+    builtin_scope.total_scope = ResponseTotalScope::BuiltinInputFilterSubtotal;
+    builtin_scope.bypass = ResponseBypassSemantics::NoEffectBypass;
+
+    let cases = [
+        (zero_id, ResponseDescriptorError::ZeroId),
+        (empty_name, ResponseDescriptorError::InvalidName),
+        (long_name, ResponseDescriptorError::InvalidName),
+        (empty_sections, ResponseDescriptorError::SectionCount),
+        (many_sections, ResponseDescriptorError::SectionCount),
+        (zero_section_id, ResponseDescriptorError::SectionOrder),
+        (duplicate_sections, ResponseDescriptorError::SectionOrder),
+        (descending_sections, ResponseDescriptorError::SectionOrder),
+        (invalid_section_name, ResponseDescriptorError::InvalidName),
+        (long_section_name, ResponseDescriptorError::InvalidName),
+        (nan_floor, ResponseDescriptorError::Floor),
+        (zero_floor, ResponseDescriptorError::Floor),
+        (wrong_axis, ResponseDescriptorError::Semantics),
+        (wrong_unit, ResponseDescriptorError::Semantics),
+        (wrong_cost, ResponseDescriptorError::Semantics),
+        (eq_without_bypass, ResponseDescriptorError::Semantics),
+        (builtin_with_bypass, ResponseDescriptorError::Semantics),
+    ];
+    for (descriptor, expected) in cases {
+        assert_eq!(
+            validate_response_analysis_descriptor(&descriptor),
+            Err(expected)
+        );
+        let descriptor: &'static ResponseAnalysisDescriptor = Box::leak(Box::new(descriptor));
+        assert_registry_rejects(descriptor);
+    }
     assert_eq!(
-        validate_response_analysis_descriptor(&BAD_RESPONSE),
-        Err(ResponseDescriptorError::ZeroId)
+        validate_response_analysis_descriptor(&builtin_scope),
+        Ok(())
     );
 }

@@ -206,3 +206,9 @@ Focused supplied results report EQ response 13, builtin filter response 11, comp
 This is the one coherent attempt-1 FAIL verdict. The corrections stay within existing allowed companion/owner/test/spec paths, with unchanged DSP and no generic architecture expansion. Artifact delivery remains a separate successor after SOURCE PASS; parent #763 remains open.
 
 Root authorizes attempt 2 for the three bounded findings, within the existing allowed paths. Preserve legacy descriptors, DSP arithmetic, dependencies and gates. Use the existing builtin diagnostic spellings directly in the owner adapter; no compiler refactor. Complete all adapter assertions in one coherent pass, then focused/Clippy/policy green checkpoint and a single adversarial verdict.
+
+## Attempt 2 focused correction checkpoint
+
+Luna max corrected companion scope/bypass validation and mapped builtin preparation errors to the established diagnostic spellings. Adapter tests now exercise independent descriptor mutations/admission, successful source-mutation stability, mixed enable masks/views, bitwise output identity/one-sided modes, and common-interface refusal/accessor allocation behavior. Production changes are limited to the companion validator and builtin error translation; DSP arithmetic, dependencies, legacy descriptors and generated assets are unchanged.
+
+Focused results: effect-contract2, effect-compiler1, EQ13, builtins11 passed; targeted all-target Clippy, formatting, effect-runtime/builtins/realtime policies and diff checks exit0. Raw logs/exits: `/tmp/issue770-attempt2-{contract-final,compiler-final,eq-response-final,builtins-filter-final,clippy-3,fmt-check,effect-runtime-policy,builtins-policy,realtime-policy,diff-check}.{log,exit}`. Earlier debugging logs remain distinct. Source pauses for root checkpoint; broad changed-source gates and one Astra medium attempt-2 verdict remain pending.

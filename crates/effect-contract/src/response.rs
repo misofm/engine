@@ -243,6 +243,19 @@ pub fn validate_response_analysis_descriptor(
     {
         return Err(ResponseDescriptorError::Semantics);
     }
+    let supported_scope = matches!(
+        (descriptor.total_scope, descriptor.bypass),
+        (
+            ResponseTotalScope::ParametricEqCascade,
+            ResponseBypassSemantics::EffectWideIdentityWithSections
+        ) | (
+            ResponseTotalScope::BuiltinInputFilterSubtotal,
+            ResponseBypassSemantics::NoEffectBypass
+        )
+    );
+    if !supported_scope {
+        return Err(ResponseDescriptorError::Semantics);
+    }
     Ok(())
 }
 

@@ -408,15 +408,15 @@ pub fn input_filter_response_descriptor() -> &'static ResponseAnalysisDescriptor
 
 fn builtin_configuration_error(error: BuiltinParameterError) -> ResponseAnalysisError {
     let code = match error {
-        BuiltinParameterError::EmptyBlock => "effect.builtin.block",
-        BuiltinParameterError::LaneLength => "effect.builtin.lane_length",
-        BuiltinParameterError::SampleTimeOverflow => "effect.builtin.sample_time",
-        BuiltinParameterError::GainDomain => "effect.builtin.gain",
-        BuiltinParameterError::FilterCutoff => "effect.builtin.filter_cutoff",
-        BuiltinParameterError::FilterOrder => "effect.builtin.filter_order",
-        BuiltinParameterError::FilterCoefficients => "effect.builtin.filter_coefficients",
-        BuiltinParameterError::MatrixCoefficient => "effect.builtin.matrix",
-        BuiltinParameterError::MatrixSmoothing => "effect.builtin.smoothing",
+        BuiltinParameterError::GainDomain => "builtin.gain.domain",
+        BuiltinParameterError::FilterCutoff => "builtin.filter.cutoff",
+        BuiltinParameterError::FilterOrder => "builtin.filter.order",
+        BuiltinParameterError::FilterCoefficients => "builtin.filter.coefficients",
+        BuiltinParameterError::MatrixCoefficient => "builtin.matrix.coefficient",
+        BuiltinParameterError::MatrixSmoothing => "builtin.matrix.smoothing",
+        BuiltinParameterError::EmptyBlock
+        | BuiltinParameterError::LaneLength
+        | BuiltinParameterError::SampleTimeOverflow => "builtin.resource.arithmetic_overflow",
     };
     ResponseAnalysisError::Configuration(EffectPrepareError { code })
 }
