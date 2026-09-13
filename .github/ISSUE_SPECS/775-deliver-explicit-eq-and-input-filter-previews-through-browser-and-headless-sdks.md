@@ -246,4 +246,4 @@ No source edits, commits, GitHub mutations, agent delegation or expensive qualif
 
 ## Merged delivery
 
-PR #776 merged at `fbfce55b4c0441128ea513162bfe016c6a624935` after required qualification `34738424659` succeeded on final head `27ed73f4c7622aab2843232edfbb624311d886ae`. GitHub #775 is verified CLOSED. Parent #763 remains OPEN; #777 is the next bounded SDK capability.
+PR #776 merged at `fbfce55b4c0441128ea513162bfe016c6a624935` after required qualification `34738424659` succeeded on final head `27ed73f4c7622aab2843232edfbb624311d886ae`. Post-merge main qualification `34738707640` also passed. GitHub #775 is verified CLOSED. The completed clean/pushed #775 worktree was removed; source/history and `/tmp/issue775-*` artifacts/logs are preserved. Parent #763 remains OPEN; #777 is the next bounded SDK capability.
