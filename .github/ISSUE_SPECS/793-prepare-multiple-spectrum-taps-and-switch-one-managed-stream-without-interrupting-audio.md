@@ -121,3 +121,7 @@ and response fields/bands; complete clock/plan/state/content/publication identit
 and bounded joins; SAB; native/remote packed-vector parity/compatibility; remaining
 integrated examples/resource evidence and the frozen descriptive comparison.
 This child neither deletes those requirements nor reopens accepted #789/#791.
+
+Milestone 1 native checkpoint: Luna max adds a bounded prepared collection by reusing existing captures/observers, transactional collection preparation, and exact-entry native selection. Existing spectrum integration suite passes 9/9, including a two-track selection/PCM/allocation fixture; host-core check, all-feature Clippy and formatting pass (/tmp/issue793-milestone1-*). This is a native checkpoint, not endpoint acceptance: complete host configuration/selection identity admission and bridge/SDK operation remain in milestone 2.
+
+Latest downstream baseline refresh: app main 53d9b069c4c5d9fc09856c2fdf3030fb20079fb3 (PR209), SDK0.2.4/adapter0.5.1; adapter main cced684beb84f2152cd237beeecd40e4d9a68ab6. Preserve 512KiB warm verification reads separately from128KiB ingest caps, integrity/cancellation/progress semantics and existing latest app behavior. Refresh again before final app implementation and landing. Primary app checkout remains untouched.

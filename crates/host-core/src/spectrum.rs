@@ -108,6 +108,24 @@ pub struct SpectrumCaptureRequest {
     pub maximum_capture_bytes: u64,
 }
 
+/// One explicitly prepared graph tap in a spectrum capture collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumCaptureCollectionEntry {
+    /// The graph boundary to observe.
+    pub target: SpectrumTarget,
+    /// The channel planes the observer copies and the analyzer publishes.
+    pub channels: SpectrumChannels,
+}
+
+/// A bounded set of spectrum taps prepared together for atomic selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumCaptureCollectionRequest {
+    /// The exact target/channel entries admitted by this preparation.
+    pub entries: Vec<SpectrumCaptureCollectionEntry>,
+    /// Aggregate bytes the caller permits the prepared collection to retain.
+    pub maximum_capture_bytes: u64,
+}
+
 /// Address-free capture storage facts used by preparation and host projections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpectrumCaptureResources {
@@ -115,6 +133,24 @@ pub struct SpectrumCaptureResources {
     pub retained_bytes: u64,
     /// The largest individual requested allocation.
     pub largest_allocation_bytes: u64,
+}
+
+/// Refusal while changing the active entry in a prepared spectrum collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumCaptureCollectionSelectionError {
+    /// No prepared entry exactly matched the requested target and channel mask.
+    UnknownEntry,
+    /// The selected entry could not be armed after the old entry was left untouched.
+    Busy,
+}
+
+/// Refusal while reading the active entry in a prepared spectrum collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumCaptureCollectionReadError {
+    /// The collection has no active entry.
+    NoSelection,
+    /// The selected entry returned its ordinary capture status.
+    Capture(SpectrumCaptureReadError),
 }
 
 /// The separately budgeted worker-side state retained by power smoothing.
@@ -150,6 +186,41 @@ pub fn spectrum_capture_resources() -> SpectrumCaptureResources {
 #[must_use]
 pub fn spectrum_capture_resources_for(target: &SpectrumTarget) -> SpectrumCaptureResources {
     spectrum_capture_resources_for_id_bytes(target.id().len())
+}
+
+/// Return the aggregate fixed storage cost of a prepared collection.
+///
+/// The collection owns one control-side capture value per entry in addition to the observer,
+/// queue, and graph binding charged by [`spectrum_capture_resources_for`]. Duplicate exact entries
+/// are rejected before any capture is prepared.
+pub fn spectrum_capture_collection_resources(
+    entries: &[SpectrumCaptureCollectionEntry],
+) -> Result<SpectrumCaptureResources, SpectrumPrepareError> {
+    let mut retained_bytes = 0_u64;
+    let mut largest_allocation_bytes = 0_u64;
+    for (index, entry) in entries.iter().enumerate() {
+        if entries[..index].iter().any(|previous| previous == entry) {
+            return Err(SpectrumPrepareError::DuplicateEntry);
+        }
+        let resources = spectrum_capture_resources_for(&entry.target);
+        retained_bytes = retained_bytes
+            .checked_add(resources.retained_bytes)
+            .ok_or(SpectrumPrepareError::CollectionCapacity)?;
+        largest_allocation_bytes = largest_allocation_bytes.max(resources.largest_allocation_bytes);
+    }
+    let capture_values = u64::try_from(
+        entries
+            .len()
+            .checked_mul(core::mem::size_of::<SpectrumCapture>())
+            .ok_or(SpectrumPrepareError::CollectionCapacity)?,
+    )
+    .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
+    Ok(SpectrumCaptureResources {
+        retained_bytes: retained_bytes
+            .checked_add(capture_values)
+            .ok_or(SpectrumPrepareError::CollectionCapacity)?,
+        largest_allocation_bytes: largest_allocation_bytes.max(capture_values),
+    })
 }
 
 fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureResources {
@@ -213,6 +284,10 @@ pub enum SpectrumPrepareError {
     QueueCapacity,
     /// The request did not select either channel plane.
     NoChannels,
+    /// The collection repeated an exact target and channel mask.
+    DuplicateEntry,
+    /// Collection resource arithmetic or control storage could not be represented.
+    CollectionCapacity,
 }
 
 /// A completed, immutable 2048-frame engine window.
@@ -260,6 +335,7 @@ pub struct SpectrumCapture {
     seen_failures: u64,
     seen_drops: u64,
     target: SpectrumTarget,
+    channels: SpectrumChannels,
 }
 
 impl SpectrumCapture {
@@ -277,6 +353,7 @@ impl SpectrumCapture {
             seen_failures: 0,
             seen_drops: 0,
             target,
+            channels: SpectrumChannels::Left,
         }
     }
 
@@ -480,6 +557,154 @@ impl SpectrumCapture {
     #[must_use]
     pub fn target(&self) -> &SpectrumTarget {
         &self.target
+    }
+
+    /// The exact channel mask prepared for this capture.
+    #[must_use]
+    pub const fn channels(&self) -> SpectrumChannels {
+        self.channels
+    }
+}
+
+/// Control-side ownership of several explicitly prepared spectrum captures.
+///
+/// Every entry owns the same fixed observer and one-slot queue used by the singular API. Only the
+/// selected entry is armed, so inactive entries perform no PCM copies or analysis work. Selection
+/// is an exclusive control-side operation and must occur between render calls.
+pub struct SpectrumCaptureCollection {
+    captures: Box<[SpectrumCapture]>,
+    selected: Option<usize>,
+}
+
+impl SpectrumCaptureCollection {
+    fn new(captures: Vec<SpectrumCapture>) -> Self {
+        Self {
+            captures: captures.into_boxed_slice(),
+            selected: None,
+        }
+    }
+
+    /// Number of prepared entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.captures.len()
+    }
+
+    /// Whether this collection prepared no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.captures.is_empty()
+    }
+
+    /// Return the accepted entry at `index`, including its stable target identity and mask.
+    #[must_use]
+    pub fn entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
+        self.captures
+            .get(index)
+            .map(|capture| SpectrumCaptureCollectionEntry {
+                target: capture.target.clone(),
+                channels: capture.channels,
+            })
+    }
+
+    /// Return the currently selected entry, if any.
+    #[must_use]
+    pub fn selected_entry(&self) -> Option<SpectrumCaptureCollectionEntry> {
+        self.selected.and_then(|index| self.entry(index))
+    }
+
+    /// Return the selected entry index in preparation order.
+    #[must_use]
+    pub const fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+
+    /// Atomically replace the selected one-shot capture with an exact prepared entry.
+    ///
+    /// The target and mask are validated before touching the current capture. A successful
+    /// replacement clears every old partial or queued result and arms the new entry. If the old
+    /// entry was running continuously, the same cadence is restarted for the new entry.
+    pub fn select(
+        &mut self,
+        target: &SpectrumTarget,
+        channels: SpectrumChannels,
+    ) -> Result<SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionSelectionError> {
+        let Some(index) = self
+            .captures
+            .iter()
+            .position(|capture| capture.target == *target && capture.channels == channels)
+        else {
+            return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+        };
+        if self.selected == Some(index) {
+            return self
+                .entry(index)
+                .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+        }
+
+        // Prepare the new state before touching the old one. All checks that can fail therefore
+        // preserve the old active capture and its queued result.
+        let cadence = self.selected.and_then(|old| self.captures[old].cadence());
+        if let Some(cadence) = cadence {
+            self.captures[index]
+                .start_continuous(cadence.sample_rate_hz(), cadence.quantum_frames())
+                .map_err(|_| SpectrumCaptureCollectionSelectionError::Busy)?;
+        } else {
+            self.captures[index]
+                .arm()
+                .map_err(|_| SpectrumCaptureCollectionSelectionError::Busy)?;
+        }
+        for (capture_index, capture) in self.captures.iter_mut().enumerate() {
+            if capture_index != index {
+                capture.cancel();
+            }
+        }
+        self.selected = Some(index);
+        self.entry(index)
+            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
+    }
+
+    /// Start continuous capture on the currently selected entry.
+    pub fn start_continuous(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        };
+        // `select` arms the entry so that the native replacement operation has the same semantics
+        // for one-shot and managed callers. Starting a managed stream explicitly replaces that
+        // just-armed one-shot state before enabling continuous mode.
+        self.captures[index].cancel();
+        self.captures[index].start_continuous(sample_rate_hz, quantum_frames)
+    }
+
+    /// Stop continuous capture on the selected entry and leave the collection idle.
+    pub fn stop_continuous(&mut self) {
+        if let Some(index) = self.selected {
+            self.captures[index].stop_continuous();
+        }
+    }
+
+    /// Read a completed one-shot window from the selected entry.
+    pub fn try_read(&mut self) -> Result<SpectrumWindow, SpectrumCaptureCollectionReadError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumCaptureCollectionReadError::NoSelection);
+        };
+        self.captures[index]
+            .try_read()
+            .map_err(SpectrumCaptureCollectionReadError::Capture)
+    }
+
+    /// Read one completed continuous window from the selected entry.
+    pub fn try_read_continuous(
+        &mut self,
+    ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumContinuousReadError::NotActive);
+        };
+        self.captures[index].try_read_continuous()
     }
 }
 
@@ -710,6 +935,20 @@ pub(crate) fn prepare_capture(
     graph_nodes: &[GraphNodeId],
     maximum_named_allocation_bytes: u64,
 ) -> Result<(GraphNodeObserverBinding, SpectrumCapture), SpectrumPrepareError> {
+    prepare_capture_with_handle(
+        request,
+        graph_nodes,
+        maximum_named_allocation_bytes,
+        SPECTRUM_OBSERVER_HANDLE,
+    )
+}
+
+fn prepare_capture_with_handle(
+    request: &SpectrumCaptureRequest,
+    graph_nodes: &[GraphNodeId],
+    maximum_named_allocation_bytes: u64,
+    observer_handle: u64,
+) -> Result<(GraphNodeObserverBinding, SpectrumCapture), SpectrumPrepareError> {
     let node = request
         .target
         .graph_node()
@@ -741,12 +980,55 @@ pub(crate) fn prepare_capture(
         seen_failures: 0,
         seen_drops: 0,
         target: request.target.clone(),
+        channels: request.channels,
     };
     let observer = SpectrumCaptureObserver::new(producer, state, mode, shared, request.channels);
     Ok((
-        GraphNodeObserverBinding::new(node, SPECTRUM_OBSERVER_HANDLE, Box::new(observer)),
+        GraphNodeObserverBinding::new(node, observer_handle, Box::new(observer)),
         capture,
     ))
+}
+
+/// Prepare every entry in one bounded collection and return its graph observer bindings.
+pub(crate) fn prepare_capture_collection(
+    request: &SpectrumCaptureCollectionRequest,
+    graph_nodes: &[GraphNodeId],
+    maximum_named_allocation_bytes: u64,
+) -> Result<(Vec<GraphNodeObserverBinding>, SpectrumCaptureCollection), SpectrumPrepareError> {
+    let resources = spectrum_capture_collection_resources(&request.entries)?;
+    if !request.entries.is_empty() && request.maximum_capture_bytes < resources.retained_bytes {
+        return Err(SpectrumPrepareError::CaptureBudget);
+    }
+    if maximum_named_allocation_bytes < resources.largest_allocation_bytes {
+        return Err(SpectrumPrepareError::AllocationBudget);
+    }
+    let mut observers = Vec::new();
+    observers
+        .try_reserve_exact(request.entries.len())
+        .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
+    let mut captures = Vec::new();
+    captures
+        .try_reserve_exact(request.entries.len())
+        .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
+    for (index, entry) in request.entries.iter().enumerate() {
+        let index = u64::try_from(index).map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
+        let observer_handle = SPECTRUM_OBSERVER_HANDLE
+            .checked_sub(index)
+            .ok_or(SpectrumPrepareError::CollectionCapacity)?;
+        let (observer, capture) = prepare_capture_with_handle(
+            &SpectrumCaptureRequest {
+                target: entry.target.clone(),
+                channels: entry.channels,
+                maximum_capture_bytes: request.maximum_capture_bytes,
+            },
+            graph_nodes,
+            maximum_named_allocation_bytes,
+            observer_handle,
+        )?;
+        observers.push(observer);
+        captures.push(capture);
+    }
+    Ok((observers, SpectrumCaptureCollection::new(captures)))
 }
 
 struct SpectrumCaptureObserver {
@@ -2076,6 +2358,7 @@ mod tests {
             seen_failures: 0,
             seen_drops: 0,
             target: SpectrumTarget::Output("main-out".into()),
+            channels,
         };
         (observer, capture)
     }
