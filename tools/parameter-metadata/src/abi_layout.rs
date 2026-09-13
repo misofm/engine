@@ -61,17 +61,20 @@ use host_web::{
     COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES, COMMAND_SOLO, COMMAND_TRIM_DB,
     DEFAULT_COMMAND_QUEUE_RECORDS, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
     DIAGNOSTIC_BYTES, MAXIMUM_COMMAND_RECORDS, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS,
-    METER_HEADER_BYTES, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT,
-    RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR,
-    RESPONSE_GRID_LOGARITHMIC, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
-    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
-    RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT,
-    RESPONSE_TARGET_INPUT_FILTERS, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
-    RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED, STATE_READY,
-    STATUS_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader, WebResourceReport,
+    METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
+    OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
+    RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT,
+    RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
+    RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT, RESPONSE_TARGET_INPUT_FILTERS,
+    RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
+    RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
+    RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
+    STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport,
+    WebMeterHeader, WebObservationResult, WebObservationSelection, WebResourceReport,
     WebResponseParameter, WebResponseRequest, WebResponseResult, WebStatus,
 };
 
@@ -106,7 +109,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 36] = [
+pub const EXPORTS: [&str; 52] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -123,6 +126,22 @@ pub const EXPORTS: [&str; 36] = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_effect_index",
+    "miso_engine_web_v1_observation_effect_slot_id",
+    "miso_engine_web_v1_observation_id_capacity",
+    "miso_engine_web_v1_observation_id_ptr",
+    "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_rack",
+    "miso_engine_web_v1_observation_read",
+    "miso_engine_web_v1_observation_result_bytes",
+    "miso_engine_web_v1_observation_result_ptr",
+    "miso_engine_web_v1_observation_selection_bytes",
+    "miso_engine_web_v1_observation_selection_capacity",
+    "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_tap_count",
+    "miso_engine_web_v1_observation_tap_id",
+    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_close",
@@ -425,6 +444,119 @@ fn command_report_fields() -> [Field; 8] {
             "u64",
         ),
         ("reserved", offset_of!(WebCommandReport, reserved), "u64[2]"),
+    ]
+}
+
+fn observation_selection_fields() -> [Field; 8] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationSelection, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationSelection, abi_version),
+            "u32",
+        ),
+        (
+            "trackIndex",
+            offset_of!(WebObservationSelection, track_index),
+            "u32",
+        ),
+        ("rack", offset_of!(WebObservationSelection, rack), "u32"),
+        (
+            "effectIndex",
+            offset_of!(WebObservationSelection, effect_index),
+            "u32",
+        ),
+        ("tapId", offset_of!(WebObservationSelection, tap_id), "u32"),
+        (
+            "channels",
+            offset_of!(WebObservationSelection, channels),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebObservationSelection, reserved),
+            "u32",
+        ),
+    ]
+}
+
+fn observation_result_fields() -> [Field; 19] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationResult, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationResult, abi_version),
+            "u32",
+        ),
+        ("status", offset_of!(WebObservationResult, status), "u32"),
+        (
+            "trackIndex",
+            offset_of!(WebObservationResult, track_index),
+            "u32",
+        ),
+        ("rack", offset_of!(WebObservationResult, rack), "u32"),
+        (
+            "effectIndex",
+            offset_of!(WebObservationResult, effect_index),
+            "u32",
+        ),
+        ("tapId", offset_of!(WebObservationResult, tap_id), "u32"),
+        (
+            "channels",
+            offset_of!(WebObservationResult, channels),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebObservationResult, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "reserved0",
+            offset_of!(WebObservationResult, reserved0),
+            "u32",
+        ),
+        (
+            "firstSample",
+            offset_of!(WebObservationResult, first_sample),
+            "u64",
+        ),
+        (
+            "endSample",
+            offset_of!(WebObservationResult, end_sample),
+            "u64",
+        ),
+        (
+            "sequence",
+            offset_of!(WebObservationResult, sequence),
+            "u64",
+        ),
+        ("blocks", offset_of!(WebObservationResult, blocks), "u32"),
+        (
+            "leftPresent",
+            offset_of!(WebObservationResult, left_present),
+            "u32",
+        ),
+        (
+            "rightPresent",
+            offset_of!(WebObservationResult, right_present),
+            "u32",
+        ),
+        ("left", offset_of!(WebObservationResult, left), "f32"),
+        ("right", offset_of!(WebObservationResult, right), "f32"),
+        (
+            "reserved",
+            offset_of!(WebObservationResult, reserved),
+            "u32[3]",
+        ),
     ]
 }
 
@@ -797,6 +929,20 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
+        "observationSelection",
+        OBSERVATION_SELECTION_BYTES,
+        &observation_selection_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationResult",
+        OBSERVATION_RESULT_BYTES,
+        &observation_result_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
         "responseRequest",
         RESPONSE_REQUEST_BYTES,
         &response_request_fields(),
@@ -830,6 +976,24 @@ pub fn render() -> String {
     render_named_constants(&mut out, "bufferKinds", &buffers);
     render_named_constants(&mut out, "wireCommandKinds", &wire_command_kinds);
     render_named_constants(&mut out, "commandReasons", &command_reasons);
+    render_named_constants(
+        &mut out,
+        "observationChannels",
+        &[
+            (OBSERVATION_CHANNEL_LEFT, "left"),
+            (OBSERVATION_CHANNEL_RIGHT, "right"),
+            (OBSERVATION_CHANNEL_BOTH, "both"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationStatuses",
+        &[
+            (OBSERVATION_STATUS_PENDING, "pending"),
+            (OBSERVATION_STATUS_UNARMED, "unarmed"),
+            (OBSERVATION_STATUS_READY, "ready"),
+        ],
+    );
     render_named_constants(
         &mut out,
         "responseTargets",

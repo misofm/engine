@@ -164,6 +164,22 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
+  miso_engine_web_v1_observation_count \
+  miso_engine_web_v1_observation_effect_index \
+  miso_engine_web_v1_observation_effect_slot_id \
+  miso_engine_web_v1_observation_id_capacity \
+  miso_engine_web_v1_observation_id_ptr \
+  miso_engine_web_v1_observation_native_effect_id \
+  miso_engine_web_v1_observation_rack \
+  miso_engine_web_v1_observation_read \
+  miso_engine_web_v1_observation_result_bytes \
+  miso_engine_web_v1_observation_result_ptr \
+  miso_engine_web_v1_observation_selection_bytes \
+  miso_engine_web_v1_observation_selection_capacity \
+  miso_engine_web_v1_observation_selection_ptr \
+  miso_engine_web_v1_observation_tap_count \
+  miso_engine_web_v1_observation_tap_id \
+  miso_engine_web_v1_observation_track_index \
   miso_engine_web_v1_render \
   miso_engine_web_v1_response_close \
   miso_engine_web_v1_response_effect_id_capacity \
