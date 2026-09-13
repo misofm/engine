@@ -255,3 +255,5 @@ This SOURCE PASS permits the separately scoped artifact qualification/delivery w
 ## Merged delivery
 
 PR #773 merged accepted delivery head `5b8ecc19e332b08a63e0ff198cbda29e41fcda32` into main as `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`. Required exact-head qualification `34732244490` passed, including three-browser qualification. Accepted source and artifact reviews above remain authoritative. The evidence commit is upstream; this child closes with synchronized GitHub evidence. Post-merge qualification `34732546015` is running and will be recorded separately.
+
+Post-merge qualification `34732546015` completed **SUCCESS** at merged main `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`. #770 and #772 are verified CLOSED on GitHub. External artifact `/tmp/issue772-attempt1-artifact` and original logs/reviews are preserved independently of the completed delivery worktree.

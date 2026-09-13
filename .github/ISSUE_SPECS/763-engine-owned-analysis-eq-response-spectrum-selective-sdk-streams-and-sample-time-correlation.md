@@ -181,3 +181,5 @@ Both children await combined PR/main qualification and merge. The next bounded s
 #770 and #772 are merged through PR #773 at main `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`, following exact-head qualification `34732244490` SUCCESS and the recorded Astra medium source/artifact verdicts. Both children close with upstream evidence and synchronized GitHub records. Post-merge qualification `34732546015` is running.
 
 #774 is the sole active feature: native selected session bindings, explicit requested-configuration identity, bounded retained storage, and engine-owned frequency grids. Astra xhigh approved the amended brief; Luna max implements attempt 1. Composition, real host publication, generated SDK previews, live observation, spectrum capture/worker processing, transports and sample-time joins remain mandatory and open.
+
+Post-merge qualification `34732546015` completed **SUCCESS** at merged main `1cb18a26c3c12a12a4afd133633ab9cd5a44600e`. #770 and #772 are verified CLOSED on GitHub. External artifact `/tmp/issue772-attempt1-artifact` and original logs/reviews are preserved independently of the completed delivery worktree.
