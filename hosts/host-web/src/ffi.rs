@@ -1948,10 +1948,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_capture_ptr() -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
-        if staging.capture.is_none() && staging.request.target != 0 {
-            if staging.configure_capture().is_err() {
-                return 0;
-            }
+        if staging.capture.is_none()
+            && staging.request.target != 0
+            && staging.configure_capture().is_err()
+        {
+            return 0;
         }
         staging
             .capture
@@ -1992,10 +1993,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_capture_set_bytes(bytes: u32) -> u
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        if staging.capture.is_none() && staging.request.target != 0 {
-            if staging.configure_capture().is_err() {
-                return RESULT_REFUSED_BUDGET;
-            }
+        if staging.capture.is_none()
+            && staging.request.target != 0
+            && staging.configure_capture().is_err()
+        {
+            return RESULT_REFUSED_BUDGET;
         }
         let Ok(length) = usize::try_from(bytes) else {
             return RESULT_INVALID_ARGUMENT;
@@ -2042,10 +2044,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_result_ptr() -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
-        if staging.result.is_none() && staging.request.target != 0 {
-            if staging.configure_capture().is_err() {
-                return 0;
-            }
+        if staging.result.is_none()
+            && staging.request.target != 0
+            && staging.configure_capture().is_err()
+        {
+            return 0;
         }
         staging
             .result
@@ -2092,9 +2095,12 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
         if sample_rate_hz == 0 {
             return RESULT_INVALID_ARGUMENT;
         }
+        let available = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+        if available == 0 || (channels & !available) != 0 {
+            return RESULT_INVALID_ARGUMENT;
+        }
         let read = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
             host.read_spectrum()
-                .map(|window| window.map(|(window, token)| (window, token)))
         });
         let (mut window, token) = match read {
             Ok(Some(value)) => value,
@@ -3332,6 +3338,77 @@ mod live_response_ffi_tests {
             RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
             u64::MAX,
             "exhaustion must not wrap or reuse a snapshot token"
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+}
+
+#[cfg(test)]
+mod spectrum_ffi_tests {
+    use super::*;
+
+    fn stage_left_output_request() {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            let target_id = b"main-out";
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
+            *staging.request = WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                target_id_bytes: target_id.len() as u32,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            };
+        });
+    }
+
+    #[test]
+    fn invalid_spectrum_channel_selection_preserves_window_for_valid_retry() {
+        stage_left_output_request();
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let handle = test_boot(
+            document.as_bytes(),
+            WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            },
+        );
+        assert_ne!(handle, 0, "spectrum fixture must boot");
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_spectrum_arm(handle), RESULT_OK);
+        for block in 0..16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+
+        // Stereo is a valid request shape but exceeds the left-only prepared capture. The refusal
+        // must happen before `read_spectrum` consumes the completed one-shot window.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(handle, SPECTRUM_CHANNEL_BOTH),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_capture_bytes(), 0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(handle, SPECTRUM_CHANNEL_LEFT),
+            RESULT_OK,
+            "a valid retry must still read the completed window"
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_capture_bytes(),
+            SPECTRUM_WINDOW_HEADER_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }

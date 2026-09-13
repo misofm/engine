@@ -154,7 +154,7 @@ impl StartedRenderSession {
 
     /// Apply an admitted source seek between render blocks on this exclusive render owner.
     ///
-    /// The matching [`SourceControlSet`](crate::SourceControlSet) queues the seek first; this
+    /// The matching [`SourceControlSet`] queues the seek first; this
     /// method consumes that admitted command without rendering or advancing the audio clock.
     /// A prepared spectrum capture treats the resulting generation boundary as a discontinuity
     /// when it occurs during a partial window.
