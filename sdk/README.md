@@ -375,6 +375,37 @@ effect, and observation operations, locally checks generated domains, and makes 
 `console.submit(...edits)` one atomic engine transaction. `ConsoleWriter` remains useful for a
 high-rate gesture loop whose pending values need latest-wins coalescing.
 
+## Managed resident observations
+
+Both SDK entries can manage selected resident effect observations:
+
+```ts
+const subscription = await engine.subscribeObservations({
+  selections: [{
+    trackId: "vocals", rack: "dynamic", effectSlotId: "compressor",
+    tapId: 1, channels: "both",
+  }],
+  windowBlocks: 2,
+  cadenceMs: 100,
+  onUpdate: ({ handle }) => consume(handle.readLatest()),
+});
+// Headless: render normally, then await subscription.pump().
+// Browser: notifications arrive automatically at the requested cadence.
+await subscription.close();
+```
+
+Use the generated observation descriptors to choose supported tap IDs, and prepare console
+command and observation capacity when creating the engine. The returned handle reports effective
+configuration, bounds and the command's `appliedAtSample`. `update()` changes a selection atomically;
+a refused update preserves the previous subscription. Identical bindings share reads, and the
+last close disarms them. Manual console observation edits are refused while managed work conflicts.
+
+`readLatest()` returns owned rows with the effect owner's original sample spans and units.
+Notifications report missed native windows separately from skipped cached publications. Headless
+pumping never renders implicitly; browser delivery retains the latest values rather than a backlog.
+Session replacement or disposal invalidates old handles. SDK-local owner/epoch IDs do not claim to
+be portable engine-clock identities. Live EQ response and spectrum queries remain separate APIs.
+
 ## Explicit response previews
 
 Response previews are stopped analysis requests over an explicit generated effect or input-filter

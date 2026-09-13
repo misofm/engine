@@ -80,6 +80,12 @@ export type ConsoleSubmit = (
   edits: readonly LaneEdit[],
 ) => CommandReport | Promise<CommandReport>;
 
+/** Optional owner hook used to serialize observation edits with managed subscriptions. */
+export type ConsoleBeforeSubmit = (
+  edits: readonly LaneEdit[],
+  managed?: boolean,
+) => void | Promise<void>;
+
 const RACKS = Object.freeze({ simd1: 0, dynamic: 1, simd2: 2 } as const);
 const CHANNELS = Object.freeze({ left: 0, right: 1, both: 2 } as const);
 const NONE = 255;
@@ -347,18 +353,31 @@ export class EffectEdits<E extends EffectId> {
 export class EngineConsole {
   readonly edit: ConsoleEdits;
   readonly #submit: ConsoleSubmit;
+  readonly #beforeSubmit: ConsoleBeforeSubmit | undefined;
 
-  constructor(map: SessionMap, submit: ConsoleSubmit) {
+  constructor(map: SessionMap, submit: ConsoleSubmit, beforeSubmit?: ConsoleBeforeSubmit) {
     this.edit = new ConsoleEdits(map);
     this.#submit = submit;
+    this.#beforeSubmit = beforeSubmit;
   }
 
   async submit(...edits: readonly LaneEdit[]): Promise<CommandReport> {
+    return this.#submitChecked(edits, false);
+  }
+
+  /** @internal Managed observation owner submission with an owner-specific guard bypass. */
+  async submitManaged(...edits: readonly LaneEdit[]): Promise<CommandReport> {
+    return this.#submitChecked(edits, true);
+  }
+
+  async #submitChecked(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
         `a console transaction must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
       );
     }
+    const beforeSubmit = this.#beforeSubmit?.(edits, managed);
+    if (beforeSubmit !== undefined) await beforeSubmit;
     const report = await this.#submit(edits);
     const resultConsistent = report.ok === (report.result === 0);
     const wholeBatch = report.ok

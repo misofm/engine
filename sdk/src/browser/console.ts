@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import { commandReasonName } from "../core/boundary.ts";
 import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { EngineConsole } from "../core/console.ts";
+import type { ConsoleBeforeSubmit } from "../core/console.ts";
 import { resultName } from "../core/errors.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
@@ -30,7 +31,10 @@ function browserCommand(edit: LaneEdit): MisoCommand {
 }
 
 /** Bind the shared semantic console to the shipped MessagePort host. */
-export async function createBrowserConsole(host: MisoAudioWorkletHost): Promise<EngineConsole> {
+export async function createBrowserConsole(
+  host: MisoAudioWorkletHost,
+  beforeSubmit?: ConsoleBeforeSubmit,
+): Promise<EngineConsole> {
   const remoteMap = await host.sessionMap();
   const map: SessionMap = Object.freeze({
     tracks: Object.freeze([...remoteMap.tracks]),
@@ -49,5 +53,5 @@ export async function createBrowserConsole(host: MisoAudioWorkletHost): Promise<
       admitted: ack.admitted,
       appliedAtSample: ack.appliedAtSample,
     });
-  });
+  }, beforeSubmit);
 }

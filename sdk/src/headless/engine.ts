@@ -17,6 +17,14 @@ import type {
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
+import {
+  ObservationSubscriptionOwner,
+} from "../core/observation-subscriptions.ts";
+import type {
+  ObservationSubscription,
+  ObservationSubscriptionLimits,
+  ObservationSubscriptionRequest,
+} from "../core/observation-subscriptions.ts";
 import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -78,27 +86,44 @@ function documentBytes(document: SessionDocument): Uint8Array<ArrayBuffer> {
 export interface OfflineEngineOptions extends BootOptions {
   /** The verified, compiled module. Absent loads the engine embedded in this package. */
   readonly asset?: MisoEngineAsset;
+  /** Finite SDK-side bounds for resident observation subscriptions. */
+  readonly observationSubscriptionLimits?: ObservationSubscriptionLimits;
 }
 
 /** A booted headless session. */
 export class OfflineEngine {
   readonly #boundary: WasmBoundary;
   readonly #asset: MisoEngineAsset;
+  readonly #observationLimits: ObservationSubscriptionLimits | undefined;
+  #observationSubscriptions: ObservationSubscriptionOwner | undefined;
 
-  private constructor(asset: MisoEngineAsset, boundary: WasmBoundary) {
+  private constructor(
+    asset: MisoEngineAsset,
+    boundary: WasmBoundary,
+    observationLimits: ObservationSubscriptionLimits | undefined,
+  ) {
     this.#asset = asset;
     this.#boundary = boundary;
+    this.#observationLimits = observationLimits;
   }
 
   static async create(
     document: SessionDocument,
     options: OfflineEngineOptions = {},
   ): Promise<OfflineEngine> {
-    const { asset: suppliedAsset, ...boot } = options;
+    const {
+      asset: suppliedAsset,
+      observationSubscriptionLimits,
+      ...boot
+    } = options;
     const spectrumQuery = boot.spectrum === undefined ? undefined : cloneSpectrumQuery(boot.spectrum);
     const bootOptions = spectrumQuery === undefined ? boot : { ...boot, spectrum: spectrumQuery };
     const asset = suppliedAsset ?? await defaultBundledAsset();
-    return new OfflineEngine(asset, await WasmBoundary.boot(asset, documentBytes(document), bootOptions));
+    return new OfflineEngine(
+      asset,
+      await WasmBoundary.boot(asset, documentBytes(document), bootOptions),
+      observationSubscriptionLimits,
+    );
   }
 
   /** The asset this engine booted from, including its compile count and provenance. */
@@ -139,6 +164,11 @@ export class OfflineEngine {
     return this.#boundary.readObservations(selections);
   }
 
+  /** Subscribe to bounded resident observation rows; values are refreshed by `pump()`. */
+  subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
+    return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
+  }
+
   /** Capture and evaluate one immutable selected-track response at the current render boundary. */
   queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
     return this.#boundary.queryTrackResponse(request);
@@ -162,7 +192,8 @@ export class OfflineEngine {
   /** A semantic console bound to the currently loaded session. */
   console(): EngineConsole {
     return new EngineConsole(this.sessionMap(), (edits) =>
-      this.submitCommands(encodeLaneEdits(edits), edits.length));
+      this.submitCommands(encodeLaneEdits(edits), edits.length),
+      (edits, managed) => this.#observationSubscriptions?.beforeConsoleSubmit(edits, managed));
   }
 
   nextAbsoluteSample(): bigint {
@@ -226,11 +257,21 @@ export class OfflineEngine {
    * reboot verb; this is it.
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
+    this.#observationSubscriptions?.invalidate();
     this.#boundary.reboot(documentBytes(document), options);
   }
 
   dispose(): void {
+    this.#observationSubscriptions?.invalidate(true);
     this.#boundary.dispose();
+  }
+
+  #observationOwner(): ObservationSubscriptionOwner {
+    return this.#observationSubscriptions ??= new ObservationSubscriptionOwner({
+      observationMap: () => this.observationMap(),
+      readObservations: (selections) => this.readObservations(selections),
+      console: () => this.console(),
+    }, this.#observationLimits);
   }
 }
 
