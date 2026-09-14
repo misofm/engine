@@ -222,3 +222,17 @@ Update the relevant root-owned ruling and its named live constants in `tools/ben
 **Assignment 2: EQ consumer correction and compatibility gates.** Own `crates/parametric-eq/src/lib.rs` plus the minimum existing `tests/mono_collapse.rs`/`tests/bank.rs` changes. Keep the permanent all-HighPass failure and make it pass in stationary and forced fallback, mono/dual, scalar/Simd4/Simd8. Compare output and every original-band state word directly with the four-section oracle. Include old general-band ramps while both cuts stay disabled. A small mixed-bank matrix covers neither/HPF-only/LPF-only/both per lane, asymmetric channels, independent cutoff/Q values, and tail placement; compare each bank lane to its scalar instance, with exact bits and a nontrivial final LPF. Cover restored noncold dedicated state and existing elision refusals, then verify six-section schedule equality. Use tiny signals and existing fixtures, not a new corpus. Run `cargo test --locked -p parametric-eq`, package clippy, and the repository-flags Wasm check; root runs the existing relevant realtime/artifact gate at the coherent boundary. Stop for root checkpoint and fresh adversarial verdict.
 
 Preserve existing corpus pins and old-band arithmetic. If they change, investigate the change against the old-four oracle before touching a digest. Existing six-versus-six tests should continue to compare corrected paths; they must not keep a stale unmasked cut oracle as the product authority. Root owns the issue attempt count, the old failed evidence, floor/state documentation, proportional delivery checks, and GitHub synchronization.
+
+## Attempt 1 — masked helper prerequisite checkpoint
+
+Luna XHIGH added only the two approved additive helpers in lane kernels and one
+focused test file. Private static output policy preserves unmasked entrypoints;
+masked output selects input bits at each section boundary after unchanged
+recurrence/state updates. Focused tests cover widths1/4/8, streams1/2, depth2,
+false-mask equivalence, mixed scalar parity, signed zero/seeded state, cascade
+boundaries and current-then-advance ramp/partition coefficient bits.
+Passed: all active lane tests (two existing descriptive ignores), release masked
+plus G2 tests, clippy, native release build, scalar and SIMD Wasm builds, lane
+policy, unfused seal and formatting. Evidence: /tmp/805-mask-kernel-evidence.md.
+The existing EQ consumer is deliberately unchanged and its retained regression
+remains red until the next bounded integration. No final verdict yet.

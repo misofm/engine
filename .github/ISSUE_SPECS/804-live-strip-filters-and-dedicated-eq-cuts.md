@@ -112,10 +112,12 @@ prepared coefficients cross an internal trusted-host companion boundary.
 ramps, preserving signed-zero and sanitization behavior. Retained input-stage
 state and actual trim work are not claimed to disappear.
 
-Sequence: #147 accepted implementation (PR #806 required CI pending), #805
+Sequence: #147 merged and closed (PR #806, merge39288df4; required CI34811007238 and main CI34811451810 passed), #805
 prepared EQ, #807 live EQ, #808 live builtins, then the coordinated immutable
 SDK/adapter releases and app adoption/deployment. Parent stays open throughout.
 
 The bounded engine release is tracked as #809. It requires accepted #147,
 #805, #807 and #808, a new immutable version, actual browser qualification
 and exact-archive publish/verify before downstream registry adoption.
+
+Downstream delivery is now tracked in misofm/engine-web-adapter#111 and misofm/app#222, with matching committed local specs. No new package publication or app deployment is claimed yet. #805 retained a real signed-zero regression and is correcting it through the narrowly approved masked-output helper; its gate is not weakened.
