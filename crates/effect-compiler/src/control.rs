@@ -431,3 +431,38 @@ fn checked_slice_bytes<T>(length: usize) -> Result<u64, EffectControlResourceErr
         .ok_or(EffectControlResourceError::Arithmetic)?;
     u64::try_from(bytes).map_err(|_| EffectControlResourceError::Arithmetic)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effect_contract::default_initial_values;
+    use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
+    use std::sync::Arc;
+
+    #[test]
+    fn revision_overflow_is_refused_before_candidate_mutation() {
+        let committed: Box<[InitialParameterValue]> =
+            default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        let mut owner = EffectControlOwner {
+            factory: Arc::new(ParametricEqFactory),
+            sample_rate: 48_000,
+            candidate: committed.clone(),
+            dirty: vec![false; committed.len()].into_boxed_slice(),
+            committed,
+            committed_revision: u64::MAX,
+            pending_revision: None,
+            phase: EffectControlOwnerPhase::Idle,
+        };
+        let committed_before = owner.committed.clone();
+        let candidate_before = owner.candidate.clone();
+        let dirty_before = owner.dirty.clone();
+        assert_eq!(
+            owner.begin(u64::MAX),
+            Err(EffectControlOwnerError::Revision)
+        );
+        assert_eq!(owner.phase, EffectControlOwnerPhase::Idle);
+        assert_eq!(owner.committed, committed_before);
+        assert_eq!(owner.candidate, candidate_before);
+        assert_eq!(owner.dirty, dirty_before);
+    }
+}

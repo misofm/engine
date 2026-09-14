@@ -190,3 +190,10 @@ this is caller correction evidence, not another completed product capability.
 storage and the browser's replacement table. Independent arithmetic and exact-budget
 refusal tests pass, alongside strict Clippy and Wasm checks. Remaining assignment5
 transaction and allocation fixtures precede the preparation ABI work; #807 stays open.
+
+
+#807 assignment5 is complete: actual authoritative owner seeding, successive queued
+transactions, revision overflow and prewarmed zero-allocation/free gates pass.
+Preparation ABI and host/browser integration are next. Per the user's direction,
+reuse existing critical evidence and prioritize the working end-to-end route over
+optional verification and optimization. No production activation or release yet.

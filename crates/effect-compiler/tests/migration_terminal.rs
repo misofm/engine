@@ -13,6 +13,8 @@ use effect_compiler::*;
 use effect_contract::*;
 use effect_package::*;
 use lane::Backend;
+use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
+use session::{CompileCaps, compile_session, parse_session_json};
 use sha2::{Digest, Sha256};
 
 struct QualificationAllocator;
@@ -141,6 +143,193 @@ const fn port_id(value: &'static str) -> PortId {
         Ok(value) => value,
         Err(_) => panic!("port"),
     }
+}
+
+/// Test-only capability injection. The production ParametricEqFactory remains unregistered for
+/// prepared targets until the later cutover assignment.
+struct OptInParametricEqFactory;
+
+impl NativeEffectFactory for OptInParametricEqFactory {
+    fn descriptor(&self) -> &'static EffectDescriptor {
+        &PARAMETRIC_EQ_DESCRIPTOR
+    }
+
+    fn prepare(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ParametricEqFactory.prepare(request)
+    }
+
+    fn target_preparation(&self) -> Option<&dyn NativeEffectTargetPreparation> {
+        Some(&ParametricEqFactory)
+    }
+
+    fn bind_homogeneous_bank(
+        &self,
+        request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ParametricEqFactory.bind_homogeneous_bank(request)
+    }
+}
+
+fn opted_in_eq_caps() -> EffectCompileCaps {
+    EffectCompileCaps {
+        maximum_total_state_bytes: 1 << 20,
+        maximum_scratch_bytes: 1 << 20,
+        maximum_automation_spans_per_block: 64,
+    }
+}
+
+fn opted_in_eq_attachment() -> (EffectPreparedSession, Vec<EffectControlProducer>) {
+    let model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ))
+    .expect("accepted EQ fixture");
+    let compiled = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled EQ fixture");
+    let registry = NativeEffectRegistry::new([
+        Box::new(OptInParametricEqFactory) as Box<dyn NativeEffectFactory>
+    ])
+    .expect("test-only opt-in registry");
+    let mut prepared = prepare_native_session_effects(&compiled, &registry, opted_in_eq_caps())
+        .expect("prepared EQ fixture");
+    let producers = attach_effect_console(
+        &mut prepared,
+        core::num::NonZeroUsize::new(12).expect("queue depth"),
+    )
+    .expect("attached EQ console");
+    (prepared, producers)
+}
+
+#[test]
+fn opted_in_attachment_uses_authoritative_sparse_default_and_asymmetric_rows() {
+    let (prepared, producers) = opted_in_eq_attachment();
+    assert_eq!(prepared.entries.len(), 9);
+    assert_eq!(producers.len(), 9);
+    assert!(producers.iter().all(EffectControlProducer::has_owner));
+    for (entry, producer) in prepared.entries.iter().zip(&producers) {
+        let owner = producer.owner().expect("explicit opt-in owner");
+        assert_eq!(
+            owner.committed(),
+            entry.bank_preparation.initial_values.as_ref(),
+            "owner seed must come from accepted bank preparation"
+        );
+        assert!(owner.dirty().iter().all(|touched| !touched));
+    }
+
+    let sparse = prepared.entries[0].bank_preparation.initial_values.as_ref();
+    assert_eq!(sparse.len(), 60, "EQ has the authoritative 60-row seed");
+    assert_eq!(
+        sparse
+            .iter()
+            .find(|row| row.parameter_index == 2 && row.channel == ParameterChannel::Left)
+            .expect("sparse left cutoff")
+            .value,
+        120.0
+    );
+    assert_eq!(
+        sparse
+            .iter()
+            .find(|row| row.parameter_index == 2 && row.channel == ParameterChannel::Right)
+            .expect("asymmetric right cutoff")
+            .value,
+        2_400.0
+    );
+    assert_eq!(
+        sparse
+            .iter()
+            .find(|row| row.parameter_index == 3 && row.channel == ParameterChannel::Left)
+            .expect("asymmetric left gain")
+            .value,
+        6.0
+    );
+    assert_eq!(
+        sparse
+            .iter()
+            .find(|row| row.parameter_index == 3 && row.channel == ParameterChannel::Right)
+            .expect("asymmetric right gain")
+            .value,
+        -9.0
+    );
+    let defaults: Box<[InitialParameterValue]> =
+        default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+    assert_eq!(
+        prepared.entries[1].bank_preparation.initial_values.as_ref(),
+        defaults.as_ref(),
+        "a sparse session omission retains descriptor defaults"
+    );
+}
+
+#[test]
+fn opted_in_owner_transaction_is_allocation_free_after_preparation() {
+    let (mut prepared, mut producers) = opted_in_eq_attachment();
+    let mut warm_targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Left,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; 12];
+    let producer = &mut producers[0];
+    producer.begin_owner(0).expect("warm begin");
+    producer
+        .edit_owner(2, ParameterChannel::Both, 100.0)
+        .expect("warm edit");
+    let warm_count = producer
+        .owner()
+        .expect("warm owner")
+        .prepare_targets_into(&mut warm_targets)
+        .expect("warm prepare");
+    producer
+        .preflight_candidate_targets(0, &warm_targets[..warm_count])
+        .expect("warm preflight");
+    producer
+        .publish_candidate_targets(0, &warm_targets[..warm_count])
+        .expect("warm publication");
+    assert_eq!(producer.commit_owner(), Ok(1));
+    let staged = prepared.entries[0]
+        .control
+        .as_mut()
+        .expect("attached control lane")
+        .stage(&mut [], 0, None);
+    assert_eq!(staged.staged_targets, warm_count);
+
+    let mut targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Left,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; 12];
+    let (result, allocations) = measure_allocations(|| {
+        let producer = &mut producers[0];
+        producer.begin_owner(1)?;
+        producer.edit_owner(2, ParameterChannel::Right, 200.0)?;
+        let count = producer
+            .owner()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .prepare_targets_into(&mut targets)?;
+        producer
+            .owner()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .validate_targets(&targets[..count])?;
+        producer.preflight_candidate_targets(1, &targets[..count])?;
+        producer.publish_candidate_targets(1, &targets[..count])?;
+        producer.commit_owner()
+    });
+    assert_eq!(result, Ok(2));
+    assert_eq!(allocations.allocations, 0);
+    assert_eq!(allocations.deallocations, 0);
+    assert_eq!(allocations.allocated_bytes, 0);
+    assert_eq!(allocations.deallocated_bytes, 0);
+    assert_eq!(allocations.live_bytes, 0);
 }
 
 static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {

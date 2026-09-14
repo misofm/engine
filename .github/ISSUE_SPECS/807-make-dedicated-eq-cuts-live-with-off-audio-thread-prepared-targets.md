@@ -622,3 +622,27 @@ Luna reports full effect-compiler, host-core prepare and host-web suites plus wo
 checking passed. No benchmark. Remaining assignment5 work is the documented seed,
 transaction edge-case, overflow and prewarmed allocation evidence; assignments6–10,
 production cutover and final issue review remain pending.
+
+
+### Assignment 5 complete — critical owner transaction evidence
+
+Luna XHIGH completed the actual opt-in attachment fixture using accepted sparse,
+default and asymmetric EQ session values. All 60 owner rows equal accepted bank
+preparation; explicit nondefault lane values and omitted defaults are checked. Two
+transactions before rendering preserve exact queued target order and committed
+revisions 1 then 2. Supported launch rates pass and an extended rate refuses.
+The existing allocation harness measures an attached, prewarmed owner through
+begin/edit/preparation/validation/preflight/publication/commit: zero allocations
+and frees. A private unit test proves revision overflow refuses before mutation.
+
+Gates PASS: cargo test --locked -p effect-compiler --lib owner_tests (7);
+cargo test --locked -p effect-compiler --test migration_terminal opted_in_ (2);
+root's revision_overflow_is_refused_before_candidate_mutation (1); strict
+effect-compiler all-target Clippy, wasm32-unknown-unknown check, fmt and diff.
+Existing refusal/companion/resource gates are reused rather than duplicated.
+
+The user's latest direction prioritizes the working end-to-end feature over broader
+verification or optimization. Proceed directly to assignment 6 under its accepted
+layout amendment; retain critical correctness/realtime gates and defer optional
+expansion. Assignments 6–10 and the fresh final adversarial review remain pending;
+production EQ capability is still absent. No public activation or release claim.

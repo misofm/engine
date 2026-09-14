@@ -1844,6 +1844,102 @@ mod owner_tests {
     }
 
     #[test]
+    fn opted_in_owner_accepts_two_transactions_before_render() {
+        let (mut owner, mut producer, mut consumer) = owner_and_queue();
+        let initial = owner.committed().to_vec();
+        let mut first = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12];
+        owner.begin(0).expect("first base revision");
+        owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("first Both edit");
+        let first_count = owner
+            .prepare_targets_into(&mut first)
+            .expect("first prepare");
+        assert_eq!(first_count, 1);
+        owner
+            .publish(&mut producer, 0, &first[..first_count])
+            .expect("first publication");
+        assert_eq!(owner.commit(), Ok(1));
+
+        let mut second = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12];
+        owner.begin(1).expect("second base revision before render");
+        owner
+            .edit(2, ParameterChannel::Right, 200.0)
+            .expect("second asymmetric edit");
+        let second_count = owner
+            .prepare_targets_into(&mut second)
+            .expect("second prepare");
+        assert_eq!(second_count, 1);
+        assert_eq!(second[0].channel, ParameterChannel::Right);
+        owner
+            .publish(&mut producer, 1, &second[..second_count])
+            .expect("second publication");
+        assert_eq!(owner.commit(), Ok(2));
+        assert_eq!(
+            consumer.try_pop(),
+            Ok(EffectControlRecord::PreparedTarget(first[0]))
+        );
+        assert_eq!(
+            consumer.try_pop(),
+            Ok(EffectControlRecord::PreparedTarget(second[0]))
+        );
+        assert_eq!(owner.committed_revision(), 2);
+        assert_eq!(
+            owner
+                .committed()
+                .iter()
+                .find(|row| { row.parameter_index == 2 && row.channel == ParameterChannel::Left })
+                .expect("left committed row")
+                .value,
+            100.0
+        );
+        assert_eq!(
+            owner
+                .committed()
+                .iter()
+                .find(|row| { row.parameter_index == 2 && row.channel == ParameterChannel::Right })
+                .expect("right committed row")
+                .value,
+            200.0
+        );
+        assert_ne!(
+            owner.committed(),
+            initial.as_slice(),
+            "both transactions changed the seed"
+        );
+    }
+
+    #[test]
+    fn opted_in_owner_accepts_launch_rates_and_rejects_unsupported_rate() {
+        for sample_rate in [44_100, 48_000, 88_200, 96_000] {
+            let mut preparation = preparation();
+            preparation.sample_rate = sample_rate;
+            EffectControlOwner::new(
+                Arc::new(OptInEqFactory) as Arc<dyn NativeEffectFactory>,
+                &preparation,
+            )
+            .expect("launch rate owner");
+        }
+        let mut unsupported = preparation();
+        unsupported.sample_rate = 176_400;
+        assert!(matches!(
+            EffectControlOwner::new(
+                Arc::new(OptInEqFactory) as Arc<dyn NativeEffectFactory>,
+                &unsupported,
+            ),
+            Err(EffectControlOwnerError::Rate)
+        ));
+    }
+
+    #[test]
     fn invalid_edit_poison_survives_valid_overwrite_until_discard() {
         let (mut owner, _producer, _consumer) = owner_and_queue();
         owner.begin(0).expect("base revision");
