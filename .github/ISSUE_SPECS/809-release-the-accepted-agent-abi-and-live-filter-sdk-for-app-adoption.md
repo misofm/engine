@@ -108,3 +108,11 @@ required CI and immutable qualification/publication/registry verification remain
 no registry release is claimed. App #222 may use these exact accepted candidate
 bytes for its already authorized temporary preparation, with tracked registry
 pins unchanged until the actual release.
+
+### Main integration
+
+#808 PR#812 passed required qualification34878694424 and merged as
+`7c4238000da90358db1bec7ffe9a2459962590b4`. This release branch merged that
+main lineage without conflict. The only release delta remains the reviewed
+version/guard/documentation changes; no runtime bytes changed. Required release
+PR/main CI and immutable workflow dispatches follow.
