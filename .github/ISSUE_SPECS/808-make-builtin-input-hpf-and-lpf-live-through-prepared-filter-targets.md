@@ -270,3 +270,15 @@ Root completed strict lib/tests clippy for builtins, session, parameter-metadata
 host-web; session library tests6passed/two existing ignored. Runtime SDK tests were
 not run against an old artifact: shared-helper integration and a rebuilt shipped
 module remain next. No release version or artifact pin changed in this checkpoint.
+
+Root integration checkpoint: rebuilt the frozen Rust Wasm with the pinned builder;
+SHA256 `42f4991252a25fde3b57df5352a1d6acc5094b97aa4d031662e72cc66beb332b`.
+The artifact export gate now includes exactly the two additive builtin preparation/config
+exports. Final JavaScript closure qualification follows the shared-helper checkpoint.
+The mandatory workspace check exposed a stale independent C resource model. Its scalar,
+four-lane and eight-lane mirrors now include the three retained coefficient sets and
+per-section countdowns: +416 bytes per scalar owner, +2,432 per input bank. The fixture
+retains two scalar owners per track and two input banks, so its exact builtin preparation
+payload grows by 7,488 bytes and plan payload by 4,864. All four C resource-lifecycle tests,
+including exact/one-below caps and allocator balance, pass; strict test Clippy and format
+pass. No production accounting gate was relaxed. Workspace continuation is pending.

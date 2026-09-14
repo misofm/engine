@@ -196,6 +196,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_eq_target_result_bytes \
   miso_engine_web_v1_eq_target_result_capacity \
   miso_engine_web_v1_eq_target_result_ptr \
+  miso_engine_web_v1_input_filters_config_copy \
+  miso_engine_web_v1_input_filters_prepare \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
