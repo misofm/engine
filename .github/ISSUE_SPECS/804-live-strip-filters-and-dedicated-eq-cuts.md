@@ -447,3 +447,17 @@ atf383b12b follows the bounded symmetry/endpoint/refusal corrections. Corrected
 Wasm7e925d93…24999e7 passes packed artifact gates,255headless tests and allthree
 actual browser qualifications. Required CI/merge and remote closure follow;
 no SDK/adapter publication or app deployment is claimed yet.
+
+### Engine and SDK delivered, downstream app integration underway
+
+#808 PR#812 merged7c423800 after required qualification34878694424 PASS;
+its GitHub issue is closed and completed worktree removed with evidence kept.
+#809 PR#813 merged51e03cfd and SDK0.3.0 is published: immutable qualify34880929687,
+one publication34881586727, and verify-only recovery34881963287 PASS after npm
+propagation. Actual registry archive SHA2560da5f34d6d5e021f543acf21053b6176931548f3bbc584301c42c2f278f5b804
+and cryptographic source/workflow binding match the accepted release. #809 holds
+full identities and evidence. Adapter#111 is adopting exact SDK0.3.0 as0.5.9.
+App#222 binding/UI checkpoints d27eea3/937478c are pushed with focused gates;
+its existing real-audio episode and final registry adoption/deployment remain.
+Parent#804 stays open until the requested deployed app outcome. No optimization
+or benchmark campaign was added.

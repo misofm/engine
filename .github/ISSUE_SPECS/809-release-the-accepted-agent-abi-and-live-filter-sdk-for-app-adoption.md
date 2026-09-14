@@ -116,3 +116,29 @@ pins unchanged until the actual release.
 main lineage without conflict. The only release delta remains the reviewed
 version/guard/documentation changes; no runtime bytes changed. Required release
 PR/main CI and immutable workflow dispatches follow.
+
+### Published and independently verified delivery
+
+PR#813 required qualification34879497461 PASS; merged source
+`51e03cfdde61802fc8456872a6637a265fae5979` passed exact-main34880226665.
+Immutable qualification34880929687 produced SDK **0.3.0**,98 files, archive SHA256
+`0da5f34d6d5e021f543acf21053b6176931548f3bbc584301c42c2f278f5b804`, SHA512
+`e7a5f0bbb2bf93b81148618ba4dcfb568d564b069a3f6176b68e8085bfe2319336d464c5b20936e195d54d5a5d56c1b543c7e67bf55b10f363b66e74b694452d`, integrity
+`sha512-56Xwu7K/k7gRSGGLpNz7Vo1WSwaaP2F2to6Ahb/iMZM21GTFsgk24ZXVTVpdVsG1Q8fme/VbEPNjtm50tpRFLQ==`.
+
+Publication34881586727 submitted that exact archive once through OIDC. npm
+accepted it and signed provenance, but public propagation exceeded the workflow
+window. After availability, **verify-only34881963287 PASS** against the same
+qualification: fresh registry public imports/CLI and cryptographically verified
+SLSA package/archive/source/workflow binding. No republish, rebuild or version
+change was used. Root independently downloaded the actual registry tarball and
+matched its SHA256/integrity, and inspected the verified DSSE subject, main
+workflow identity and exact51e03cfd source. Wasm remains
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`.
+
+Evidence archives are the qualify/publish/verify workflow artifacts; local
+copies are /tmp/809-qualified-51e03cfd, /tmp/809-publish-51e03cfd and
+/tmp/809-verified-51e03cfd, plus /tmp/809-registry-archive. The registry archive
+also exactly matches the accepted temporary app candidate. #809 completion
+requires this evidence checkpoint upstream and GitHub closure; downstream
+adapter#111 and app#222 remain tracked under open parent#804.
