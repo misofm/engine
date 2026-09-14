@@ -930,3 +930,25 @@ run (eight production factories, zero failed gates). Fresh Astra MEDIUM reviewed
 four-file correction and recorded attempt2 PASS with no blockers. All other jobs in
 the prior required run passed, including DSP, math, Wasm guests, cross-target and
 all three browsers. Restart required CI on this correction before merging PR#811.
+
+
+### Native integration compatibility correction — attempt3 PASS
+
+Required run34862552366 passed every leaf except workspace debug tests, which
+progressed past the corrected graph fixture and reached two native bank fixtures
+still submitting raw EQ parameter records. The existing symmetry fixture had the
+same caller pattern, and the host resource fixture still counted strings alone.
+#807 was reopened for this bounded test-only correction.
+
+The two fixtures now share a small helper using real off-render owner preparation,
+preflight, publication and commit; their existing bank routing and symmetry
+assertions are unchanged. The host accounting fixture measures owner/slice layouts
+and asserts all nine owners share the factory before charging its actual Arc layout
+once. Exact table/payload/largest-allocation assertions remain intact.
+
+PASS: full host-core integration/doc suite (156 passed,two existing ignored), strict
+host-core Clippy, and the exact previously failing workspace CI command locally
+(1211 passed,nine existing ignored), plus native host smoke. Fresh Astra MEDIUM
+reviewed the four test-file delta and recorded attempt3 PASS with no blockers.
+No runtime,DSP,ABI,SDK or Wasm changes. Push this correction and require green CI
+before merged delivery; no new test framework or benchmark was introduced.
