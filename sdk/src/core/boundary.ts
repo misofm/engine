@@ -11,6 +11,13 @@ import {
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
+import { createPreparedControl } from "../assets/prepared-control.js";
+import type {
+  PreparedAck,
+  PreparedAddress,
+  PreparedConfigReply,
+  PreparedControl,
+} from "../assets/prepared-control.js";
 import { TrackResponseModule } from "./live-response.ts";
 import type {
   TrackResponseObservedState,
@@ -187,6 +194,7 @@ export class WasmBoundary {
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
   #spectrumActiveQuery: SpectrumQuery | undefined;
+  #preparedControl: PreparedControl | undefined;
 
   private constructor(
     exports: ExportTable,
@@ -1022,6 +1030,10 @@ export class WasmBoundary {
 
   /** Stage `count` already-encoded 48-byte command records and submit them as one transaction. */
   submitCommands(records: Uint8Array, count: number): CommandReport {
+    return this.#submitOrdinaryCommands(records, count);
+  }
+
+  #submitOrdinaryCommands(records: Uint8Array, count: number): CommandReport {
     const handle = this.#live();
     const recordBytes = ABI_LAYOUT.commandRecord.bytes;
     const staging = this.#buffer("command");
@@ -1042,6 +1054,102 @@ export class WasmBoundary {
     }
     new Uint8Array(this.#exports.memory.buffer, staging.pointer, records.byteLength).set(records);
     const result = Number(this.#exports.miso_engine_web_v1_command_submit(handle, count));
+    return this.#readCommandReport(handle, result);
+  }
+
+  /** Assignment 9's private prepared lowering; command() remains on the ordinary route until 10. */
+  #submitPreparedCommands(records: Uint8Array, count: number): CommandReport {
+    const control = this.#preparedControl ??= createPreparedControl({
+      instance: this.#exports,
+      abiLayout: ABI_LAYOUT,
+      sampleRateHz: this.#status().u32("sampleRateHz"),
+      configCopySync: (address) => this.#preparedConfigCopy(address),
+      ordinarySubmitSync: (bytes, batchCount) => this.#submitPreparedOrdinary(bytes, batchCount),
+      preparedSubmitSync: (bytes, companion, batchCount) =>
+        this.#submitPreparedBatch(bytes, companion, batchCount),
+      preparedRefusalSync: (bytes, batchCount, reason, rejectedIndex, result) =>
+        this.#preparedRefusal(bytes, batchCount, reason, rejectedIndex, result),
+    });
+    const reply = control.submitSync(records, count);
+    return this.#publicCommandReport(reply);
+  }
+
+  #preparedConfigCopy(address: PreparedAddress): PreparedConfigReply {
+    const handle = this.#live();
+    const result = Number(this.#exports.miso_engine_web_v1_eq_target_config_copy(
+      handle, address.trackIndex, address.rack, address.effectIndex,
+    ));
+    const ok = constantValue("resultCodes", "ok");
+    if (result === ok) {
+      const pointer = Number(this.#exports.miso_engine_web_v1_eq_target_config_ptr(handle));
+      const bytes = structBytes("eqTargetConfig");
+      if (pointer === 0 || pointer + bytes > this.#exports.memory.buffer.byteLength) {
+        throw new MisoEngineError("the engine returned a malformed prepared EQ configuration", {
+          phase: "asset",
+          code: "abiMismatch",
+          result: constantValue("resultCodes", "abiMismatch"),
+          diagnostics: [{ code: "sdk.prepared.config", path: "eqTargetConfig" }],
+        });
+      }
+      return { result, reason: commandReasonValue("none"), config: new Uint8Array(
+        this.#exports.memory.buffer, pointer, bytes,
+      ).slice() };
+    }
+    let reason = commandReasonValue("none");
+    if (result === constantValue("resultCodes", "invalidArgument")) {
+      const trackCount = Number(this.#exports.miso_engine_web_v1_console_track_count(handle));
+      reason = address.trackIndex >= trackCount
+        ? commandReasonValue("unknownTrack")
+        : address.rack > 2
+          ? commandReasonValue("unknownRack")
+          : commandReasonValue("unknownEffect");
+    }
+    return { result, reason, config: new Uint8Array(0) };
+  }
+
+  #submitPreparedOrdinary(records: Uint8Array, count: number): PreparedAck {
+    return { ...this.#submitOrdinaryCommands(records, count), records: records.slice() };
+  }
+
+  #submitPreparedBatch(records: Uint8Array, companion: Uint8Array, count: number): PreparedAck {
+    const handle = this.#live();
+    const staging = this.#buffer("command");
+    const pointer = Number(this.#exports.miso_engine_web_v1_prepared_companion_ptr(handle));
+    const capacity = Number(this.#exports.miso_engine_web_v1_prepared_companion_capacity(handle));
+    if (records.byteLength > staging.capacity || records.byteLength !== count * ABI_LAYOUT.commandRecord.bytes
+        || pointer === 0 || companion.byteLength > capacity
+        || pointer + companion.byteLength > this.#exports.memory.buffer.byteLength) {
+      throw new MisoUsageError("prepared command staging is too small");
+    }
+    new Uint8Array(this.#exports.memory.buffer, staging.pointer, records.byteLength).set(records);
+    new Uint8Array(this.#exports.memory.buffer, pointer, companion.byteLength).set(companion);
+    const result = Number(this.#exports.miso_engine_web_v1_prepared_command_submit(
+      handle, count, companion.byteLength,
+    ));
+    return { ...this.#readCommandReport(handle, result), records: records.slice() };
+  }
+
+  #preparedRefusal(
+    records: Uint8Array,
+    _count: number,
+    reason: number,
+    rejectedIndex: number | undefined,
+    result: number,
+  ): PreparedAck {
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+      reason,
+      reasonName: commandReasonName(reason),
+      rejectedIndex: rejectedIndex ?? 0,
+      admitted: 0,
+      appliedAtSample: 0n,
+      records: records.slice(),
+    });
+  }
+
+  #readCommandReport(handle: number, result: number): CommandReport {
     const report = new StructView(
       this.#exports.memory,
       "commandReport",
@@ -1060,6 +1168,19 @@ export class WasmBoundary {
     });
   }
 
+  #publicCommandReport(reply: PreparedAck): CommandReport {
+    return Object.freeze({
+      ok: reply.result === constantValue("resultCodes", "ok"),
+      result: reply.result,
+      code: resultName(reply.result, "call"),
+      reason: reply.reason,
+      reasonName: commandReasonName(reply.reason),
+      rejectedIndex: reply.rejectedIndex,
+      admitted: reply.admitted,
+      appliedAtSample: reply.appliedAtSample,
+    });
+  }
+
   /**
    * Release the session.
    *
@@ -1068,6 +1189,8 @@ export class WasmBoundary {
    * (issue #243 S2(a)).
    */
   dispose(): void {
+    this.#preparedControl?.close();
+    this.#preparedControl = undefined;
     if (this.#handle === 0) return;
     this.#trackResponse?.close();
     this.#trackResponse = undefined;
@@ -1106,6 +1229,14 @@ export function commandReasonName(value: number): CommandReasonName {
     throw new MisoUsageError(`the engine reported an unknown command reason ${value}`);
   }
   return name;
+}
+
+function commandReasonValue(name: CommandReasonName): number {
+  const value = ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name)?.value;
+  if (value === undefined) {
+    throw new MisoUsageError(`the generated ABI has no command reason ${name}`);
+  }
+  return value;
 }
 
 /**

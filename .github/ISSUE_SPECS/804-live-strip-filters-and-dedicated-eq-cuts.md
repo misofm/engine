@@ -258,3 +258,19 @@ worklet shell suite/source checks, root focused Rust control-target tests (2), A
 validator and ordinary generated assets/codegen. No benchmark or final artifact build.
 Proceed to assignment9 headless callbacks/types, then assignment10 production cutover
 and the consolidated real-host/audio gates. #807 remains open, attempt1.
+
+
+### Assignment9 headless boundary checkpoint, 2026-09-14
+
+The SDK's private prepared submission now uses its existing Wasm exports and the
+shared synchronous helper with generated ABI layouts. Config-copy, companion staging,
+real prepared admission, command-report decoding and dispose/reboot invalidation are
+connected. Root factored ordinary submission through its existing staging/validation
+function; numeric and semantic commands still converge at submitCommands. A narrow
+internal declaration describes the already staged shared JS asset. Public submission
+remains on the ordinary route until assignment10.
+
+PASS: TypeScript noEmit (including root's ordinary-path factoring), canonical shared
+helper fixture, generated code check and diff check. No benchmark or artifact build.
+Assignment10 now owns the factory/callsite/metadata switch plus actual production
+admission, DSP and packed browser/headless qualification. #807 is open, attempt1.
