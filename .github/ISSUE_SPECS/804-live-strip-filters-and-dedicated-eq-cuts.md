@@ -115,3 +115,7 @@ state and actual trim work are not claimed to disappear.
 Sequence: #147 accepted implementation (PR #806 required CI pending), #805
 prepared EQ, #807 live EQ, #808 live builtins, then the coordinated immutable
 SDK/adapter releases and app adoption/deployment. Parent stays open throughout.
+
+The bounded engine release is tracked as #809. It requires accepted #147,
+#805, #807 and #808, a new immutable version, actual browser qualification
+and exact-archive publish/verify before downstream registry adoption.
