@@ -1195,6 +1195,41 @@ fn response_owner_metadata_rows() -> (u64, u64) {
     (binding_bytes, string_bytes)
 }
 
+/// #805's six prepared-only EQ cut rows are present in the live `SESSION` catalog. The resource
+/// report owns one metadata and state record for each per-lane row, plus the strings copied into
+/// each protocol descriptor. Keep this independent restatement beside the exact tiny-frame cap:
+/// the scratch fixture used by the broader oracle replaces EQ with soft-clip and does not carry
+/// this catalog growth.
+fn prepared_eq_catalog_growth() -> (u64, u64, u64) {
+    let tracks = 9_u64;
+    let lanes = 2_u64;
+    let cuts = [
+        ("hpf-enabled", "on/off"),
+        ("hpf-frequency", "Hz"),
+        ("hpf-q", "Q"),
+        ("lpf-enabled", "on/off"),
+        ("lpf-frequency", "Hz"),
+        ("lpf-q", "Q"),
+    ];
+    let rows = tracks * lanes * cuts.len() as u64;
+    let descriptor_bytes = bytes::<protocol::ParameterDescriptor>(rows as usize);
+    let state_bytes = bytes::<protocol::ParameterStateRecord>(rows as usize);
+    // Every fixture track ID is three bytes (`eq0`..`eq8`) and every EQ slot ID is two (`eq`).
+    // The new rows have no enum choices; only their display names and units add payload bytes.
+    let string_bytes = tracks
+        * lanes
+        * (cuts
+            .iter()
+            .map(|(name, unit)| name.len() + unit.len())
+            .sum::<usize>() as u64
+            + cuts.len() as u64 * ("eq0".len() + "eq".len()) as u64);
+    assert_eq!(
+        (rows, descriptor_bytes, state_bytes, string_bytes),
+        (108, 18_144, 1_296, 1_908)
+    );
+    (descriptor_bytes, state_bytes, string_bytes)
+}
+
 fn effect_bank_descriptor_layout_delta() -> u64 {
     bytes::<graph::GraphPreparedEffectBank>(1)
         .checked_sub(96)
@@ -2571,7 +2606,15 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     };
     // #779's response boundary validity flag adds 16 bytes to each retained publication,
     // retirement, and active-plan handle layout; the exact three-owner total is therefore +48.
-    assert_eq!(required, 178_514, "tiny-frame retained authority");
+    // #805 then adds six per-lane EQ cut rows to each of the nine tracks. The catalog's exact
+    // metadata/state/string growth is restated independently above, so this remains an exact
+    // budget assertion rather than an observed-value pin.
+    let (eq_descriptor_bytes, eq_state_bytes, eq_string_bytes) = prepared_eq_catalog_growth();
+    assert_eq!(
+        required,
+        178_514 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
+        "tiny-frame retained authority"
+    );
     let mut exact = roomy;
     exact.maximum_capi_retained_bytes = required;
     // SAFETY: Exact admission returns two uniquely owned children.

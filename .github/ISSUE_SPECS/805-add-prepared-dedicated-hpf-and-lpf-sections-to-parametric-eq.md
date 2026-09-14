@@ -458,3 +458,9 @@ PR#810 first required run34817097346 caught formatting after root's final
 test-only Clippy cleanup: rustfmt collapses the new array-pattern expression.
 Root applied rustfmt and verified the full format check. No production or Wasm
 change; the first failing job log is /tmp/805-ci-lint-first.log.
+
+## CI resource-oracle correction — 2026-09-14
+
+Qualification run 34817272127 passed every required leaf except workspace debug tests, which stopped at the CAPI tiny-frame retained-budget oracle. Production accounting correctly includes the six additional prepared EQ cut descriptors for each of nine tracks and two lanes. Luna XHIGH independently restated the added 108 rows: 18,144 descriptor bytes + 1,296 state bytes + 1,908 copied string bytes = 21,348 bytes, raising the frozen total from 178,514 to 199,862. This is metadata ownership, not retained response scratch. The exact-budget acceptance and one-byte-below atomic rejection gates remain unchanged. No runtime source or Wasm artifact changed.
+
+`cargo test --locked -p capi --test resource_lifecycle` passed all four tests; `cargo fmt --all -- --check` and `git diff --check` passed. Astra MEDIUM independently verified the byte derivation, production owner accounting and final patch: narrow correction PASS. Required CI remains a delivery gate before merge.
