@@ -264,3 +264,17 @@ Accepted #793 Wasm reused without rebuild, independently verified SHA-256
 `c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
 Required merged-main CI, evidence commit delivery and GitHub closure remain root
 responsibilities; this source PASS is not #794 registry publication or #763 closure.
+
+
+## Combined source cut
+
+The independently accepted #797 helper was ready before release qualification
+and merged without conflicts into the accepted #796 candidate at
+`f78d599e0a51b49daa0d5def7c01e9b8a8aaeb41`. Refreshed main remains
+`69c268f240bf30b2a43b43dd521120cd89dcc0b9` and is already an ancestor. Root's
+combined SDK gate passes 248/248; types, generated/package and real packed
+Vite/Chromium meter/boot/seek checks pass using the unchanged accepted artifact.
+Logs: `/tmp/miso-796-audit/combined-types.log`, `combined-sdk.log`,
+`combined-package.log`. The 0.2.5 release input set is accepted #789/#791/#793
+plus #796 and #797; no further sibling work is needed for this cut. Required
+PR/merged-main CI and #794 immutable registry publication remain pending.

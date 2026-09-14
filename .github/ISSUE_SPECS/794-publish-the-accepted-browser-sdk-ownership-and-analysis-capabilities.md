@@ -98,3 +98,17 @@ change or Wasm rebuild. Review `/tmp/miso-796-audit/verify-794.md`, packed proof
 `f920ab50c69a04e24c9ad7474c80c021251e3d49b87fab43774549fb2f8f12e4` is not the
 registry release archive. Final merged source/required CI, exact workflow qualify
 then publish, and independent registry/archive/provenance verdict remain pending.
+
+
+## Combined source cut
+
+The independently accepted #797 helper was ready before release qualification
+and merged without conflicts into the accepted #796 candidate at
+`f78d599e0a51b49daa0d5def7c01e9b8a8aaeb41`. Refreshed main remains
+`69c268f240bf30b2a43b43dd521120cd89dcc0b9` and is already an ancestor. Root's
+combined SDK gate passes 248/248; types, generated/package and real packed
+Vite/Chromium meter/boot/seek checks pass using the unchanged accepted artifact.
+Logs: `/tmp/miso-796-audit/combined-types.log`, `combined-sdk.log`,
+`combined-package.log`. The 0.2.5 release input set is accepted #789/#791/#793
+plus #796 and #797; no further sibling work is needed for this cut. Required
+PR/merged-main CI and #794 immutable registry publication remain pending.
