@@ -2658,6 +2658,344 @@ mod tests {
     }
 
     #[test]
+    fn effect_control_resource_uses_independent_queue_and_owner_arithmetic() {
+        // Keep the expected bytes in this test independent of `effect_control_resource`: the
+        // queue helper, the lane layout and the target FIFO are the witnesses, while the report
+        // only supplies the final graph deltas and cap boundary.
+        let model = queued_eq_model();
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: registry
+                .get_shared_ascii("miso.parametric-eq")
+                .expect("registered launch EQ"),
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 4096,
+        };
+
+        struct OwnerExpectation {
+            total: u64,
+            largest: u64,
+            controlled: usize,
+            target_staging: bool,
+            banked: bool,
+        }
+
+        let build = |registry: &NativeEffectRegistry,
+                     dispatch: Backend,
+                     controlled: usize,
+                     target_staging: bool|
+         -> (EffectPreparedSession, OwnerExpectation) {
+            let session = queued_eq_session(&model);
+            let mut effects = prepare_native_session_effects(&session, registry, effect_caps)
+                .expect("prepared EQ effects");
+            assert_eq!(effects.entries.len(), 8);
+            let requested_depth = NonZeroUsize::new(4_103).expect("fixture queue depth");
+            let producers = attach_effect_console(&mut effects, requested_depth)
+                .expect("checked effect-console attachment");
+            assert_eq!(producers.len(), effects.entries.len());
+            let mut expected_total = 0_u64;
+            let mut expected_largest = 0_u64;
+            for (index, entry) in effects.entries.iter_mut().enumerate() {
+                let capped_capacity = entry.metadata.automation_capacity as usize;
+                let actual_capacity = producers[index].producer.capacity();
+                assert_eq!(
+                    actual_capacity,
+                    requested_depth.get().min(capped_capacity),
+                    "attachment caps the requested depth at metadata capacity"
+                );
+                if index >= controlled {
+                    entry.control = None;
+                    continue;
+                }
+                let capacity = NonZeroUsize::new(actual_capacity).expect("EQ queue capacity");
+                let payload =
+                    engine::realtime::bounded_spsc_retained_payload::<EffectControlRecord>(
+                        capacity,
+                    )
+                    .expect("queue payload");
+                assert_eq!(
+                    payload.slot_count,
+                    actual_capacity + 1,
+                    "sentinel slot retained"
+                );
+                let queue_header = payload.ring_header_bytes as u64;
+                let queue_slots = payload.slot_payload_bytes as u64;
+                expected_total = expected_total
+                    .checked_add(queue_header)
+                    .and_then(|value| value.checked_add(queue_slots))
+                    .expect("queue resource arithmetic");
+                expected_largest = expected_largest.max(queue_header).max(queue_slots);
+                let target_bytes = if target_staging {
+                    (actual_capacity * size_of::<PreparedEffectTarget>()) as u64
+                } else {
+                    0
+                };
+                expected_total = expected_total
+                    .checked_add(target_bytes)
+                    .expect("target resource arithmetic");
+                expected_largest = expected_largest.max(target_bytes);
+                if target_staging {
+                    let (_, consumer) =
+                        bounded_spsc(capacity, QueueGeneration(0)).expect("fixture target queue");
+                    let lane = EffectControlLane::new_with_target_staging(
+                        consumer,
+                        entry.bank_preparation.bypass,
+                    );
+                    assert_eq!(lane.target_staging_retained_bytes() as u64, target_bytes);
+                    entry.control = Some(Box::new(lane));
+                } else {
+                    assert_eq!(
+                        entry
+                            .control
+                            .as_deref()
+                            .expect("attached unsupported lane")
+                            .target_staging_retained_bytes() as u64,
+                        0,
+                        "unsupported owners retain no target backing"
+                    );
+                }
+            }
+
+            let bank_width = BankWidth::for_backend(dispatch)
+                .map(|width| width.lanes() as usize)
+                .unwrap_or(0);
+            let banked = bank_width != 0;
+            if banked && controlled != 0 {
+                assert_eq!(8 % bank_width, 0, "EQ fixture fills complete banks");
+                let bank_bytes = (bank_width * size_of::<Option<EffectControlLane>>()) as u64;
+                expected_total = expected_total
+                    .checked_add(bank_bytes * controlled.div_ceil(bank_width) as u64)
+                    .expect("bank owner arithmetic");
+                expected_largest = expected_largest.max(bank_bytes);
+            } else if !banked && controlled != 0 {
+                let lane_bytes = size_of::<EffectControlLane>() as u64;
+                let scalar_bytes = (controlled as u64)
+                    .checked_mul(lane_bytes)
+                    .expect("scalar owner arithmetic");
+                expected_total = expected_total
+                    .checked_add(scalar_bytes)
+                    .expect("scalar owner arithmetic");
+                expected_largest = expected_largest.max(lane_bytes);
+            }
+            (
+                effects,
+                OwnerExpectation {
+                    total: expected_total,
+                    largest: expected_largest,
+                    controlled,
+                    target_staging,
+                    banked,
+                },
+            )
+        };
+        let prepare = |registry: &NativeEffectRegistry,
+                       dispatch: Backend,
+                       controlled: usize,
+                       target_staging: bool,
+                       caps: GraphCompileCaps|
+         -> (PreparedGraphArtifact, OwnerExpectation) {
+            let (effects, expected) = build(registry, dispatch, controlled, target_staging);
+            let artifact = GraphCompiler::compile(GraphCompileRequest {
+                dispatch,
+                plan_id: 8_080,
+                effects,
+                caps,
+            })
+            .unwrap_or_else(|failure| panic!("resource graph: {:?}", failure.diagnostics));
+            if expected.banked && controlled != 0 {
+                let members: usize = artifact
+                    .report
+                    .rack_cohorts
+                    .bound_slots_in(RackLocation::Simd1)
+                    .map(|slot| slot.members.len())
+                    .sum();
+                assert_eq!(
+                    members, 8,
+                    "all eight EQs remain banked regardless of control selection"
+                );
+            }
+            (artifact, expected)
+        };
+
+        let cases = [
+            (&registry, host_dispatch(), 0_usize, false, "none"),
+            (&registry, host_dispatch(), 1_usize, true, "bank-one-target"),
+            (
+                &registry,
+                host_dispatch(),
+                8_usize,
+                false,
+                "bank-unsupported-target",
+            ),
+            (
+                &scalar_registry,
+                Backend::Scalar,
+                8_usize,
+                true,
+                "scalar-target",
+            ),
+        ];
+        for (registry, dispatch, controlled, target_staging, label) in cases {
+            let plain = prepare(registry, dispatch, 0, false, integration_caps()).0;
+            let (live, expected) = prepare(
+                registry,
+                dispatch,
+                controlled,
+                target_staging,
+                integration_caps(),
+            );
+            assert_eq!(expected.controlled, controlled, "{label} control count");
+            assert_eq!(
+                expected.target_staging, target_staging,
+                "{label} target mode"
+            );
+            assert_eq!(
+                expected.banked,
+                BankWidth::for_backend(dispatch).is_some(),
+                "{label} bank mode"
+            );
+            let plain_resource = &plain.report.estimate;
+            let live_resource = &live.report.estimate;
+            assert_eq!(
+                GraphCompiler::evidence(&plain.graph, &plain.report).canonical_bytes,
+                GraphCompiler::evidence(&live.graph, &live.report).canonical_bytes,
+                "{label}: controls do not alter semantic canonical bytes"
+            );
+            assert_eq!(
+                live_resource.graph_metadata_bytes - plain_resource.graph_metadata_bytes,
+                expected.total,
+                "{label}: graph owner delta"
+            );
+            assert_eq!(
+                live_resource.incremental_plan_bytes - plain_resource.incremental_plan_bytes,
+                expected.total,
+                "{label}: plan owner delta"
+            );
+            assert_eq!(
+                live_resource.session_plus_plan_bytes - plain_resource.session_plus_plan_bytes,
+                expected.total,
+                "{label}: session owner delta"
+            );
+            assert_eq!(
+                live_resource.largest_allocation_bytes,
+                plain_resource
+                    .largest_allocation_bytes
+                    .max(expected.largest),
+                "{label}: largest owner is a maximum, never a sum"
+            );
+            if controlled == 0 {
+                assert_eq!(expected.total, 0, "no controls retain no owner bytes");
+            } else if label == "bank-one-target" {
+                assert!(
+                    expected.largest > plain_resource.largest_allocation_bytes,
+                    "the high-cap control owner must exercise largest-allocation accounting"
+                );
+            }
+
+            for (field, value) in [
+                ("graph", live_resource.graph_metadata_bytes),
+                ("plan", live_resource.incremental_plan_bytes),
+                ("largest", live_resource.largest_allocation_bytes),
+            ] {
+                let mut exact = integration_caps();
+                match field {
+                    "graph" => exact.maximum_graph_bytes = value,
+                    "plan" => exact.maximum_plan_bytes = value,
+                    "largest" => exact.maximum_single_allocation_bytes = value,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    prepare(registry, dispatch, controlled, target_staging, exact)
+                        .0
+                        .report
+                        .estimate
+                        == *live_resource,
+                    "{label}: exact {field} cap accepts"
+                );
+                let mut below = exact;
+                match field {
+                    "graph" => below.maximum_graph_bytes -= 1,
+                    "plan" => below.maximum_plan_bytes -= 1,
+                    "largest" => below.maximum_single_allocation_bytes -= 1,
+                    _ => unreachable!(),
+                }
+                let (effects, _) = build(registry, dispatch, controlled, target_staging);
+                let failure = match GraphCompiler::compile(GraphCompileRequest {
+                    dispatch,
+                    plan_id: 8_080,
+                    effects,
+                    caps: below,
+                }) {
+                    Ok(_) => panic!("{label}: one below {field} cap accepted"),
+                    Err(failure) => failure,
+                };
+                assert!(
+                    failure
+                        .diagnostics
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "graph.resource.limit"
+                            && diagnostic.path == "$.graph_compile_caps"),
+                    "{label}: one below {field} cap refuses"
+                );
+            }
+        }
+
+        // The launch compressor is the non-EQ ordinary owner: its real attachment path must cap
+        // the requested depth too, and because its factory has no target capability it retains no
+        // prepared-target FIFO.
+        let compressor_model = accepted_compressor_graph_fixture();
+        let compressor_session = compile_session(
+            &compressor_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled compressor session");
+        let compressor_registry = launch_native_effect_registry().expect("launch registry");
+        let mut compressor_effects =
+            prepare_native_session_effects(&compressor_session, &compressor_registry, effect_caps)
+                .expect("prepared compressor effects");
+        let compressor_depth = NonZeroUsize::new(4_103).expect("compressor queue depth");
+        let compressor_producers = attach_effect_console(&mut compressor_effects, compressor_depth)
+            .expect("checked compressor attachment");
+        assert_eq!(compressor_producers.len(), compressor_effects.entries.len());
+        for (entry, producer) in compressor_effects.entries.iter().zip(&compressor_producers) {
+            assert_eq!(entry.effect_id, "compressor");
+            assert_eq!(
+                producer.producer.capacity(),
+                compressor_depth
+                    .get()
+                    .min(entry.metadata.automation_capacity as usize)
+            );
+            let lane = entry.control.as_deref().expect("attached compressor lane");
+            assert_eq!(lane.target_staging_retained_bytes(), 0);
+            let payload = lane
+                .retained_queue_payload()
+                .expect("compressor queue payload");
+            let independent =
+                engine::realtime::bounded_spsc_retained_payload::<EffectControlRecord>(
+                    NonZeroUsize::new(producer.producer.capacity()).expect("capacity"),
+                )
+                .expect("independent compressor payload");
+            assert_eq!(
+                payload, independent,
+                "compressor queue is charged at actual capacity"
+            );
+        }
+    }
+
+    #[test]
     #[allow(clippy::result_large_err)]
     fn runtime_bank_slot_reservation_is_published_and_capped_transactionally() {
         assert_eq!(core::mem::size_of::<bool>(), 1);

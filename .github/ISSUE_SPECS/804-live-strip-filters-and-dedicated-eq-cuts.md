@@ -156,3 +156,9 @@ an asymmetric retarget, and FIFO overlap against an independently prepared final
 A reordered negative control fails as required; the restored fixture and complete host
 suite pass. Exact assignment-4 resource fixtures remain, followed by owner/host/SDK
 integration. No public live-cut activation, package publication or app deployment yet.
+
+
+The next #807 checkpoint proves graph queue/target/lane storage with independent
+arithmetic and exact/one-byte-below cap tests, including a queue that determines the
+largest allocation. Native focused tests, strict Clippy and Wasm compilation pass.
+Host decoded-storage evidence remains before assignment 5; no release claim.

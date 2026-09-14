@@ -204,7 +204,7 @@ pub(crate) fn effect_control_resource(
             })
         });
         if has_control {
-            let lanes = u64::try_from(bank.members.len()).ok()?;
+            let lanes = u64::from(bank.scratch.width().lanes());
             let bytes = lanes.checked_mul(
                 u64::try_from(core::mem::size_of::<
                     Option<effect_contract::EffectControlLane>,

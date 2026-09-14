@@ -444,3 +444,24 @@ Wasm graph-compiler check; strict all-target Clippy for graph-compiler and host-
 formatting and diff checks. Clippy's redundant test clones were removed without a
 lint exemption. No benchmark. Exact queue/lane/decoded allocation and budget fixtures
 remain before assignment-4 acceptance. Assignments 5–10 and final review remain open.
+
+
+### Assignment 4 follow-through — graph resource boundaries
+
+Luna XHIGH added independent queue/header/sentinel, target-backing and scalar/bank
+owner arithmetic against actual graph compilation. Real EQ and compressor attachment
+checks the requested depth is capped by admitted automation capacity; unsupported
+factories retain no target backing. EQ fixtures compare all three runtime resource
+rows against independently derived deltas while semantic canonical bytes remain equal.
+Exact graph, plan and largest-allocation caps accept; one byte below each refuses.
+A 4096-record queue explicitly exceeds the baseline largest allocation, so a missing
+queue maximum cannot hide behind unrelated storage. No-control and one-controlled-lane
+cases cover zero storage and full bank control-array charging.
+
+Root corrected the test's eight-lane assumption to count every controlled bank at
+its actual backend width, removed an unnecessary lint exemption, and made the estimator
+use the runtime scratch width directly instead of inferring it from member count.
+The complete final pre-resource graph suite passed 72 tests; the new focused resource
+test, strict all-target graph Clippy, Wasm graph check, formatting and diff checks pass.
+No benchmark. Host decoded-storage and aggregate budget fixtures remain assignment-4
+work; owner/host/SDK integration, activation and final adversarial review remain open.
