@@ -53,3 +53,30 @@ obtains final PASS, merges/deploys and verifies live build/provenance. Existing
 new bytes require new evidence. Releases/deployment are already user-authorized.
 Close this bug issue only after source PASS, merged evidence and published SDK
 verification; synchronize all amended GitHub bodies/states before reporting done.
+
+## Attempt 2 source/candidate PASS
+
+Fresh Astra MEDIUM accepts checkpoint `a0949481`, including `087e9d11` cadence
+correction. Attempt 1's exact served candidate still starved: native gap reads
+report new drops before popping the full queue. Attempt 2 performs at most one
+immediate sequential recovery read after an automatic gap, preserving delivered
+and coalesced loss, older queued metadata, epoch resets and one in-flight poll.
+Initial stale-Vite-cache invocations were invalid candidate evidence and are
+preserved separately; rebuilt attempt-1 failure and uninstrumented attempt-2
+success have verified served-byte attribution.
+
+Full SDK 250/250 with zero skips, types and package qualification PASS. Existing
+actual Chromium Worker/AudioWorklet scenario PASS: spectrum L/R
+-14.0000009537/-20.0206012726 dBFS, response +6/+6 dB, meters
+0.1995262504/0.0997631252 with overlapping actual spans. A -6 dB fader produces
+-20 dBFS/.10000000149 amplitude without changing response. Focus switches to
+track-000 while context stays running and transport advances; errors empty.
+Report `/tmp/miso-801-verifier/attempt2-verdict.md` and
+`browser-attempt2/results.json` preserve evidence. Candidate archive SHA256
+`02fb8c8aa477594f9b918d1bd5fbb7e1a4597a94a3ba7b770313c34bbac7f80a`;
+served subscription module SHA256
+`21cad800ce02b47d2eeef21323524d54a25a35b37e567790886e95d33d7a01cc`.
+Accepted Wasm remains
+`c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
+The local candidate retains development version 0.2.5 and MUST NOT be published;
+new immutable metadata, required main CI and release verification remain pending.
