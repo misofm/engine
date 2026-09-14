@@ -461,3 +461,46 @@ App#222 binding/UI checkpoints d27eea3/937478c are pushed with focused gates;
 its existing real-audio episode and final registry adoption/deployment remain.
 Parent#804 stays open until the requested deployed app outcome. No optimization
 or benchmark campaign was added.
+
+### Verified app delivery, 2026-09-14
+
+The requested engine → SDK → adapter → app chain is delivered. SDK
+@misofm/engine@0.3.0 and adapter @misofm/engine-web-adapter@0.5.9 are published
+with verified registry archive/source/provenance bindings. Adapter #111 release
+source is bb8e1661e54d339901a5bfab0d04f45c4bd1f9ef; publish/verify run
+34883822457 passed. Engine #807/#808/#809 and adapter #111 are remotely closed.
+
+App #222 integrates dedicated HPF/LPF enable/cutoff/independent Q in the existing
+EQ instance while preserving all four general-purpose bands and imported builtin
+state. App PR #230 delivered the controls. The production smoke then caught a
+Vite asset-closure omission that development-server evidence could not cover.
+Bounded attempt 2 preserves exact host/helper/ABI package bytes under one SDK
+manifest-hash directory; fresh Astra MEDIUM PASS at 1870564. PR #232 required
+Checks 34887756402 and React Doctor 34887756373 passed, and merged as
+fa431ebe6b8b7c86119ba5c103d177e285bd129d. No DSP or SDK release change was needed.
+
+Deploy Testnet 34888171982 passed. The live https://testnet.app.miso.fm/version.json
+reports fa431ebe6b8b7c86119ba5c103d177e285bd129d and the live asset provenance
+matches the exact SDK0.3.0/adapter0.5.9 identities and Wasm SHA256
+7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7.
+Actual Chromium against the deployed production assets starts playback and
+passes HPF/LPF enable, independent Q adjustment and restore without uncaught
+browser errors. Evidence remains outside completed worktrees:
+/tmp/804-final-testnet-deployment.json,
+/tmp/804-final-testnet-controls.{json,png,log}, and /tmp/804-live-smoke.mjs.
+The smoke supplies the existing eight canonical audio fixtures through the
+public sparse-container serializer with exact decoded PCM hashes; only fixture
+HTTP inputs are controlled, not application/engine assets or runtime behavior.
+
+Full app formatting, lint, typecheck,1492 tests and production build/budgets
+pass. Final local logs are /tmp/222-attempt2-{check,lint,test,build}.log and
+/tmp/222-attempt2-typecheck-fixed.log; exact production host-byte/import proof
+is /tmp/804-closure-host-check.json. No optimization or benchmark campaign was
+added. App #222's final delivery comment links this shared evidence record,
+avoiding another documentation-only app deployment.
+
+The default Wide Open demo document independently uses obsolete SHA256 source
+identities and bare FLAC delivery. It fails before engine startup; refreshing
+that published demo to canonical identities and current sparse delivery is the
+bounded stateless app #231 follow-up. No parser or integrity gate was weakened,
+and this data migration is not claimed as delivered by #804.
