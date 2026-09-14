@@ -59,8 +59,8 @@
         "idStagingBytes": "14",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "1113175",
-        "bridgeRetainedBytes": "1133684",
+        "bridgeMetadataBytes": "1146111",
+        "bridgeRetainedBytes": "1166620",
         "largestBridgeAllocationBytes": "1048576",
         "sourceTotalBytes": "2210",
         "sourceOverheadBytes": "1186",
@@ -113,7 +113,7 @@
           "reason": 5,
           "rejectedIndex": 0,
           "admitted": 0,
-          "appliedAtSample": "256"
+          "appliedAtSample": "0"
         },
         "pan": {
           "result": 0,
@@ -166,7 +166,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
         "renderedQuanta": "10",
-        "memoryBytes": 1310720
+        "memoryBytes": 1376256
       },
       "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
     },

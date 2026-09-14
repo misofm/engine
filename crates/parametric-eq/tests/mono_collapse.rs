@@ -83,6 +83,7 @@ fn block(base: usize, lanes: usize) -> Vec<f32> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_block(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],

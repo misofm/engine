@@ -3460,6 +3460,226 @@ fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation
     );
 }
 
+fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
+    assert_eq!(host.copy_eq_target_config(0, 1, 0), RESULT_OK);
+    let config = host.eq_target_config().expect("EQ owner config").to_vec();
+    let revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let effect = host
+        .ready
+        .as_ref()
+        .expect("ready")
+        .effect_slot(0, 1, 0)
+        .expect("EQ slot");
+    let success = host
+        .ready
+        .as_ref()
+        .expect("ready")
+        .effect_controls
+        .get(effect)
+        .and_then(Option::as_ref)
+        .expect("EQ producer")
+        .success_count();
+    (config, revision, success)
+}
+
+/// The host's prepared-owner transaction rejects malformed, stale and late-invalid companions
+/// atomically. The final case fills an unrelated matrix queue to prove the EQ candidate rolls
+/// back when a later destination has no room, then verifies a valid retry recovers.
+#[test]
+fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
+    const QUANTUM: u32 = 128;
+
+    // A valid prepared EQ edit followed by an invalid edit names the original second wire index
+    // and leaves the first owner's candidate unpublished.
+    let mut late = effect_console_host(QUANTUM, 8);
+    stage_prepared_eq_parameter(&mut late, 0, 0, 1, 0, 4, -12.0);
+    stage_command(
+        &mut late,
+        1,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        9_999,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(
+        late.submit_prepared_commands(2, 104),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        late.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(late.command_report().rejected_index, 1);
+    assert_eq!(late.command_report().admitted, 0);
+    let (config, revision, success) = eq_owner_snapshot(&mut late);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut late, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK,
+        "valid retry after late invalid edit"
+    );
+    let (recovered, recovered_revision, recovered_success) = eq_owner_snapshot(&mut late);
+    assert_ne!(recovered, config);
+    assert_eq!(recovered_revision, 1);
+    assert_eq!(recovered_success, 1);
+
+    // A missing target record is unsafe even though the semantic edit itself is valid.
+    let mut missing = effect_console_host(QUANTUM, 8);
+    stage_command(
+        &mut missing,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    let missing_before = eq_owner_snapshot(&mut missing);
+    let generation = missing.host_generation;
+    let companion = missing
+        .prepared_companion_mut()
+        .expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    assert_eq!(
+        missing.submit_prepared_commands(1, 24),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(missing.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(missing.command_report().rejected_index, 0);
+    assert_eq!(missing.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut missing);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+
+    assert_eq!(eq_owner_snapshot(&mut missing), missing_before);
+
+    // Unsafe coefficients and invalid original edits cannot be hidden by a valid final target.
+    for invalid_edit in [false, true] {
+        let mut host = effect_console_host(QUANTUM, 8);
+        let before = eq_owner_snapshot(&mut host);
+        stage_prepared_eq_parameter(&mut host, usize::from(invalid_edit), 0, 1, 0, 4, -12.0);
+        if invalid_edit {
+            stage_command(
+                &mut host,
+                0,
+                COMMAND_EFFECT_PARAM,
+                1,
+                2,
+                0,
+                0,
+                4,
+                0,
+                [f32::NAN, 0.0, 0.0, 0.0],
+            );
+        } else {
+            host.prepared_companion_mut().unwrap()[80..84]
+                .copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        }
+        assert_ne!(
+            host.submit_prepared_commands(1 + u32::from(invalid_edit), 104),
+            RESULT_OK
+        );
+        assert_eq!(host.command_report().admitted, 0);
+        assert_eq!(host.command_report().rejected_index, 0);
+        assert_eq!(eq_owner_snapshot(&mut host), before);
+    }
+
+    // A valid target with an unrelated addressed extra record is rejected before publication.
+    let mut extra = effect_console_host(QUANTUM, 8);
+    stage_prepared_eq_parameter(&mut extra, 0, 0, 1, 0, 4, -12.0);
+    {
+        let companion = extra.prepared_companion_mut().expect("prepared companion");
+        companion.copy_within(24..104, 104);
+        companion[16..20].copy_from_slice(&2_u32.to_le_bytes());
+        companion[104..108].copy_from_slice(&99_u32.to_le_bytes());
+    }
+    assert_eq!(
+        extra.submit_prepared_commands(1, 184),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(extra.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(extra.command_report().rejected_index, 0);
+    assert_eq!(extra.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut extra);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+
+    // Both a stale owner revision and a stale host generation refuse atomically.
+    for (label, offset) in [("revision", 40_usize), ("generation", 8_usize)] {
+        let mut stale = effect_console_host(QUANTUM, 8);
+        stage_prepared_eq_parameter(&mut stale, 0, 0, 1, 0, 4, -12.0);
+        stale.prepared_companion_mut().expect("prepared companion")[offset..offset + 8]
+            .copy_from_slice(&99_u64.to_le_bytes());
+        assert_eq!(
+            stale.submit_prepared_commands(1, 104),
+            RESULT_INVALID_ARGUMENT,
+            "stale {label} result"
+        );
+        assert_eq!(stale.command_report().reason, COMMAND_REASON_MALFORMED);
+        assert_eq!(stale.command_report().rejected_index, 0);
+        assert_eq!(stale.command_report().admitted, 0);
+        let (_, revision, success) = eq_owner_snapshot(&mut stale);
+        assert_eq!(revision, 0, "stale {label} changed revision");
+        assert_eq!(success, 0, "stale {label} changed queue");
+    }
+
+    // Fill the matrix queue, then submit a valid prepared EQ edit plus a later matrix record.
+    // The unrelated full queue refuses the whole batch; after one render, the EQ edit recovers.
+    let mut full = effect_console_host(QUANTUM, 1);
+    stage_command(
+        &mut full,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(full.submit_commands(1), RESULT_OK);
+    stage_prepared_eq_parameter(&mut full, 0, 0, 1, 0, 4, -12.0);
+    stage_command(
+        &mut full,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.25, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(full.submit_prepared_commands(2, 104), RESULT_BACKPRESSURE);
+    assert_eq!(full.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(full.command_report().rejected_index, 1);
+    assert_eq!(full.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut full);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+    assert_eq!(full.render_next(), RESULT_OK);
+    assert_eq!(
+        full.submit_prepared_commands(2, 104),
+        RESULT_OK,
+        "the same mixed EQ/matrix batch recovers after the unrelated queue drains"
+    );
+    assert_eq!(full.command_report().admitted, 2);
+    assert_eq!(eq_owner_snapshot(&mut full).1, 1);
+}
+
 #[test]
 fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
     const QUANTUM: u32 = 128;

@@ -852,3 +852,25 @@ now describe prepared EQ targets and exact A/A+64 timing.
 Still pending: production mixed-owner refusal variants and the built artifact,
 SDK/packed browser qualification, then fresh adversarial review and merged delivery.
 These are source checkpoints; #807 remains open, attempt1. No benchmark was run.
+
+
+### Assignment10 production artifact checkpoint, 2026-09-14
+
+Production-owner refusal/recovery now covers missing/extra and unsafe targets,
+stale generation/revision, invalid original edits before overwrite, original wire
+indexes, and a full unrelated queue. The same mixed EQ/matrix batch succeeds after
+that queue drains. Root's focused refusal gate passes; the earlier scalar/bank
+allocation/designer gate remains green. Strict all-target/all-feature clippy passes
+for the touched Rust packages, with small test/benchmark caller lint corrections.
+
+The reproducible shipped Wasm pin is now
+`1e80588ceafce0777fd0e098b3ceb966b74352c4cd9c7b4111fada2ba301aa52`.
+Artifact static/object, ABI, actual boot high-water and SDK publishable-tarball gates
+pass. The migrated direct oracle preserves every native/Wasm PCM digest; expected
+resource totals reflect actual larger bridge storage, and a main-realm preparation
+refusal has application sample0 because no audio admission occurred.
+
+Headless qualification found three stale fixture expectations (artifact count and
+old EQ row/queue costs); those test updates are in progress. Packed-browser runtime
+qualification and final adversarial verdict are still pending. No benchmark,
+release, merge or issue completion is claimed.

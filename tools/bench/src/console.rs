@@ -535,8 +535,8 @@ impl HoistArm {
                 .target_preparation()
                 .expect("the launch EQ exposes target preparation");
             for _bank in 0..banks {
-                for track in 0..lanes {
-                    let mut candidate = eq_values[track].clone();
+                for (track, values) in eq_values.iter().enumerate().take(lanes) {
+                    let mut candidate = values.clone();
                     let mut changed = vec![false; candidate.len()];
                     if arm != Arm::Quiet {
                         candidate[3 * 2].value = eq_band0_gain(track) + offset_db;

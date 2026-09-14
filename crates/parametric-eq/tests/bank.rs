@@ -351,8 +351,8 @@ fn bank_rendering_is_partition_invariant() {
     let mut split_right = whole_right.clone();
 
     let empty_offsets = vec![0_u32; lanes + 1];
-    for track in 0..lanes {
-        let mut target_values = values_by_track[track].clone();
+    for (track, values) in values_by_track.iter().enumerate().take(lanes) {
+        let mut target_values = values.clone();
         set_initial(
             &mut target_values,
             3,

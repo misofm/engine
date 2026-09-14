@@ -398,7 +398,7 @@ fn automation_is_partition_invariant() {
         );
 
         let mut first = 0_usize;
-        for (index, frames) in partition.iter().copied().enumerate() {
+        for frames in partition.iter().copied() {
             split.process(
                 EffectProcessBlock::new(
                     &mut split_left[first..first + frames],
