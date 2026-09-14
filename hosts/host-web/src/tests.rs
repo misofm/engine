@@ -989,6 +989,23 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     ] {
         let baseline =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
+        let ready = baseline.ready.as_ref().expect("ready ownership");
+        let dense_effect_table_bytes =
+            (ready.effect_controls.len() * size_of::<Option<EffectControlProducer>>()) as u64;
+        assert_eq!(
+            size_of_val(ready.effect_controls.as_ref()) as u64,
+            dense_effect_table_bytes,
+            "the browser owns the actual dense effect table in both console modes"
+        );
+        assert_eq!(
+            ready.effect_controls.len(),
+            1,
+            "one-track fixture has one effect"
+        );
+        assert!(
+            baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
+            "console-off preparation still charges the dense replacement table"
+        );
         let exact = exact_retained_report_total(baseline.resources());
         drop(baseline);
         AudioWorkletEngineHost::boot(
@@ -2987,6 +3004,190 @@ fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
+}
+
+#[test]
+fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
+    let document = include_str!("../tests/browser-v1/command-session.json");
+    let parsed = parse_host_session(document).expect("effect fixture parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("effect fixture compile");
+    let shape = compiled_session_shape(&compiled).expect("effect fixture shape");
+    let source_id_bytes = compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .map(|source| source.id.as_str().len() as u64)
+        .sum::<u64>();
+    let source_control_bytes = control_table_bytes(shape.source_count as usize)
+        .expect("source control table")
+        + source_id_arena_bytes(source_id_bytes as usize).expect("source ID arena");
+    let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
+    const SOURCE_RING_FRAMES: u32 = 1 << 20;
+
+    for (name, console_command_queue_records) in
+        [("off", 0_u64), ("on", DEFAULT_COMMAND_QUEUE_RECORDS as u64)]
+    {
+        let options = WebBootOptions {
+            source_ring_frames: SOURCE_RING_FRAMES,
+            console_command_queue_records,
+            ..boot_options(128)
+        };
+        let projection = project_buffers(
+            document.len() as u32,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            shape.maximum_source_channels,
+            shape
+                .longest_source_id_bytes
+                .max(shape.longest_track_id_bytes),
+            options,
+            (false, (0, 0)),
+        )
+        .expect("bridge projection");
+        let caps = prepare_caps(&compiled, options, SOURCE_RING_FRAMES, u64::MAX);
+        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let (engine, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+            &compiled,
+            &caps,
+            &console,
+            &[],
+        )
+        .expect("independent effect preparation");
+        let dense_table = shape
+            .effect_count
+            .checked_mul(size_of::<Option<EffectControlProducer>>() as u64)
+            .expect("dense effect table arithmetic");
+        assert_eq!(shape.effect_count, 1, "fixture has one effect");
+        let native_table =
+            (handles.effect_controls.capacity() * size_of::<EffectControlProducer>()) as u64;
+        let string_payload = handles
+            .effect_controls
+            .iter()
+            .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+            .map(|bytes| bytes as u64)
+            .sum::<u64>();
+        let string_largest = handles
+            .effect_controls
+            .iter()
+            .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+            .map(|bytes| bytes as u64)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            engine.report.effect_control_resources.producer_table_bytes, native_table,
+            "{name}: native table uses actual Vec capacity"
+        );
+        assert_eq!(
+            engine.report.effect_control_resources.owned_payload_bytes, string_payload,
+            "{name}: launch EQ has no owner payload before assignment 10"
+        );
+        let decoded_count =
+            command_staging_count(shape.track_count as usize).expect("decoded command count");
+        let decoded_bytes = (decoded_count * size_of::<(u32, AdmittedCommand)>()) as u64;
+        let observation_arm_table = shape
+            .effect_count
+            .checked_mul(size_of::<Box<[u64]>>() as u64)
+            .expect("observation arm table arithmetic");
+        let effect_retained = dense_table + string_payload;
+        let ready_metadata = source_control_bytes + session_model_bytes;
+        let expected_bridge_metadata = projection
+            .report
+            .bridge_metadata_bytes
+            .checked_add(ready_metadata)
+            .and_then(|bytes| bytes.checked_add(effect_retained))
+            .and_then(|bytes| bytes.checked_add(observation_arm_table))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge metadata arithmetic");
+        let expected_bridge_retained = projection
+            .report
+            .bridge_retained_bytes
+            .checked_add(ready_metadata)
+            .and_then(|bytes| bytes.checked_add(effect_retained))
+            .and_then(|bytes| bytes.checked_add(observation_arm_table))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge retained arithmetic");
+        let expected_bridge_largest = projection
+            .report
+            .largest_bridge_allocation_bytes
+            .max(control_table_bytes(shape.source_count as usize).expect("control largest"))
+            .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
+            .max(engine.report.session_largest_allocation_bytes)
+            .max(dense_table)
+            .max(string_largest)
+            .max(observation_arm_table)
+            .max(decoded_bytes);
+        let expected_named_largest =
+            expected_bridge_largest.max(engine.report.largest_engine_allocation_bytes);
+        let host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+        let ready = host.ready.as_ref().expect("ready ownership");
+        assert_eq!(
+            size_of_val(ready.effect_controls.as_ref()) as u64,
+            dense_table,
+            "{name}: browser owns the actual dense replacement table"
+        );
+        assert_eq!(
+            host.resources().bridge_metadata_bytes,
+            expected_bridge_metadata,
+            "{name}: exact bridge metadata includes dense table and payload"
+        );
+        assert_eq!(
+            host.resources().bridge_retained_bytes,
+            expected_bridge_retained,
+            "{name}: exact bridge retained bytes include dense table and payload"
+        );
+        assert_eq!(
+            host.resources().largest_bridge_allocation_bytes,
+            expected_bridge_largest,
+            "{name}: largest browser allocation excludes consumed native table"
+        );
+        assert_eq!(
+            host.resources().largest_named_allocation_bytes,
+            expected_named_largest
+        );
+
+        let exact = exact_retained_report_total(host.resources());
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact,
+                ..options
+            },
+        )
+        .expect("exact retained effect budget must admit");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact - 1,
+                ..options
+            },
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{name}: one byte below retained effect budget must refuse"));
+        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            failure.diagnostic(),
+            format!(
+                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+                exact - 1
+            )
+            .as_bytes(),
+            "{name}: one-byte refusal reaches final exact aggregate gate"
+        );
+    }
 }
 
 #[test]

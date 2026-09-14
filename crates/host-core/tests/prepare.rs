@@ -5,11 +5,12 @@
 //! checked against the row the facade itself reports, and every source-control rejection is typed.
 
 use builtins::{MeterMetricSet, MeterTap};
+use core::mem::size_of;
 use host_core::{
-    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    LAUNCH_SAMPLE_RATES, PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError,
-    SourceSubmission, compile_host_session, control_table_bytes, default_source_ring_frames,
-    diagnostic_lines, prepare_host_runtime,
+    EffectControlProducer, HostConsoleRequest, HostMeterRequest, HostPrepareCaps,
+    HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
+    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
+    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
     source_id_arena_bytes,
 };
@@ -369,6 +370,117 @@ fn retained_bytes_projection_matches_the_live_set() {
         prepared.report.source_id_bytes,
         "fixture-source".len() as u64
     );
+}
+
+#[test]
+fn effect_control_report_uses_actual_native_capacity_and_strings() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let console = HostConsoleRequest {
+        control_queue_depth: core::num::NonZeroUsize::new(4),
+        ..HostConsoleRequest::default()
+    };
+    let (prepared, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &caps(),
+        &console,
+        &[],
+    )
+    .expect("console preparation");
+    assert_eq!(
+        handles.effect_controls.len(),
+        9,
+        "launch EQ fixture has one effect per track"
+    );
+    let table = (handles.effect_controls.capacity() * size_of::<EffectControlProducer>()) as u64;
+    let payload = handles
+        .effect_controls
+        .iter()
+        .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+        .map(|bytes| bytes as u64)
+        .sum::<u64>();
+    let largest_owned = handles
+        .effect_controls
+        .iter()
+        .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+        .map(|bytes| bytes as u64)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        prepared
+            .report
+            .effect_control_resources
+            .producer_table_bytes,
+        table
+    );
+    assert_eq!(
+        prepared.report.effect_control_resources.owned_payload_bytes,
+        payload
+    );
+    assert_eq!(
+        prepared
+            .report
+            .effect_control_resources
+            .largest_owned_allocation_bytes,
+        largest_owned
+    );
+    assert_eq!(
+        prepared
+            .report
+            .effect_control_resources
+            .largest_allocation_bytes(),
+        table.max(largest_owned)
+    );
+}
+
+#[test]
+fn effect_control_bytes_join_the_graph_session_cap() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let console = HostConsoleRequest {
+        control_queue_depth: core::num::NonZeroUsize::new(4),
+        ..HostConsoleRequest::default()
+    };
+    let (prepared, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &caps(),
+        &console,
+        &[],
+    )
+    .expect("console preparation");
+    let admitted = prepared
+        .report
+        .graph_session_plus_plan_bytes
+        .checked_add(prepared.report.session_model_bytes)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                prepared
+                    .report
+                    .effect_control_resources
+                    .total_bytes()
+                    .expect("effect resource sum"),
+            )
+        })
+        .expect("graph admission sum");
+    let mut equal = caps();
+    equal.maximum_graph_session_plus_plan_bytes = admitted;
+    prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &equal,
+        &console,
+        &[],
+    )
+    .expect("exact graph plus effect budget must admit");
+    let mut below = caps();
+    below.maximum_graph_session_plus_plan_bytes = admitted - 1;
+    let failure = match prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &below,
+        &console,
+        &[],
+    ) {
+        Ok(_) => panic!("one byte below graph plus effect budget must refuse"),
+        Err(failure) => failure,
+    };
+    assert!(matches!(failure.kind(), PrepareRejection::Resource));
 }
 
 /// `Exact` pins both the rate and the quantum; `AnyLaunchRate` accepts the launch set and the ring

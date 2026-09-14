@@ -4,7 +4,10 @@ mod control;
 mod diagnostic;
 mod migration;
 mod prepare;
-pub use control::{EffectControlOwner, EffectControlOwnerError, EffectControlOwnerPhase};
+pub use control::{
+    EffectControlOwner, EffectControlOwnerError, EffectControlOwnerPhase,
+    EffectControlResourceError,
+};
 pub use diagnostic::*;
 pub use migration::*;
 /// Re-export the EQ's copied-word evaluator so host composition uses the exact owner analysis

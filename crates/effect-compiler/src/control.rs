@@ -4,6 +4,8 @@
 //! that preparation can borrow it, but no part of this type is reachable from render. A failed
 //! edit poisons the one candidate tranche until the caller discards it.
 
+use core::alloc::Layout;
+use core::sync::atomic::AtomicUsize;
 use effect_contract::{
     AutomationRate, EffectTargetError, EffectTargetRequest, InitialParameterValue,
     NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, PreparedEffectTarget,
@@ -70,6 +72,14 @@ pub struct EffectControlOwner {
     committed_revision: u64,
     pending_revision: Option<u64>,
     phase: EffectControlOwnerPhase,
+}
+
+/// Engine-owned allocations retained by one prepared-target owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EffectControlOwnerResources {
+    pub(crate) owned_payload_bytes: u64,
+    pub(crate) largest_owned_allocation_bytes: u64,
+    pub(crate) factory_allocation_bytes: u64,
 }
 
 impl core::fmt::Debug for EffectControlOwner {
@@ -157,6 +167,40 @@ impl EffectControlOwner {
     #[must_use]
     pub fn dirty(&self) -> &[bool] {
         &self.dirty
+    }
+
+    /// Computes the actual dynamic allocations retained by this owner. The factory allocation is
+    /// returned separately so a producer-table walk can count shared `Arc` identities once.
+    pub(crate) fn resource_facts(
+        &self,
+    ) -> Result<EffectControlOwnerResources, EffectControlResourceError> {
+        let owner_box = u64::try_from(core::mem::size_of::<Self>())
+            .map_err(|_| EffectControlResourceError::Arithmetic)?;
+        let committed = checked_slice_bytes::<InitialParameterValue>(self.committed.len())?;
+        let candidate = checked_slice_bytes::<InitialParameterValue>(self.candidate.len())?;
+        let dirty = checked_slice_bytes::<bool>(self.dirty.len())?;
+        let mut owned_payload_bytes = owner_box;
+        owned_payload_bytes = owned_payload_bytes
+            .checked_add(committed)
+            .and_then(|bytes| bytes.checked_add(candidate))
+            .and_then(|bytes| bytes.checked_add(dirty))
+            .ok_or(EffectControlResourceError::Arithmetic)?;
+        let largest_owned_allocation_bytes = owner_box.max(committed).max(candidate).max(dirty);
+
+        let header = Layout::new::<AtomicUsize>();
+        let (strong_weak, _) = header
+            .extend(header)
+            .map_err(|_| EffectControlResourceError::Arithmetic)?;
+        let (arc_layout, _) = strong_weak
+            .extend(Layout::for_value(self.factory.as_ref()))
+            .map_err(|_| EffectControlResourceError::Arithmetic)?;
+        let factory_allocation_bytes = u64::try_from(arc_layout.pad_to_align().size())
+            .map_err(|_| EffectControlResourceError::Arithmetic)?;
+        Ok(EffectControlOwnerResources {
+            owned_payload_bytes,
+            largest_owned_allocation_bytes,
+            factory_allocation_bytes,
+        })
     }
 
     /// Starts one candidate at the caller's checked base revision.
@@ -373,4 +417,17 @@ impl EffectControlOwner {
         self.phase = EffectControlOwnerPhase::Idle;
         Ok(self.committed_revision)
     }
+}
+
+/// Arithmetic failure while projecting retained effect-control storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectControlResourceError {
+    Arithmetic,
+}
+
+fn checked_slice_bytes<T>(length: usize) -> Result<u64, EffectControlResourceError> {
+    let bytes = length
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(EffectControlResourceError::Arithmetic)?;
+    u64::try_from(bytes).map_err(|_| EffectControlResourceError::Arithmetic)
 }

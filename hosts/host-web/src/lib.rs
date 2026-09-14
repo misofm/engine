@@ -4670,6 +4670,36 @@ fn compile_ready(
         }
         *entry = Some(producer);
     }
+    // Host-core checked its native Vec and owned payload against the preparation caps. The
+    // browser retains this dense replacement table instead of that Vec. Add only the replacement
+    // table and transferred payload to the bridge rows, each once.
+    let effect_control_table_bytes = u64::try_from(effect_controls.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<Option<EffectControlProducer>>() as u64))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let effect_control_payload_bytes = engine.effect_control_resources.owned_payload_bytes;
+    let effect_control_largest = effect_control_table_bytes.max(
+        engine
+            .effect_control_resources
+            .largest_owned_allocation_bytes,
+    );
+    let effect_control_retained = effect_control_table_bytes
+        .checked_add(effect_control_payload_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(effect_control_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(effect_control_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes = report
+        .largest_bridge_allocation_bytes
+        .max(effect_control_largest);
+    report.largest_named_allocation_bytes = report
+        .largest_named_allocation_bytes
+        .max(effect_control_largest);
     // Three per-track bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity.
     let queue_count = track_count
         .checked_mul(3)

@@ -184,3 +184,9 @@ A follow-up #807 caller audit fixed five remaining host-core test accesses to th
 private endpoint. The three affected suites pass (23 tests, one existing ignored),
 and full workspace all-target compilation passes. Resource implementation resumes;
 this is caller correction evidence, not another completed product capability.
+
+
+#807 assignment5 resource propagation now charges actual native producer/owner/factory
+storage and the browser's replacement table. Independent arithmetic and exact-budget
+refusal tests pass, alongside strict Clippy and Wasm checks. Remaining assignment5
+transaction and allocation fixtures precede the preparation ABI work; #807 stays open.

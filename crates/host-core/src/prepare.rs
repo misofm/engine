@@ -15,8 +15,9 @@ use builtins_compiler::{
     session_structural_symmetry,
 };
 use effect_compiler::{
-    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
-    attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
+    attach_effect_console, attach_effect_observation, effect_control_resources,
+    launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::TailSamples;
 use engine::realtime::PreparedRenderPlan;
@@ -251,6 +252,8 @@ pub struct HostPrepareReport {
     pub session_largest_allocation_bytes: u64,
     /// Bytes retained by the returned [`SourceControlSet`] (endpoint table plus ID arena).
     pub control_retained_bytes: u64,
+    /// Native effect-control table and transferred owner payload allocations.
+    pub effect_control_resources: EffectControlResources,
     /// Engine-owned bytes the compiled plan's observation lanes and slots retain (issue #143 R7).
     ///
     /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
@@ -840,7 +843,6 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         None => Vec::new(),
         Some(depth) => attach_effect_console(&mut effects, depth).map_err(effect_diagnostics)?,
     };
-
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
     // only alongside a control channel: a subscription rides the effect's own command queue, so
     // "observe without a console" has no delivery path and is a rejection rather than a silent
@@ -1019,13 +1021,27 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     };
     let spectrum_capture_retained_bytes =
         spectrum_resources.map_or(0, |resources| resources.retained_bytes);
-    let admitted_graph_and_model = graph_resources
+    let graph_and_model_without_effect_controls = graph_resources
         .session_plus_plan_bytes
         .checked_add(session_resources.compiled_model_bytes)
         .and_then(|bytes| bytes.checked_add(spectrum_capture_retained_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let native_effect_control_resources = effect_control_resources(&effect_controls)
+        .map_err(|_| resource("host.effect.resource.arithmetic"))?;
+    let admitted_graph_and_model = graph_and_model_without_effect_controls
+        .checked_add(
+            native_effect_control_resources
+                .total_bytes()
+                .ok_or_else(|| resource("host.effect.resource.arithmetic"))?,
+        )
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
         return Err(resource("host.graph.resource.limit"));
+    }
+    if native_effect_control_resources.largest_allocation_bytes()
+        > caps.maximum_named_allocation_bytes
+    {
+        return Err(resource("host.resource.limit"));
     }
     let source_set = prepare_graph_source_set(artifact.envelope(), graph_sources, mappings)
         .map_err(|_| graph_failure("host.source.graph.prepare"))?;
@@ -1201,6 +1217,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         session_model_bytes: session_resources.compiled_model_bytes,
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
+        effect_control_resources: native_effect_control_resources,
         observation_retained_bytes,
         spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,

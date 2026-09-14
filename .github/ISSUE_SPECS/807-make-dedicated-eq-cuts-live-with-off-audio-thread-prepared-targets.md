@@ -591,3 +591,34 @@ effect_console (2), effect_observation (10 plus 1 existing ignored), symmetry_wi
 (11). Full `cargo check --locked --workspace --all-targets` now passes, including
 all dependent test callers. Formatting and diff checks pass. This corrects the
 component checkpoint's incomplete caller coverage; owner resource work resumes next.
+
+
+### Assignment 5 resource checkpoint
+
+Luna XHIGH implemented checked EffectControlResources and propagation through native
+preparation and the browser bridge. Actual Vec capacity, strings, optional owner box,
+committed/candidate/dirty backings and distinct factory Arc layouts are charged; Arc
+identity deduplication scans retained owners without an auxiliary allocation. Graph
+queue/staging and source-only control rows retain their meanings. Native aggregate
+and named caps include the separate result. Browser rows charge its dense replacement
+table plus transferred payload, excluding the consumed native table from totals and
+maxima. Root clarified that distinction and removed an invalid generic table-summing
+helper during review.
+
+Independent fixtures cover spare Vec capacity, two fixture owners sharing one factory,
+actual nine-EQ native producer storage, native aggregate exact/one-below boundaries,
+and browser console-off/on exact metadata/retained arithmetic. Root rejected a weak
+browser >= assertion; its replacement compares the complete independent sum and checks
+that exact-1 reaches host.budget.retained_exact, with exact budget accepted. The browser
+still retains its dense table when console controls are absent. Current production EQ
+resource fixtures intentionally expect no target owner before assignment10; update
+those expectations to actual owner-backed storage at cutover, never disable the gates.
+
+Root gates PASS: effect-compiler --lib effect_control_resources (1); host-core --test
+prepare effect_control (2); host-web effect_control_browser_table (1, both modes);
+strict all-target Clippy for effect-compiler/host-core/host-web with
+host-core/control-provider; Wasm checks for those crates; formatting and diff checks.
+Luna reports full effect-compiler, host-core prepare and host-web suites plus workspace
+checking passed. No benchmark. Remaining assignment5 work is the documented seed,
+transaction edge-case, overflow and prewarmed allocation evidence; assignments6–10,
+production cutover and final issue review remain pending.

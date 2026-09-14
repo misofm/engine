@@ -29,7 +29,7 @@ use session::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::control::{EffectControlOwner, EffectControlOwnerError};
+use crate::control::{EffectControlOwner, EffectControlOwnerError, EffectControlResourceError};
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
 use lane::Backend;
 
@@ -1228,6 +1228,99 @@ pub struct EffectControlProducer {
     owner: Option<Box<EffectControlOwner>>,
 }
 
+/// Checked native allocations retained by one effect-control producer table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectControlResources {
+    /// The actual backing allocation of the native producer `Vec`, using its capacity.
+    pub producer_table_bytes: u64,
+    /// Retained strings, owner boxes, owner row/dirty backings and distinct factory `Arc`s.
+    pub owned_payload_bytes: u64,
+    /// Largest individual allocation in `owned_payload_bytes` (the producer table is separate).
+    pub largest_owned_allocation_bytes: u64,
+}
+
+impl EffectControlResources {
+    /// Empty resource facts for a console-free preparation.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            producer_table_bytes: 0,
+            owned_payload_bytes: 0,
+            largest_owned_allocation_bytes: 0,
+        }
+    }
+
+    /// Total native effect-control bytes retained by the table and its transferred payload.
+    #[must_use]
+    pub const fn total_bytes(self) -> Option<u64> {
+        self.producer_table_bytes
+            .checked_add(self.owned_payload_bytes)
+    }
+
+    /// Largest individual allocation including the producer table backing.
+    #[must_use]
+    pub const fn largest_allocation_bytes(self) -> u64 {
+        if self.producer_table_bytes > self.largest_owned_allocation_bytes {
+            self.producer_table_bytes
+        } else {
+            self.largest_owned_allocation_bytes
+        }
+    }
+}
+
+/// Projects actual native effect-control allocations from the producer Vec.
+pub fn effect_control_resources(
+    producers: &Vec<EffectControlProducer>,
+) -> Result<EffectControlResources, EffectControlResourceError> {
+    let producer_table_bytes = producers
+        .capacity()
+        .checked_mul(core::mem::size_of::<EffectControlProducer>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(EffectControlResourceError::Arithmetic)?;
+    let mut owned_payload_bytes = 0_u64;
+    let mut largest_owned_allocation_bytes = 0_u64;
+    let mut factory_payload_bytes = 0_u64;
+    for (index, producer) in producers.iter().enumerate() {
+        for text in [&producer.track_id, &producer.effect_id] {
+            let bytes =
+                u64::try_from(text.len()).map_err(|_| EffectControlResourceError::Arithmetic)?;
+            owned_payload_bytes = owned_payload_bytes
+                .checked_add(bytes)
+                .ok_or(EffectControlResourceError::Arithmetic)?;
+            largest_owned_allocation_bytes = largest_owned_allocation_bytes.max(bytes);
+        }
+        if let Some(owner) = producer.owner.as_deref() {
+            let facts = owner.resource_facts()?;
+            owned_payload_bytes = owned_payload_bytes
+                .checked_add(facts.owned_payload_bytes)
+                .ok_or(EffectControlResourceError::Arithmetic)?;
+            largest_owned_allocation_bytes =
+                largest_owned_allocation_bytes.max(facts.largest_owned_allocation_bytes);
+            let shared_factory = producers[..index]
+                .iter()
+                .filter_map(|prior| prior.owner.as_deref())
+                .any(|prior| Arc::ptr_eq(prior.factory(), owner.factory()));
+            if !shared_factory {
+                factory_payload_bytes = factory_payload_bytes
+                    .checked_add(facts.factory_allocation_bytes)
+                    .ok_or(EffectControlResourceError::Arithmetic)?;
+                largest_owned_allocation_bytes =
+                    largest_owned_allocation_bytes.max(facts.factory_allocation_bytes);
+            }
+        }
+    }
+    // Factory allocations are counted once by identity. Add them after walking owner-local
+    // payload so shared Arc clones never multiply the retained factory bytes.
+    owned_payload_bytes = owned_payload_bytes
+        .checked_add(factory_payload_bytes)
+        .ok_or(EffectControlResourceError::Arithmetic)?;
+    Ok(EffectControlResources {
+        producer_table_bytes,
+        owned_payload_bytes,
+        largest_owned_allocation_bytes,
+    })
+}
+
 /// Why an effect-control publication failed.
 #[derive(Debug)]
 pub enum EffectControlPushError {
@@ -1516,7 +1609,10 @@ mod control_producer_tests {
 mod owner_tests {
     use super::*;
     use crate::EffectControlOwnerPhase;
+    use core::alloc::Layout;
+    use core::mem::size_of;
     use core::num::NonZeroUsize;
+    use core::sync::atomic::AtomicUsize;
     use effect_contract::{
         EffectControlRecord, EffectPrepareError, NativeEffectFactory, ParameterChannel,
         PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffect,
@@ -1593,6 +1689,109 @@ mod owner_tests {
             EffectControlProducerHandle::new(producer, true),
             consumer,
         )
+    }
+
+    fn resource_producer(
+        track_id: &str,
+        effect_id: &str,
+        factory: Option<Arc<dyn NativeEffectFactory>>,
+    ) -> EffectControlProducer {
+        let owner = factory.map(|factory| {
+            Box::new(EffectControlOwner::new(factory, &preparation()).expect("valid EQ owner"))
+        });
+        let (producer, _consumer) = bounded_spsc(
+            NonZeroUsize::new(12).expect("capacity"),
+            QueueGeneration(33),
+        )
+        .expect("queue");
+        EffectControlProducer {
+            track_id: track_id.into(),
+            rack: EffectRack::Dynamic,
+            effect_index: 0,
+            effect_id: effect_id.into(),
+            descriptor: &PARAMETRIC_EQ_DESCRIPTOR,
+            producer: EffectControlProducerHandle::new(producer, owner.is_some()),
+            owner,
+        }
+    }
+
+    #[test]
+    fn effect_control_resources_charge_actual_tables_and_shared_owner_once() {
+        let factory: Arc<dyn NativeEffectFactory> = Arc::new(OptInEqFactory);
+        let mut opted = Vec::with_capacity(5);
+        opted.push(resource_producer(
+            "track-a",
+            "effect-a",
+            Some(Arc::clone(&factory)),
+        ));
+        opted.push(resource_producer(
+            "track-b",
+            "effect-b",
+            Some(Arc::clone(&factory)),
+        ));
+        let resources = effect_control_resources(&opted).expect("resource facts");
+        let values = preparation().initial_values.len();
+        let owner_box = size_of::<EffectControlOwner>() as u64;
+        let row_backing = (values * size_of::<InitialParameterValue>()) as u64;
+        let dirty_backing = (values * size_of::<bool>()) as u64;
+        let owner_payload = owner_box + (2 * row_backing) + dirty_backing;
+        let factory_layout = Layout::new::<AtomicUsize>()
+            .extend(Layout::new::<AtomicUsize>())
+            .expect("Arc header layout")
+            .0
+            .extend(Layout::for_value(factory.as_ref()))
+            .expect("factory layout")
+            .0
+            .pad_to_align()
+            .size() as u64;
+        let expected_payload = "track-a".len() as u64
+            + "effect-a".len() as u64
+            + "track-b".len() as u64
+            + "effect-b".len() as u64
+            + (2 * owner_payload)
+            + factory_layout;
+        let expected_table = 5 * size_of::<EffectControlProducer>() as u64;
+        let expected_largest = [
+            "track-a".len() as u64,
+            "effect-a".len() as u64,
+            "track-b".len() as u64,
+            "effect-b".len() as u64,
+            owner_box,
+            row_backing,
+            dirty_backing,
+            factory_layout,
+        ]
+        .into_iter()
+        .max()
+        .expect("nonempty resource rows");
+        assert_eq!(resources.producer_table_bytes, expected_table);
+        assert_eq!(resources.owned_payload_bytes, expected_payload);
+        assert_eq!(resources.largest_owned_allocation_bytes, expected_largest);
+        assert_eq!(
+            resources.total_bytes(),
+            Some(expected_table + expected_payload)
+        );
+        assert_eq!(
+            resources.largest_allocation_bytes(),
+            expected_table.max(expected_largest)
+        );
+
+        let mut production = Vec::with_capacity(3);
+        production.push(resource_producer("track", "effect", None));
+        let production_resources =
+            effect_control_resources(&production).expect("production resource facts");
+        assert_eq!(
+            production_resources.producer_table_bytes,
+            3 * size_of::<EffectControlProducer>() as u64
+        );
+        assert_eq!(
+            production_resources.owned_payload_bytes,
+            "track".len() as u64 + "effect".len() as u64
+        );
+        assert_eq!(
+            production_resources.largest_owned_allocation_bytes,
+            "effect".len() as u64
+        );
     }
 
     #[test]
