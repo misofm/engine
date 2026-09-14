@@ -69,3 +69,18 @@ campaign. Root owns dispatch, GitHub synchronization and release coordination.
 
 Astra XHIGH scope approved; implementation/version freeze and fresh Astra MEDIUM
 verdict pending. No registry version is reserved or published by this brief.
+
+### Release preparation brief, 2026-09-14
+
+Root freezes unused SDK minor **0.3.0** after a live registry check (latest0.2.6;
+0.3.0 absent). Accepted #808 runtime/source and attempt3 test correction are at
+ea8efbc0; PR#812 required CI/merge remain. To avoid idle release preparation,
+root permits the bounded version/guard/documentation tranche in isolated
+`codex/809-live-filter-sdk` from that accepted checkpoint while #808 CI runs.
+Merge the accepted #808 main lineage into this branch before its delivery.
+This sequencing does not relax the release prerequisites: no qualification
+release dispatch or publication until #808 is merged and the exact final main
+source has passed required CI. Frozen Wasm is
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`.
+The numbered-issue audit found all414 local specs represented among518 remote
+issues; #809 number/title match and #804 remains open. Root owns all publication.
