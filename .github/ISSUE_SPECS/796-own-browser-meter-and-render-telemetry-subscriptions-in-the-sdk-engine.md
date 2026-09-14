@@ -278,3 +278,12 @@ Logs: `/tmp/miso-796-audit/combined-types.log`, `combined-sdk.log`,
 `combined-package.log`. The 0.2.5 release input set is accepted #789/#791/#793
 plus #796 and #797; no further sibling work is needed for this cut. Required
 PR/merged-main CI and #794 immutable registry publication remain pending.
+
+
+## Source delivery — CLOSED
+
+PR #798 merged at `1646a6a1bd0011cc2b5480283bf498b27be460e5`. Final PR
+qualification run 34791858639 and merged-main required qualification run
+34792194652 both PASS. Independent attempt-1 evidence is upstream in the
+merged source. This source issue is complete; exact 0.2.5 registry availability
+remains separately gated by #794. The larger #763 program remains OPEN.
