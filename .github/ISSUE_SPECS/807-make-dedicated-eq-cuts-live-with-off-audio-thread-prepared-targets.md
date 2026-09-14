@@ -296,3 +296,10 @@ Final gates PASS: locked complete EQ tests (32 unit, 7 analytic, 6 bank, 1 confo
 The preserved #805 canonical fixture hashes to e9e6b012399cabe3632462622519bebac71e31af17813a31aa84d857209433e4. Nine EQs each add 936-920=16 declared-state bytes, hence exactly144 bytes: declared_effect_bytes 8280→8424, incremental_plan_bytes and session_plus_plan_bytes 150415→150559. Root constructed expected canonical text by changing only those three fields of the preserved final estimate row, retaining every other byte. Its SHA256 is eb3ca77606e93cf9aa13f475415ecbf6e70ee1cdd074a0cca9e46cbb18e0ea10, exactly matching the current compiler's independently observed result. The graph test pin/comment now records this derivation; all eight graph-compiler track_delay tests pass, preserving structural/no-delay/PDC/resource gates. No production graph source changed.
 
 Queue delivery, owner/admission, browser/headless wiring, capability activation, rebuilt final artifact and the final fresh Astra MEDIUM review remain pending. No public live-cut or release completion is claimed at this checkpoint.
+
+
+### Account-switch pause — 2026-09-14
+
+Implementation is paused at the user's request for another Codex account to resume. All source checkpoints are pushed on `codex/807-live-eq`, through `e81df55b61f563fa26952608e7383d3c060cb956`. #147 and #805 are merged/closed; #807 assignments 1–3 are complete, assignments 4–10 remain. #808, #809, adapter #111 and app #222 have not entered implementation/release. No public live-cut activation, package publication or app deployment is claimed.
+
+The self-contained [resume handoff](https://github.com/misofm/engine/blob/codex/807-live-eq/docs/handoffs/804-account-switch-2026-09-14/README.md) records branches, exact commits, accepted decisions, test evidence, preserved plans, downstream requirements and the next bounded task. All agents are stopped. Before assignment 4, freeze its staging layout and amend the brief using the linked handoff's Astra XHIGH queue/accounting recommendation; no assignment-4 source has been written. #807 remains attempt 1 and still requires its final fresh Astra MEDIUM review. Keep this issue open.

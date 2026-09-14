@@ -1,0 +1,685 @@
+MISO-GRAPH-V1
+envelope	48000	128
+node	track:eq0:input	track-stage	0	finite:0
+node	track:eq0:post-input-builtins	track-stage	0	finite:0
+node	track:eq0:post-simd1	track-stage	0	finite:0
+node	track:eq0:post-dynamic	track-stage	0	finite:0
+node	track:eq0:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq0:post-fader	track-stage	0	finite:0
+node	track:eq0:post-matrix	track-stage	0	finite:0
+node	track:eq1:input	track-stage	0	finite:0
+node	track:eq1:post-input-builtins	track-stage	0	finite:0
+node	track:eq1:post-simd1	track-stage	0	finite:0
+node	track:eq1:post-dynamic	track-stage	0	finite:0
+node	track:eq1:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq1:post-fader	track-stage	0	finite:0
+node	track:eq1:post-matrix	track-stage	0	finite:0
+node	track:eq2:input	track-stage	0	finite:0
+node	track:eq2:post-input-builtins	track-stage	0	finite:0
+node	track:eq2:post-simd1	track-stage	0	finite:0
+node	track:eq2:post-dynamic	track-stage	0	finite:0
+node	track:eq2:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq2:post-fader	track-stage	0	finite:0
+node	track:eq2:post-matrix	track-stage	0	finite:0
+node	track:eq3:input	track-stage	0	finite:0
+node	track:eq3:post-input-builtins	track-stage	0	finite:0
+node	track:eq3:post-simd1	track-stage	0	finite:0
+node	track:eq3:post-dynamic	track-stage	0	finite:0
+node	track:eq3:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq3:post-fader	track-stage	0	finite:0
+node	track:eq3:post-matrix	track-stage	0	finite:0
+node	track:eq4:input	track-stage	0	finite:0
+node	track:eq4:post-input-builtins	track-stage	0	finite:0
+node	track:eq4:post-simd1	track-stage	0	finite:0
+node	track:eq4:post-dynamic	track-stage	0	finite:0
+node	track:eq4:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq4:post-fader	track-stage	0	finite:0
+node	track:eq4:post-matrix	track-stage	0	finite:0
+node	track:eq5:input	track-stage	0	finite:0
+node	track:eq5:post-input-builtins	track-stage	0	finite:0
+node	track:eq5:post-simd1	track-stage	0	finite:0
+node	track:eq5:post-dynamic	track-stage	0	finite:0
+node	track:eq5:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq5:post-fader	track-stage	0	finite:0
+node	track:eq5:post-matrix	track-stage	0	finite:0
+node	track:eq6:input	track-stage	0	finite:0
+node	track:eq6:post-input-builtins	track-stage	0	finite:0
+node	track:eq6:post-simd1	track-stage	0	finite:0
+node	track:eq6:post-dynamic	track-stage	0	finite:0
+node	track:eq6:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq6:post-fader	track-stage	0	finite:0
+node	track:eq6:post-matrix	track-stage	0	finite:0
+node	track:eq7:input	track-stage	0	finite:0
+node	track:eq7:post-input-builtins	track-stage	0	finite:0
+node	track:eq7:post-simd1	track-stage	0	finite:0
+node	track:eq7:post-dynamic	track-stage	0	finite:0
+node	track:eq7:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq7:post-fader	track-stage	0	finite:0
+node	track:eq7:post-matrix	track-stage	0	finite:0
+node	track:eq8:input	track-stage	0	finite:0
+node	track:eq8:post-input-builtins	track-stage	0	finite:0
+node	track:eq8:post-simd1	track-stage	0	finite:0
+node	track:eq8:post-dynamic	track-stage	0	finite:0
+node	track:eq8:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:eq8:post-fader	track-stage	0	finite:0
+node	track:eq8:post-matrix	track-stage	0	finite:0
+node	effect:eq0:simd1:eq	effect	0	infinite
+node	effect:eq1:simd1:eq	effect	0	infinite
+node	effect:eq2:simd1:eq	effect	0	infinite
+node	effect:eq3:simd1:eq	effect	0	infinite
+node	effect:eq4:simd1:eq	effect	0	infinite
+node	effect:eq5:simd1:eq	effect	0	infinite
+node	effect:eq6:simd1:eq	effect	0	infinite
+node	effect:eq7:simd1:eq	effect	0	infinite
+node	effect:eq8:simd1:eq	effect	0	infinite
+node	route:eq0-main	route	0	finite:0
+node	route:eq1-main	route	0	finite:0
+node	route:eq2-main	route	0	finite:0
+node	route:eq3-main	route	0	finite:0
+node	route:eq4-main	route	0	finite:0
+node	route:eq5-main	route	0	finite:0
+node	route:eq6-main	route	0	finite:0
+node	route:eq7-main	route	0	finite:0
+node	route:eq8-main	route	0	finite:0
+node	output:main-out	output	0	finite:0
+port	track:eq0:input:main-input:-
+port	track:eq0:input:main-output:-
+port	track:eq0:post-input-builtins:main-input:-
+port	track:eq0:post-input-builtins:main-output:-
+port	track:eq0:post-simd1:main-input:-
+port	track:eq0:post-simd1:main-output:-
+port	track:eq0:post-dynamic:main-input:-
+port	track:eq0:post-dynamic:main-output:-
+port	track:eq0:post-simd2-pre-fader:main-input:-
+port	track:eq0:post-simd2-pre-fader:main-output:-
+port	track:eq0:post-fader:main-input:-
+port	track:eq0:post-fader:main-output:-
+port	track:eq0:post-matrix:main-input:-
+port	track:eq0:post-matrix:main-output:-
+port	track:eq1:input:main-input:-
+port	track:eq1:input:main-output:-
+port	track:eq1:post-input-builtins:main-input:-
+port	track:eq1:post-input-builtins:main-output:-
+port	track:eq1:post-simd1:main-input:-
+port	track:eq1:post-simd1:main-output:-
+port	track:eq1:post-dynamic:main-input:-
+port	track:eq1:post-dynamic:main-output:-
+port	track:eq1:post-simd2-pre-fader:main-input:-
+port	track:eq1:post-simd2-pre-fader:main-output:-
+port	track:eq1:post-fader:main-input:-
+port	track:eq1:post-fader:main-output:-
+port	track:eq1:post-matrix:main-input:-
+port	track:eq1:post-matrix:main-output:-
+port	track:eq2:input:main-input:-
+port	track:eq2:input:main-output:-
+port	track:eq2:post-input-builtins:main-input:-
+port	track:eq2:post-input-builtins:main-output:-
+port	track:eq2:post-simd1:main-input:-
+port	track:eq2:post-simd1:main-output:-
+port	track:eq2:post-dynamic:main-input:-
+port	track:eq2:post-dynamic:main-output:-
+port	track:eq2:post-simd2-pre-fader:main-input:-
+port	track:eq2:post-simd2-pre-fader:main-output:-
+port	track:eq2:post-fader:main-input:-
+port	track:eq2:post-fader:main-output:-
+port	track:eq2:post-matrix:main-input:-
+port	track:eq2:post-matrix:main-output:-
+port	track:eq3:input:main-input:-
+port	track:eq3:input:main-output:-
+port	track:eq3:post-input-builtins:main-input:-
+port	track:eq3:post-input-builtins:main-output:-
+port	track:eq3:post-simd1:main-input:-
+port	track:eq3:post-simd1:main-output:-
+port	track:eq3:post-dynamic:main-input:-
+port	track:eq3:post-dynamic:main-output:-
+port	track:eq3:post-simd2-pre-fader:main-input:-
+port	track:eq3:post-simd2-pre-fader:main-output:-
+port	track:eq3:post-fader:main-input:-
+port	track:eq3:post-fader:main-output:-
+port	track:eq3:post-matrix:main-input:-
+port	track:eq3:post-matrix:main-output:-
+port	track:eq4:input:main-input:-
+port	track:eq4:input:main-output:-
+port	track:eq4:post-input-builtins:main-input:-
+port	track:eq4:post-input-builtins:main-output:-
+port	track:eq4:post-simd1:main-input:-
+port	track:eq4:post-simd1:main-output:-
+port	track:eq4:post-dynamic:main-input:-
+port	track:eq4:post-dynamic:main-output:-
+port	track:eq4:post-simd2-pre-fader:main-input:-
+port	track:eq4:post-simd2-pre-fader:main-output:-
+port	track:eq4:post-fader:main-input:-
+port	track:eq4:post-fader:main-output:-
+port	track:eq4:post-matrix:main-input:-
+port	track:eq4:post-matrix:main-output:-
+port	track:eq5:input:main-input:-
+port	track:eq5:input:main-output:-
+port	track:eq5:post-input-builtins:main-input:-
+port	track:eq5:post-input-builtins:main-output:-
+port	track:eq5:post-simd1:main-input:-
+port	track:eq5:post-simd1:main-output:-
+port	track:eq5:post-dynamic:main-input:-
+port	track:eq5:post-dynamic:main-output:-
+port	track:eq5:post-simd2-pre-fader:main-input:-
+port	track:eq5:post-simd2-pre-fader:main-output:-
+port	track:eq5:post-fader:main-input:-
+port	track:eq5:post-fader:main-output:-
+port	track:eq5:post-matrix:main-input:-
+port	track:eq5:post-matrix:main-output:-
+port	track:eq6:input:main-input:-
+port	track:eq6:input:main-output:-
+port	track:eq6:post-input-builtins:main-input:-
+port	track:eq6:post-input-builtins:main-output:-
+port	track:eq6:post-simd1:main-input:-
+port	track:eq6:post-simd1:main-output:-
+port	track:eq6:post-dynamic:main-input:-
+port	track:eq6:post-dynamic:main-output:-
+port	track:eq6:post-simd2-pre-fader:main-input:-
+port	track:eq6:post-simd2-pre-fader:main-output:-
+port	track:eq6:post-fader:main-input:-
+port	track:eq6:post-fader:main-output:-
+port	track:eq6:post-matrix:main-input:-
+port	track:eq6:post-matrix:main-output:-
+port	track:eq7:input:main-input:-
+port	track:eq7:input:main-output:-
+port	track:eq7:post-input-builtins:main-input:-
+port	track:eq7:post-input-builtins:main-output:-
+port	track:eq7:post-simd1:main-input:-
+port	track:eq7:post-simd1:main-output:-
+port	track:eq7:post-dynamic:main-input:-
+port	track:eq7:post-dynamic:main-output:-
+port	track:eq7:post-simd2-pre-fader:main-input:-
+port	track:eq7:post-simd2-pre-fader:main-output:-
+port	track:eq7:post-fader:main-input:-
+port	track:eq7:post-fader:main-output:-
+port	track:eq7:post-matrix:main-input:-
+port	track:eq7:post-matrix:main-output:-
+port	track:eq8:input:main-input:-
+port	track:eq8:input:main-output:-
+port	track:eq8:post-input-builtins:main-input:-
+port	track:eq8:post-input-builtins:main-output:-
+port	track:eq8:post-simd1:main-input:-
+port	track:eq8:post-simd1:main-output:-
+port	track:eq8:post-dynamic:main-input:-
+port	track:eq8:post-dynamic:main-output:-
+port	track:eq8:post-simd2-pre-fader:main-input:-
+port	track:eq8:post-simd2-pre-fader:main-output:-
+port	track:eq8:post-fader:main-input:-
+port	track:eq8:post-fader:main-output:-
+port	track:eq8:post-matrix:main-input:-
+port	track:eq8:post-matrix:main-output:-
+port	effect:eq0:simd1:eq:main-input:-
+port	effect:eq0:simd1:eq:main-output:-
+port	effect:eq1:simd1:eq:main-input:-
+port	effect:eq1:simd1:eq:main-output:-
+port	effect:eq2:simd1:eq:main-input:-
+port	effect:eq2:simd1:eq:main-output:-
+port	effect:eq3:simd1:eq:main-input:-
+port	effect:eq3:simd1:eq:main-output:-
+port	effect:eq4:simd1:eq:main-input:-
+port	effect:eq4:simd1:eq:main-output:-
+port	effect:eq5:simd1:eq:main-input:-
+port	effect:eq5:simd1:eq:main-output:-
+port	effect:eq6:simd1:eq:main-input:-
+port	effect:eq6:simd1:eq:main-output:-
+port	effect:eq7:simd1:eq:main-input:-
+port	effect:eq7:simd1:eq:main-output:-
+port	effect:eq8:simd1:eq:main-input:-
+port	effect:eq8:simd1:eq:main-output:-
+port	route:eq0-main:main-input:-
+port	route:eq0-main:main-output:-
+port	route:eq1-main:main-input:-
+port	route:eq1-main:main-output:-
+port	route:eq2-main:main-input:-
+port	route:eq2-main:main-output:-
+port	route:eq3-main:main-input:-
+port	route:eq3-main:main-output:-
+port	route:eq4-main:main-input:-
+port	route:eq4-main:main-output:-
+port	route:eq5-main:main-input:-
+port	route:eq5-main:main-output:-
+port	route:eq6-main:main-input:-
+port	route:eq6-main:main-output:-
+port	route:eq7-main:main-input:-
+port	route:eq7-main:main-output:-
+port	route:eq8-main:main-input:-
+port	route:eq8-main:main-output:-
+port	output:main-out:main-input:-
+port	output:main-out:main-output:-
+edge	track-main:track:eq0:post-input-builtins	track:eq0:input:main-output:-	track:eq0:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq0:post-simd1	effect:eq0:simd1:eq:main-output:-	track:eq0:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq0:post-dynamic	track:eq0:post-simd1:main-output:-	track:eq0:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq0:post-simd2-pre-fader	track:eq0:post-dynamic:main-output:-	track:eq0:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq0:post-fader	track:eq0:post-simd2-pre-fader:main-output:-	track:eq0:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq0:post-matrix	track:eq0:post-fader:main-output:-	track:eq0:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq1:post-input-builtins	track:eq1:input:main-output:-	track:eq1:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq1:post-simd1	effect:eq1:simd1:eq:main-output:-	track:eq1:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq1:post-dynamic	track:eq1:post-simd1:main-output:-	track:eq1:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq1:post-simd2-pre-fader	track:eq1:post-dynamic:main-output:-	track:eq1:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq1:post-fader	track:eq1:post-simd2-pre-fader:main-output:-	track:eq1:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq1:post-matrix	track:eq1:post-fader:main-output:-	track:eq1:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq2:post-input-builtins	track:eq2:input:main-output:-	track:eq2:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq2:post-simd1	effect:eq2:simd1:eq:main-output:-	track:eq2:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq2:post-dynamic	track:eq2:post-simd1:main-output:-	track:eq2:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq2:post-simd2-pre-fader	track:eq2:post-dynamic:main-output:-	track:eq2:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq2:post-fader	track:eq2:post-simd2-pre-fader:main-output:-	track:eq2:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq2:post-matrix	track:eq2:post-fader:main-output:-	track:eq2:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq3:post-input-builtins	track:eq3:input:main-output:-	track:eq3:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq3:post-simd1	effect:eq3:simd1:eq:main-output:-	track:eq3:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq3:post-dynamic	track:eq3:post-simd1:main-output:-	track:eq3:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq3:post-simd2-pre-fader	track:eq3:post-dynamic:main-output:-	track:eq3:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq3:post-fader	track:eq3:post-simd2-pre-fader:main-output:-	track:eq3:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq3:post-matrix	track:eq3:post-fader:main-output:-	track:eq3:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq4:post-input-builtins	track:eq4:input:main-output:-	track:eq4:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq4:post-simd1	effect:eq4:simd1:eq:main-output:-	track:eq4:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq4:post-dynamic	track:eq4:post-simd1:main-output:-	track:eq4:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq4:post-simd2-pre-fader	track:eq4:post-dynamic:main-output:-	track:eq4:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq4:post-fader	track:eq4:post-simd2-pre-fader:main-output:-	track:eq4:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq4:post-matrix	track:eq4:post-fader:main-output:-	track:eq4:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq5:post-input-builtins	track:eq5:input:main-output:-	track:eq5:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq5:post-simd1	effect:eq5:simd1:eq:main-output:-	track:eq5:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq5:post-dynamic	track:eq5:post-simd1:main-output:-	track:eq5:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq5:post-simd2-pre-fader	track:eq5:post-dynamic:main-output:-	track:eq5:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq5:post-fader	track:eq5:post-simd2-pre-fader:main-output:-	track:eq5:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq5:post-matrix	track:eq5:post-fader:main-output:-	track:eq5:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq6:post-input-builtins	track:eq6:input:main-output:-	track:eq6:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq6:post-simd1	effect:eq6:simd1:eq:main-output:-	track:eq6:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq6:post-dynamic	track:eq6:post-simd1:main-output:-	track:eq6:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq6:post-simd2-pre-fader	track:eq6:post-dynamic:main-output:-	track:eq6:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq6:post-fader	track:eq6:post-simd2-pre-fader:main-output:-	track:eq6:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq6:post-matrix	track:eq6:post-fader:main-output:-	track:eq6:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq7:post-input-builtins	track:eq7:input:main-output:-	track:eq7:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq7:post-simd1	effect:eq7:simd1:eq:main-output:-	track:eq7:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq7:post-dynamic	track:eq7:post-simd1:main-output:-	track:eq7:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq7:post-simd2-pre-fader	track:eq7:post-dynamic:main-output:-	track:eq7:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq7:post-fader	track:eq7:post-simd2-pre-fader:main-output:-	track:eq7:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq7:post-matrix	track:eq7:post-fader:main-output:-	track:eq7:post-matrix:main-input:-	$.tracks
+edge	track-main:track:eq8:post-input-builtins	track:eq8:input:main-output:-	track:eq8:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:eq8:post-simd1	effect:eq8:simd1:eq:main-output:-	track:eq8:post-simd1:main-input:-	$.tracks
+edge	track-main:track:eq8:post-dynamic	track:eq8:post-simd1:main-output:-	track:eq8:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:eq8:post-simd2-pre-fader	track:eq8:post-dynamic:main-output:-	track:eq8:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:eq8:post-fader	track:eq8:post-simd2-pre-fader:main-output:-	track:eq8:post-fader:main-input:-	$.tracks
+edge	track-main:track:eq8:post-matrix	track:eq8:post-fader:main-output:-	track:eq8:post-matrix:main-input:-	$.tracks
+edge	track-main:effect:eq0:simd1:eq	track:eq0:post-input-builtins:main-output:-	effect:eq0:simd1:eq:main-input:-	$.tracks[id=eq0].simd1.effects[id=eq]
+edge	track-main:effect:eq1:simd1:eq	track:eq1:post-input-builtins:main-output:-	effect:eq1:simd1:eq:main-input:-	$.tracks[id=eq1].simd1.effects[id=eq]
+edge	track-main:effect:eq2:simd1:eq	track:eq2:post-input-builtins:main-output:-	effect:eq2:simd1:eq:main-input:-	$.tracks[id=eq2].simd1.effects[id=eq]
+edge	track-main:effect:eq3:simd1:eq	track:eq3:post-input-builtins:main-output:-	effect:eq3:simd1:eq:main-input:-	$.tracks[id=eq3].simd1.effects[id=eq]
+edge	track-main:effect:eq4:simd1:eq	track:eq4:post-input-builtins:main-output:-	effect:eq4:simd1:eq:main-input:-	$.tracks[id=eq4].simd1.effects[id=eq]
+edge	track-main:effect:eq5:simd1:eq	track:eq5:post-input-builtins:main-output:-	effect:eq5:simd1:eq:main-input:-	$.tracks[id=eq5].simd1.effects[id=eq]
+edge	track-main:effect:eq6:simd1:eq	track:eq6:post-input-builtins:main-output:-	effect:eq6:simd1:eq:main-input:-	$.tracks[id=eq6].simd1.effects[id=eq]
+edge	track-main:effect:eq7:simd1:eq	track:eq7:post-input-builtins:main-output:-	effect:eq7:simd1:eq:main-input:-	$.tracks[id=eq7].simd1.effects[id=eq]
+edge	track-main:effect:eq8:simd1:eq	track:eq8:post-input-builtins:main-output:-	effect:eq8:simd1:eq:main-input:-	$.tracks[id=eq8].simd1.effects[id=eq]
+edge	route-source:eq0-main	track:eq0:post-matrix:main-output:-	route:eq0-main:main-input:-	$.routes[id=eq0-main].source
+edge	route-source:eq1-main	track:eq1:post-matrix:main-output:-	route:eq1-main:main-input:-	$.routes[id=eq1-main].source
+edge	route-source:eq2-main	track:eq2:post-matrix:main-output:-	route:eq2-main:main-input:-	$.routes[id=eq2-main].source
+edge	route-source:eq3-main	track:eq3:post-matrix:main-output:-	route:eq3-main:main-input:-	$.routes[id=eq3-main].source
+edge	route-source:eq4-main	track:eq4:post-matrix:main-output:-	route:eq4-main:main-input:-	$.routes[id=eq4-main].source
+edge	route-source:eq5-main	track:eq5:post-matrix:main-output:-	route:eq5-main:main-input:-	$.routes[id=eq5-main].source
+edge	route-source:eq6-main	track:eq6:post-matrix:main-output:-	route:eq6-main:main-input:-	$.routes[id=eq6-main].source
+edge	route-source:eq7-main	track:eq7:post-matrix:main-output:-	route:eq7-main:main-input:-	$.routes[id=eq7-main].source
+edge	route-source:eq8-main	track:eq8:post-matrix:main-output:-	route:eq8-main:main-input:-	$.routes[id=eq8-main].source
+edge	route-destination:eq0-main	route:eq0-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq0-main].destination
+edge	route-destination:eq1-main	route:eq1-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq1-main].destination
+edge	route-destination:eq2-main	route:eq2-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq2-main].destination
+edge	route-destination:eq3-main	route:eq3-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq3-main].destination
+edge	route-destination:eq4-main	route:eq4-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq4-main].destination
+edge	route-destination:eq5-main	route:eq5-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq5-main].destination
+edge	route-destination:eq6-main	route:eq6-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq6-main].destination
+edge	route-destination:eq7-main	route:eq7-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq7-main].destination
+edge	route-destination:eq8-main	route:eq8-main:main-output:-	output:main-out:main-input:-	$.routes[id=eq8-main].destination
+order	0	track:eq0:input
+order	1	track:eq1:input
+order	2	track:eq2:input
+order	3	track:eq3:input
+order	4	track:eq4:input
+order	5	track:eq5:input
+order	6	track:eq6:input
+order	7	track:eq7:input
+order	8	track:eq8:input
+order	9	track:eq0:post-input-builtins
+order	10	track:eq1:post-input-builtins
+order	11	track:eq2:post-input-builtins
+order	12	track:eq3:post-input-builtins
+order	13	track:eq4:post-input-builtins
+order	14	track:eq5:post-input-builtins
+order	15	track:eq6:post-input-builtins
+order	16	track:eq7:post-input-builtins
+order	17	track:eq8:post-input-builtins
+order	18	effect:eq0:simd1:eq
+order	19	effect:eq1:simd1:eq
+order	20	effect:eq2:simd1:eq
+order	21	effect:eq3:simd1:eq
+order	22	effect:eq4:simd1:eq
+order	23	effect:eq5:simd1:eq
+order	24	effect:eq6:simd1:eq
+order	25	effect:eq7:simd1:eq
+order	26	effect:eq8:simd1:eq
+order	27	track:eq0:post-simd1
+order	28	track:eq1:post-simd1
+order	29	track:eq2:post-simd1
+order	30	track:eq3:post-simd1
+order	31	track:eq4:post-simd1
+order	32	track:eq5:post-simd1
+order	33	track:eq6:post-simd1
+order	34	track:eq7:post-simd1
+order	35	track:eq8:post-simd1
+order	36	track:eq0:post-dynamic
+order	37	track:eq1:post-dynamic
+order	38	track:eq2:post-dynamic
+order	39	track:eq3:post-dynamic
+order	40	track:eq4:post-dynamic
+order	41	track:eq5:post-dynamic
+order	42	track:eq6:post-dynamic
+order	43	track:eq7:post-dynamic
+order	44	track:eq8:post-dynamic
+order	45	track:eq0:post-simd2-pre-fader
+order	46	track:eq1:post-simd2-pre-fader
+order	47	track:eq2:post-simd2-pre-fader
+order	48	track:eq3:post-simd2-pre-fader
+order	49	track:eq4:post-simd2-pre-fader
+order	50	track:eq5:post-simd2-pre-fader
+order	51	track:eq6:post-simd2-pre-fader
+order	52	track:eq7:post-simd2-pre-fader
+order	53	track:eq8:post-simd2-pre-fader
+order	54	track:eq0:post-fader
+order	55	track:eq1:post-fader
+order	56	track:eq2:post-fader
+order	57	track:eq3:post-fader
+order	58	track:eq4:post-fader
+order	59	track:eq5:post-fader
+order	60	track:eq6:post-fader
+order	61	track:eq7:post-fader
+order	62	track:eq8:post-fader
+order	63	track:eq0:post-matrix
+order	64	track:eq1:post-matrix
+order	65	track:eq2:post-matrix
+order	66	track:eq3:post-matrix
+order	67	track:eq4:post-matrix
+order	68	track:eq5:post-matrix
+order	69	track:eq6:post-matrix
+order	70	track:eq7:post-matrix
+order	71	track:eq8:post-matrix
+order	72	route:eq0-main
+order	73	route:eq1-main
+order	74	route:eq2-main
+order	75	route:eq3-main
+order	76	route:eq4-main
+order	77	route:eq5-main
+order	78	route:eq6-main
+order	79	route:eq7-main
+order	80	route:eq8-main
+order	81	output:main-out
+level	0	track:eq0:input
+level	0	track:eq1:input
+level	0	track:eq2:input
+level	0	track:eq3:input
+level	0	track:eq4:input
+level	0	track:eq5:input
+level	0	track:eq6:input
+level	0	track:eq7:input
+level	0	track:eq8:input
+level	1	track:eq0:post-input-builtins
+level	1	track:eq1:post-input-builtins
+level	1	track:eq2:post-input-builtins
+level	1	track:eq3:post-input-builtins
+level	1	track:eq4:post-input-builtins
+level	1	track:eq5:post-input-builtins
+level	1	track:eq6:post-input-builtins
+level	1	track:eq7:post-input-builtins
+level	1	track:eq8:post-input-builtins
+level	2	effect:eq0:simd1:eq
+level	2	effect:eq1:simd1:eq
+level	2	effect:eq2:simd1:eq
+level	2	effect:eq3:simd1:eq
+level	2	effect:eq4:simd1:eq
+level	2	effect:eq5:simd1:eq
+level	2	effect:eq6:simd1:eq
+level	2	effect:eq7:simd1:eq
+level	2	effect:eq8:simd1:eq
+level	3	track:eq0:post-simd1
+level	3	track:eq1:post-simd1
+level	3	track:eq2:post-simd1
+level	3	track:eq3:post-simd1
+level	3	track:eq4:post-simd1
+level	3	track:eq5:post-simd1
+level	3	track:eq6:post-simd1
+level	3	track:eq7:post-simd1
+level	3	track:eq8:post-simd1
+level	4	track:eq0:post-dynamic
+level	4	track:eq1:post-dynamic
+level	4	track:eq2:post-dynamic
+level	4	track:eq3:post-dynamic
+level	4	track:eq4:post-dynamic
+level	4	track:eq5:post-dynamic
+level	4	track:eq6:post-dynamic
+level	4	track:eq7:post-dynamic
+level	4	track:eq8:post-dynamic
+level	5	track:eq0:post-simd2-pre-fader
+level	5	track:eq1:post-simd2-pre-fader
+level	5	track:eq2:post-simd2-pre-fader
+level	5	track:eq3:post-simd2-pre-fader
+level	5	track:eq4:post-simd2-pre-fader
+level	5	track:eq5:post-simd2-pre-fader
+level	5	track:eq6:post-simd2-pre-fader
+level	5	track:eq7:post-simd2-pre-fader
+level	5	track:eq8:post-simd2-pre-fader
+level	6	track:eq0:post-fader
+level	6	track:eq1:post-fader
+level	6	track:eq2:post-fader
+level	6	track:eq3:post-fader
+level	6	track:eq4:post-fader
+level	6	track:eq5:post-fader
+level	6	track:eq6:post-fader
+level	6	track:eq7:post-fader
+level	6	track:eq8:post-fader
+level	7	track:eq0:post-matrix
+level	7	track:eq1:post-matrix
+level	7	track:eq2:post-matrix
+level	7	track:eq3:post-matrix
+level	7	track:eq4:post-matrix
+level	7	track:eq5:post-matrix
+level	7	track:eq6:post-matrix
+level	7	track:eq7:post-matrix
+level	7	track:eq8:post-matrix
+level	8	route:eq0-main
+level	8	route:eq1-main
+level	8	route:eq2-main
+level	8	route:eq3-main
+level	8	route:eq4-main
+level	8	route:eq5-main
+level	8	route:eq6-main
+level	8	route:eq7-main
+level	8	route:eq8-main
+level	9	output:main-out
+reduction	output:main-out	0	route-destination:eq0-main
+reduction	output:main-out	1	route-destination:eq1-main
+reduction	output:main-out	2	route-destination:eq2-main
+reduction	output:main-out	3	route-destination:eq3-main
+reduction	output:main-out	4	route-destination:eq4-main
+reduction	output:main-out	5	route-destination:eq5-main
+reduction	output:main-out	6	route-destination:eq6-main
+reduction	output:main-out	7	route-destination:eq7-main
+reduction	output:main-out	8	route-destination:eq8-main
+route-transform	route:eq0-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq1-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq2-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq3-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq4-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq5-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq6-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq7-main	3f800000	3f800000	00000000	00000000	3f800000
+route-transform	route:eq8-main	3f800000	3f800000	00000000	00000000	3f800000
+route-timing	eq0-main	0	0	0
+route-timing	eq1-main	0	0	0
+route-timing	eq2-main	0	0	0
+route-timing	eq3-main	0	0	0
+route-timing	eq4-main	0	0	0
+route-timing	eq5-main	0	0	0
+route-timing	eq6-main	0	0	0
+route-timing	eq7-main	0	0	0
+route-timing	eq8-main	0	0	0
+tail	track:eq0:input	finite:0
+tail	track:eq0:post-input-builtins	finite:0
+tail	track:eq0:post-simd1	finite:0
+tail	track:eq0:post-dynamic	finite:0
+tail	track:eq0:post-simd2-pre-fader	finite:0
+tail	track:eq0:post-fader	finite:0
+tail	track:eq0:post-matrix	finite:0
+tail	track:eq1:input	finite:0
+tail	track:eq1:post-input-builtins	finite:0
+tail	track:eq1:post-simd1	finite:0
+tail	track:eq1:post-dynamic	finite:0
+tail	track:eq1:post-simd2-pre-fader	finite:0
+tail	track:eq1:post-fader	finite:0
+tail	track:eq1:post-matrix	finite:0
+tail	track:eq2:input	finite:0
+tail	track:eq2:post-input-builtins	finite:0
+tail	track:eq2:post-simd1	finite:0
+tail	track:eq2:post-dynamic	finite:0
+tail	track:eq2:post-simd2-pre-fader	finite:0
+tail	track:eq2:post-fader	finite:0
+tail	track:eq2:post-matrix	finite:0
+tail	track:eq3:input	finite:0
+tail	track:eq3:post-input-builtins	finite:0
+tail	track:eq3:post-simd1	finite:0
+tail	track:eq3:post-dynamic	finite:0
+tail	track:eq3:post-simd2-pre-fader	finite:0
+tail	track:eq3:post-fader	finite:0
+tail	track:eq3:post-matrix	finite:0
+tail	track:eq4:input	finite:0
+tail	track:eq4:post-input-builtins	finite:0
+tail	track:eq4:post-simd1	finite:0
+tail	track:eq4:post-dynamic	finite:0
+tail	track:eq4:post-simd2-pre-fader	finite:0
+tail	track:eq4:post-fader	finite:0
+tail	track:eq4:post-matrix	finite:0
+tail	track:eq5:input	finite:0
+tail	track:eq5:post-input-builtins	finite:0
+tail	track:eq5:post-simd1	finite:0
+tail	track:eq5:post-dynamic	finite:0
+tail	track:eq5:post-simd2-pre-fader	finite:0
+tail	track:eq5:post-fader	finite:0
+tail	track:eq5:post-matrix	finite:0
+tail	track:eq6:input	finite:0
+tail	track:eq6:post-input-builtins	finite:0
+tail	track:eq6:post-simd1	finite:0
+tail	track:eq6:post-dynamic	finite:0
+tail	track:eq6:post-simd2-pre-fader	finite:0
+tail	track:eq6:post-fader	finite:0
+tail	track:eq6:post-matrix	finite:0
+tail	track:eq7:input	finite:0
+tail	track:eq7:post-input-builtins	finite:0
+tail	track:eq7:post-simd1	finite:0
+tail	track:eq7:post-dynamic	finite:0
+tail	track:eq7:post-simd2-pre-fader	finite:0
+tail	track:eq7:post-fader	finite:0
+tail	track:eq7:post-matrix	finite:0
+tail	track:eq8:input	finite:0
+tail	track:eq8:post-input-builtins	finite:0
+tail	track:eq8:post-simd1	finite:0
+tail	track:eq8:post-dynamic	finite:0
+tail	track:eq8:post-simd2-pre-fader	finite:0
+tail	track:eq8:post-fader	finite:0
+tail	track:eq8:post-matrix	finite:0
+tail	effect:eq0:simd1:eq	infinite
+tail	effect:eq1:simd1:eq	infinite
+tail	effect:eq2:simd1:eq	infinite
+tail	effect:eq3:simd1:eq	infinite
+tail	effect:eq4:simd1:eq	infinite
+tail	effect:eq5:simd1:eq	infinite
+tail	effect:eq6:simd1:eq	infinite
+tail	effect:eq7:simd1:eq	infinite
+tail	effect:eq8:simd1:eq	infinite
+tail	route:eq0-main	finite:0
+tail	route:eq1-main	finite:0
+tail	route:eq2-main	finite:0
+tail	route:eq3-main	finite:0
+tail	route:eq4-main	finite:0
+tail	route:eq5-main	finite:0
+tail	route:eq6-main	finite:0
+tail	route:eq7-main	finite:0
+tail	route:eq8-main	finite:0
+tail	output:main-out	finite:0
+buffer	track:eq0:input:main-output:-	0
+buffer	track:eq1:input:main-output:-	1
+buffer	track:eq2:input:main-output:-	2
+buffer	track:eq3:input:main-output:-	3
+buffer	track:eq4:input:main-output:-	4
+buffer	track:eq5:input:main-output:-	5
+buffer	track:eq6:input:main-output:-	6
+buffer	track:eq7:input:main-output:-	7
+buffer	track:eq8:input:main-output:-	8
+buffer	track:eq0:post-input-builtins:main-output:-	9
+buffer	track:eq1:post-input-builtins:main-output:-	0
+buffer	track:eq2:post-input-builtins:main-output:-	1
+buffer	track:eq3:post-input-builtins:main-output:-	2
+buffer	track:eq4:post-input-builtins:main-output:-	3
+buffer	track:eq5:post-input-builtins:main-output:-	4
+buffer	track:eq6:post-input-builtins:main-output:-	5
+buffer	track:eq7:post-input-builtins:main-output:-	6
+buffer	track:eq8:post-input-builtins:main-output:-	7
+buffer	effect:eq0:simd1:eq:main-output:-	8
+buffer	effect:eq1:simd1:eq:main-output:-	9
+buffer	effect:eq2:simd1:eq:main-output:-	0
+buffer	effect:eq3:simd1:eq:main-output:-	1
+buffer	effect:eq4:simd1:eq:main-output:-	2
+buffer	effect:eq5:simd1:eq:main-output:-	3
+buffer	effect:eq6:simd1:eq:main-output:-	4
+buffer	effect:eq7:simd1:eq:main-output:-	5
+buffer	effect:eq8:simd1:eq:main-output:-	6
+buffer	track:eq0:post-simd1:main-output:-	8
+buffer	track:eq1:post-simd1:main-output:-	9
+buffer	track:eq2:post-simd1:main-output:-	0
+buffer	track:eq3:post-simd1:main-output:-	1
+buffer	track:eq4:post-simd1:main-output:-	2
+buffer	track:eq5:post-simd1:main-output:-	3
+buffer	track:eq6:post-simd1:main-output:-	4
+buffer	track:eq7:post-simd1:main-output:-	5
+buffer	track:eq8:post-simd1:main-output:-	6
+buffer	track:eq0:post-dynamic:main-output:-	8
+buffer	track:eq1:post-dynamic:main-output:-	9
+buffer	track:eq2:post-dynamic:main-output:-	0
+buffer	track:eq3:post-dynamic:main-output:-	1
+buffer	track:eq4:post-dynamic:main-output:-	2
+buffer	track:eq5:post-dynamic:main-output:-	3
+buffer	track:eq6:post-dynamic:main-output:-	4
+buffer	track:eq7:post-dynamic:main-output:-	5
+buffer	track:eq8:post-dynamic:main-output:-	6
+buffer	track:eq0:post-simd2-pre-fader:main-output:-	8
+buffer	track:eq1:post-simd2-pre-fader:main-output:-	9
+buffer	track:eq2:post-simd2-pre-fader:main-output:-	0
+buffer	track:eq3:post-simd2-pre-fader:main-output:-	1
+buffer	track:eq4:post-simd2-pre-fader:main-output:-	2
+buffer	track:eq5:post-simd2-pre-fader:main-output:-	3
+buffer	track:eq6:post-simd2-pre-fader:main-output:-	4
+buffer	track:eq7:post-simd2-pre-fader:main-output:-	5
+buffer	track:eq8:post-simd2-pre-fader:main-output:-	6
+buffer	track:eq0:post-fader:main-output:-	7
+buffer	track:eq1:post-fader:main-output:-	8
+buffer	track:eq2:post-fader:main-output:-	9
+buffer	track:eq3:post-fader:main-output:-	0
+buffer	track:eq4:post-fader:main-output:-	1
+buffer	track:eq5:post-fader:main-output:-	2
+buffer	track:eq6:post-fader:main-output:-	3
+buffer	track:eq7:post-fader:main-output:-	4
+buffer	track:eq8:post-fader:main-output:-	5
+buffer	track:eq0:post-matrix:main-output:-	6
+buffer	track:eq1:post-matrix:main-output:-	7
+buffer	track:eq2:post-matrix:main-output:-	8
+buffer	track:eq3:post-matrix:main-output:-	9
+buffer	track:eq4:post-matrix:main-output:-	0
+buffer	track:eq5:post-matrix:main-output:-	1
+buffer	track:eq6:post-matrix:main-output:-	2
+buffer	track:eq7:post-matrix:main-output:-	3
+buffer	track:eq8:post-matrix:main-output:-	4
+buffer	route:eq0-main:main-output:-	5
+buffer	route:eq1-main:main-output:-	6
+buffer	route:eq2-main:main-output:-	7
+buffer	route:eq3-main:main-output:-	8
+buffer	route:eq4-main:main-output:-	9
+buffer	route:eq5-main:main-output:-	0
+buffer	route:eq6-main:main-output:-	1
+buffer	route:eq7-main:main-output:-	2
+buffer	route:eq8-main:main-output:-	3
+buffer	output:main-out:main-output:-	4
+estimate	82	82	81	82	10	1	9	9	23305	0	0	48915	8424	0	0	0	0	48915	150559	150559

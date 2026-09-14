@@ -125,3 +125,10 @@ Downstream delivery is now tracked in misofm/engine-web-adapter#111 and misofm/a
 ### Prepared-cut delivery boundary
 
 #805 is merged through PR #810 at 80f2918b5aba5b2428c5f5cc76c24f46b4e0edde; required qualification34820834881 passed and #805 is CLOSED. Together with merged #147 this completes the prepared EQ/structured-edit foundation. #807 live EQ implementation follows the approved bounded assignments; #808 builtin live controls, #809 package release, adapter #111 and app #222 remain open. No app integration or release is claimed yet.
+
+
+### Account-switch pause — 2026-09-14
+
+Implementation is paused at the user's request for another Codex account to resume. All source checkpoints are pushed on `codex/807-live-eq`, through `e81df55b61f563fa26952608e7383d3c060cb956`. #147 and #805 are merged/closed; #807 assignments 1–3 are complete, assignments 4–10 remain. #808, #809, adapter #111 and app #222 have not entered implementation/release. No public live-cut activation, package publication or app deployment is claimed.
+
+The self-contained [resume handoff](https://github.com/misofm/engine/blob/codex/807-live-eq/docs/handoffs/804-account-switch-2026-09-14/README.md) records branches, exact commits, accepted decisions, test evidence, preserved plans, downstream requirements and the next bounded task. All agents are stopped. Before assignment 4, freeze its staging layout and amend the brief using the linked handoff's Astra XHIGH queue/accounting recommendation; no assignment-4 source has been written. #807 remains attempt 1 and still requires its final fresh Astra MEDIUM review. Keep this issue open.
