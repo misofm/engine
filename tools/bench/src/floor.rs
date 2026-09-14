@@ -62,10 +62,11 @@ const OPS_PER_CYCLE: f64 = 3.7;
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Compressor inventory".
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
-/// Required arithmetic per lane-sample, parametric-EQ kernel, at the standing fixture's band count.
+/// Required arithmetic per lane-sample, parametric-EQ masked stationary cascade, at the standing
+/// fixture's effective two-section count.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
-const EQ_LANE_OPS: f64 = 51.0;
+const EQ_LANE_OPS: f64 = 53.0;
 /// Required arithmetic per lane-sample, true-peak limiter, post-round-1 uniform-cohort shape.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
@@ -624,9 +625,9 @@ input as $rust |
         // compressor inventory. The limiter's shared link has the same accounting shape.
         assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
         assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 51.0);
+        assert_eq!(EQ_LANE_OPS, 53.0);
         let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (69.0 + 51.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
+        let expected = (69.0 + 53.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
         assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
         let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
         let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");

@@ -236,3 +236,27 @@ plus G2 tests, clippy, native release build, scalar and SIMD Wasm builds, lane
 policy, unfused seal and formatting. Evidence: /tmp/805-mask-kernel-evidence.md.
 The existing EQ consumer is deliberately unchanged and its retained regression
 remains red until the next bounded integration. No final verdict yet.
+
+## Attempt 1 — EQ correction and accounting checkpoint
+
+The dedicated per-lane dry masks now follow exact current identity bits and
+remaining==0 at the section boundary in stationary mono/dual and fallback
+rendering. Original general bands remain wet and retain their old ramp timing.
+The permanent old-four all-HighPass negative-zero regression now passes.
+Passed: full parametric-eq suite, package clippy, scalar and SIMD Wasm checks,
+fmt/diff checks. /tmp/805-eq-mask-evidence.md records commands. Luna created
+commit1aee3d60 despite the root-only commit instruction; root audited and
+preserved this coherent source checkpoint without rewriting history.
+
+Root applied the separate Luna accounting draft and verified nine focused bench
+floor tests, including Rust/jq exact parity; no benchmark timing was run. The
+current stationary inventory is25*kept+3 (53 standing two-kept,153 full six),
+with mask construction accounted separately as bounded segment/block work.
+Payload remains456bytes/lane,920serialized total, not resident allocation size.
+Root rejected repricing historical timing percentages against the new mask
+inventory: those tables retain their historical51-op EQ floor/percentages and
+are explicitly labelled historical. No new measured performance claim follows.
+
+A small final compatibility test supplement remains for mixed enabled cuts and
+original-band ramps, followed by catalog/prepared-SDK evidence and the fresh
+Astra MEDIUM complete-attempt verdict. #805 is not complete yet.

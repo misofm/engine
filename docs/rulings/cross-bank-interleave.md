@@ -1,5 +1,10 @@
 # Fusing independent same-kernel banks into one interleaved loop — null
 
+**#805 applicability.** The four-section EQ cascade in the measurements below is historical. The
+prepared EQ now has six physical sections (HPF, four general bands, LPF) and uses a local effective
+stationary depth of 2 in both mono and dual paths. This does not change the historical table or its
+`Lane::SVF_CASCADE_DEPTH` ruling.
+
 **Candidate.** Issue #163 phase 3. A TPT SVF is a first-order recurrence, so a bank's block loop is
 a serial dependency chain and the vector units idle for most of every frame. The phase-3 plan's
 mechanism was to step **K independent banks** together in one loop: the graph executor schedules
