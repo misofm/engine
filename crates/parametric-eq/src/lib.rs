@@ -1,4 +1,5 @@
-//! Four-section dual-mono parametric EQ, realised as a cascade of TPT state-variable sections.
+//! Four-band, six-section dual-mono parametric EQ, realised as a cascade of TPT state-variable
+//! sections. The dedicated HPF and LPF are prepared-only controls around the original four bands.
 //!
 //! The spec transfer is the RBJ Audio EQ Cookbook's, unchanged. The *realization* is Simper's
 //! trapezoidal state-variable filter (decision D2 of the #83 master plan), designed in `f64` on the
@@ -25,12 +26,12 @@
 //!
 //! # State layout
 //!
-//! Version 1. Per lane, per band, 19 little-endian 32-bit words (76 words, 304 bytes per lane); the
-//! common section is the shared codec's two-word header — the layout version and the data word
-//! count — and nothing else, because the two channels share no state. The header makes a payload
-//! self-describing, so a stale or truncated restore is rejected on the payload's own evidence and
-//! not only on the caller's out-of-band `state_layout_version`. A stale payload is rejected with
-//! `effect.state.version`; there is no silent migration.
+//! Version 1. Per physical section and lane, 19 little-endian 32-bit words (114 words, 456 bytes
+//! per channel); the common section is the shared codec's two-word header — the layout version and
+//! data word count — and nothing else, because the two channels share no state. The header makes a
+//! payload self-describing, so a stale or truncated restore is rejected on the payload's own
+//! evidence and not only on the caller's out-of-band `state_layout_version`. A stale payload is
+//! rejected with `effect.state.version`; there is no silent migration.
 
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
@@ -55,7 +56,8 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
-    SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_cascade_interleaved,
+    SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
+    svf_cascade_interleaved_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -66,8 +68,17 @@ pub use response::{
     EqResponseSummary, query_response_into, query_snapshot_magnitudes_into,
 };
 
-/// Fixed cascade length in V1.
-pub const EQ_SECTION_COUNT: usize = 4;
+/// Number of original, user-configurable general bands. Their parameter IDs and descriptor order
+/// are stable and remain separate from the physical cascade section count.
+pub const EQ_BAND_COUNT: usize = 4;
+
+/// Number of physical sections in the prepared cascade: HPF, four original bands, LPF.
+pub const EQ_SECTION_COUNT: usize = 6;
+
+const HPF_SECTION: usize = 0;
+const BAND_SECTION_OFFSET: usize = 1;
+const LPF_SECTION: usize = 5;
+const EFFECTIVE_CASCADE_DEPTH: usize = 2;
 
 /// Coefficient words one SVF section carries, in the pinned `c1, a2, a3, m0, m1, m2` order.
 ///
@@ -139,9 +150,9 @@ impl EqBandKind {
 /// Stable parameter IDs for one cascade position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EqBandDescriptor {
-    /// Band index, `0..EQ_SECTION_COUNT`.
+    /// General-band index, `0..EQ_BAND_COUNT`.
     pub index: u8,
-    /// Position in the cascade; equal to `index` in V1.
+    /// Position in the physical cascade; one greater than `index` because HPF is prepended.
     pub cascade_order: u8,
     /// Boolean enable.
     pub enabled: ParameterId,
@@ -178,13 +189,14 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-/// The first stable parameter ID of band `band`; bands are spaced sixteen apart.
+/// The first stable parameter ID of general band `band`; bands are spaced sixteen apart.
 const fn band_base(band: usize) -> u32 {
     band as u32 * 16 + 1
 }
 
-/// Four static cascade positions in increasing order.
-pub const EQ_BAND_DESCRIPTORS: [EqBandDescriptor; EQ_SECTION_COUNT] = {
+/// Four static general-band descriptors in their stable parameter order. Their physical cascade
+/// positions are one through four because the prepared cuts occupy positions zero and five.
+pub const EQ_BAND_DESCRIPTORS: [EqBandDescriptor; EQ_BAND_COUNT] = {
     let mut bands = [EqBandDescriptor {
         index: 0,
         cascade_order: 0,
@@ -194,13 +206,13 @@ pub const EQ_BAND_DESCRIPTORS: [EqBandDescriptor; EQ_SECTION_COUNT] = {
         gain_db: parameter_id(4),
         q: parameter_id(5),
         shelf_slope: parameter_id(6),
-    }; EQ_SECTION_COUNT];
+    }; EQ_BAND_COUNT];
     let mut band = 0;
-    while band < EQ_SECTION_COUNT {
+    while band < EQ_BAND_COUNT {
         let base = band_base(band);
         bands[band] = EqBandDescriptor {
             index: band as u8,
-            cascade_order: band as u8,
+            cascade_order: (band + BAND_SECTION_OFFSET) as u8,
             enabled: parameter_id(base),
             kind: parameter_id(base + 1),
             frequency_hz: parameter_id(base + 2),
@@ -242,7 +254,7 @@ const KIND_CHOICES: [EnumChoice; 6] = [
 
 /// Display names, band major, in descriptor order. The table below is generated from them, so the
 /// twenty-four descriptors cannot drift apart in a field no reader is comparing.
-const PARAMETER_NAMES: [&str; EQ_SECTION_COUNT * 6] = [
+const PARAMETER_NAMES: [&str; EQ_BAND_COUNT * 6] = [
     "band-1-enabled",
     "band-1-kind",
     "band-1-frequency",
@@ -270,7 +282,7 @@ const PARAMETER_NAMES: [&str; EQ_SECTION_COUNT * 6] = [
 ];
 
 /// Default centre frequency of each band, in Hz.
-const FREQUENCY_DEFAULTS: [f32; EQ_SECTION_COUNT] = [80.0, 400.0, 2_000.0, 10_000.0];
+const FREQUENCY_DEFAULTS: [f32; EQ_BAND_COUNT] = [80.0, 400.0, 2_000.0, 10_000.0];
 
 /// Lowest and highest admitted frequency, gain, Q and shelf slope, in field order 2..6.
 const NUMERIC_SPECS: [ParameterSpec; 4] = [
@@ -360,10 +372,44 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
     }
 }
 
-const EQ_PARAMETERS: [ParameterDescriptor; EQ_SECTION_COUNT * 6] = {
-    let mut table = [parameter(0, 0); EQ_SECTION_COUNT * 6];
+const fn cut_parameter(
+    id: u32,
+    display_name: &'static str,
+    unit: ParameterUnit,
+    domain: ParameterDomain,
+    bounds: (Option<f32>, Option<f32>, f32),
+    mapping: ParameterMapping,
+) -> ParameterDescriptor {
+    ParameterDescriptor {
+        id: parameter_id(id),
+        display_name,
+        display_unit: match unit {
+            ParameterUnit::Hz => "Hz",
+            ParameterUnit::Ratio => "Q",
+            ParameterUnit::Linear => "on/off",
+            _ => "",
+        },
+        unit,
+        domain,
+        minimum: bounds.0,
+        maximum: bounds.1,
+        default_value: bounds.2,
+        mapping,
+        automation_rate: AutomationRate::None,
+        channel_policy: ParameterChannelPolicy::PerLane,
+        smoothing: SmoothingRule::None,
+        smoothing_samples: 0,
+        readable: true,
+        automatable: false,
+        enum_choices: &[],
+        lattice: effect_contract::default_parameter_lattice(unit, domain, mapping),
+    }
+}
+
+const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
+    let mut table = [parameter(0, 0); EQ_BAND_COUNT * 6 + 6];
     let mut band = 0;
-    while band < EQ_SECTION_COUNT {
+    while band < EQ_BAND_COUNT {
         let mut field = 0;
         while field < 6 {
             table[band * 6 + field] = parameter(band, field);
@@ -371,6 +417,54 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_SECTION_COUNT * 6] = {
         }
         band += 1;
     }
+    table[EQ_BAND_COUNT * 6] = cut_parameter(
+        65,
+        "hpf-enabled",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        (None, None, 0.0),
+        ParameterMapping::Stepped,
+    );
+    table[EQ_BAND_COUNT * 6 + 1] = cut_parameter(
+        66,
+        "hpf-frequency",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        (Some(10.0), Some(20_000.0), 80.0),
+        ParameterMapping::Logarithmic,
+    );
+    table[EQ_BAND_COUNT * 6 + 2] = cut_parameter(
+        67,
+        "hpf-q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        (Some(0.1), Some(18.0), core::f32::consts::FRAC_1_SQRT_2),
+        ParameterMapping::Logarithmic,
+    );
+    table[EQ_BAND_COUNT * 6 + 3] = cut_parameter(
+        81,
+        "lpf-enabled",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        (None, None, 0.0),
+        ParameterMapping::Stepped,
+    );
+    table[EQ_BAND_COUNT * 6 + 4] = cut_parameter(
+        82,
+        "lpf-frequency",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        (Some(10.0), Some(20_000.0), 18_000.0),
+        ParameterMapping::Logarithmic,
+    );
+    table[EQ_BAND_COUNT * 6 + 5] = cut_parameter(
+        83,
+        "lpf-q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        (Some(0.1), Some(18.0), core::f32::consts::FRAC_1_SQRT_2),
+        ParameterMapping::Logarithmic,
+    );
     table
 };
 
@@ -940,6 +1034,30 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         })
     }
 
+    /// Builds the per-lane dry-output mask for a dedicated cut at the current segment boundary.
+    ///
+    /// The decision is deliberately made from the coefficient *bits*, not `Lane::eq`: ordered
+    /// floating equality treats `-0.0` as equal to `+0.0`, while the identity contract is exact.
+    /// The fixed 0/1 decision vector is loaded and compared only to manufacture the backend's
+    /// canonical mask representation. Original sections never select dry, even when disabled.
+    #[inline(always)]
+    fn dry_mask(&self, section: usize) -> L::Mask {
+        let dedicated = section == HPF_SECTION || section == LPF_SECTION;
+        let mut decisions = [0.0_f32; MAX_LANES];
+        if dedicated {
+            let slot = &self.sections[section];
+            for (track, decision) in decisions.iter_mut().enumerate().take(W) {
+                let exact_identity = (0..EQ_COEFFICIENT_WORDS).all(|index| {
+                    lane_bits(coef_word(&slot.coef, index), track) == IDENTITY_WORD_BITS[index]
+                });
+                if exact_identity && self.remaining[section][track] == 0 {
+                    *decision = 1.0;
+                }
+            }
+        }
+        L::load(&decisions[..L::WIDTH]).eq(L::splat(1.0))
+    }
+
     /// Starts a [`RAMP_SAMPLES`]-sample word ramp on lane `track` of `section` (D11).
     ///
     /// The increment is one multiply by an exact power of two, computed once here; a ramp that is
@@ -1060,7 +1178,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         self.remaining[section] = [0; W];
     }
 
-    /// Runs the four sections over one block in place.
+    /// Runs the six physical sections over one block in place.
     ///
     /// `#[inline(always)]`, and [`process_section`](Self::process_section) with it, so that the
     /// whole render path of a bank stays inside one wasm function. `check-web-audioworklet.sh`
@@ -1111,20 +1229,45 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 }
             }
             debug_assert!(length > 0);
+            let dry_mask = self.dry_mask(section);
             let slot = &mut self.sections[section];
             let block = &mut io[position * W..(position + length) * W];
             if ramping {
                 advance_words(&mut slot.coef, &slot.step);
-                svf_block_ramped::<L>(
-                    block,
-                    length,
-                    &mut slot.coef,
-                    &slot.step,
-                    length - 1,
-                    &mut slot.state,
-                );
+                if section == HPF_SECTION || section == LPF_SECTION {
+                    svf_block_ramped_with_dry_mask::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        length - 1,
+                        &mut slot.state,
+                        dry_mask,
+                    );
+                } else {
+                    svf_block_ramped::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        length - 1,
+                        &mut slot.state,
+                    );
+                }
             } else {
-                svf_block::<L>(block, length, &slot.coef, &mut slot.state);
+                if section == HPF_SECTION || section == LPF_SECTION {
+                    svf_block_ramped_with_dry_mask::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        0,
+                        &mut slot.state,
+                        dry_mask,
+                    );
+                } else {
+                    svf_block::<L>(block, length, &slot.coef, &mut slot.state);
+                }
             }
             for track in 0..W {
                 let remaining = &mut self.remaining[section][track];
@@ -1189,7 +1332,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 }
 
-/// Runs both channels' four-section cascades over one block.
+/// Runs both channels' six-section cascades over one block.
 ///
 /// Issue #163 phase 3. `stationary` means no lane of either channel has a ramp in flight, so
 /// every section would run [`svf_block`] with fixed coefficients over the whole block --
@@ -1198,10 +1341,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 /// leaves the vector units idle for most of every frame, and it is why the EQ took the same
 /// wall time at `Simd4` as at `Simd8`.
 ///
-/// The interleaved form runs the two channels in one frame loop, [`Lane::SVF_CASCADE_DEPTH`]
-/// sections deep, so several independent recurrences are always in flight. It is the *same*
-/// operation order per chain -- see [`svf_cascade_interleaved`] -- so this is a schedule
-/// change, not a numeric one, and the fixture pins are untouched.
+/// The interleaved form runs the two channels in one frame loop, two sections deep, so several
+/// independent recurrences are always in flight. It is the *same* operation order per chain --
+/// see [`svf_cascade_interleaved`] -- so this is a schedule change, not a numeric one, and the
+/// fixture pins are untouched.
 ///
 /// A ramping block falls back to the per-section path, which owns the block-splitting rule
 /// that a moving coefficient needs. Ramps run for at most a smoothing window after a
@@ -1222,15 +1365,9 @@ fn process_channels<L: Lane, const W: usize>(
     debug_assert!(channels.0.identity_flags_agree());
     debug_assert!(channels.1.identity_flags_agree());
     let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames);
-    // `SVF_CASCADE_DEPTH` is a constant, so exactly one arm survives monomorphisation and the
-    // match costs nothing. Every arm is bit-identical; a depth that did not divide the cascade
-    // would silently drop sections, so only the divisors of `EQ_SECTION_COUNT` are reached
-    // and anything else falls back to the always-valid depth of one.
-    match L::SVF_CASCADE_DEPTH {
-        4 => interleave::<L, W, 4>(channels, left, right, frames, sections),
-        2 => interleave::<L, W, 2>(channels, left, right, frames, sections),
-        _ => interleave::<L, W, 1>(channels, left, right, frames, sections),
-    }
+    // Six physical sections use the effective stationary depth of two on every backend. This
+    // keeps the final LPF in a complete pass while retaining one fixed interleaved kernel shape.
+    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections);
 }
 
 /// [`process_channels`] over one plane: the collapsed track's live channel.
@@ -1262,11 +1399,7 @@ fn process_channels_mono<L: Lane, const W: usize>(
     }
     debug_assert!(channel.identity_flags_agree());
     let sections = cascade_sections_mono::<L, W>(channel, io, frames);
-    match L::SVF_CASCADE_DEPTH {
-        4 => interleave_mono::<L, W, 4>(channel, io, frames, sections),
-        2 => interleave_mono::<L, W, 2>(channel, io, frames, sections),
-        _ => interleave_mono::<L, W, 1>(channel, io, frames, sections),
-    }
+    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections);
 }
 
 /// [`cascade_sections`] over one channel. Every leg is [`cascade_sections`]'s, gated on the one
@@ -1279,7 +1412,7 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| channel.identity[section];
-    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT);
+    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
@@ -1347,7 +1480,14 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
             [core::array::from_fn(|k| channel.sections[at[k]].coef)];
         let mut state: [[SvfState<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].state)];
-        svf_cascade_interleaved::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
+        let dry_masks: [[L::Mask; DEPTH]; 1] = [core::array::from_fn(|k| channel.dry_mask(at[k]))];
+        svf_cascade_interleaved_with_dry_masks::<L, 1, DEPTH>(
+            [&mut *io],
+            frames,
+            &coefficients,
+            &mut state,
+            &dry_masks,
+        );
         let [only] = state;
         for (k, word) in only.into_iter().enumerate() {
             channel.sections[at[k]].state = word;
@@ -1357,7 +1497,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 
 /// The cascade positions this stationary block will actually run, in cascade order.
 ///
-/// All four, unless identity-section elision is admissible — in which case the sections that are
+/// All six, unless identity-section elision is admissible — in which case the sections that are
 /// the exact identity on every lane of *both* channels are dropped from the list, and the cascade
 /// runs shorter.
 ///
@@ -1365,9 +1505,10 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///
 /// `BandTarget::words` maps `enabled = false` to [`EqSvfWords::IDENTITY`] at every other
 /// parameter, so a disabled band is not "nearly" a pass-through, it is `c1 = a2 = a3 = m1 = m2 =
-/// +0.0, m0 = 1.0`. A console that ships four bands and uses two spends half the cascade there.
-/// The bank runs both channels through [`svf_cascade_interleaved`] at a fixed
-/// [`Lane::SVF_CASCADE_DEPTH`], so dropping sections buys whole passes.
+/// +0.0, m0 = 1.0`. A console that ships six sections and uses two spends most of the cascade
+/// there.
+/// The bank runs both channels through [`svf_cascade_interleaved`] at a fixed effective depth of
+/// two, so dropping sections buys whole passes.
 ///
 /// The flag is per section **across both channels** because that is the granularity the kernel
 /// has: one pass carries section `k` of the left channel and section `k` of the right, and a
@@ -1428,13 +1569,13 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// **Finiteness is part of the claim, not an aside.** `0.0 * inf` is `NaN`, so an identity section
 /// handed an infinity writes `NaN` where elision would pass the infinity through. Gate (a)'s
 /// magnitude ceiling refuses non-finite input, and by refusing anything above [`BLOCK_LIMIT`] —
-/// `1e30`, about `3.4e8` below `f32::MAX`, against a four-section cascade whose per-section output
+/// `1e30`, about `3.4e8` below `f32::MAX`, against a six-section cascade whose per-section output
 /// mix is bounded by `|m0| + |m1| + |m2| < 2^6` — it also leaves the cascade unable to reach an
 /// infinity from a block it admitted.
 ///
 /// # Correctness never depends on the gate
 ///
-/// Every leg is a refusal: any doubt returns all four sections and the block renders exactly as it
+/// Every leg is a refusal: any doubt returns all six sections and the block renders exactly as it
 /// did before this function existed. The gate is a performance predicate, and the only thing a
 /// wrong *engagement* rule could cost is speed.
 #[inline(always)]
@@ -1447,7 +1588,7 @@ fn cascade_sections<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
-    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT);
+    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
@@ -1532,11 +1673,16 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             core::array::from_fn(|k| channels.0.sections[at[k]].state),
             core::array::from_fn(|k| channels.1.sections[at[k]].state),
         ];
-        svf_cascade_interleaved::<L, 2, DEPTH>(
+        let dry_masks: [[L::Mask; DEPTH]; 2] = [
+            core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+            core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+        ];
+        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
             [&mut *left, &mut *right],
             frames,
             &coefficients,
             &mut state,
+            &dry_masks,
         );
         let [left_state, right_state] = state;
         for (k, word) in left_state.into_iter().enumerate() {
@@ -1751,7 +1897,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             *invalid_spans = invalid_spans.saturating_add(spans.len() as u64);
             return;
         }
-        let mut pending = [None; EQ_SECTION_COUNT * 4 * 2];
+        let mut pending = [None; EQ_BAND_COUNT * 4 * 2];
         let mut prior_sort_key = None;
         for span in spans {
             let sort_key = (span.start_sample, span.parameter_index, span.channel);
@@ -1779,7 +1925,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             prior_sort_key = Some(sort_key);
         }
         let sample_rate = self.sample_rate();
-        for section in 0..EQ_SECTION_COUNT {
+        for section in 0..EQ_BAND_COUNT {
+            let physical_section = section + BAND_SECTION_OFFSET;
             for channel in 0..2 {
                 let updates: [Option<f32>; 4] =
                     core::array::from_fn(|field| pending[(section * 4 + field) * 2 + channel]);
@@ -1789,9 +1936,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 // The stored band is read by value, so the borrow of the channel ends here and
                 // the cached-design read below can borrow it again.
                 let stored = if channel == 0 {
-                    self.left.targets[track][section]
+                    self.left.targets[track][physical_section]
                 } else {
-                    self.right.targets[track][section]
+                    self.right.targets[track][physical_section]
                 };
                 let mut candidate = stored;
                 for (field, value) in updates.into_iter().enumerate() {
@@ -1805,9 +1952,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 // `Section::target` is what it last returned, so the two are the same bits.
                 let designed = if candidate.same_bits(&stored) {
                     Ok(if channel == 0 {
-                        self.left.target_words(section, track)
+                        self.left.target_words(physical_section, track)
                     } else {
-                        self.right.target_words(section, track)
+                        self.right.target_words(physical_section, track)
                     })
                 } else {
                     candidate.words(sample_rate)
@@ -1815,11 +1962,11 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 match designed {
                     Ok(words) => {
                         if channel == 0 {
-                            self.left.targets[track][section] = candidate;
-                            self.left.start_ramp(section, track, words);
+                            self.left.targets[track][physical_section] = candidate;
+                            self.left.start_ramp(physical_section, track, words);
                         } else {
-                            self.right.targets[track][section] = candidate;
-                            self.right.start_ramp(section, track, words);
+                            self.right.targets[track][physical_section] = candidate;
+                            self.right.start_ramp(physical_section, track, words);
                         }
                     }
                     Err(_) => {
@@ -1859,7 +2006,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
-            // The buffers already hold exactly `+0.0`, which is exactly what the four sections
+            // The buffers already hold exactly `+0.0`, which is exactly what the six sections
             // would have written; the integrators are at a fixed point the previous block
             // measured. Writing nothing is bit-identical, and an all-`+0.0` block is trivially
             // inside the §4.4 bound, so no lane failed.
@@ -1991,9 +2138,12 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// Returns the cascade section and the automatable field index (0 frequency .. 3 shelf slope).
 fn numeric_parameter(parameter_index: usize) -> Option<(usize, usize)> {
     let section = parameter_index / 6;
-    if section >= EQ_SECTION_COUNT || parameter_index % 6 < 2 {
+    if section >= EQ_BAND_COUNT || parameter_index % 6 < 2 {
         return None;
     }
+    // General-band parameter descriptors precede the appended prepared-only cut descriptors. Keep
+    // the returned index in descriptor/general-band order; target access adds the physical HPF
+    // offset explicitly.
     Some((section, parameter_index % 6 - 2))
 }
 
@@ -2006,7 +2156,7 @@ fn lane_index(channel: ParameterChannel) -> Option<usize> {
     }
 }
 
-/// Reads one track's four bands out of a validated initial-value list.
+/// Reads one track's four general bands out of a validated initial-value list.
 ///
 /// The contract validates that the list is exactly one value per parameter per channel, in
 /// descriptor order, before this runs, so the index arithmetic needs no search and no allocation.
@@ -2014,7 +2164,7 @@ fn band_targets(
     values: &[InitialParameterValue],
     channel: usize,
     sample_rate: SampleRateHz,
-) -> Result<[BandTarget; EQ_SECTION_COUNT], EffectPrepareError> {
+) -> Result<[BandTarget; EQ_BAND_COUNT], EffectPrepareError> {
     let mut bands = [BandTarget {
         enabled: false,
         kind: EqBandKind::Bell,
@@ -2022,7 +2172,7 @@ fn band_targets(
         gain: 0.0,
         q: 0.0,
         slope: 0.0,
-    }; EQ_SECTION_COUNT];
+    }; EQ_BAND_COUNT];
     for (section, band) in bands.iter_mut().enumerate() {
         let field = |index: usize| values[(section * 6 + index) * 2 + channel].value;
         *band = BandTarget {
@@ -2042,6 +2192,60 @@ fn band_targets(
     Ok(bands)
 }
 
+/// Reads one dedicated cut's three prepared-only values. The cut is represented by the same
+/// section target used by the general bands, with fixed zero gain and unit shelf slope so the
+/// existing coefficient authority and state machinery remain shared.
+fn cut_target(
+    values: &[InitialParameterValue],
+    channel: usize,
+    sample_rate: SampleRateHz,
+    base: usize,
+    kind: EqBandKind,
+) -> Result<BandTarget, EffectPrepareError> {
+    let field = |parameter: usize| values[parameter * 2 + channel].value;
+    let target = BandTarget {
+        enabled: field(base).to_bits() == 1.0_f32.to_bits(),
+        kind,
+        frequency: field(base + 1),
+        gain: 0.0,
+        q: field(base + 2),
+        slope: 1.0,
+    };
+    target.words(sample_rate).map_err(|_| EffectPrepareError {
+        code: "effect.eq.coefficients",
+    })?;
+    Ok(target)
+}
+
+/// Reads and lays out one track's six physical sections. Parameter order stays the original four
+/// general bands followed by the six appended cut rows; DSP order is HPF, bands 1..4, LPF.
+fn physical_targets(
+    values: &[InitialParameterValue],
+    channel: usize,
+    sample_rate: SampleRateHz,
+) -> Result<[BandTarget; EQ_SECTION_COUNT], EffectPrepareError> {
+    let bands = band_targets(values, channel, sample_rate)?;
+    let hpf = cut_target(
+        values,
+        channel,
+        sample_rate,
+        EQ_BAND_COUNT * 6,
+        EqBandKind::HighPass,
+    )?;
+    let lpf = cut_target(
+        values,
+        channel,
+        sample_rate,
+        EQ_BAND_COUNT * 6 + 3,
+        EqBandKind::LowPass,
+    )?;
+    let mut sections = [hpf; EQ_SECTION_COUNT];
+    sections[HPF_SECTION] = hpf;
+    sections[BAND_SECTION_OFFSET..BAND_SECTION_OFFSET + EQ_BAND_COUNT].copy_from_slice(&bands);
+    sections[LPF_SECTION] = lpf;
+    Ok(sections)
+}
+
 /// Builds a prepared EQ of width `W` from one request per track.
 fn prepare_width<L: Lane, const W: usize>(
     metadata: PreparedEffectMetadata,
@@ -2059,8 +2263,8 @@ fn prepare_width<L: Lane, const W: usize>(
         slope: 0.0,
     }; EQ_SECTION_COUNT]; 2]; W];
     for (track, request) in requests.iter().enumerate() {
-        initial[track][0] = band_targets(request.initial_values, 0, sample_rate)?;
-        initial[track][1] = band_targets(request.initial_values, 1, sample_rate)?;
+        initial[track][0] = physical_targets(request.initial_values, 0, sample_rate)?;
+        initial[track][1] = physical_targets(request.initial_values, 1, sample_rate)?;
     }
     let coefficients = |_| EffectPrepareError {
         code: "effect.eq.coefficients",
@@ -2256,12 +2460,12 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// ramp lands on, assigns `target` over `coef`; how many samples remain is `Channel::remaining`.
 /// So the designed surface for lane `l` of one channel is
 ///
-/// * `sections[s].coef`   -- 4 x 6 words, what this frame uses;
-/// * `sections[s].step`   -- 4 x 6 words, the increment, exactly `+0.0` on a settled lane;
-/// * `sections[s].target` -- 4 x 6 words, where the ramp lands;
-/// * `remaining[s][l]`    -- 4 counters, when it lands.
+/// * `sections[s].coef`   -- 6 x 6 words, what this frame uses;
+/// * `sections[s].step`   -- 6 x 6 words, the increment, exactly `+0.0` on a settled lane;
+/// * `sections[s].target` -- 6 x 6 words, where the ramp lands;
+/// * `remaining[s][l]`    -- 6 counters, when it lands.
 ///
-/// Two channels that agree on all seventy-six of those words produce bit-identical output from
+/// Two channels that agree on all 114 of those words produce bit-identical output from
 /// bit-identical input, and stay in agreement for as long as no per-channel write arrives:
 /// `advance_words` is the same increment applied to the same word, and `snap` assigns the same
 /// target on the same sample.
@@ -2466,11 +2670,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         let bypassed = request.bypassed;
         let left = request.left;
         let right = request.right;
-        for section in 0..EQ_SECTION_COUNT {
-            let left_target = self.left.targets[lane][section];
-            let right_target = self.right.targets[lane][section];
-            let left_words = self.left.target_words(section, lane).to_array();
-            let right_words = self.right.target_words(section, lane).to_array();
+        for (public_section, physical_section) in
+            response::RESPONSE_TO_PHYSICAL.into_iter().enumerate()
+        {
+            let left_target = self.left.targets[lane][physical_section];
+            let right_target = self.right.targets[lane][physical_section];
+            let left_words = self.left.target_words(physical_section, lane).to_array();
+            let right_words = self.right.target_words(physical_section, lane).to_array();
             let mut left_bits = [0_u32; effect_contract::RESPONSE_SNAPSHOT_WORDS];
             let mut right_bits = [0_u32; effect_contract::RESPONSE_SNAPSHOT_WORDS];
             for (destination, source) in left_bits[..left_words.len()].iter_mut().zip(left_words) {
@@ -2480,15 +2686,15 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             {
                 *destination = source.to_bits();
             }
-            left[section] = ResponseSnapshotSection {
-                id: u32::try_from(section + 1).expect("EQ section count fits u32"),
+            left[public_section] = ResponseSnapshotSection {
+                id: u32::try_from(public_section + 1).expect("EQ section count fits u32"),
                 kind: left_target.kind as u32,
                 enabled: left_target.enabled,
                 word_count: u8::try_from(left_words.len()).expect("EQ words fit u8"),
                 words: left_bits,
             };
-            right[section] = ResponseSnapshotSection {
-                id: u32::try_from(section + 1).expect("EQ section count fits u32"),
+            right[public_section] = ResponseSnapshotSection {
+                id: u32::try_from(public_section + 1).expect("EQ section count fits u32"),
                 kind: right_target.kind as u32,
                 enabled: right_target.enabled,
                 word_count: u8::try_from(right_words.len()).expect("EQ words fit u8"),
@@ -2613,7 +2819,13 @@ pub mod corpus;
 /// runtime tuning knob is added to reach it.
 #[cfg(test)]
 mod interleave_identity {
-    use super::{BandTarget, Channel, EQ_SECTION_COUNT, MAX_LANES, corpus, process_channels};
+    use super::{
+        BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
+        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
+        RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
+        corpus, process_channels, process_channels_mono, section_state_is_positive_zero,
+    };
+    use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
 
     /// Frames per case: the corpus length, several blocks' worth of settling.
@@ -2623,7 +2835,7 @@ mod interleave_identity {
     /// never carry the same configuration.
     fn channel<L: Lane, const W: usize>(offset: usize) -> Channel<L, W> {
         let targets: [[BandTarget; EQ_SECTION_COUNT]; W] =
-            core::array::from_fn(|lane| corpus::bands((offset + lane) % corpus::LANES));
+            core::array::from_fn(|lane| corpus::sections((offset + lane) % corpus::LANES));
         Channel::new(targets, corpus::CORPUS_RATE).expect("every corpus row is a legal design")
     }
 
@@ -2659,6 +2871,306 @@ mod interleave_identity {
     /// Raw bits of a block.
     fn bits(samples: &[f32]) -> Vec<u32> {
         samples.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// The four-section oracle that represents the pre-cut prepared cascade.
+    ///
+    /// This intentionally owns only the four original sections and calls the existing
+    /// per-section [`svf_block`] kernel. It is therefore an independent schedule/shape oracle for
+    /// the compatibility claim; a second six-section path would only prove that two new paths
+    /// agree. The physical six-section channel supplies the same settled coefficient/state words
+    /// for sections 1..4, so no filter arithmetic is reimplemented here.
+    fn original_four<L: Lane, const W: usize>(offset: usize) -> [Section<L>; EQ_BAND_COUNT] {
+        let six = channel::<L, W>(offset);
+        core::array::from_fn(|band| six.sections[BAND_SECTION_OFFSET + band])
+    }
+
+    fn process_original_four<L: Lane>(
+        sections: &mut [Section<L>; EQ_BAND_COUNT],
+        io: &mut [f32],
+        frames: usize,
+    ) {
+        for section in sections {
+            svf_block::<L>(io, frames, &section.coef, &mut section.state);
+        }
+    }
+
+    /// Four-band ramp oracle for the one synchronized ramp used below. It mirrors the production
+    /// driver's advance, final snap, and fixed tail without reimplementing coefficient design.
+    fn process_original_four_ramped<L: Lane, const W: usize>(
+        sections: &mut [Section<L>; EQ_BAND_COUNT],
+        io: &mut [f32],
+        frames: usize,
+    ) {
+        for (index, section) in sections.iter_mut().enumerate() {
+            if index == 1 {
+                let ramp = RAMP_SAMPLES as usize - 1;
+                super::advance_words(&mut section.coef, &section.step);
+                lane::kernels::svf_block_ramped::<L>(
+                    &mut io[..ramp * W],
+                    ramp,
+                    &mut section.coef,
+                    &section.step,
+                    ramp - 1,
+                    &mut section.state,
+                );
+                section.coef = section.target;
+                section.step = Default::default();
+                lane::kernels::svf_block::<L>(
+                    &mut io[ramp * W..frames * W],
+                    frames - ramp,
+                    &section.coef,
+                    &mut section.state,
+                );
+            } else {
+                lane::kernels::svf_block::<L>(io, frames, &section.coef, &mut section.state);
+            }
+        }
+    }
+
+    /// The exact signed-zero boundary that a disabled cut must preserve for the old four-band
+    /// schedule. This retained regression records the historical signed-zero compatibility failure
+    /// that the prepared path now fixes with per-lane dry selection.
+    fn all_high_pass_channel<L: Lane, const W: usize>() -> Channel<L, W> {
+        let disabled = BandTarget {
+            enabled: false,
+            kind: EqBandKind::HighPass,
+            frequency: 1_000.0,
+            gain: 0.0,
+            q: 1.0,
+            slope: 1.0,
+        };
+        let live = BandTarget {
+            enabled: true,
+            ..disabled
+        };
+        let mut targets = [disabled; EQ_SECTION_COUNT];
+        for target in targets
+            .iter_mut()
+            .skip(BAND_SECTION_OFFSET)
+            .take(EQ_BAND_COUNT)
+        {
+            *target = live;
+        }
+        Channel::new([targets; W], SampleRateHz(44_100)).expect("legal all-HighPass design")
+    }
+
+    fn original_state_bits<L: Lane>(sections: &[Section<L>; EQ_BAND_COUNT]) -> Vec<u32> {
+        let mut words = [0_u32; EQ_BAND_COUNT * 2 * MAX_LANES];
+        for (index, section) in sections.iter().enumerate() {
+            let base = index * 2 * L::WIDTH;
+            section
+                .state
+                .ic1
+                .store_bits(&mut words[base..base + L::WIDTH]);
+            section
+                .state
+                .ic2
+                .store_bits(&mut words[base + L::WIDTH..base + 2 * L::WIDTH]);
+        }
+        words.to_vec()
+    }
+
+    /// Compares the six-section prepared renderer with the direct pre-cut four-section oracle.
+    ///
+    /// With both dedicated cuts disabled and an admissible finite input, the elision list contains
+    /// exactly the original four physical sections. The output and original-band integrator words
+    /// must remain bit-identical for dual and collapsed mono execution at every launch width,
+    /// including a non-cold state.
+    fn compare_disabled_cuts_to_original_four<L: Lane, const W: usize>(
+        width: &str,
+        case: usize,
+        seeded: bool,
+        mono: bool,
+        refusal_state: bool,
+        negative_zero: bool,
+    ) {
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        let mut four_right = original_four::<L, W>(3);
+        if seeded {
+            for section in 0..EQ_BAND_COUNT {
+                six_left.sections[BAND_SECTION_OFFSET + section].state.ic1 = L::splat(1.0e-40);
+                six_left.sections[BAND_SECTION_OFFSET + section].state.ic2 = L::splat(-1.0e-41);
+                four_left[section].state.ic1 = L::splat(1.0e-40);
+                four_left[section].state.ic2 = L::splat(-1.0e-41);
+                six_right.sections[BAND_SECTION_OFFSET + section].state.ic1 = L::splat(-3.5e-7);
+                six_right.sections[BAND_SECTION_OFFSET + section].state.ic2 = L::splat(9.0e-8);
+                four_right[section].state.ic1 = L::splat(-3.5e-7);
+                four_right[section].state.ic2 = L::splat(9.0e-8);
+            }
+        }
+        if refusal_state {
+            // A restored negative-zero integrator in a live original band refuses elision. The
+            // direct four-section oracle carries the same state, so this still checks old-band
+            // output/state bits while exercising the full six-section fallback.
+            six_left.sections[BAND_SECTION_OFFSET].state.ic1 = L::splat(-0.0);
+            four_left[0].state.ic1 = L::splat(-0.0);
+        }
+        let mut six_left_io = block::<W>(case, 0);
+        let mut six_right_io = block::<W>(case, 3);
+        let mut four_left_io = six_left_io.clone();
+        let mut four_right_io = six_right_io.clone();
+        if negative_zero {
+            six_left_io[0] = -0.0;
+            four_left_io[0] = -0.0;
+        }
+        let kept = if mono {
+            cascade_sections_mono(&six_left, &six_left_io, FRAMES).1
+        } else {
+            cascade_sections(&six_left, &six_right, &six_left_io, &six_right_io, FRAMES).1
+        };
+        if negative_zero || refusal_state {
+            assert_eq!(
+                kept,
+                EQ_SECTION_COUNT,
+                "{width} {mode}: compatibility oracle refusal must retain all six sections",
+                mode = if mono { "mono" } else { "dual" }
+            );
+        }
+        if mono {
+            process_channels_mono(&mut six_left, &mut six_left_io, FRAMES, true);
+            process_original_four(&mut four_left, &mut four_left_io, FRAMES);
+            assert_eq!(
+                bits(&six_left_io),
+                bits(&four_left_io),
+                "{width} mono output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_left.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_left),
+                "{width} mono original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+        } else {
+            process_channels(
+                (&mut six_left, &mut six_right),
+                &mut six_left_io,
+                &mut six_right_io,
+                FRAMES,
+                true,
+            );
+            process_original_four(&mut four_left, &mut four_left_io, FRAMES);
+            process_original_four(&mut four_right, &mut four_right_io, FRAMES);
+            assert_eq!(
+                bits(&six_left_io),
+                bits(&four_left_io),
+                "{width} dual left output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                bits(&six_right_io),
+                bits(&four_right_io),
+                "{width} dual right output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_left.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_left),
+                "{width} dual left original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_right.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_right),
+                "{width} dual right original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+        }
+    }
+
+    /// A signed-zero input refuses elision and therefore follows the established full six-section
+    /// per-section path. The direct four-section oracle remains the compatibility authority for
+    /// settled disabled cuts; this six-versus-six comparison checks only that refusal selects the
+    /// corrected schedule consistently. Compare the stationary refusal with the nonstationary
+    /// reference at every width and for both dual and collapsed mono entry points.
+    fn compare_signed_zero_refusal<L: Lane, const W: usize>(width: &str, mono: bool, plane: usize) {
+        let mut left = block::<W>(0, 0);
+        let mut right = block::<W>(0, 3);
+        if plane == 0 {
+            left[0] = -0.0;
+        } else {
+            right[0] = -0.0;
+        }
+        let kept = if mono {
+            let channel = channel::<L, W>(0);
+            cascade_sections_mono(&channel, &left, FRAMES).1
+        } else {
+            let left_channel = channel::<L, W>(0);
+            let right_channel = channel::<L, W>(3);
+            cascade_sections(&left_channel, &right_channel, &left, &right, FRAMES).1
+        };
+        assert_eq!(
+            kept,
+            EQ_SECTION_COUNT,
+            "{width} {mode} plane={plane}: -0.0 must refuse the shortened cascade",
+            mode = if mono { "mono" } else { "dual" }
+        );
+
+        let mut stationary_left_channel = channel::<L, W>(0);
+        let mut stationary_right_channel = channel::<L, W>(3);
+        let mut reference_left_channel = channel::<L, W>(0);
+        let mut reference_right_channel = channel::<L, W>(3);
+        let mut stationary_left = left.clone();
+        let mut stationary_right = right.clone();
+        let mut reference_left = left;
+        let mut reference_right = right;
+        if mono {
+            process_channels_mono(
+                &mut stationary_left_channel,
+                &mut stationary_left,
+                FRAMES,
+                true,
+            );
+            process_channels_mono(
+                &mut reference_left_channel,
+                &mut reference_left,
+                FRAMES,
+                false,
+            );
+            assert_eq!(
+                bits(&stationary_left),
+                bits(&reference_left),
+                "{width} mono signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                integrators(&stationary_left_channel, &stationary_right_channel),
+                integrators(&reference_left_channel, &reference_right_channel),
+                "{width} mono signed-zero refusal changed state"
+            );
+        } else {
+            process_channels(
+                (&mut stationary_left_channel, &mut stationary_right_channel),
+                &mut stationary_left,
+                &mut stationary_right,
+                FRAMES,
+                true,
+            );
+            process_channels(
+                (&mut reference_left_channel, &mut reference_right_channel),
+                &mut reference_left,
+                &mut reference_right,
+                FRAMES,
+                false,
+            );
+            assert_eq!(
+                bits(&stationary_left),
+                bits(&reference_left),
+                "{width} dual left signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                bits(&stationary_right),
+                bits(&reference_right),
+                "{width} dual right signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                integrators(&stationary_left_channel, &stationary_right_channel),
+                integrators(&reference_left_channel, &reference_right_channel),
+                "{width} dual signed-zero refusal changed state"
+            );
+        }
     }
 
     /// Runs one corpus case at one width down both arms and asserts they are the same bits.
@@ -2738,26 +3250,460 @@ mod interleave_identity {
         }
     }
 
-    /// The depth this gate exercises really is per backend, and really is a divisor of the cascade.
     #[test]
-    fn the_tuned_depth_is_per_backend_and_divides_the_cascade() {
-        for depth in [
-            <f32 as Lane>::SVF_CASCADE_DEPTH,
-            <Simd4 as Lane>::SVF_CASCADE_DEPTH,
-            <Simd8 as Lane>::SVF_CASCADE_DEPTH,
-        ] {
+    fn prepared_hpf_and_last_lpf_are_reached_at_every_backend_width() {
+        fn run<L: Lane, const W: usize>() {
+            for (section, kind, label) in [
+                (HPF_SECTION, EqBandKind::HighPass, "HPF"),
+                (LPF_SECTION, EqBandKind::LowPass, "LPF"),
+            ] {
+                let mut targets = corpus::sections(0);
+                for target in &mut targets {
+                    target.enabled = false;
+                }
+                targets[section] = BandTarget {
+                    enabled: true,
+                    kind,
+                    frequency: 1_000.0,
+                    gain: 0.0,
+                    q: 1.0,
+                    slope: 1.0,
+                };
+                let targets = [targets; W];
+                let mut left_channel =
+                    Channel::<L, W>::new(targets, corpus::CORPUS_RATE).expect("cut design");
+                let mut right_channel =
+                    Channel::<L, W>::new(targets, corpus::CORPUS_RATE).expect("cut design");
+                let mut left = vec![0.0_f32; corpus::FRAMES * W];
+                let mut right = vec![0.0_f32; corpus::FRAMES * W];
+                for lane in 0..W {
+                    left[lane] = 1.0;
+                    right[lane] = 1.0;
+                }
+                let source = left.clone();
+                process_channels(
+                    (&mut left_channel, &mut right_channel),
+                    &mut left,
+                    &mut right,
+                    corpus::FRAMES,
+                    true,
+                );
+                assert!(
+                    left.iter()
+                        .zip(source)
+                        .any(|(actual, input)| { actual.to_bits() != input.to_bits() }),
+                    "the prepared {label} must affect stationary output at width {W}"
+                );
+                assert!(
+                    !section_state_is_positive_zero(&left_channel.sections[section]),
+                    "the prepared {label} must retain state at width {W}"
+                );
+            }
+        }
+
+        run::<f32, 1>();
+        run::<Simd4, 4>();
+        run::<Simd8, 8>();
+    }
+
+    /// Builds a cut-only matrix. The four original bands are disabled so each scalar lane can
+    /// independently exercise neither, HPF-only, LPF-only, or both cuts; the two channels use
+    /// different masks and cutoff/Q words. The enabled LPF is deliberately nontrivial.
+    fn mixed_cut_channel<L: Lane, const W: usize>(
+        statuses: [u8; W],
+        offset: usize,
+        right: bool,
+    ) -> Channel<L, W> {
+        let targets: [[BandTarget; EQ_SECTION_COUNT]; W] = core::array::from_fn(|lane| {
+            let track = (offset + lane) % corpus::LANES;
+            let mut sections = corpus::sections(track);
+            for section in &mut sections[BAND_SECTION_OFFSET..BAND_SECTION_OFFSET + EQ_BAND_COUNT] {
+                section.enabled = false;
+            }
+            let status = statuses[lane];
+            sections[HPF_SECTION] = BandTarget {
+                enabled: status & 1 != 0,
+                kind: EqBandKind::HighPass,
+                frequency: 180.0 + track as f32 * 97.0 + if right { 31.0 } else { 0.0 },
+                gain: 0.0,
+                q: 0.35 + track as f32 * 0.17,
+                slope: 1.0,
+            };
+            sections[LPF_SECTION] = BandTarget {
+                enabled: status & 2 != 0,
+                kind: EqBandKind::LowPass,
+                frequency: 6_000.0 + track as f32 * 1_100.0 + if right { 47.0 } else { 0.0 },
+                gain: 0.0,
+                q: 0.55 + track as f32 * 0.11,
+                slope: 1.0,
+            };
+            sections
+        });
+        Channel::new(targets, corpus::CORPUS_RATE).expect("mixed cut design")
+    }
+
+    fn channel_lane_state_bits<L: Lane, const W: usize>(
+        channel: &Channel<L, W>,
+        lane: usize,
+    ) -> Vec<u32> {
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+        channel.state_bits(&mut words);
+        let mut out = Vec::with_capacity(EQ_SECTION_COUNT * 2);
+        for section in 0..EQ_SECTION_COUNT {
+            let base = section * 2 * W;
+            out.push(words[base + lane]);
+            out.push(words[base + W + lane]);
+        }
+        out
+    }
+
+    fn mixed_cut_scalar_parity<L: Lane, const W: usize>(width: &str) {
+        let left_statuses = core::array::from_fn(|lane| [0_u8, 1, 2, 3, 3, 2, 1, 0][lane]);
+        let right_statuses = core::array::from_fn(|lane| [3_u8, 2, 1, 0, 1, 3, 0, 2][lane]);
+        let mut bank_left = mixed_cut_channel::<L, W>(left_statuses, 0, false);
+        let mut bank_right = mixed_cut_channel::<L, W>(right_statuses, 3, true);
+        let mut scalar_left: [Channel<f32, 1>; W] = core::array::from_fn(|lane| {
+            mixed_cut_channel::<f32, 1>([left_statuses[lane]], lane, false)
+        });
+        let mut scalar_right: [Channel<f32, 1>; W] = core::array::from_fn(|lane| {
+            mixed_cut_channel::<f32, 1>([right_statuses[lane]], lane + 3, true)
+        });
+        const FRAMES: usize = 11;
+        let mut left = vec![0.0_f32; FRAMES * W];
+        let mut right = vec![0.0_f32; FRAMES * W];
+        for frame in 0..FRAMES {
+            for lane in 0..W {
+                let sample = 0.000_001 * (1.0 + frame as f32 * 0.25 + lane as f32 * 0.5);
+                left[frame * W + lane] = sample;
+                right[frame * W + lane] = -sample * 0.7;
+            }
+        }
+        let source = left.clone();
+        let right_source = right.clone();
+        process_channels(
+            (&mut bank_left, &mut bank_right),
+            &mut left,
+            &mut right,
+            FRAMES,
+            true,
+        );
+
+        for lane in 0..W {
+            let mut scalar_left_io = (0..FRAMES)
+                .map(|frame| source[frame * W + lane])
+                .collect::<Vec<_>>();
+            let mut scalar_right_io = (0..FRAMES)
+                .map(|frame| right_source[frame * W + lane])
+                .collect::<Vec<_>>();
+            process_channels(
+                (&mut scalar_left[lane], &mut scalar_right[lane]),
+                &mut scalar_left_io,
+                &mut scalar_right_io,
+                FRAMES,
+                true,
+            );
+            for frame in 0..FRAMES {
+                assert_eq!(
+                    left[frame * W + lane].to_bits(),
+                    scalar_left_io[frame].to_bits(),
+                    "{width} mixed cut left lane {lane} frame {frame}; bank={:#010x} scalar={:#010x}",
+                    left[frame * W + lane].to_bits(),
+                    scalar_left_io[frame].to_bits()
+                );
+                assert_eq!(
+                    right[frame * W + lane].to_bits(),
+                    scalar_right_io[frame].to_bits(),
+                    "{width} mixed cut right lane {lane} frame {frame}"
+                );
+            }
             assert_eq!(
-                EQ_SECTION_COUNT % depth,
-                0,
-                "#163 phase 3: a cascade depth that does not divide {EQ_SECTION_COUNT} \
-                 sections would silently drop sections"
+                channel_lane_state_bits(&bank_left, lane),
+                channel_lane_state_bits(&scalar_left[lane], 0),
+                "{width} mixed cut left state lane {lane}"
+            );
+            assert_eq!(
+                channel_lane_state_bits(&bank_right, lane),
+                channel_lane_state_bits(&scalar_right[lane], 0),
+                "{width} mixed cut right state lane {lane}"
             );
         }
-        assert_ne!(
-            <f32 as Lane>::SVF_CASCADE_DEPTH,
-            <Simd8 as Lane>::SVF_CASCADE_DEPTH,
-            "#163 phase 3: the constant is tuned per backend, not shared"
+        // At least one enabled final LPF must have changed the signal; this catches a dropped
+        // remainder section even when all scalar lanes happen to agree with their bank lane.
+        assert!(
+            (0..W).any(|lane| right_statuses[lane] & 2 != 0
+                && (0..FRAMES).any(|frame| {
+                    right[frame * W + lane].to_bits() != right_source[frame * W + lane].to_bits()
+                })),
+            "{width} mixed cut matrix must execute its nontrivial final LPF"
         );
+        // One scalar track after a complete bank is the corresponding tail shape.
+        let mut tail_channel = mixed_cut_channel::<f32, 1>([3], W, false);
+        let mut tail = (0..FRAMES)
+            .map(|frame| 0.000_001 * (1.0 + frame as f32 * 0.25 + W as f32 * 0.5))
+            .collect::<Vec<_>>();
+        let tail_source = tail.clone();
+        process_channels_mono(&mut tail_channel, &mut tail, FRAMES, true);
+        assert!(
+            tail.iter()
+                .zip(tail_source)
+                .any(|(output, input)| output.to_bits() != input.to_bits()),
+            "{width} scalar tail must execute both dedicated cuts"
+        );
+    }
+
+    #[test]
+    fn mixed_dedicated_cut_masks_match_scalar_lanes_bit_for_bit() {
+        mixed_cut_scalar_parity::<Simd4, 4>("Simd4");
+        mixed_cut_scalar_parity::<Simd8, 8>("Simd8");
+    }
+
+    /// A general-band ramp must keep the old four-band oracle in lockstep while dedicated cuts stay
+    /// disabled. The six-section consumer is explicitly forced onto the fallback by `remaining`.
+    fn disabled_cuts_general_ramp_parity<L: Lane, const W: usize>(width: &str) {
+        const FRAMES: usize = 80;
+        const RAMP_SECTION: usize = BAND_SECTION_OFFSET + 1;
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        let mut four_right = original_four::<L, W>(3);
+        for lane in 0..W {
+            let left_target = corpus::bands((lane + 3) % corpus::LANES)[1]
+                .words(corpus::CORPUS_RATE)
+                .expect("ramp target");
+            let right_target = corpus::bands((lane + 6) % corpus::LANES)[1]
+                .words(corpus::CORPUS_RATE)
+                .expect("ramp target");
+            six_left.start_ramp(RAMP_SECTION, lane, left_target);
+            six_right.start_ramp(RAMP_SECTION, lane, right_target);
+        }
+        four_left[1] = six_left.sections[RAMP_SECTION];
+        four_right[1] = six_right.sections[RAMP_SECTION];
+        let mut six_left_io = vec![0.0_f32; FRAMES * W];
+        let mut six_right_io = vec![0.0_f32; FRAMES * W];
+        for frame in 0..FRAMES {
+            for lane in 0..W {
+                let sample = 0.02 + frame as f32 * 0.0003 + lane as f32 * 0.004;
+                six_left_io[frame * W + lane] = sample;
+                six_right_io[frame * W + lane] = -sample * 0.8;
+            }
+        }
+        let mut four_left_io = six_left_io.clone();
+        let mut four_right_io = six_right_io.clone();
+        assert!(!six_left.no_ramp_in_flight() || !six_right.no_ramp_in_flight());
+        process_channels(
+            (&mut six_left, &mut six_right),
+            &mut six_left_io,
+            &mut six_right_io,
+            FRAMES,
+            false,
+        );
+        process_original_four_ramped::<L, W>(&mut four_left, &mut four_left_io, FRAMES);
+        process_original_four_ramped::<L, W>(&mut four_right, &mut four_right_io, FRAMES);
+        assert_eq!(
+            bits(&six_left_io),
+            bits(&four_left_io),
+            "{width} ramped old-four left output"
+        );
+        assert_eq!(
+            bits(&six_right_io),
+            bits(&four_right_io),
+            "{width} ramped old-four right output"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_left.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_left),
+            "{width} ramped old-four left original state"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_right.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_right),
+            "{width} ramped old-four right original state"
+        );
+    }
+
+    #[test]
+    fn disabled_cuts_with_an_original_band_ramp_match_the_four_section_oracle() {
+        disabled_cuts_general_ramp_parity::<f32, 1>("Scalar");
+        disabled_cuts_general_ramp_parity::<Simd4, 4>("Simd4");
+        disabled_cuts_general_ramp_parity::<Simd8, 8>("Simd8");
+    }
+
+    #[test]
+    fn resident_sizes_are_measured_separately_from_serialized_state() {
+        println!(
+            "resident_size Channel width=1 bytes={}",
+            core::mem::size_of::<Channel<f32, 1>>()
+        );
+        println!(
+            "resident_size Channel width=4 bytes={}",
+            core::mem::size_of::<Channel<Simd4, 4>>()
+        );
+        println!(
+            "resident_size Channel width=8 bytes={}",
+            core::mem::size_of::<Channel<Simd8, 8>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=1 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<f32, 1>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=4 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<Simd4, 4>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=8 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<Simd8, 8>>()
+        );
+        println!("serialized_state_bytes total={}", STATE_SIZES.total());
+    }
+
+    #[test]
+    fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
+        for width in [1_usize, 4, 8] {
+            match width {
+                1 => tiny_disabled_cut_state::<f32, 1>("Scalar"),
+                4 => tiny_disabled_cut_state::<Simd4, 4>("Simd4"),
+                _ => tiny_disabled_cut_state::<Simd8, 8>("Simd8"),
+            }
+        }
+    }
+
+    fn tiny_disabled_cut_state<L: Lane, const W: usize>(width: &str) {
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        six_left.sections[HPF_SECTION].state.ic1 = L::splat(1.0e-30);
+        let mut left = vec![0.000_001_f32; 9 * W];
+        let mut right = vec![-0.000_002_f32; 9 * W];
+        let mut old_left = left.clone();
+        assert_eq!(
+            cascade_sections(&six_left, &six_right, &left, &right, 9).1,
+            EQ_SECTION_COUNT,
+            "{width} restored tiny disabled HPF state must refuse elision"
+        );
+        process_channels(
+            (&mut six_left, &mut six_right),
+            &mut left,
+            &mut right,
+            9,
+            true,
+        );
+        process_original_four(&mut four_left, &mut old_left, 9);
+        assert_eq!(
+            bits(&left),
+            bits(&old_left),
+            "{width} tiny HPF state left output"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_left.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_left),
+            "{width} tiny HPF state left original state"
+        );
+        let hpf_state = channel_lane_state_bits(&six_left, 0);
+        assert_eq!(
+            hpf_state[0], 0,
+            "{width} executed disabled HPF flushes its restored tiny state"
+        );
+    }
+
+    #[test]
+    fn disabled_cuts_match_the_full_six_section_reference() {
+        for width in [1_usize, 4, 8] {
+            match width {
+                1 => compare::<f32, 1>("Scalar-disabled-cuts", 0, false),
+                4 => compare::<Simd4, 4>("Simd4-disabled-cuts", 0, false),
+                _ => compare::<Simd8, 8>("Simd8-disabled-cuts", 0, false),
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_cuts_preserve_original_band_bits_against_a_direct_four_section_oracle() {
+        for seeded in [false, true] {
+            for refusal_state in [false, true] {
+                for negative_zero in [false, true] {
+                    for case in [0_usize, 2] {
+                        for mono in [false, true] {
+                            compare_disabled_cuts_to_original_four::<f32, 1>(
+                                "Scalar",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                            compare_disabled_cuts_to_original_four::<Simd4, 4>(
+                                "Simd4",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                            compare_disabled_cuts_to_original_four::<Simd8, 8>(
+                                "Simd8",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle() {
+        let mut prepared = all_high_pass_channel::<f32, 1>();
+        let mut oracle = core::array::from_fn(|band| prepared.sections[BAND_SECTION_OFFSET + band]);
+        let mut prepared_io = vec![-0.0_f32];
+        let mut oracle_io = prepared_io.clone();
+
+        assert_eq!(
+            cascade_sections_mono(&prepared, &prepared_io, 1).1,
+            EQ_SECTION_COUNT,
+            "signed-zero input must retain the full prepared schedule while testing the oracle"
+        );
+        process_channels_mono(&mut prepared, &mut prepared_io, 1, true);
+        process_original_four(&mut oracle, &mut oracle_io, 1);
+
+        assert_eq!(
+            prepared_io[0].to_bits(),
+            oracle_io[0].to_bits(),
+            "all-HighPass signed-zero compatibility mismatch: prepared={:#010x}, four={:#010x}",
+            prepared_io[0].to_bits(),
+            oracle_io[0].to_bits()
+        );
+    }
+
+    #[test]
+    fn signed_zero_refusal_preserves_the_full_six_section_bits() {
+        for mono in [false, true] {
+            for plane in [0_usize, 1] {
+                if mono && plane == 1 {
+                    continue;
+                }
+                compare_signed_zero_refusal::<f32, 1>("Scalar", mono, plane);
+                compare_signed_zero_refusal::<Simd4, 4>("Simd4", mono, plane);
+                compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
+            }
+        }
+    }
+
+    /// Six physical sections use the same effective stationary depth-two pass on every backend.
+    #[test]
+    fn the_tuned_depth_is_per_backend_and_divides_the_cascade() {
+        assert_eq!(EQ_SECTION_COUNT % EFFECTIVE_CASCADE_DEPTH, 0);
+        assert_eq!(EFFECTIVE_CASCADE_DEPTH, 2);
     }
 }
 
@@ -2765,11 +3711,11 @@ mod interleave_identity {
 ///
 /// The oracle is the one [`interleave_identity`] already uses and for the same reason: the
 /// `stationary = false` arm of [`process_channels`] is [`Channel::process_block`], which runs all
-/// four sections through the per-section path and knows nothing about elision. So an equality
+/// six sections through the per-section path and knows nothing about elision. So an equality
 /// against it is an equality against the code the EQ ran before this existed, not against a
 /// re-transcription of it -- and no runtime knob is added to reach either arm.
 ///
-/// What is covered: every live/dead subset of the four sections, both channels agreeing and
+/// What is covered: every live/dead subset of the six sections, both channels agreeing and
 /// disagreeing, at all three widths, cold and with seeded subnormal-adjacent state; the three
 /// refusal legs of the gate (`-0.0` input, a non-`+0.0` state in an elided section, a `-0.0`
 /// integrator in a live one) and the magnitude ceiling; per-lane disagreement inside one section;
@@ -2777,13 +3723,13 @@ mod interleave_identity {
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES, RAMP_SAMPLES,
-        cascade_sections, corpus, process_channels,
+        BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES,
+        RAMP_SAMPLES, cascade_sections, corpus, process_channels,
     };
     use lane::{Lane, Simd4, Simd8};
 
     const FRAMES: usize = corpus::FRAMES;
-    /// Every subset of the four cascade positions, as a bitmask of *live* sections.
+    /// Every subset of the six cascade positions, as a bitmask of *live* sections.
     const MASKS: core::ops::Range<u8> = 0..(1 << EQ_SECTION_COUNT);
 
     /// A channel whose section `s` is a real corpus band when `live` has bit `s` set, and the
@@ -2794,7 +3740,7 @@ mod elision {
     /// same words a session with a disabled band prepares.
     fn channel<L: Lane, const W: usize>(offset: usize, live: u8) -> Channel<L, W> {
         let targets: [[BandTarget; EQ_SECTION_COUNT]; W] = core::array::from_fn(|lane| {
-            let mut bands = corpus::bands((offset + lane) % corpus::LANES);
+            let mut bands = corpus::sections((offset + lane) % corpus::LANES);
             for (section, band) in bands.iter_mut().enumerate() {
                 band.enabled = live & (1 << section) != 0;
             }
@@ -2941,7 +3887,7 @@ mod elision {
             for right_live in MASKS {
                 let ran = compare::<Simd4, 4>("Simd4", 0, left_live, right_live, false);
                 let live = (left_live | right_live).count_ones() as usize;
-                let depth = <Simd4 as Lane>::SVF_CASCADE_DEPTH;
+                let depth = EFFECTIVE_CASCADE_DEPTH;
                 let expected = live.div_ceil(depth) * depth;
                 assert_eq!(
                     ran,
@@ -2971,8 +3917,8 @@ mod elision {
                  {EQ_SECTION_COUNT} sections"
             );
         }
-        // Three live sections cannot be shortened at depth two: the list has to divide by the
-        // depth, and paying one identity section is what keeps a single kernel instantiation.
+        // Three live sections round up to four at depth two: the list has to divide by the depth,
+        // and paying one identity section keeps a single kernel instantiation.
         let left_channel = channel::<Simd8, 8>(0, 0b0111);
         let right_channel = channel::<Simd8, 8>(3, 0b0111);
         assert_eq!(
@@ -2982,15 +3928,16 @@ mod elision {
                 &block::<8>(0, 0),
                 &block::<8>(0, 3)
             ),
-            EQ_SECTION_COUNT,
-            "three live sections round up to the whole cascade at depth two"
+            4,
+            "three live sections round up to four at depth two"
         );
     }
 
     /// A section that is identity on some lanes and live on others is not elidable.
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
-        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] = core::array::from_fn(corpus::bands);
+        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] =
+            core::array::from_fn(corpus::sections);
         for bands in &mut targets {
             for band in bands.iter_mut() {
                 band.enabled = false;
@@ -3161,7 +4108,7 @@ mod elision {
                     &mut left,
                     &mut right,
                     FRAMES,
-                    ([0, 1, 2, 3], 0),
+                    ([0, 1, 2, 3, 4, 5], 0),
                 );
             } else {
                 process_channels(

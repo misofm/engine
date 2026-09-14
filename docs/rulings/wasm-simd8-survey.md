@@ -120,6 +120,12 @@ named gate rather than a warning.
 
 ## `SVF_CASCADE_DEPTH` at the new width
 
+**#805 applicability.** The four-section EQ shape described by this survey is its historical
+workload. The current prepared EQ has six physical sections (HPF, four general bands, LPF) and its
+local stationary dispatch is fixed at effective depth 2. The wasm measurements below remain
+historical and make no six-section timing claim; historical floor values elsewhere in this survey
+remain tied to that four-section workload.
+
 `Lane::SVF_CASCADE_DEPTH` is `4` for the scalar oracle and **`2` for both `Simd4` and `Simd8`**
 (`crates/lane/src/wide_impl.rs:32`, the fourth macro argument, instantiated in
 `simd4.rs` and `simd8.rs`). It was fixed by the B2 sweep (`crates/lane/tests/
@@ -132,8 +138,8 @@ that is also true of the second, and the B2 sweep cannot be re-run to find out: 
 that builds a `std::time::Instant`, which `wasm32-unknown-unknown` cannot construct — the same
 blocker `docs/rulings/wasm-kernel-timing-interim.md` recorded for the whole kernel-timing family.
 
-Concretely, at the standing fixture the EQ keeps two of four sections
-(`docs/rulings/effect-floor-accounting.md`, EQ inventory: `live.div_ceil(depth) * depth = 2`), so
+Concretely, in this survey's historical standing fixture the EQ keeps two of four sections
+(`docs/rulings/effect-floor-accounting.md`, historical EQ inventory: `live.div_ceil(depth) * depth = 2`), so
 the kernel runs one pass of `svf_cascade_interleaved::<L, S = 2, D = 2>`. Its loop-carried live set
 is `S * D * 2 = 8` integrator vectors plus `S * D = 4` hoisted `nc1` vectors — **twelve** vectors,
 which is twelve `v128` at W4 and **twenty-four** at W8, before `svf_step`'s five temporaries and

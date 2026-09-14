@@ -50,6 +50,18 @@ fn configured(track: usize) -> Vec<effect_contract::InitialParameterValue> {
     configured
 }
 
+/// A prepared-only LPF with every original band and the HPF disabled. This isolates the final
+/// physical section so a mono collapse regression cannot pass by filtering only the first section.
+fn configured_lpf() -> Vec<effect_contract::InitialParameterValue> {
+    let mut configured = values();
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(&mut configured, 27, channel, 1.0);
+        set_initial(&mut configured, 28, channel, 1_000.0);
+        set_initial(&mut configured, 29, channel, 0.7);
+    }
+    configured
+}
+
 /// Adversarial content: `-0.0`, both zeroes and ordinary signal, repeating every five frames.
 ///
 /// No subnormals: the cascade's identity-elision gate refuses a block that carries one, so a
@@ -132,6 +144,22 @@ fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNat
             requests: &requests,
         })
         .expect("valid bank request")
+        .expect("the native width must bind")
+}
+
+fn bind_lpf(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNativeEffectBank> {
+    let values_by_track: Vec<_> = (0..lanes).map(|_| configured_lpf()).collect();
+    let requests: Vec<_> = values_by_track
+        .iter()
+        .map(|values| request(values, false))
+        .collect();
+    ParametricEqFactory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+        })
+        .expect("valid LPF bank request")
         .expect("the native width must bind")
 }
 
@@ -270,4 +298,65 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             }
         }
     }
+}
+
+/// The final LPF remains in the mono-collapse body and affects the gathered left plane.
+#[test]
+fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let mut dual = bind_lpf(width, backend, lanes);
+    let mut collapsed = bind_lpf(width, backend, lanes);
+    let idle = vec![0_u32; lanes + 1];
+    let mut dual_left = vec![0.0_f32; FRAMES * lanes];
+    let mut dual_right = vec![0.0_f32; FRAMES * lanes];
+    for lane in 0..lanes {
+        dual_left[lane] = 1.0;
+        dual_right[lane] = 1.0;
+    }
+    let input = dual_left.clone();
+    let mut collapsed_left = input.clone();
+    let mut stale_right = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
+    run_block(
+        dual.as_mut(),
+        &mut dual_left,
+        &mut dual_right,
+        width,
+        0,
+        &[],
+        &idle,
+        false,
+    );
+    run_block(
+        collapsed.as_mut(),
+        &mut collapsed_left,
+        &mut stale_right,
+        width,
+        0,
+        &[],
+        &idle,
+        true,
+    );
+    for (word, (collapsed_word, dual_word)) in
+        collapsed_left.iter().zip(dual_left.iter()).enumerate()
+    {
+        assert_eq!(
+            collapsed_word.to_bits(),
+            dual_word.to_bits(),
+            "mono LPF collapse differs from dual left at word {word}"
+        );
+    }
+    assert!(
+        dual_left
+            .iter()
+            .zip(input.iter())
+            .any(|(output, input)| output.to_bits() != input.to_bits()),
+        "the final LPF must affect a collapsed impulse"
+    );
+    assert!(
+        dual_left.iter().all(|sample| sample.is_finite()),
+        "the collapsed final LPF must remain finite"
+    );
 }

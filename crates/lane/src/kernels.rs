@@ -190,6 +190,79 @@ pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
 ) {
+    svf_cascade_interleaved_impl(io, frames, c, s, UnmaskedOutput);
+}
+
+/// [`svf_cascade_interleaved`] with a bitwise per-lane dry-output selection for each section.
+///
+/// The recurrence and its state updates are exactly the same as the unmasked kernel. For each
+/// frame, `dry_masks[stream][section]` selects the section input `x` when set and the ordinary SVF
+/// output when clear. Selection happens at the section boundary, before the selected value feeds
+/// the next section, so the dry input reaches that section with its bits intact. Downstream
+/// processing then applies normally. Both arms are evaluated; an executed dry section therefore
+/// retains the existing state evolution, including its `flush` behavior.
+///
+/// Masks must be canonical [`Lane::Mask`] values produced by the trait comparisons and mask
+/// combinators. The array shape is fixed by the prepared cascade, and this function adds no
+/// render-time allocation or scratch storage.
+#[inline(always)]
+pub fn svf_cascade_interleaved_with_dry_masks<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    dry_masks: &[[L::Mask; D]; S],
+) {
+    svf_cascade_interleaved_impl(io, frames, c, s, MaskedCascadeOutput { masks: dry_masks });
+}
+
+/// The output policy is a zero-cost static choice: `UnmaskedOutput` is the original arithmetic,
+/// while the two masked output policies add only their required bitwise selection.
+trait SvfOutput<L: Lane> {
+    fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L;
+}
+
+struct UnmaskedOutput;
+
+impl<L: Lane> SvfOutput<L> for UnmaskedOutput {
+    #[inline(always)]
+    fn choose(&self, _dry: L, wet: L, _stream: usize, _section: usize) -> L {
+        wet
+    }
+}
+
+struct MaskedCascadeOutput<'a, L: Lane, const S: usize, const D: usize> {
+    masks: &'a [[L::Mask; D]; S],
+}
+
+impl<L: Lane, const S: usize, const D: usize> SvfOutput<L> for MaskedCascadeOutput<'_, L, S, D> {
+    #[inline(always)]
+    fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L {
+        L::select(self.masks[stream][section], dry, wet)
+    }
+}
+
+struct MaskedBlockOutput<L: Lane> {
+    mask: L::Mask,
+}
+
+impl<L: Lane> SvfOutput<L> for MaskedBlockOutput<L> {
+    #[inline(always)]
+    fn choose(&self, dry: L, wet: L, _stream: usize, _section: usize) -> L {
+        L::select(self.mask, dry, wet)
+    }
+}
+
+/// Shared cascade body. `M` is monomorphized, so old callers retain the original arithmetic
+/// without a select and the additive entrypoint gets one boundary select per section.
+#[inline(always)]
+fn svf_cascade_interleaved_impl<L: Lane, const S: usize, const D: usize, M: SvfOutput<L>>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    output: M,
+) {
     let width = L::WIDTH;
     let span = frames * width;
     debug_assert!(io.iter().all(|block| block.len() == span));
@@ -213,9 +286,12 @@ pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
                     coefficients.a3,
                     &mut state[stream][section],
                 );
-                x = coefficients
+                let wet = coefficients
                     .m2
                     .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
+                // The output policy is statically monomorphized. Masked policies select after
+                // the recurrence, even for a dry lane, to retain its state updates.
+                x = output.choose(x, wet, stream, section);
             }
             x.store(slot);
         }
@@ -301,13 +377,56 @@ pub fn svf_block_ramped<L: Lane>(
     ramp_frames: usize,
     s: &mut SvfState<L>,
 ) {
+    svf_block_ramped_impl(io, frames, c, step, ramp_frames, s, UnmaskedOutput);
+}
+
+/// [`svf_block_ramped`] with a bitwise per-lane dry-output selection.
+///
+/// The existing recurrence and current-then-advance ramp rule are unchanged. On every frame the
+/// selected dry lane stores its input bits, while its state still follows [`svf_step`]. The mask is
+/// constant for this block/segment; callers that split a ramp can provide a newly derived mask for
+/// each segment. `ramp_frames = 0` is the stationary masked section case.
+#[inline(always)]
+pub fn svf_block_ramped_with_dry_mask<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &mut SvfCoef<L>,
+    step: &SvfCoefStep<L>,
+    ramp_frames: usize,
+    s: &mut SvfState<L>,
+    dry_mask: L::Mask,
+) {
+    svf_block_ramped_impl(
+        io,
+        frames,
+        c,
+        step,
+        ramp_frames,
+        s,
+        MaskedBlockOutput { mask: dry_mask },
+    );
+}
+
+/// Shared ramp body. `M` is monomorphized, so the original entrypoint retains its unmasked
+/// arithmetic and the additive entrypoint adds only one output selection per frame.
+#[inline(always)]
+fn svf_block_ramped_impl<L: Lane, M: SvfOutput<L>>(
+    io: &mut [f32],
+    frames: usize,
+    c: &mut SvfCoef<L>,
+    step: &SvfCoefStep<L>,
+    ramp_frames: usize,
+    s: &mut SvfState<L>,
+    output: M,
+) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let mut state = *s;
     for (index, frame) in io.chunks_exact_mut(L::WIDTH).enumerate() {
         let nc1 = c.c1.neg();
         let v0 = L::load(frame);
         let (v1, v2) = svf_step(v0, nc1, c.a2, c.a3, &mut state);
-        let y = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
+        let wet = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
+        let y = output.choose(v0, wet, 0, 0);
         y.store(frame);
         if index < ramp_frames {
             c.c1 = c.c1.add(step.c1);

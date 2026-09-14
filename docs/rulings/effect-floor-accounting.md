@@ -32,8 +32,9 @@ the derivation and are ruled against below, with the evidence:
 Both are recorded here rather than quietly worked around, because a floor that agrees with an
 expectation it cannot reproduce is not a measurement.
 
-**Current-lowering recount (#368).** The live authorities now use compressor **81.5** lane-ops,
-limiter **129.5**, EQ **51**, and builtins **69**. x86 and wasm max/min are one lane-op, the shared
+**Current-lowering recount (#368); #805 masked stationary EQ update.** The live authorities now
+use compressor **81.5** lane-ops, limiter **129.5**, EQ **53**, and builtins **69**. x86 and wasm
+max/min are one lane-op, the shared
 stereo links retain their fractional half-op accounting, and `exp2_int_in_range` is the two-op
 synthesis established by #367. The old compressor and limiter values remain below only where they
 describe dated measurements or disassembly; they are explicitly historical.
@@ -197,29 +198,97 @@ They disagree about how much it costs to compute it, and that disagreement is th
 ## EQ inventory
 
 Source: `crates/parametric-eq/src/lib.rs` and the shared
-`crates/lane/src/kernels.rs` SVF. The standing fixture declares band 1 only on all 64
-tracks; the other three of `EQ_SECTION_COUNT = 4` take the descriptor default `enabled = 0.0`
-and design to `EqSvfWords::IDENTITY`. Round 1's elision keeps `live.div_ceil(depth) * depth` = 2
-sections at `SVF_CASCADE_DEPTH = 2`, which is the crate's own pinned case for this fixture. Per
+`crates/lane/src/kernels.rs` SVF. The prepared EQ has six physical cascade sections in render
+order: dedicated HPF, the four original general bands, and dedicated LPF. The public general-band
+count remains four; the dedicated cuts are prepared-only and default disabled. The standing fixture
+still has one active general band, with the other five physical sections at the identity. The
+stationary EQ path pins a local effective cascade depth of 2 in both its dual and mono forms; this
+is an EQ dispatch choice and does not change `Lane::SVF_CASCADE_DEPTH` for other kernels. Per
 lane-sample:
 
 | item | lane-ops |
 |---|---:|
 | `svf_step`: `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines with `flush` 10 | 19 |
 | output mix `m2.fma(v2, m1.fma(v1, m0.mul(x)))` | 5 |
-| **one section** | **24** |
-| two kept sections | 48 |
+| `Lane::select(dry, x, wet)` output selection | 1 |
+| **one executed section** | **25** |
+| two kept sections | 50 |
 | 4.4 boundary scan | 3 |
-| **total** | **51** |
+| **total** | **53** |
 
 The block-data elision gate (`block_admits_elision`) adds five integer comparisons per lane-sample
 and is not counted as arithmetic: it is a guard on the optimisation, contends for the integer
 pipes rather than the FP ones, and would disappear with the optimisation.
 
 **The section count here is workload-dependent in a way the builtins' is not**, and the floor is
-stated per kept section: `24 x kept + 3`, where `kept = ceil(live / 2) * 2` and `live` is the
-number of enabled bands. At the standing fixture's one live band, `kept = 2` and the floor is 51;
-un-elided at four sections it would be 99.
+stated per kept section. For an **admitted stationary elision plan**, `active` nonidentity physical
+sections use the local depth-2 dispatch:
+
+`floor_lane_ops(active) = 25 * ceil(active / 2) * 2 + 3`, for `active` in `0..=6`.
+
+This is a source operation count for the simple masked stationary cascade, not a timing
+measurement. Mask construction from coefficient words and remaining counters is a bounded
+block/segment control cost outside the per-sample arithmetic. Ramped paths retain their existing
+coefficient-add costs and add the dedicated-cut output selections; if a shipped specialization
+removes a redundant select, this inventory must follow that implementation.
+
+| active physical sections | kept sections | lane-ops floor |
+|---:|---:|---:|
+| 0 | 0 | 3 |
+| 1–2 | 2 | 53 |
+| 3–4 | 4 | 103 |
+| 5–6 | 6 | 153 |
+
+`active` counts physical sections whose current coefficient words are nonidentity for any required
+bank lane/channel; it is not a user-enabled-control count. Mono counts the selected channel. At
+the standing fixture's one active general band, `kept = 2` and the floor is 53. A full six-section
+pass is 153. `tools/bench/src/floor.rs` and
+`scripts/console-benchmark-record-lib.jq` are pinned at 53 for the standing workload; these values
+move with the source inventory and do not claim a new timing result.
+
+### Prepared state accounting
+
+Each physical section contributes 19 little-endian `u32` words to one channel's lane payload.
+Six sections are 114 words, or 456 bytes, per channel lane. The shared two-word header is 8 bytes;
+the serialized left-plus-right payload is therefore `8 + 456 + 456 = 920` bytes. These are
+serialized state sizes, not resident Rust object sizes.
+
+The version-1 layout keeps exact lengths and the stamped data-word count (228), so the former
+304-byte channel shape is rejected before restore writes anything. The resident change is recorded
+as a structural estimate: each channel's section-indexed arrays (`sections: [Section; 4]`,
+`remaining: [[u32; W]; 4]`, `targets: [[BandTarget; 4]; W]`, and `identity: [bool; 4]`) gain two
+physical-section entries, and the prepared `initial` target storage gains two entries per channel
+and lane. Target-specific resident memory must come from
+the source type's `size_of` and allocator accounting; neither the two-entry deltas nor the payload
+values above are measured resident allocation sizes. The four-general-band automation scratch
+remains four-band-sized because
+the two dedicated cuts are prepared-only.
+
+Native x86-64 `size_of` recount at #805's final compatibility checkpoint:
+
+| width | `Channel` bytes | `PreparedParametricEq` bytes |
+|---:|---:|---:|
+| 1 | 656 | 1832 |
+| 4 | 2608 | 6608 |
+| 8 | 5216 | 12992 |
+
+These are target-specific Rust object sizes, excluding allocator overhead. The existing
+`maximum_effect_state_bytes` host cap sums declared serialized state (920 per scalar EQ),
+not all resident heap allocations. The existing exact-budget/one-byte-below host test passes
+with the changed descriptor totals; it is not a total-resident-heap ceiling claim.
+
+### Scope of disabled-cut elision
+
+A disabled HPF or LPF carries the exact identity coefficient words, but it is omitted only when the
+accepted stationary elision plan permits it: input is finite, contains no `-0.0`, and is within the
+block bound; the required identity and live-section state bit conditions hold; and no ramp is in
+flight. With an odd active count, depth-2 rounding can retain a disabled section as identity padding
+(`active` 1, 3, or 5 gives `kept` 2, 4, or 6). At `kept = 6`, or whenever elision is refused, all six physical
+sections execute, including disabled sections as identity where present; the nonstationary path
+also executes all six. The applicable claim is only that an accepted plan can remove the omitted
+cut's section arithmetic. An executed disabled cut still advances its recurrence and selects its
+input bitwise; identity describes its output transfer, not frozen or canonicalized state. It makes
+no blanket zero-DSP or zero-memory claim.
 
 ---
 
@@ -494,7 +563,7 @@ route matrix and its share of the reduction whatever else it does or does not pr
 `sixty_four_track_console_half_mono` render `fixtures/session/v1/console-sixty-four-track-mono.toml`,
 which is the standing fixture with its source mapping and its upstream per-channel parameters
 symmetrised. They carry the whole intended strip and are costed at the whole intended strip's
-current inventory — 331 lane-ops — because their fixture differs from the standing one in per-channel
+current inventory — 333 lane-ops — because their fixture differs from the standing one in per-channel
 *values* only, and a floor is an inventory of operations, not of operands.
 
 **One question is deliberately left open**, and it is left open here rather than answered quietly in
@@ -504,13 +573,14 @@ describes two. So the row's measured cost has fallen against an inventory that h
 %-of-floor now reads above what any stereo row can reach. Whether a collapsed row's floor *should*
 halve is a ruling this document still does not make: the honest candidates are "the spec requires the arithmetic
 of both channels and the collapse is an implementation that exploits their equality, so the floor
-stands at 331 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
+stands at 333 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
 whose value is determined by another lane-sample is not independent arithmetic, so the upstream half
 of the inventory halves". Both are defensible and they give different numbers for the same row. The
 rows exist now so that the question is asked against measurements; the pinned equality in
 `floor.rs`'s `the_mono_rows_carry_the_standing_strips_floor` is what makes answering it a deliberate
 edit rather than a table drift. The mono-collapse decision remains open. The #193 max/min recount
-debt is closed by #368's current 331-op pricing and is no longer part of that question.
+debt is closed by #368's max/min recount; #805's current inventory is 333 lane-ops and is no
+longer part of that question.
 
 ---
 
@@ -525,17 +595,20 @@ independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 | route and master reduction (the plumbing floor) | 4 | 0.135 |
 | builtins chain and routing | 69 | 2.331 |
 | builtins chain, identity sections (`dispatch_only`, `gain_pan_only`) | 22 | 0.743 |
-| parametric EQ, two kept sections | 51 | 1.723 |
+| parametric EQ, two kept sections | 53 | 1.791 |
 | compressor | 81.5 | 2.753 |
 | true-peak limiter, uniform cohort | 129.5 | 4.375 |
-| the whole intended strip | 331.0 | 11.182 |
+| the whole intended strip | 333.0 | 11.250 |
 
 ### The standing table
 
 The measurements below are from `artifacts/issue184/`, commit `a1ef5f1`, controlled, AMD Ryzen 7
 9700X pinned to cpu 15, exported core clock **5 455 548 845 Hz**. Their p50 and isolate columns are
 historical measurements (minimum of the two measured rounds); #368 retrospectively recomputes only
-the floor-derived columns against the current inventories. The sealed artifacts remain untouched.
+the floor-derived columns against the then-current inventories. These historical tables retain
+the pre-#805 EQ floor (51 operations, 1.723 cycles) and its percentages. The current masked
+EQ inventory above is 53 operations; it is not paired with these old timings. The EQ isolate
+is a four-section measurement, not a six-section claim. The sealed artifacts remain untouched.
 
 | row | p50 µs/block | measured cycles/lane-sample | floor | % of floor | isolate | isolated % of floor |
 |---|---:|---:|---:|---:|---:|---:|
@@ -645,6 +718,11 @@ finding "the compressor is at 88 % of floor and there is nothing left".
 ---
 
 ## Boundary 3 — the EQ's gap is the same shape, and its kernel is not the subject
+
+**Historical four-section evidence.** The timing, floor and gap in this section describe
+the pre-#805 implementation. The new masked stationary inventory is 53 operations
+(1.791 derived cycles at the same machine constants); no new measured gap or percentage
+is claimed without a timing of that implementation.
 
 The EQ isolate measures 4.984 cycles/lane-sample against a 1.723 floor: 34.6 %, the best of the
 three rack effects. The kernel itself is at its register-file ceiling — `SVF_CASCADE_DEPTH = 2` is

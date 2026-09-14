@@ -17,14 +17,14 @@ use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
     LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES, LIVE_RESPONSE_MAXIMUM_OWNERS,
-    LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
-    LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES, LIVE_RESPONSE_REQUEST_BYTES,
-    LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES, MAXIMUM_DOCUMENT_BYTES,
-    MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
-    OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
-    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
-    ObservationAddress, ObservationReadChannels, ObservationReadError, ObservationReadValues,
-    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
+    LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
+    LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
+    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH,
+    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
+    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
+    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationReadChannels, ObservationReadError,
+    ObservationReadValues, RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
@@ -1416,8 +1416,8 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
         right: &[ResponseSnapshotSection],
     ) -> Result<(), ResponseSnapshotError> {
         if self.owner_count >= LIVE_RESPONSE_MAXIMUM_OWNERS
-            || left.len() > 4
-            || right.len() > 4
+            || left.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
+            || right.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
             || owner.track_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
             || owner.native_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
             || owner.stable_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES
@@ -1580,7 +1580,8 @@ fn parse_live_sections(
     count: u32,
     record_bytes: u32,
 ) -> Result<Box<[ResponseSnapshotSection]>, u32> {
-    if count > 4 || record_bytes != LIVE_RESPONSE_SECTION_BYTES {
+    if count > LIVE_RESPONSE_MAXIMUM_SECTIONS as u32 || record_bytes != LIVE_RESPONSE_SECTION_BYTES
+    {
         return Err(RESULT_INVALID_ARGUMENT);
     }
     let count_usize = usize::try_from(count).map_err(|_| RESULT_INVALID_ARGUMENT)?;
@@ -1675,8 +1676,8 @@ fn parse_live_snapshot(staging: &ResponseStaging) -> Result<(ResponseSnapshot, u
         if raw.bypassed > 1
             || raw.availability > 1
             || raw.reserved != [0; 1]
-            || raw.left_count > 4
-            || raw.right_count > 4
+            || raw.left_count > LIVE_RESPONSE_MAXIMUM_SECTIONS as u32
+            || raw.right_count > LIVE_RESPONSE_MAXIMUM_SECTIONS as u32
         {
             return Err(RESULT_INVALID_ARGUMENT);
         }
@@ -4253,6 +4254,14 @@ mod live_response_ffi_tests {
         );
         stage_request(b"eq0");
 
+        let maximum_raw_payload = size_of::<WebLiveResponseResult>()
+            + LIVE_RESPONSE_MAXIMUM_OWNERS
+                * (size_of::<WebLiveResponseOwner>()
+                    + 3 * LIVE_RESPONSE_MAXIMUM_ID_BYTES
+                    + 2 * LIVE_RESPONSE_MAXIMUM_SECTIONS * size_of::<WebLiveResponseSection>());
+        assert_eq!(maximum_raw_payload, 249_192);
+        assert!(maximum_raw_payload <= LIVE_RESPONSE_CAPTURE_BYTES);
+
         let (capture_result, allocations, deallocations) =
             measured(|| miso_engine_web_v1_track_response_capture(handle));
         assert_eq!(capture_result, RESULT_OK);
@@ -4267,6 +4276,41 @@ mod live_response_ffi_tests {
             "input filters and EQ must both be captured"
         );
         assert!(capture_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+
+        let expected_result_bytes = RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let header: WebLiveResponseResult = read_live_record(bytes, 0).expect("capture header");
+            let owner_count = usize::try_from(header.owner_count).expect("owner count");
+            let owners_start = usize::try_from(header.owners_offset).expect("owners offset");
+            let mut expected =
+                owners_start + LIVE_RESPONSE_MAXIMUM_OWNERS * size_of::<WebLiveResponseOwner>();
+            for index in 0..owner_count {
+                let owner_offset = owners_start + index * size_of::<WebLiveResponseOwner>();
+                let raw: WebLiveResponseOwner =
+                    read_live_record(bytes, u32::try_from(owner_offset).expect("owner offset"))
+                        .expect("owner record");
+                expected += usize::try_from(raw.track_id_bytes).expect("track ID bytes")
+                    + usize::try_from(raw.native_id_bytes).expect("native ID bytes")
+                    + usize::try_from(raw.stable_id_bytes).expect("stable ID bytes")
+                    + (usize::try_from(raw.left_count).expect("left count")
+                        + usize::try_from(raw.right_count).expect("right count"))
+                        * size_of::<WebLiveResponseSection>();
+                let native_id =
+                    live_payload_bytes(bytes, raw.native_id_offset, raw.native_id_bytes)
+                        .expect("native ID payload");
+                if native_id == b"miso.parametric-eq" {
+                    assert_eq!(raw.left_count as usize, LIVE_RESPONSE_MAXIMUM_SECTIONS);
+                    assert_eq!(raw.right_count as usize, LIVE_RESPONSE_MAXIMUM_SECTIONS);
+                }
+                if native_id == b"miso.builtin.input-filters" {
+                    assert_eq!(raw.left_count, 2);
+                    assert_eq!(raw.right_count, 2);
+                }
+            }
+            expected
+        });
+        assert_eq!(expected_result_bytes, capture_header.result_bytes as usize);
 
         let (snapshot, token) = RESPONSE_STAGING
             .with(|slot| parse_live_snapshot(&slot.borrow()).expect("captured mixed snapshot"));
@@ -4283,6 +4327,96 @@ mod live_response_ffi_tests {
                 .iter()
                 .any(|owner| owner.native_id.as_ref() == "miso.parametric-eq")
         );
+        let eq_owner = snapshot
+            .owners
+            .iter()
+            .find(|owner| owner.native_id.as_ref() == "miso.parametric-eq")
+            .expect("EQ owner");
+        assert_eq!(eq_owner.left.len(), LIVE_RESPONSE_MAXIMUM_SECTIONS);
+        assert_eq!(eq_owner.right.len(), LIVE_RESPONSE_MAXIMUM_SECTIONS);
+        let input_filter_owner = snapshot
+            .owners
+            .iter()
+            .find(|owner| owner.native_id.as_ref() == "miso.builtin.input-filters")
+            .expect("input-filter owner");
+        assert_eq!(input_filter_owner.left.len(), 2);
+        assert_eq!(input_filter_owner.right.len(), 2);
+
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let result_len = staging.live_result_len;
+            let eq_left_count = {
+                let bytes = &staging.live_result[..result_len];
+                let header: WebLiveResponseResult =
+                    read_live_record(bytes, 0).expect("capture header");
+                let owners_start = usize::try_from(header.owners_offset).expect("owners offset");
+                let mut eq_left_count = None;
+                for index in 0..usize::try_from(header.owner_count).expect("owner count") {
+                    let owner_offset = owners_start + index * size_of::<WebLiveResponseOwner>();
+                    let raw: WebLiveResponseOwner =
+                        read_live_record(bytes, u32::try_from(owner_offset).expect("owner offset"))
+                            .expect("owner record");
+                    let native_id =
+                        live_payload_bytes(bytes, raw.native_id_offset, raw.native_id_bytes)
+                            .expect("native ID payload");
+                    if native_id == b"miso.parametric-eq" {
+                        eq_left_count = Some(
+                            owner_offset + core::mem::offset_of!(WebLiveResponseOwner, left_count),
+                        );
+                    }
+                }
+                eq_left_count.expect("EQ owner count")
+            };
+            let original_count = {
+                let bytes = &staging.live_result[..result_len];
+                u32::from_le_bytes(
+                    bytes[eq_left_count..eq_left_count + 4]
+                        .try_into()
+                        .expect("count"),
+                )
+            };
+            {
+                let bytes = &mut staging.live_result[..result_len];
+                bytes[eq_left_count..eq_left_count + 4].copy_from_slice(&7_u32.to_le_bytes());
+            }
+            assert!(
+                parse_live_snapshot(&staging).is_err(),
+                "seven sections must be rejected"
+            );
+            {
+                let bytes = &mut staging.live_result[..result_len];
+                bytes[eq_left_count..eq_left_count + 4]
+                    .copy_from_slice(&original_count.to_le_bytes());
+            }
+        });
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            let original_len = staging.live_result_len;
+            let original_result_bytes = {
+                let bytes = &staging.live_result[..original_len];
+                let at = core::mem::offset_of!(WebLiveResponseResult, result_bytes);
+                u64::from_le_bytes(bytes[at..at + 8].try_into().expect("result bytes"))
+            };
+            {
+                let bytes = &mut staging.live_result[..original_len];
+                let at = core::mem::offset_of!(WebLiveResponseResult, result_bytes);
+                bytes[at..at + 8].copy_from_slice(
+                    &u64::try_from(original_len - 1)
+                        .expect("truncated length")
+                        .to_le_bytes(),
+                );
+            }
+            staging.live_result_len = original_len - 1;
+
+            assert!(
+                parse_live_snapshot(&staging).is_err(),
+                "truncated sections must be rejected"
+            );
+            staging.live_result_len = original_len;
+            let bytes = &mut staging.live_result[..original_len];
+            let at = core::mem::offset_of!(WebLiveResponseResult, result_bytes);
+            bytes[at..at + 8].copy_from_slice(&original_result_bytes.to_le_bytes());
+        });
 
         assert_eq!(miso_engine_web_v1_track_response_analysis(), RESULT_OK);
         let analysis_header = captured_header();

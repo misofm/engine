@@ -170,6 +170,9 @@ pub const RESPONSE_MAXIMUM_RESULT_BYTES: u64 = 16 << 20;
 
 /// Maximum number of owners a bounded live response query may return.
 pub const LIVE_RESPONSE_MAXIMUM_OWNERS: usize = 256;
+/// Maximum number of response sections retained for each owner channel.
+pub const LIVE_RESPONSE_MAXIMUM_SECTIONS: usize =
+    effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS;
 /// Maximum bytes in one stable live-response identity.
 pub const LIVE_RESPONSE_MAXIMUM_ID_BYTES: usize = 127;
 /// Maximum points accepted by one live response query.

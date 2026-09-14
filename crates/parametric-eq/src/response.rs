@@ -17,10 +17,14 @@ use effect_contract::{
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
 
-use super::{BandTarget, EQ_SECTION_COUNT, EqSvfWords, PARAMETRIC_EQ_DESCRIPTOR, band_targets};
+use super::{BandTarget, EQ_SECTION_COUNT, EqSvfWords, PARAMETRIC_EQ_DESCRIPTOR, physical_targets};
 
 /// The fixed magnitude floor returned by this query, in dB relative to unit amplitude.
 pub(crate) const EQ_RESPONSE_FLOOR_DB: f32 = -120.0;
+
+/// Public response order is the stable original band order followed by the prepared cuts. The
+/// render cascade uses HPF, bands 1..4, LPF, so every response path goes through this one mapping.
+pub(crate) const RESPONSE_TO_PHYSICAL: [usize; EQ_SECTION_COUNT] = [1, 2, 3, 4, 0, 5];
 
 static EQ_RESPONSE_SECTIONS: [ResponseSectionDescriptor; EQ_SECTION_COUNT] = [
     ResponseSectionDescriptor {
@@ -39,6 +43,8 @@ static EQ_RESPONSE_SECTIONS: [ResponseSectionDescriptor; EQ_SECTION_COUNT] = [
         id: 4,
         name: "Band 4",
     },
+    ResponseSectionDescriptor { id: 5, name: "HPF" },
+    ResponseSectionDescriptor { id: 6, name: "LPF" },
 ];
 
 pub(crate) static EQ_RESPONSE_DESCRIPTOR: ResponseAnalysisDescriptor = ResponseAnalysisDescriptor {
@@ -102,15 +108,19 @@ impl EqResponseConfiguration {
                 code: "effect.quality.unsupported",
             }));
         }
-        let left_targets = band_targets(request.initial_values, 0, sample_rate)
+        let left_targets = physical_targets(request.initial_values, 0, sample_rate)
             .map_err(EqResponseError::Configuration)?;
-        let right_targets = band_targets(request.initial_values, 1, sample_rate)
+        let right_targets = physical_targets(request.initial_values, 1, sample_rate)
             .map_err(EqResponseError::Configuration)?;
         Ok(Self {
             sample_rate_hz: metadata.sample_rate,
             bypass: metadata.bypass,
-            enabled_left: core::array::from_fn(|section| left_targets[section].enabled),
-            enabled_right: core::array::from_fn(|section| right_targets[section].enabled),
+            enabled_left: core::array::from_fn(|section| {
+                left_targets[RESPONSE_TO_PHYSICAL[section]].enabled
+            }),
+            enabled_right: core::array::from_fn(|section| {
+                right_targets[RESPONSE_TO_PHYSICAL[section]].enabled
+            }),
             left_words: realized_words(&left_targets, sample_rate)?,
             right_words: realized_words(&right_targets, sample_rate)?,
         })
@@ -447,13 +457,14 @@ pub fn query_response_into(
         total_left_db[point] = left.total_db;
         total_right_db[point] = right.total_db;
         if let Some(section_output) = sections_left_db.as_deref_mut() {
-            for (section, value) in left.section_db.into_iter().enumerate() {
-                section_output[section * points + point] = value;
+            for (public_section, physical_section) in RESPONSE_TO_PHYSICAL.into_iter().enumerate() {
+                section_output[public_section * points + point] = left.section_db[physical_section];
             }
         }
         if let Some(section_output) = sections_right_db.as_deref_mut() {
-            for (section, value) in right.section_db.into_iter().enumerate() {
-                section_output[section * points + point] = value;
+            for (public_section, physical_section) in RESPONSE_TO_PHYSICAL.into_iter().enumerate() {
+                section_output[public_section * points + point] =
+                    right.section_db[physical_section];
             }
         }
     }
@@ -512,8 +523,11 @@ pub fn query_snapshot_magnitudes_into(
         return Err(EqResponseError::OutputShape);
     }
     let decode = |sections: &[ResponseSnapshotSection]| {
-        let mut words = [EqSvfWords::IDENTITY; EQ_SECTION_COUNT];
+        let mut public_words = [EqSvfWords::IDENTITY; EQ_SECTION_COUNT];
         for (index, section) in sections.iter().enumerate() {
+            if section.id != u32::try_from(index + 1).expect("response section id") {
+                return Err(EqResponseError::OutputShape);
+            }
             if section.word_count != 6 {
                 return Err(EqResponseError::InvalidFrequencyGrid);
             }
@@ -524,13 +538,19 @@ pub fn query_snapshot_magnitudes_into(
             if section.enabled && decoded.iter().all(|word| *word == 0.0) {
                 return Err(EqResponseError::Numerical);
             }
-            words[index] = if section.enabled {
+            public_words[index] = if section.enabled {
                 EqSvfWords::from_array(decoded)
             } else {
                 EqSvfWords::IDENTITY
             };
         }
-        Ok(words)
+        Ok(core::array::from_fn(|physical| {
+            let public = RESPONSE_TO_PHYSICAL
+                .iter()
+                .position(|mapped| *mapped == physical)
+                .expect("response mapping covers every physical section");
+            public_words[public]
+        }))
     };
     let left_words = decode(left)?;
     let right_words = decode(right)?;

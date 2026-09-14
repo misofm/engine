@@ -64,7 +64,7 @@ def builtins_identity_lane_ops: 22;
 # estimate. Job 3's route fold moved neither: folding relocates the same `mix2x2_block` and the
 # same 63 adds into the cohort chain's epilogue, in the order `route_fold` proves at bind.
 def plumbing_lane_ops: 3 + 1;
-def eq_lane_ops: 51;
+def eq_lane_ops: 53;
 # Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
 # link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
 # after #367. These are inventories, not runtime measurements.

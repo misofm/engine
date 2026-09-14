@@ -20,14 +20,17 @@ fn launch_registry_discovers_eq_response_without_effect_crate_import() {
         ResponseAnalysisMode::RequestedConfiguration
     );
     assert_eq!(descriptor.cadence, ResponseQueryCadence::ExplicitQuery);
-    assert_eq!(descriptor.sections.len(), 4);
+    assert_eq!(
+        descriptor.sections.len(),
+        RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+    );
     assert_eq!(
         descriptor
             .sections
             .iter()
             .map(|section| section.id)
             .collect::<Vec<_>>(),
-        [1, 2, 3, 4]
+        [1, 2, 3, 4, 5, 6]
     );
 
     let initial_values: Vec<_> = default_initial_values(factory.descriptor()).collect();
@@ -57,8 +60,26 @@ fn launch_registry_discovers_eq_response_without_effect_crate_import() {
         .expect("response preparation");
     let configuration = prepared.configuration();
     assert_eq!(configuration.sample_rate_hz, 48_000);
-    assert_eq!(configuration.enabled_left.len(), 4);
-    assert_eq!(configuration.enabled_right.len(), 4);
+    assert_eq!(
+        configuration.enabled_left.len(),
+        RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+    );
+    assert_eq!(
+        configuration.enabled_right.len(),
+        RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+    );
+    assert!(
+        configuration.enabled_left[4..]
+            .iter()
+            .all(|enabled| !enabled),
+        "prepared EQ HPF/LPF defaults must be disabled on the left"
+    );
+    assert!(
+        configuration.enabled_right[4..]
+            .iter()
+            .all(|enabled| !enabled),
+        "prepared EQ HPF/LPF defaults must be disabled on the right"
+    );
     assert_eq!(configuration.bypass, Some(false));
 
     let frequencies = [0.0, 1_000.0, 24_000.0];

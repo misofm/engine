@@ -100,3 +100,24 @@ zero; claim identity-elided filter DSP, not zero retained metadata/state.
 #147 is amended to preserve the existing metadata `name` as machine key, derive
 builtin units from Rust authority, and add object-shaped edits over the existing
 live console. No duplicate `key` metadata column or suffix rename is introduced.
+
+## Approved live implementation children
+
+Astra XHIGH briefs are frozen as #807 (off-audio-thread live EQ targets) and
+#808 (builtin live filter pairs using the same preparation/transport owner).
+Both use bounded Luna XHIGH tranches and fresh Astra MEDIUM acceptance.
+The original 48-byte semantic command ABI remains narrow; engine-owned
+prepared coefficients cross an internal trusted-host companion boundary.
+#808 also requires settled-disabled filters to skip SVF work during trim
+ramps, preserving signed-zero and sanitization behavior. Retained input-stage
+state and actual trim work are not claimed to disappear.
+
+Sequence: #147 merged and closed (PR #806, merge39288df4; required CI34811007238 and main CI34811451810 passed), #805
+prepared EQ, #807 live EQ, #808 live builtins, then the coordinated immutable
+SDK/adapter releases and app adoption/deployment. Parent stays open throughout.
+
+The bounded engine release is tracked as #809. It requires accepted #147,
+#805, #807 and #808, a new immutable version, actual browser qualification
+and exact-archive publish/verify before downstream registry adoption.
+
+Downstream delivery is now tracked in misofm/engine-web-adapter#111 and misofm/app#222, with matching committed local specs. No new package publication or app deployment is claimed yet. #805 retained a real signed-zero regression and is correcting it through the narrowly approved masked-output helper; its gate is not weakened.

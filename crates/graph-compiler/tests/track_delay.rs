@@ -4,9 +4,9 @@
 //! plan rather than about rendered audio:
 //!
 //! * **P2-2, the off gate.** A session that declares `delay_samples = 0` -- which is every session
-//!   in the tree, and will be almost every session a host ever writes -- must compile to the plan
-//!   it compiled to before this feature existed. Not an equivalent plan: the same plan, with the
-//!   same canonical text and therefore the same SHA-256.
+//!   in the tree, and will be almost every session a host ever writes -- must compile to the
+//!   current zero-delay semantic plan. The digest pin records that plan; the structural row below
+//!   proves that track delay itself adds no node or ring.
 //! * **P2-3, PDC non-interaction.** A delayed track's *output* shifts. Its *PDC report* does not.
 //! * **P2-4, accounting.** The rings are charged to `delay_bytes`, exactly `sum * 4` per lane, and
 //!   a hostile session that asks for more than the caps allow is rejected rather than allocated.
@@ -195,23 +195,24 @@ fn a_zero_delay_session_lowers_no_delay_node() {
     assert_eq!(zero.delay_bytes, 0, "no ring, no bytes");
 }
 
-/// The zero-delay plan is byte-for-byte the plan this fixture compiled to before the feature.
+/// The zero-delay plan has the current semantic digest for this feature set.
 ///
-/// The constant is not a snapshot of this tree: it was measured by running this exact digest on
-/// `origin/main` at 17682b4, against that tree's `canonical.json` -- the one without the
-/// `delay_samples` key. That the two agree is the whole class-A claim, and it holds for a
-/// non-obvious reason worth stating: the session's *text* grew, but the graph's canonical text is
-/// derived from the compiled plan and its estimate, and the estimate's session term is
-/// `requested_runtime_bytes` (a function of counts and limits) rather than the canonical byte
-/// count. So a schema key that no plan reads moves no plan byte.
+/// The pre-track-delay comparison was measured at 17682b4 and re-pinned by #241. The clean main
+/// baseline at 39288df produced the #241 pin (`213617...acf4b`), but #805's six-section prepared
+/// EQ state size legitimately changes the candidate's effect-state estimate. A temporary canonical
+/// dump on both revisions is 34,051 bytes over 685 lines and differs only in the trailing estimate
+/// row: `declared_effect_bytes` is 5,544 -> 8,280, and both plan-byte totals are 147,679 ->
+/// 150,415. Nine EQ entries each grow by 304 bytes (`2 sections * 19 f32 words * 4 bytes * 2
+/// lanes`), for the independently derived 2,736-byte total. Every structural and PDC field is
+/// identical, including `total_delay_samples = 0` and `delay_bytes = 0`.
 ///
-/// Red mutation: none of this row's own. Measured, not assumed: emitting a *zero-length* entry for
-/// every track (dropping `compile.rs`'s `filter`) leaves this digest **unchanged**, because a
-/// zero-sample ring adds nothing to `delay_bytes` and the canonical text never names the entry. The
-/// digest catches a delay that reaches the estimate; only `a_zero_delay_session_lowers_no_delay_node`
-/// catches one that reaches the *program*. That is why both rows exist, and neither is redundant.
+/// The pin therefore moves with the current semantic plan while the structural off-delay gate
+/// above continues to prove that no zero-length delay node or ring was introduced. Measured
+/// mutation evidence remains: emitting a zero-length entry for every track leaves this digest
+/// unchanged because it contributes no `delay_bytes`; `a_zero_delay_session_lowers_no_delay_node`
+/// catches that program mutation.
 #[test]
-fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
+fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
     assert_eq!(
         compiled(0, 0).sha256,
         ZERO_DELAY_CANONICAL_SHA256,
@@ -219,23 +220,17 @@ fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
     );
 }
 
-/// Originally measured on `origin/main` (17682b4), whose `canonical.json` has no `delay_samples`
-/// key at all. Re-pinned by issue #241.
+/// The historical schema-repin rationale and canonical comparison for #241 remain in
+/// `docs/derivations/241-schema-repins.md`.
 ///
-/// The reason recorded when it was re-pinned -- that source content identity had entered the
-/// compiled graph's semantic text -- is wrong, and is corrected here rather than left to mislead
-/// the next reader: `node_text`/`edge_text` carry no source identity and `write_canonical` emits
-/// no source row at all. Dumping the canonical text either side of the change shows it is
-/// **34,051 bytes in both arms with exactly one of 685 lines different**, in one of the twenty
-/// fields of the trailing `estimate` row: `session_plus_plan_bytes` 159,967 -> 147,679, now equal
-/// to `incremental_plan_bytes`. The mover is the deleted `limits` table, whose words the estimate
-/// used to project runtime storage from -- `control_queue_messages * 64 + pcm_ring_frames *
-/// channels * 4` = `64 * 64 + 1024 * 2 * 4` = 12,288, now zero. Every structural term is
-/// identical, including the 0 total delay samples and 0 delay bytes this row exists to hold.
+/// The current pin is updated for #805 because prepared EQ state size changed from 616 to 920
+/// bytes per instance. Nine instances therefore add `9 * (920 - 616) = 2,736` declared-effect
+/// bytes; the canonical estimate's two plan-byte totals grow by the same amount. Structural and
+/// PDC fields remain unchanged, including zero total delay samples and zero delay bytes. The
+/// complete derivation is recorded in the numbered #805 spec.
 ///
-/// Full derivation: `docs/derivations/241-schema-repins.md`.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "213617ba7e5774e831785e725f8cb70bdd0f043cba9ae071e139888935acf4b0";
+    "e9e6b012399cabe3632462622519bebac71e31af17813a31aa84d857209433e4";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

@@ -166,7 +166,10 @@ test("candidate Wasm answers EQ and input-filter previews headlessly", {
       fields: "totalAndSections",
     });
     assert.equal(eq.configurationId, 9_007_199_254_740_993n);
-    assert.equal(eq.sections.length, 4);
+    assert.deepEqual(eq.sections.map((section) => section.id), [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(eq.sections.map((section) => section.name), ["Band 1", "Band 2", "Band 3", "Band 4", "HPF", "LPF"]);
+    assert.deepEqual(eq.enabledLeft, [true, false, false, false, false, false]);
+    assert.deepEqual(eq.enabledRight, [true, false, false, false, false, false]);
     assert.equal(eq.frequenciesHz.length, 16);
     assert.ok(eq.totalLeftDb?.some((value) => value > 0));
     const filters = await preview.query({

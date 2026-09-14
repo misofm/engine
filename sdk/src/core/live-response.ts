@@ -111,6 +111,7 @@ type LiveContract = Readonly<{
   readonly maximumPoints: number;
   readonly maximumCaptureBytes: number;
   readonly maximumOwners: number;
+  readonly maximumSections: number;
   readonly resultOk: number;
   readonly resultWrongState: number;
   readonly resultRefusedBudget: number;
@@ -174,6 +175,7 @@ function liveContract(): LiveContract {
     maximumPoints: generatedMaximum("maximumLiveResponsePoints"),
     maximumCaptureBytes: generatedMaximum("liveResponseCaptureBytes"),
     maximumOwners: generatedMaximum("maximumLiveResponseOwners"),
+    maximumSections: generatedMaximum("maximumLiveResponseSections"),
     resultOk: constantValue("resultCodes", "ok"),
     resultWrongState: constantValue("resultCodes", "wrongState"),
     resultRefusedBudget: constantValue("resultCodes", "refusedBudget"),
@@ -486,7 +488,7 @@ function parseObservedSections(
   count: number,
   contract: LiveContract,
 ): readonly ParsedSection[] {
-  if (count > 4) throw invalidPayload("the live response section count exceeds its bound");
+  if (count > contract.maximumSections) throw invalidPayload("the live response section count exceeds its bound");
   if (count === 0) {
     checkedRange(capture, sectionOffset, 0, "empty live response sections");
     return Object.freeze([]);
@@ -845,7 +847,7 @@ export class TrackResponseModule {
   }
 
   #parseSections(capture: Uint8Array, view: DataView, sectionOffset: number, count: number): readonly ParsedSection[] {
-    if (count > 4) throw invalidPayload("the live response section count exceeds its bound");
+    if (count > this.#contract.maximumSections) throw invalidPayload("the live response section count exceeds its bound");
     if (count === 0) {
       checkedRange(capture, sectionOffset, 0, "empty live response sections");
       return Object.freeze([]);

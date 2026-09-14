@@ -19,6 +19,10 @@ pub use response::{
     ResponseSnapshotSummary, ResponseSummary, ResponseTotalScope,
     validate_response_analysis_descriptor,
 };
+
+/// Maximum number of sections carried by one prepared response snapshot channel.
+pub const RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS: usize = 6;
+
 pub use step::{
     DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
     NearestLatticeValues, ParameterLattice, StepLadder, canonical_descriptor_decimal,
