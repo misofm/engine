@@ -135,3 +135,17 @@ the source SHA. Independent record `/tmp/miso-796-audit/verify-794.md`; exact
 qualified archive/evidence `/tmp/miso-796-audit/release025-qualification`;
 independent registry/attestation evidence `/tmp/miso-796-audit/verify794-registry`.
 Downstream #95/#101 and app #210 may now use this verified registry identity.
+
+## Confirmed downstream live-capture correction release
+
+Reopened for the narrowly scoped engine#801 defect discovered by the required
+app#210 real-browser gate. The published0.2.5 provenance above remains valid,
+but live managed spectrum yielded73gap notifications/218drops/windows0 without
+source underruns. A new immutable SDK patch is required after #801 source PASS
+and required merged-main CI. Re-audit unused version (candidate0.2.6), update
+existing exact guards only, and reuse the same qualify/publish/verify workflow.
+No DSP/Wasm changes or expanded acceptance matrix. Preserve prior archive/run
+identities and record new source/archive/registry/provenance identities separately.
+Then adapter#95 cuts its exact-dependency patch before app#210 final adoption and
+deployment. This is the existing authorized release scope's defect correction;
+publication is not yet complete for the corrected bytes.
