@@ -121,3 +121,7 @@ The bounded engine release is tracked as #809. It requires accepted #147,
 and exact-archive publish/verify before downstream registry adoption.
 
 Downstream delivery is now tracked in misofm/engine-web-adapter#111 and misofm/app#222, with matching committed local specs. No new package publication or app deployment is claimed yet. #805 retained a real signed-zero regression and is correcting it through the narrowly approved masked-output helper; its gate is not weakened.
+
+### Prepared-cut delivery boundary
+
+#805 is merged through PR #810 at 80f2918b5aba5b2428c5f5cc76c24f46b4e0edde; required qualification34820834881 passed and #805 is CLOSED. Together with merged #147 this completes the prepared EQ/structured-edit foundation. #807 live EQ implementation follows the approved bounded assignments; #808 builtin live controls, #809 package release, adapter #111 and app #222 remain open. No app integration or release is claimed yet.

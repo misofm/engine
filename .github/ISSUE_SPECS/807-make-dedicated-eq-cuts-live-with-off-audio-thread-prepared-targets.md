@@ -262,3 +262,7 @@ Astra XHIGH design: this spec is ready for root to number and brief. Source evid
 ## Driver timing correction discovered during #805
 
 Astra XHIGH found that the existing EQ Channel::process_section driver pre-advances and snaps when remaining==1, although the underlying lane ramp kernel processes current then advances. #805 preserves that existing original-band timing. #807 must explicitly correct the driver to its frozen current-then-advance contract: sample A uses current coefficients, all 64 updates occur, exact target first applies at A+64. Test retarget and uneven block partitions at that boundary. Reuse #805 additive masked helpers for dedicated settled-identity lanes; derive dry masks from exact current identity words and remaining==0, never target enabled while a ramp is in flight.
+
+## Attempt 1 implementation baseline
+
+Prepared-cut child #805 merged at 80f2918b5aba5b2428c5f5cc76c24f46b4e0edde with required qualification34820834881 PASS; #147 is included. The numbered-spec/GitHub boundary audit found no missing numbered issues; #805 is verified closed, and #807/#808/#809 remain open. Root starts bounded assignment1 on codex/807-live-eq from this merged baseline. Request/target/error types may derive Clone and Copy; borrowed request slices do not own heap state. No production capability opt-in until assignment10.
