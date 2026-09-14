@@ -326,11 +326,14 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
         },
     )
     .expect("valid cascade query");
-    assert!(summary.enabled_left.into_iter().all(|enabled| enabled));
-    assert!(summary.enabled_right.into_iter().all(|enabled| enabled));
+    assert_eq!(summary.enabled_left, [true, true, true, true, false, false]);
+    assert_eq!(
+        summary.enabled_right,
+        [true, true, true, true, false, false]
+    );
     for point in 0..frequencies.len() {
         let mut product = dsp_reference::Complex64 { re: 1.0, im: 0.0 };
-        for section in 0..EQ_SECTION_COUNT {
+        for section in 0..4 {
             let value = sections_left[section * frequencies.len() + point];
             assert!(value.is_finite());
             let (kind, frequency, gain, q, slope) = [
@@ -350,6 +353,9 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
                 re: product.re * response.re - product.im * response.im,
                 im: product.re * response.im + product.im * response.re,
             };
+        }
+        for section in 4..EQ_SECTION_COUNT {
+            assert_eq!(sections_left[section * frequencies.len() + point], 0.0);
         }
         let expected_total = (20.0 * product.re.hypot(product.im).log10()).max(FLOOR_DB);
         assert!((f64::from(total_left[point]) - expected_total).abs() <= TOLERANCE_DB);
@@ -379,6 +385,9 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
                 re: right_product.re * response.re - right_product.im * response.im,
                 im: right_product.re * response.im + right_product.im * response.re,
             };
+        }
+        for section in 4..EQ_SECTION_COUNT {
+            assert_eq!(sections_right[section * frequencies.len() + point], 0.0);
         }
         let expected_right =
             (20.0 * right_product.re.hypot(right_product.im).log10()).max(FLOOR_DB);
@@ -1125,11 +1134,11 @@ fn common_eq_adapter_is_bit_identical_for_asymmetric_sections_and_all_launch_rat
         assert_eq!(provider.configuration().bypass, Some(false));
         assert_eq!(
             provider.configuration().enabled_left,
-            &[true, false, true, false]
+            &[true, false, true, false, false, false]
         );
         assert_eq!(
             provider.configuration().enabled_right,
-            &[true, true, false, true]
+            &[true, true, false, true, false, false]
         );
 
         let frequencies = [0.0_f32, 120.0, 1_000.0, 8_000.0, rate as f32 * 0.5];
@@ -1654,8 +1663,16 @@ fn snapshot_magnitude_query_validates_both_lanes_before_publishing() {
         word_count: 6,
         words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
     };
-    let left_sections = [identity; EQ_SECTION_COUNT];
-    let right_sections = [singular; EQ_SECTION_COUNT];
+    let left_sections: [ResponseSnapshotSection; EQ_SECTION_COUNT] =
+        core::array::from_fn(|index| ResponseSnapshotSection {
+            id: (index + 1) as u32,
+            ..identity
+        });
+    let right_sections: [ResponseSnapshotSection; EQ_SECTION_COUNT] =
+        core::array::from_fn(|index| ResponseSnapshotSection {
+            id: (index + 1) as u32,
+            ..singular
+        });
     let mut left = [31.0_f64];
     let mut right = [37.0_f64];
     assert_eq!(

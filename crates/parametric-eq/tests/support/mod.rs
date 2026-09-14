@@ -16,7 +16,7 @@ use effect_contract::{
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
 /// Bytes in each channel section of the current payload.
-pub const LANE_BYTES: usize = 304;
+pub const LANE_BYTES: usize = 456;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -217,7 +217,7 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 616 bytes; production admits megabytes (`maximum_effect_state_bytes` is
+        // The current layout is 920 bytes; production admits megabytes (`maximum_effect_state_bytes` is
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
@@ -283,7 +283,14 @@ pub fn word(payload: &[u8], position: usize) -> u32 {
 /// Reads word `word_index` of band `band` of a lane section.
 #[must_use]
 pub fn band_word(payload: &[u8], band: usize, word_index: usize) -> u32 {
-    word(payload, band * WORDS_PER_BAND + word_index)
+    // Existing fixtures address the original four general bands by their stable descriptor index;
+    // the prepared state stores physical order (HPF, bands 1..4, LPF).
+    let physical = if band < parametric_eq::EQ_BAND_COUNT {
+        band + 1
+    } else {
+        band
+    };
+    word(payload, physical * WORDS_PER_BAND + word_index)
 }
 
 /// Renders `frames` frames of silence with the given automation.

@@ -29,7 +29,7 @@ use support::{
 fn descriptor_is_frozen() {
     validate_descriptor(&PARAMETRIC_EQ_DESCRIPTOR).expect("descriptor");
     let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters;
-    assert_eq!(parameters.len(), 24);
+    assert_eq!(parameters.len(), 30);
     assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 1);
     for quality in PARAMETRIC_EQ_DESCRIPTOR.qualities {
         assert_eq!(quality.maximum_state.common_bytes, COMMON_BYTES as u32);
@@ -58,7 +58,7 @@ fn descriptor_is_frozen() {
     for (band, descriptor) in EQ_BAND_DESCRIPTORS.iter().enumerate() {
         let base = band as u32 * 16 + 1;
         assert_eq!(descriptor.index, band as u8);
-        assert_eq!(descriptor.cascade_order, band as u8);
+        assert_eq!(descriptor.cascade_order, band as u8 + 1);
         assert_eq!(
             [
                 descriptor.enabled.0,
@@ -100,6 +100,58 @@ fn descriptor_is_frozen() {
         }
         assert_eq!(parameters[band * 6 + 2].default_value, frequencies[band]);
         assert_eq!(parameters[band * 6 + 1].enum_choices.len(), 6);
+    }
+    let cuts = [
+        (65, "hpf-enabled", ParameterDomain::Boolean, None, None, 0.0),
+        (
+            66,
+            "hpf-frequency",
+            ParameterDomain::Continuous,
+            Some(10.0),
+            Some(20_000.0),
+            80.0,
+        ),
+        (
+            67,
+            "hpf-q",
+            ParameterDomain::Continuous,
+            Some(0.1),
+            Some(18.0),
+            core::f32::consts::FRAC_1_SQRT_2,
+        ),
+        (81, "lpf-enabled", ParameterDomain::Boolean, None, None, 0.0),
+        (
+            82,
+            "lpf-frequency",
+            ParameterDomain::Continuous,
+            Some(10.0),
+            Some(20_000.0),
+            18_000.0,
+        ),
+        (
+            83,
+            "lpf-q",
+            ParameterDomain::Continuous,
+            Some(0.1),
+            Some(18.0),
+            core::f32::consts::FRAC_1_SQRT_2,
+        ),
+    ];
+    for (offset, (id, name, domain, minimum, maximum, default_value)) in
+        cuts.into_iter().enumerate()
+    {
+        let parameter = &parameters[24 + offset];
+        assert_eq!(parameter.id.0, id);
+        assert_eq!(parameter.display_name, name);
+        assert_eq!(parameter.domain, domain);
+        assert_eq!(parameter.minimum, minimum);
+        assert_eq!(parameter.maximum, maximum);
+        assert_eq!(parameter.default_value, default_value);
+        assert_eq!(parameter.automation_rate, AutomationRate::None);
+        assert_eq!(parameter.smoothing, SmoothingRule::None);
+        assert_eq!(parameter.smoothing_samples, 0);
+        assert!(!parameter.automatable);
+        assert!(parameter.readable);
     }
     assert_eq!(SECTIONS, EQ_SECTION_COUNT);
     assert_eq!(SECTIONS * WORDS_PER_BAND * 4, LANE_BYTES);
@@ -422,6 +474,9 @@ fn a_payload_of_the_wrong_length_is_rejected() {
         (COMMON_BYTES + 4, LANE_BYTES, LANE_BYTES),
         (COMMON_BYTES, LANE_BYTES - 4, LANE_BYTES),
         (COMMON_BYTES, LANE_BYTES, LANE_BYTES + 4),
+        // The previous four-section payload shape is rejected atomically under layout tag 1;
+        // there is no reinterpretation or fabricated migration into six sections.
+        (COMMON_BYTES, 304, 304),
     ] {
         let resize = |source: &[u8], length: usize| {
             let mut bytes = vec![0_u8; length];

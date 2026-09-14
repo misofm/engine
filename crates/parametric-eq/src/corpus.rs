@@ -24,13 +24,15 @@
 //! stable sections, inputs in `[-1, 1]` — and `tests/determinism.rs` asserts finiteness rather than
 //! assuming it.
 
-use crate::{BandTarget, Channel, EQ_SECTION_COUNT, EqBandKind, RAMP_SAMPLES, SampleRateHz};
+use crate::{
+    BandTarget, Channel, EQ_BAND_COUNT, EQ_SECTION_COUNT, EqBandKind, RAMP_SAMPLES, SampleRateHz,
+};
 use lane::{Lane, Simd4, Simd8};
 
 /// Independent single-track configurations in every case; a multiple of the widest backend.
 pub const LANES: usize = 8;
 
-/// Frames per track: long enough for the four-section cascade to settle and for a 64-sample word
+/// Frames per track: long enough for the six-section cascade to settle and for a 64-sample word
 /// ramp to finish and snap well inside the case.
 pub const FRAMES: usize = 512;
 
@@ -51,8 +53,8 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 pub(crate) const CORPUS_RATE: SampleRateHz = SampleRateHz(48_000);
 
 /// The four-band configuration of one track, spread across the frozen parameter domain.
-pub(crate) fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT] {
-    const KINDS: [EqBandKind; EQ_SECTION_COUNT] = [
+pub(crate) fn bands(track: usize) -> [BandTarget; EQ_BAND_COUNT] {
+    const KINDS: [EqBandKind; EQ_BAND_COUNT] = [
         EqBandKind::Bell,
         EqBandKind::LowShelf,
         EqBandKind::HighPass,
@@ -74,11 +76,24 @@ pub(crate) fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT] {
     })
 }
 
+/// The corpus predates the dedicated cuts and intentionally exercises only the original four
+/// bands. Supply exact identity targets around it so the six-section prepared renderer can reuse
+/// the same arithmetic fixtures.
+pub(crate) fn sections(track: usize) -> [BandTarget; EQ_SECTION_COUNT] {
+    let bands = bands(track);
+    let mut cuts = bands[0];
+    cuts.enabled = false;
+    let mut sections = [cuts; EQ_SECTION_COUNT];
+    sections[1..1 + EQ_BAND_COUNT].copy_from_slice(&bands);
+    sections
+}
+
 /// The band a ramped case re-targets, and the parameters it ramps to. Both endpoints are frozen
 /// grid points, so the whole ramp stays inside the parameter domain by construction.
 fn ramp_target(track: usize, section: usize) -> BandTarget {
-    let mut target = bands(track)[section];
-    let shifted = bands((track + 3) % LANES)[section];
+    let general = section - 1;
+    let mut target = bands(track)[general];
+    let shifted = bands((track + 3) % LANES)[general];
     target.frequency = shifted.frequency;
     target.gain = -target.gain;
     target.q = shifted.q;
@@ -140,13 +155,13 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
     }
     let mut block = vec![0.0_f32; FRAMES * W];
     for group in 0..LANES / W {
-        let targets = core::array::from_fn(|lane| bands(group * W + lane));
+        let targets = core::array::from_fn(|lane| sections(group * W + lane));
         let mut channel =
             Channel::<L, W>::new(targets, CORPUS_RATE).expect("every corpus row is a legal design");
         if case == 1 {
             for lane in 0..W {
                 let track = group * W + lane;
-                let section = track % EQ_SECTION_COUNT;
+                let section = track % EQ_BAND_COUNT + 1;
                 let words = ramp_target(track, section)
                     .words(CORPUS_RATE)
                     .expect("every corpus ramp target is a legal design");

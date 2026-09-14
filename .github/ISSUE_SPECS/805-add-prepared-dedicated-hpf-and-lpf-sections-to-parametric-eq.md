@@ -66,3 +66,28 @@ No live cut control, new generic queue ABI, variable slope, new filter family, h
 ## Decision/evidence record
 
 Astra XHIGH brief PASS: frozen above from current engine 551f6d7e and live issue 804, the D2 builtin ruling, and current EQ/response source. Implementation attempt 1: pending. Astra MEDIUM adversarial verdict: pending. Root must record checkpoint hashes, focused gates, upstream issue synchronization and later final verdict here; no issue completion claim before upstream evidence.
+
+## Attempt 1 — prepared representation checkpoint
+
+Luna XHIGH completed the six-section representation, original-band mapping,
+prepared cut descriptors, depth-two dispatch, payload codec and minimum
+response/fixture adaptations. Root approved the necessary existing corpus and
+response-test count adaptations. Exact changed implementation paths are
+`src/{lib,corpus,response}.rs` and `tests/{contract,response}.rs`,
+`tests/support/mod.rs`, all under `crates/parametric-eq/`.
+
+Passed: package cargo check, fmt/diff hygiene, clippy over all targets/features
+with `-D warnings`, Wasm target check, and the complete parametric-eq test run.
+All active suites passed; existing ignored descriptive cases were not changed.
+The agent unnecessarily started a duplicate final test run; it also completed
+without failures, and no additional repeat is required. Evidence:
+`/tmp/805-tranche1-evidence.md`.
+
+The six-section serialized payload is 456 bytes per lane, 920 bytes total with
+the common header; this is not the resident Rust object size. New HPF/LPF
+stationary regressions prove both sections execute at widths1/4/8. The current
+disabled-cut test compares two six-section paths; it does not independently
+prove old-four-section bit identity. Tranche2 must add that direct oracle,
+complete response/catalog/prepared-SDK coverage and confirm resident accounting
+before the coherent attempt receives its fresh Astra MEDIUM verdict. No live
+cut capability or completed #805 claim is made by this checkpoint.
