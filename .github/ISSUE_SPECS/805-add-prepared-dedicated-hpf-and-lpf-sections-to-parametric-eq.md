@@ -470,3 +470,40 @@ Qualification run 34817272127 passed every required leaf except workspace debug 
 The broader debug group exposed three additional old fixture expectations: 63 catalog rows/189 lattice samples become 69/207; EQ response discovery now explicitly pins IDs 1..6 and verifies both default cut masks disabled; the nine-track host provider owns 9 * 30 * 2 = 540 descriptors. Luna XHIGH corrected only those tests. Focused gates passed: ten lattice tests, one registry response test and the host catalog-state test, plus fmt and diff checks. Astra MEDIUM narrow review PASS; substantive domain/conversion/response checks remain intact.
 
 A full workspace debug invocation with `--no-fail-fast` completed. Beyond the corrected host count, it reported one remaining failure: graph-compiler track_delay fixed plan digest (actual e9e6b012399cabe3632462622519bebac71e31af17813a31aa84d857209433e4 versus pinned 213617ba7e5774e831785e725f8cb70bdd0f043cba9ae071e139888935acf4b0). Root reproduced it separately; baseline comparison and cause investigation are pending. This checkpoint is focused-green, not a claim that the full workspace gate is green. No runtime/Wasm source changed.
+
+### Track-delay canonical digest derivation
+
+Generated 2026-09-14 from temporary `dump_zero_delay_canonical_probe` tests in
+`crates/graph-compiler/tests/track_delay.rs`. The probe called
+`GraphCompiler::evidence` and wrote the zero-delay canonical bytes outside both worktrees.
+
+| tree | revision | canonical bytes | lines | SHA-256 |
+| --- | --- | ---: | ---: | --- |
+| clean baseline | `39288df47fa1e8d3df47286e1bcab03064f7413f` | 34,051 | 685 | `213617ba7e5774e831785e725f8cb70bdd0f043cba9ae071e139888935acf4b0` |
+| #805 candidate | `a04d9b6f24b8cd7266c9c0aca5e079b28b08eda9` | 34,051 | 685 | `e9e6b012399cabe3632462622519bebac71e31af17813a31aa84d857209433e4` |
+
+`diff -u` reports exactly one changed line, line 685, the trailing estimate row:
+
+```text
+-estimate  82 82 81 82 10 1 9 9 23305 0 0 48915 5544 0 0 0 0 48915 147679 147679
++estimate  82 82 81 82 10 1 9 9 23305 0 0 48915 8280 0 0 0 0 48915 150415 150415
+```
+
+The originating changed estimate field is `declared_effect_bytes`, 5,544 -> 8,280,
+an increase of 2,736 bytes. `incremental_plan_bytes` and
+`session_plus_plan_bytes` increase by the same amount, 147,679 -> 150,415.
+All graph/PDC fields, including `total_delay_samples = 0` and `delay_bytes = 0`,
+are identical.
+
+Independent derivation: each of the nine EQ entries changes its prepared EQ
+state size from 616 to 920 bytes. The per-entry delta is
+`(6 - 4) sections * 19 f32 words * 4 bytes * 2 lanes = 304` bytes;
+`9 * 304 = 2,736` bytes. Scratch and all other estimate inputs are unchanged.
+
+The temporary probe was removed before the final test-only edit. The baseline
+probe worktree was `/tmp/805-track-delay-baseline`; it is disposable and is
+removed after verification.
+
+Root and Astra MEDIUM independently inspected both canonical files and verified their SHA-256 values and exact one-line diff. The test pin now reflects the six-section prepared state; separate no-delay-node, PDC, delay-resource and hostile-cap checks remain unchanged. No production source or artifact changes are needed.
+
+Luna XHIGH final correction gates: all eight graph-compiler track_delay tests PASS; formatting and diff checks PASS. Astra MEDIUM narrow correction verdict PASS after independent canonical hash/diff/arithmetic verification. Temporary baseline probe worktree was removed after restoring its clean state; artifacts remain outside it. The full workspace sweep had no additional failures beyond the corrected catalog/response and digest expectations. Required remote qualification remains pending.
