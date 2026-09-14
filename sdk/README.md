@@ -253,13 +253,18 @@ stopTelemetry();
 
 `TrackMeter` and `MasterMeter` expose left and right peak amplitudes as linear magnitudes and gain
 reduction as a non-negative dB value. `MasterMeter.gainReductionDb` stays `null` when the host has
-no measured master reduction; `0` remains a measured or unobserved zero. `MeterUpdate` preserves
-the host's `generation`, validity bits, and saturating `lossCount`, and its
-`[firstSample, endSample)` span timestamps the peak window only. A track's positional gain
-reduction still conflates an unobserved effect with zero and may fold independently aged effects;
-the SDK does not claim an exact peak/GR join or per-effect GR timing. `TelemetryUpdate` carries the
-host's block, CPU, deadline, budget, clock-resolution, and below-resolution measurements without
-inventing a generation or sample span.
+no measured master reduction; master `0` is a measured zero. `MeterUpdate.generation` changes
+on each real host lease transition or detected producer reset, starting a new delivery epoch.
+Its `validity` bits are complete (`1`), master aligned (`2`), loss (`4`), and gain reduction (`8`).
+`lossCount` is the saturating count of dropped or rejected meter windows observed before the
+frame; `windows` counts the complete windows folded into the frame, normally one.
+`[firstSample, endSample)` timestamps the peak window only. Within a generation, a gap between
+one frame's end and the next frame's start, or the loss bit/count, indicates omitted or rejected
+windows rather than contiguous measurement. A track's positional gain reduction still conflates
+an unobserved effect with zero and may fold independently aged effects; the SDK does not claim
+an exact peak/GR join or per-effect GR timing. `TelemetryUpdate` carries CPU utilization in percent,
+block/deadline-miss counts, peak/mean block duration, budget and clock resolution in milliseconds,
+and the host's below-resolution flag, without inventing a generation or sample span.
 
 Call `await engine.close()` when the browser session is finished. It disposes the worklet host
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the

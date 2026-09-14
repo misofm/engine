@@ -230,3 +230,37 @@ a passing browser proof. Root checkpoints both test changes as useful, buildable
 evidence. Logs: `/tmp/miso-796-audit/verify-sdk-full.log`, `verify-types.log`,
 `verify-measurements.log`, and `verify-package1.log`. No runtime correction or
 registry availability is claimed by this checkpoint.
+
+
+## Independent attempt 1 verdict — PASS
+
+Fresh Astra MEDIUM verifier (separate from coordinator and Luna XHIGH implementer)
+records **PASS** on `bc771b9ad1c94af6df6d93a28baf10cadf78d778` plus the final README
+metadata-semantics clarification. Full independent record and preserved failure
+logs: `/tmp/miso-796-audit/verify-796-attempt1.md`.
+
+Independent `check-sdk-headless.sh /tmp/issue793-candidate1-artifact` passed 241/241
+on the final runtime; the final focused measurement suite passed 12/12 after two
+additional regressions. Typecheck passed. The final
+`MISO_ENGINE_SDK_BROWSER_TOOLS=/tmp/miso-app-engine-analysis-integration/node_modules
+bash scripts/sdk-package.sh check /tmp/issue793-candidate1-artifact` passed its
+artifact preflight, generated surface, package build, enginectl, fresh strict typed
+consumer and Vite/Chromium checks (`verify-package-final.log`). `git diff --check`
+passed. The real packed SDK meter had sequence/generation 1, validity 3, loss 0,
+windows 1, peak span [0,128), track/master L/R .25/.5, track GR 0, master GR null,
+and awaited close completion. No FLAC adapter was installed.
+
+Verifier fixed the late-arm test's invalid frame shape and added missing metadata
+and telemetry/close assertions. The packed fixture timeout was independently
+explained by its default centered pan mixing lanes: first-frame actual peaks were
+both 0.1767766923, at sample 0 with a suspended context. The meter-only fixture now
+sets an explicit identity matrix and queues PCM before resume; no DSP/product
+change or weakened assertion was needed. Earlier failed fixture runs are preserved
+alongside the successful result. Approved adapter `tests/console.test.ts` at
+`f833303f146de7cbe1705fe88ae68a6d6e0d4e45` supplied the explicitly reviewed lease-race
+source cases. The actual engine console/managed-observation hook regression passes.
+
+Accepted #793 Wasm reused without rebuild, independently verified SHA-256
+`c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
+Required merged-main CI, evidence commit delivery and GitHub closure remain root
+responsibilities; this source PASS is not #794 registry publication or #763 closure.
