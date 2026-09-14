@@ -1,4 +1,4 @@
-use core::mem::{offset_of, size_of};
+use core::mem::{offset_of, size_of, size_of_val};
 
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
 use session::{canonical_session_json, parse_session_json};
@@ -15,6 +15,16 @@ fn one_track_session(quantum: u32) -> String {
     model.tracks.truncate(1);
     model.routes.truncate(1);
     canonical_session_json(&model).expect("canonical one-track session")
+}
+
+fn one_track_resource_session(quantum: u32) -> String {
+    let mut model = parse_session_json(&one_track_session(quantum)).expect("one-track session");
+    for track in &mut model.tracks {
+        track.simd1.effects.clear();
+        track.dynamic.effects.clear();
+        track.simd2.effects.clear();
+    }
+    canonical_session_json(&model).expect("canonical resource session")
 }
 
 fn one_track_compressor_session(quantum: u32) -> String {
@@ -800,39 +810,214 @@ fn each_boot_option_rule_has_its_own_typed_refusal() {
 }
 
 #[test]
+fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters() {
+    let document = one_track_resource_session(128);
+    let parsed = parse_host_session(&document).expect("resource session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("resource session compile");
+    let shape = compiled_session_shape(&compiled).expect("resource session shape");
+    assert_eq!(shape.effect_count, 0, "resource fixture has no effects");
+
+    let source_id_bytes: u64 = compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .map(|source| source.id.as_str().len() as u64)
+        .sum();
+    let source_control_bytes = control_table_bytes(shape.source_count as usize)
+        .expect("source control table projection")
+        + source_id_arena_bytes(source_id_bytes as usize).expect("source ID projection");
+    let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
+    let expected_decoded_count = (2 * MAXIMUM_COMMAND_RECORDS as usize)
+        .checked_add(2 * shape.track_count as usize)
+        .expect("decoded record count");
+    let decoded_bytes = (expected_decoded_count * size_of::<(u32, AdmittedCommand)>()) as u64;
+
+    for (name, options, expected_wire_bytes) in [
+        ("off", boot_options(128), 0_u64),
+        (
+            "on",
+            WebBootOptions {
+                console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+                console_meter_blocks: 0,
+                console_observation_taps: 0,
+                ..boot_options(128)
+            },
+            (MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) as u64,
+        ),
+    ] {
+        let projection = project_buffers(
+            document.len() as u32,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            shape.maximum_source_channels,
+            shape
+                .longest_source_id_bytes
+                .max(shape.longest_track_id_bytes),
+            options,
+            (false, (0, 0)),
+        )
+        .expect("bridge projection");
+        assert_eq!(
+            u64::from(projection.command_records) * u64::from(COMMAND_RECORD_BYTES),
+            expected_wire_bytes
+        );
+
+        let source_ring_frames = if options.source_ring_frames == 0 {
+            default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
+        } else {
+            options.source_ring_frames
+        };
+        let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
+        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let (engine, _) = prepare_host_runtime_with_selected_meters_between_render_calls(
+            &compiled,
+            &caps,
+            &console,
+            &[],
+        )
+        .expect("independent engine preparation");
+        assert_eq!(
+            engine.report.control_retained_bytes, source_control_bytes,
+            "{name}: source-control table and ID arena are exact"
+        );
+        assert_eq!(
+            engine.report.session_model_bytes, session_model_bytes,
+            "{name}: compiled model retention is exact"
+        );
+        assert_eq!(engine.report.observation_retained_bytes, 0);
+        assert_eq!(engine.report.builtin_meter_payload_bytes, 0);
+
+        let host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+        let ready = host.ready.as_ref().expect("ready ownership");
+        assert_eq!(ready.command_decoded.len(), expected_decoded_count);
+        assert_eq!(
+            size_of_val(ready.command_decoded.as_ref()) as u64,
+            decoded_bytes,
+            "{name}: typed decoded backing has exact element size"
+        );
+        assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
+        assert!(
+            !ready.command_decoded.is_empty(),
+            "decoded backing is retained in console-off mode"
+        );
+        assert!(
+            ready.effect_controls.is_empty(),
+            "no effect control additions"
+        );
+        assert!(
+            ready.effect_observations.is_empty(),
+            "no observation additions"
+        );
+        assert!(ready.meters.is_empty(), "no meter additions");
+        assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
+        assert_eq!(host.resources().observation_retained_bytes, 0);
+
+        let expected_bridge_metadata = projection
+            .report
+            .bridge_metadata_bytes
+            .checked_add(source_control_bytes)
+            .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge metadata arithmetic");
+        let expected_bridge_retained = projection
+            .report
+            .bridge_retained_bytes
+            .checked_add(source_control_bytes)
+            .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge retained arithmetic");
+        assert_eq!(
+            host.resources().bridge_metadata_bytes,
+            expected_bridge_metadata
+        );
+        assert_eq!(
+            host.resources().bridge_retained_bytes,
+            expected_bridge_retained
+        );
+
+        // The 1 MiB live-response capture is deliberately larger than this fixture's decoded
+        // array. Keep the largest assertion honest: it includes that independent projection and
+        // then folds the engine's own largest allocation into the named maximum.
+        let bridge_largest = projection
+            .report
+            .largest_named_allocation_bytes
+            .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
+            .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
+            .max(compiled.resource_estimate().single_allocation_bytes)
+            .max(decoded_bytes);
+        assert_eq!(
+            host.resources().largest_bridge_allocation_bytes,
+            bridge_largest
+        );
+        assert_eq!(
+            host.resources().largest_named_allocation_bytes,
+            bridge_largest.max(engine.report.largest_engine_allocation_bytes)
+        );
+    }
+}
+
+#[test]
 fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     let document = one_track_session(128);
     let source_ring_frames = 1 << 20;
-    let baseline = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
+    for options in [
         WebBootOptions {
             source_ring_frames,
             ..boot_options(128)
         },
-    )
-    .expect("baseline boot");
-    let resources = baseline.resources();
-    let exact = exact_retained_report_total(resources);
-    drop(baseline);
-    let failure = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
         WebBootOptions {
             source_ring_frames,
-            maximum_memory_bytes: exact - 1,
+            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            console_meter_blocks: 0,
+            console_observation_taps: 0,
             ..boot_options(128)
         },
-    )
-    .err()
-    .expect("one byte below exact aggregate must refuse");
-    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-    assert_eq!(
-        failure.diagnostic(),
-        format!(
-            "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
-            exact - 1
+    ] {
+        let baseline =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
+        let exact = exact_retained_report_total(baseline.resources());
+        drop(baseline);
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact,
+                ..options
+            },
         )
-        .as_bytes()
-    );
+        .expect("exact aggregate budget must accept");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact - 1,
+                ..options
+            },
+        )
+        .err()
+        .expect("one byte below exact aggregate must refuse");
+        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            failure.diagnostic(),
+            format!(
+                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+                exact - 1
+            )
+            .as_bytes()
+        );
+    }
 }
 
 #[test]

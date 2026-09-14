@@ -465,3 +465,74 @@ The complete final pre-resource graph suite passed 72 tests; the new focused res
 test, strict all-target graph Clippy, Wasm graph check, formatting and diff checks pass.
 No benchmark. Host decoded-storage and aggregate budget fixtures remain assignment-4
 work; owner/host/SDK integration, activation and final adversarial review remain open.
+
+
+### Assignment 5 frozen admission and accounting refinement
+
+Astra XHIGH read-only design and root decision: retain no third target cache. The
+optional boxed compiler owner retains its factory Arc, accepted rate, committed and
+candidate canonical rows, touched flags, revision and transaction phase. Initial rows
+come from accepted bank preparation, including sparse defaults and lane asymmetry.
+An invalid edit poisons that candidate until discard/restart; a later valid overwrite
+cannot erase its refusal. Same-value edits still mark touched rows. Descriptor policy,
+automation permission/rate and domains remain authoritative; no EQ-ID allowlist. The
+current 20,000 Hz EQ maximum is below Nyquist at every supported launch rate; companion
+seed validation also rejects unsupported rates. No new reset export is introduced:
+repreparation creates a freshly seeded owner.
+
+Publication revalidates the exact caller-owned target slice against the private current
+candidate, checks revision increment and room for the complete target prefix, then
+uses the private producer. Add a narrowly scoped SPSC `Producer::available_capacity`
+snapshot (one acquired consumer cursor; overflow-safe modular occupancy; no cache or
+counter changes). With one producer, the consumer can only free additional room after
+that check. Expected full refusal changes no queue/counter/shadow. Only complete
+publication permits one commit with the checked next revision; edit, discard and repeat
+publication refuse after publication. An unexpected partial push is an invariant fault,
+never a rollback or partial-success report. Ordinary raw PreparedTarget publication and
+unlowered opted-in Parameter publication remain refused. Production EQ opt-in stays
+absent until assignment 10.
+
+Assignment 5 permits narrow host-web preparation accounting glue and the SPSC snapshot
+alongside its original primary files. Export a checked Rust `EffectControlResources`
+result with producer_table_bytes, owned_payload_bytes and
+largest_owned_allocation_bytes. Native table backing uses actual Vec capacity times
+sizeof(EffectControlProducer). Owned payload includes each retained track/effect string,
+opted-in owner box, both InitialParameterValue slice backings and dirty-flag backing.
+For EQ the three slices total 2*60*12+60 = 1500 bytes; charge the actual owner box too.
+Count each distinct retained factory Arc allocation once (two AtomicUsize reference
+counts extended/padded to the actual factory layout), deduplicated by Arc identity.
+Static descriptors add no backing allocation. Largest means the maximum individual
+allocation, never the sum. Queue and render-side staging remain solely graph charges.
+
+HostPrepareReport gains this separate internal Rust resource result. Source-only
+control_retained_bytes and graph rows keep their meanings. Host-core includes native
+effect-control total in its aggregate preparation cap and its separate maximum in the
+named cap. Its existing largest_engine_allocation_bytes continues to describe engine
+storage. Host-web consumes the native Vec and charges its actual dense
+Box<[Option<EffectControlProducer>]> replacement plus the transferred owned payload,
+never both tables. The console-off all-None dense table is still an allocation when
+effects exist. Fold these into bridge retained/metadata/maxima before final validation;
+no public WebResourceReport ABI row is added. Tests must independently verify shared
+factory deduplication, actual table replacement, and exact/one-byte-below boundaries.
+
+
+### Assignment 4 complete — host decoded storage and exact aggregate gates
+
+Luna XHIGH added an actual console-off/on host fixture with no effects or meters.
+The retained decoded slice has exactly 2*MAXIMUM_COMMAND_RECORDS+2*track_count entries;
+its sizeof_val charge is separate from the 48-byte wire buffer, which is absent in
+the off case. Independently projected bridge storage plus source-control table/ID
+arena, compiled model and actual decoded backing equals final retained/metadata rows.
+The maximum check includes the existing 1 MiB response capture; this fixture does not
+claim decoded storage determines that maximum. Exact aggregate budgets accept and
+one byte below refuses for both console modes. The existing projection allowance is
+unchanged and its regression tests pass.
+
+Gates PASS: focused decoded_command_resource and exact_retained_total; root's host
+resource filter (2 tests), exact_retained_total (1) and retained_projection (2);
+strict host-web all-target Clippy, Wasm host check, formatting and diff checks. No
+benchmark. Assignment 4 is complete through these pushed checkpoints: bounded FIFO
+staging/application, fail-closed producer/host preflight, real EQ scalar/bank PCM,
+collapse/asymmetric retarget, and independent queue/lane/host resource boundaries.
+Assignment 5 uses the frozen refinement above. Assignments 5–10, actual production
+activation, final artifact and fresh Astra MEDIUM issue review remain pending.

@@ -162,3 +162,11 @@ The next #807 checkpoint proves graph queue/target/lane storage with independent
 arithmetic and exact/one-byte-below cap tests, including a queue that determines the
 largest allocation. Native focused tests, strict Clippy and Wasm compilation pass.
 Host decoded-storage evidence remains before assignment 5; no release claim.
+
+
+#807 assignment 4 is complete: host decoded-buffer charges and console-off/on exact
+aggregate budget acceptance/refusal now pass, alongside queue/runtime/PCM gates.
+The compiler-owned candidate/publication transaction is the next bounded assignment;
+its separate resource-report and checked publication design is frozen in #807.
+#807 remains open, attempt 1, with assignments 5–10 and final review pending. No
+live-cut activation, SDK release or app deployment has occurred.
