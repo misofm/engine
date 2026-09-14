@@ -153,3 +153,22 @@ The current command vocabulary ends at polarityInvert11: inputFilters12 is free.
 Start only tranche1 builtin preparation/ramp/identity behavior. Keep public metadata
 prepared-only until queue/host/SDK closure. Reuse existing fixtures and counters,
 run no benchmark, and checkpoint focused-green work before adding another tranche.
+
+
+### Tranche1 initial DSP checkpoint — implementation continues
+
+Luna implemented the pure builtin pair preparer/validator, fixed64 coefficient-ramp
+state and kernels, disabled endpoint clearing, plan/symmetry/reset integration,
+target response snapshots, and all-identity trim-ramp bodies. Existing builtin tests,
+lane input-chain elision tests and the builtin Wasm check pass; four focused new
+fixtures cover launch-rate preparation, first-sample/target response, trim finiteness
+and symmetric bank mono/dual PCM. Public metadata remains prepared-only.
+
+Root found two concrete gaps before queue wiring: bank target application currently
+updates every SIMD member instead of taking one lane address, and target validation
+must associate exact identity with that section's zero cutoff. Correct these in the
+same bounded tranche before proceeding; preserve padding and unrelated ramps.
+Representative endpoint/partition, asymmetric lane, disable/reset and identity-body
+mechanism checks also remain before the tranche is complete. This is a buildable
+recovery checkpoint, not tranche completion or a whole-issue adversarial verdict.
+No benchmark or new framework was introduced; #808 remains attempt1/open.

@@ -701,6 +701,319 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     }
 }
 
+/// A fixed 64-update filter ramp combined with the existing trim ramp.  Filter coefficients are
+/// consumed for the current frame and advanced afterwards, so frame A uses the old words and
+/// frame A+64 uses the exact target words.  `filter_remaining` is indexed `[channel][section]`;
+/// zero-count lanes are harmless and let one bank run its bounded prefix without a per-lane
+/// dispatch.
+#[inline(always)]
+pub fn input_chain_ramp_block_filter<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &mut InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    trim: &mut InputTrimRamp<L>,
+    trim_ramping: bool,
+    filter_target: &[[SvfCoef<L>; 2]; 2],
+    filter_step: &[[SvfCoef<L>; 2]; 2],
+    filter_remaining: &mut [[L; 2]; 2],
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    let mut state = s.section;
+    let mut coefficients = c.section;
+    let mut trim_current = trim.current;
+    let mut trim_remaining = trim.remaining;
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            let trim_value = if trim_ramping {
+                trim_remaining[channel] = trim_remaining[channel].sub(one);
+                let done = trim_remaining[channel].le(zero);
+                let value = L::select(
+                    done,
+                    trim.target[channel],
+                    trim_current[channel].add(trim.step[channel]),
+                );
+                trim_current[channel] = value;
+                value
+            } else {
+                c.trim[channel]
+            };
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
+            let mut v = x.andnot(bad).mul(trim_value);
+            for section in 0..2 {
+                let coefficient = &coefficients[channel][section];
+                let v0 = v;
+                let (v1, v2) = svf_step(
+                    v0,
+                    coefficient.c1.neg(),
+                    coefficient.a2,
+                    coefficient.a3,
+                    &mut state[channel][section],
+                );
+                v = coefficient
+                    .m2
+                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+            }
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+
+            // Current-then-advance is the coefficient-ramp contract.  Clearing a disabled
+            // endpoint occurs after its last old-word sample and before the first identity one.
+            for section in 0..2 {
+                let remaining = filter_remaining[channel][section].sub(one);
+                let done = remaining.le(zero);
+                filter_remaining[channel][section] = remaining;
+                let current = &mut coefficients[channel][section];
+                let target = &filter_target[channel][section];
+                let step = &filter_step[channel][section];
+                current.c1 = L::select(done, target.c1, current.c1.add(step.c1));
+                current.a2 = L::select(done, target.a2, current.a2.add(step.a2));
+                current.a3 = L::select(done, target.a3, current.a3.add(step.a3));
+                current.m0 = L::select(done, target.m0, current.m0.add(step.m0));
+                current.m1 = L::select(done, target.m1, current.m1.add(step.m1));
+                current.m2 = L::select(done, target.m2, current.m2.add(step.m2));
+                let identity = L::mask_and(
+                    L::mask_and(current_target_identity(target), done),
+                    L::mask_not(no_lanes::<L>()),
+                );
+                state[channel][section].ic1 = state[channel][section].ic1.andnot(identity);
+                state[channel][section].ic2 = state[channel][section].ic2.andnot(identity);
+            }
+        }
+    }
+    c.section = coefficients;
+    s.section = state;
+    trim.current = trim_current;
+    trim.remaining = trim_remaining;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}
+
+#[inline(always)]
+fn current_target_identity<L: Lane>(target: &SvfCoef<L>) -> L::Mask {
+    L::mask_and(
+        L::mask_and(target.m0.eq(L::splat(1.0)), target.m1.eq(L::zero())),
+        L::mask_and(
+            target.m2.eq(L::zero()),
+            L::mask_and(
+                target.c1.eq(L::zero()),
+                L::mask_and(target.a2.eq(L::zero()), target.a3.eq(L::zero())),
+            ),
+        ),
+    )
+}
+
+/// Mono-collapse form of [`input_chain_ramp_block_filter`].  Only channel zero advances; the
+/// owner mirrors its complete filter and trim records onto channel one after the block.
+#[inline(always)]
+pub fn input_chain_ramp_block_filter_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &mut InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    trim: &mut InputTrimRamp<L>,
+    trim_ramping: bool,
+    filter_target: &[[SvfCoef<L>; 2]; 2],
+    filter_step: &[[SvfCoef<L>; 2]; 2],
+    filter_remaining: &mut [[L; 2]; 2],
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut state = s.section[0];
+    let mut coefficients = c.section[0];
+    let mut trim_current = trim.current[0];
+    let mut trim_remaining = trim.remaining[0];
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let trim_value = if trim_ramping {
+            trim_remaining = trim_remaining.sub(one);
+            let done = trim_remaining.le(zero);
+            let value = L::select(done, trim.target[0], trim_current.add(trim.step[0]));
+            trim_current = value;
+            value
+        } else {
+            c.trim[0]
+        };
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(trim_value);
+        for section in 0..2 {
+            let coefficient = &coefficients[section];
+            let v0 = v;
+            let (v1, v2) = svf_step(
+                v0,
+                coefficient.c1.neg(),
+                coefficient.a2,
+                coefficient.a3,
+                &mut state[section],
+            );
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+        for section in 0..2 {
+            let remaining = filter_remaining[0][section].sub(one);
+            let done = remaining.le(zero);
+            filter_remaining[0][section] = remaining;
+            let current = &mut coefficients[section];
+            let target = &filter_target[0][section];
+            let step = &filter_step[0][section];
+            current.c1 = L::select(done, target.c1, current.c1.add(step.c1));
+            current.a2 = L::select(done, target.a2, current.a2.add(step.a2));
+            current.a3 = L::select(done, target.a3, current.a3.add(step.a3));
+            current.m0 = L::select(done, target.m0, current.m0.add(step.m0));
+            current.m1 = L::select(done, target.m1, current.m1.add(step.m1));
+            current.m2 = L::select(done, target.m2, current.m2.add(step.m2));
+            let identity = L::mask_and(current_target_identity(target), done);
+            state[section].ic1 = state[section].ic1.andnot(identity);
+            state[section].ic2 = state[section].ic2.andnot(identity);
+        }
+    }
+    c.section[0] = coefficients;
+    s.section[0] = state;
+    trim.current[0] = trim_current;
+    trim.remaining[0] = trim_remaining;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
+/// Dispatch a trim-only ramp through the all-identity body when the settled plan proves that no
+/// SVF recurrence is needed.  The wrapper performs its one shape choice before the frame loop.
+#[inline(always)]
+pub fn input_chain_ramp_block_elided<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    if plan.elided == [[true, true], [true, true]] {
+        identity_chain_ramp_block(left, right, frames, r)
+    } else {
+        input_chain_ramp_block(left, right, frames, c, s, r)
+    }
+}
+
+#[inline(always)]
+fn identity_chain_ramp_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    let mut current = r.current;
+    let mut remaining = r.remaining;
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            remaining[channel] = remaining[channel].sub(one);
+            let done = remaining[channel].le(zero);
+            let trim = L::select(
+                done,
+                r.target[channel],
+                current[channel].add(r.step[channel]),
+            );
+            current[channel] = trim;
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
+            let v = x.andnot(bad).mul(trim).add(zero);
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+    r.current = current;
+    r.remaining = remaining;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}
+
+/// Mono-collapse wrapper for the all-identity trim-ramp path.
+#[inline(always)]
+pub fn input_chain_ramp_block_mono_elided<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    if plan.elided[0] == [true, true] {
+        identity_chain_ramp_block_mono(io, frames, r)
+    } else {
+        input_chain_ramp_block_mono(io, frames, c, s, r)
+    }
+}
+
+#[inline(always)]
+fn identity_chain_ramp_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut current = r.current[0];
+    let mut remaining = r.remaining[0];
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        remaining = remaining.sub(one);
+        let done = remaining.le(zero);
+        let trim = L::select(done, r.target[0], current.add(r.step[0]));
+        current = trim;
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let v = x.andnot(bad).mul(trim).add(zero);
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+    r.current[0] = current;
+    r.remaining[0] = remaining;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
 /// The bit pattern of `+1.0`, the direct-mix word of a disabled builtin section.
 const IDENTITY_M0_BITS: u32 = 0x3F80_0000;
 /// The bit pattern of `+0.0`, which every other identity word and both identity state words carry.
