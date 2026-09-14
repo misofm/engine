@@ -2883,6 +2883,228 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
+        },
+        {
+          "id": 65,
+          "name": "hpf-enabled",
+          "displayUnit": "on/off",
+          "unit": 5,
+          "unitName": "linear",
+          "domain": 2,
+          "domainName": "boolean",
+          "minimum": null,
+          "maximum": null,
+          "default": 0,
+          "mapping": 4,
+          "mappingName": "stepped",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 66,
+          "name": "hpf-frequency",
+          "displayUnit": "Hz",
+          "unit": 2,
+          "unitName": "hz",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 10,
+          "maximum": 20000,
+          "default": 80,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "cents",
+            "size": "20",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 67,
+          "name": "hpf-q",
+          "displayUnit": "Q",
+          "unit": 6,
+          "unitName": "ratio",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 0.1,
+          "maximum": 18,
+          "default": 0.70710677,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 81,
+          "name": "lpf-enabled",
+          "displayUnit": "on/off",
+          "unit": 5,
+          "unitName": "linear",
+          "domain": 2,
+          "domainName": "boolean",
+          "minimum": null,
+          "maximum": null,
+          "default": 0,
+          "mapping": 4,
+          "mappingName": "stepped",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 82,
+          "name": "lpf-frequency",
+          "displayUnit": "Hz",
+          "unit": 2,
+          "unitName": "hz",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 10,
+          "maximum": 20000,
+          "default": 18000,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "cents",
+            "size": "20",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 83,
+          "name": "lpf-q",
+          "displayUnit": "Q",
+          "unit": 6,
+          "unitName": "ratio",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 0.1,
+          "maximum": 18,
+          "default": 0.70710677,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 3,
+          "automationRateName": "none",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 1,
+          "smoothingName": "none",
+          "smoothingSamples": 0,
+          "readable": true,
+          "automatable": false,
+          "liveUpdatable": false,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
         }
       ],
       "ports": [
@@ -2934,6 +3156,14 @@ export const CATALOG = deepFreeze(
           {
             "id": 4,
             "name": "Band 4"
+          },
+          {
+            "id": 5,
+            "name": "HPF"
+          },
+          {
+            "id": 6,
+            "name": "LPF"
           }
         ]
       }

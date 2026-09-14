@@ -42,6 +42,41 @@ fn quoted_field<'a>(row: &'a str, field: &str) -> &'a str {
     &row[start..end]
 }
 
+fn raw_field<'a>(row: &'a str, field: &str) -> &'a str {
+    let marker = format!("\"{field}\": ");
+    let start = row
+        .find(&marker)
+        .unwrap_or_else(|| panic!("row names {field}: {row}"))
+        + marker.len();
+    let end = row[start..]
+        .find(|character: char| character == ',' || character == '\n')
+        .expect("raw field closes")
+        + start;
+    row[start..end].trim()
+}
+
+fn effect_parameter_rows<'a>(document: &'a str, effect_id: &str) -> Vec<&'a str> {
+    let effect_start = document
+        .find(&format!("\"id\": \"{effect_id}\""))
+        .unwrap_or_else(|| panic!("metadata names effect {effect_id}"));
+    let parameters_start = document[effect_start..]
+        .find("\"parameters\": [")
+        .expect("effect carries parameters")
+        + effect_start;
+    let ports_start = document[parameters_start..]
+        .find("\"ports\": [")
+        .expect("effect closes parameters before ports")
+        + parameters_start;
+    document[parameters_start..ports_start]
+        .split("        {\n")
+        .skip(1)
+        .map(|row| {
+            let end = row.find("\n        }").expect("parameter row closes");
+            &row[..end]
+        })
+        .collect()
+}
+
 fn unit_name(unit: ParameterUnit) -> &'static str {
     match unit {
         ParameterUnit::Db => "db",
@@ -97,6 +132,142 @@ fn builtin_metadata_has_authoritative_units_and_unique_keys() {
             "{} carries its explicit unit",
             descriptor.name
         );
+    }
+}
+
+/// Issue #805: the six prepared cut controls are appended after the historical 24-band catalog.
+///
+/// The old IDs and defaults are part of the prepared session compatibility surface. The cut rows
+/// are deliberately present in the catalog so the SDK can author them, but remain prepared-only:
+/// they have no live command write path and therefore must not enter the console queue.
+#[test]
+fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
+    let document = parameter_metadata::render();
+    let rows = effect_parameter_rows(&document, "miso.parametric-eq");
+    let old = [
+        (1, "band-1-enabled", "0.0"),
+        (2, "band-1-kind", "1.0"),
+        (3, "band-1-frequency", "80.0"),
+        (4, "band-1-gain", "0.0"),
+        (5, "band-1-q", "0.70710677"),
+        (6, "band-1-shelf-slope", "1.0"),
+        (17, "band-2-enabled", "0.0"),
+        (18, "band-2-kind", "1.0"),
+        (19, "band-2-frequency", "400.0"),
+        (20, "band-2-gain", "0.0"),
+        (21, "band-2-q", "0.70710677"),
+        (22, "band-2-shelf-slope", "1.0"),
+        (33, "band-3-enabled", "0.0"),
+        (34, "band-3-kind", "1.0"),
+        (35, "band-3-frequency", "2000.0"),
+        (36, "band-3-gain", "0.0"),
+        (37, "band-3-q", "0.70710677"),
+        (38, "band-3-shelf-slope", "1.0"),
+        (49, "band-4-enabled", "0.0"),
+        (50, "band-4-kind", "1.0"),
+        (51, "band-4-frequency", "10000.0"),
+        (52, "band-4-gain", "0.0"),
+        (53, "band-4-q", "0.70710677"),
+        (54, "band-4-shelf-slope", "1.0"),
+    ];
+    assert_eq!(
+        rows.len(),
+        30,
+        "the EQ catalog has 24 old rows plus six cuts"
+    );
+    for (row, (id, name, default)) in rows.iter().zip(old) {
+        assert_eq!(raw_field(row, "id"), id.to_string());
+        assert_eq!(quoted_field(row, "name"), name);
+        assert_eq!(raw_field(row, "default"), default);
+    }
+
+    let cuts = [
+        (
+            65,
+            "hpf-enabled",
+            "on/off",
+            "linear",
+            "boolean",
+            "stepped",
+            "null",
+            "null",
+            "0.0",
+        ),
+        (
+            66,
+            "hpf-frequency",
+            "Hz",
+            "hz",
+            "continuous",
+            "logarithmic",
+            "10.0",
+            "20000.0",
+            "80.0",
+        ),
+        (
+            67,
+            "hpf-q",
+            "Q",
+            "ratio",
+            "continuous",
+            "logarithmic",
+            "0.1",
+            "18.0",
+            "0.70710677",
+        ),
+        (
+            81,
+            "lpf-enabled",
+            "on/off",
+            "linear",
+            "boolean",
+            "stepped",
+            "null",
+            "null",
+            "0.0",
+        ),
+        (
+            82,
+            "lpf-frequency",
+            "Hz",
+            "hz",
+            "continuous",
+            "logarithmic",
+            "10.0",
+            "20000.0",
+            "18000.0",
+        ),
+        (
+            83,
+            "lpf-q",
+            "Q",
+            "ratio",
+            "continuous",
+            "logarithmic",
+            "0.1",
+            "18.0",
+            "0.70710677",
+        ),
+    ];
+    for (row, (id, name, display_unit, unit, domain, mapping, minimum, maximum, default)) in
+        rows[old.len()..].iter().zip(cuts)
+    {
+        assert_eq!(raw_field(row, "id"), id.to_string());
+        assert_eq!(quoted_field(row, "name"), name);
+        assert_eq!(quoted_field(row, "displayUnit"), display_unit);
+        assert_eq!(quoted_field(row, "unitName"), unit);
+        assert_eq!(quoted_field(row, "domainName"), domain);
+        assert_eq!(quoted_field(row, "mappingName"), mapping);
+        assert_eq!(raw_field(row, "minimum"), minimum);
+        assert_eq!(raw_field(row, "maximum"), maximum);
+        assert_eq!(raw_field(row, "default"), default);
+        assert_eq!(quoted_field(row, "channelPolicyName"), "perLane");
+        assert_eq!(quoted_field(row, "automationRateName"), "none");
+        assert_eq!(quoted_field(row, "smoothingName"), "none");
+        assert_eq!(raw_field(row, "smoothingSamples"), "0");
+        assert_eq!(raw_field(row, "readable"), "true");
+        assert_eq!(raw_field(row, "automatable"), "false");
+        assert_eq!(raw_field(row, "liveUpdatable"), "false");
     }
 }
 

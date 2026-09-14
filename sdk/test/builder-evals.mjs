@@ -493,6 +493,55 @@ describe("validation refusals name the offending path", () => {
     assert.throws(() => effect("miso.compressor", { nope: 1 }), /has no parameter 'nope'/);
     assert.throws(() => effect("miso.not-an-effect"), /unknown native effect/);
   });
+
+  test("prepared EQ cuts accept typed booleans while defaults stay sparse", () => {
+    // The prepared descriptor rows are authorable through the same catalog as old EQ rows, but
+    // they do not become live console edits. Red mutation: treat booleans as numbers, or assign
+    // new rows ahead of the old IDs, and one of these normalized wire records changes.
+    const withCuts = oneTrack({
+      id: "eq.prepared.cuts",
+      racks: {
+        dynamic: [effect("miso.parametric-eq", {
+          "hpf-enabled": true,
+          "lpf-enabled": false,
+          "band-1-enabled": true,
+          "band-1-kind": "bell",
+          "band-1-frequency": 120,
+          "band-1-gain": -2,
+        })],
+      },
+    });
+    const params = withCuts.toJSON().tracks[0].dynamic.effects[0].params;
+    assert.deepEqual(params.map((row) => row.parameter_id), [1, 2, 3, 4, 65, 81]);
+    assert.deepEqual(params.find((row) => row.parameter_id === 65), {
+      parameter_id: 65,
+      channel: "both",
+      unit: "linear",
+      value: 1,
+    });
+    assert.deepEqual(params.find((row) => row.parameter_id === 81), {
+      parameter_id: 81,
+      channel: "both",
+      unit: "linear",
+      value: 0,
+    });
+    assert.deepEqual(
+      params.filter((row) => row.parameter_id <= 4).map(({ parameter_id, unit, value }) =>
+        ({ parameter_id, unit, value })),
+      [
+        { parameter_id: 1, unit: "linear", value: 1 },
+        { parameter_id: 2, unit: "linear", value: 1 },
+        { parameter_id: 3, unit: "hz", value: 120 },
+        { parameter_id: 4, unit: "db", value: -2 },
+      ],
+    );
+
+    const defaults = oneTrack({
+      id: "eq.prepared.defaults",
+      racks: { dynamic: [effect("miso.parametric-eq")] },
+    });
+    assert.deepEqual(defaults.toJSON().tracks[0].dynamic.effects[0].params, []);
+  });
 });
 
 describe("issue #278 -- the port table is enforced, not documented", () => {

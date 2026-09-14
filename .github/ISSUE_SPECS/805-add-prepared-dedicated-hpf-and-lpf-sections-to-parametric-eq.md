@@ -285,3 +285,18 @@ passed, including render allocation/callgraph and SIMD shape gates (EQ dual
 /tmp/805-render-contract.log. No new npm release yet.
 Astra's committed DSP review has no production blocker; final verdict waits
 for generated catalog and prepared SDK/package evidence.
+
+## Attempt 1 — catalog checkpoint and exposed response integration failures
+
+Normal Rust metadata/SDK generators now expose30EQrows: original spaced IDs
+unchanged and six prepared-only cut rows. Typed booleans serialize0/1; omitted
+cuts preserve sparse params; live types still exclude new cuts. Passed:
+parameter-metadata (5round-trip,7ABI), generated/schema/types/fmt checks and
+the new builder case. Evidence /tmp/805-catalog-evidence.md.
+The required full headless run is explicitly RED:253tests,250pass,3fail.
+response-evals still expects4sections, while live-response and subscription
+queries hit host invalidArgument. Root located obsolete count>4 bounds in
+host-web FFI and both SDK live-response parsers. No failures are waived.
+Astra XHIGH is defining the minimum bounded6section transport correction and
+malformed-payload defenses before implementation. This is the existing response
+compatibility requirement; no new live-cut capability is claimed.
