@@ -132,3 +132,21 @@ Historical published 0.2.6 release guards/evidence remain frozen; the #804
 release child will freeze a new version and matching workflow pin before
 qualification/publication. This source/package acceptance does not claim a
 new registry release. Fresh Astra MEDIUM attempt-1 review is in progress.
+
+## Attempt 1 — independent verdict
+
+Fresh Astra MEDIUM: **PASS, no blockers** on source checkpoints `8f5e66b5`
+and `d860b6fb` plus matching-artifact checkpoint `9a126a6f`. Reviewer independently
+compared the entire old/new metadata after removing only the additive builtin
+unit fields; all remaining data was identical. Strict type probes rejected a
+`feedback | cross feedback` union addressed to the left lane, while valid
+per-lane/shared cases compiled. Runtime probes covered missing/malformed
+objects, nonenumerable and symbol unknown fields, nonfinite values, string
+smoothing and actual prepared-only EQ keys. Existing live rows have no boolean
+or enum domains, so positive live boolean/enum probes were correctly not
+invented. The completed headless/package logs and positional/agent/session
+compatibility were assessed. Full local report: `/tmp/147-astra-review.md`.
+
+This accepts the bounded source/package implementation. Integration, required
+CI and remote issue closure follow; registry publication remains in #804's
+coordinated release.
