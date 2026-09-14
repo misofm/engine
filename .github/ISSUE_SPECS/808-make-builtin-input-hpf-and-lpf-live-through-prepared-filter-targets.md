@@ -369,3 +369,54 @@ Astra MEDIUM reviewed the two-file delta and recorded **attempt3 PASS**, preserv
 attempt2's full runtime/artifact/browser qualification. #808 was reopened for the
 CI correction and is closed again once this evidence is upstream; required CI
 must be green before PR#812 merges.
+
+### Attempt4 CI resource-fixture correction
+
+Qualification34875764291 passed runtime, DSP, cross-target, SDK and all three
+browser jobs but exposed three stale policy/resource expectations. The bounded
+correction changes only one scanned comment word and existing resource fixtures
+plus their manifest consumers. No runtime arithmetic or ABI changes.
+
+Independent native accounting adds416 bytes per input owner:288 cached
+coefficient bytes plus128 countdown bytes. Two scalar owners add832 bytes per
+track; input processor size is688, boxed entry704 and preparation row1072.
+All nine fixture rows retain allocation counts and meter bytes; maximum
+allocation is max(previous,1072*tracks). Manifest SHA256 is
+`9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3`.
+Browser bridge metadata/retained grow16 bytes (the input shadow slice, rate and
+alignment); builtin retained grows832; graph plan grows2432 (largest retained
+bank variant:2304 coefficient plus128 countdown bytes). Only these five
+resource fields change; PCM/source digests remain unchanged.
+
+Fresh Astra MEDIUM **attempt4 PASS**: independently checked all nine rows and
+manifest consumers; no blocking findings. PASS:49 release audit tests, existing
+fixture/policy mutations, both benchmark-validator self-tests with zero timed
+workloads, browser/native resource parity plus26 mutations, strict audit/bench
+Clippy and the feature-enabled actual allocation tracker (1 passed). A first
+tracker invocation omitted test-support and ran zero tests; the corrected
+feature-enabled run supplies the evidence. Rebuilt Wasm remains exactly
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`,
+preserving accepted runtime/browser qualification. Required remote CI and merge
+remain; no benchmark or optimization was performed.
+
+### Bounded attempt5: derived graph audit identity
+
+Qualification34877814180 passes the corrected audit unit/resource fixtures and
+all three browser runs. Its realtime graph trace passes the zero-violation and
+ownership predicates, then fails the sealed whole-record checksum because that
+record embeds the newly accepted resource manifest hash. Root authorizes the
+final bounded attempt: prove the record differs only in that manifest identity,
+update its sole active checksum consumer, and run the existing exact graph trace
+and its direct script tests. Preserve all runtime and trace predicates. No new
+framework or runtime changes; a failing fifth verdict requires rescope.
+
+Fresh Astra MEDIUM **attempt5 PASS** against726e1a51. Exact million-block
+graph all-TID trace passes; existing trace-validator mutations, nine fatal
+graph-audit probes and the50-file builtin fixture audit pass. New audit record
+SHA256 is `3a5ae2622fb44bd2ddc3423c487f21ccaaac8cc1b9dc82635f316cb6afd38914`.
+Replacing its single accepted-manifest hash with the prior436a73ee... value
+recovers exact prior record SHA256
+`b54ed8e03bd039f803b71321995f0f848aea2095582873f7e96fd49c7155dff7`;
+all other bytes are unchanged. Reviewer independently repeated this derivation.
+All other jobs in34877814180 passed. Only the derived checksum consumer changes;
+no runtime or predicate changes. Required CI must pass before merge.
