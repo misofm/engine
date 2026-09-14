@@ -381,7 +381,7 @@ would have elided, on the blocks a ramp is in flight and on those only. Charged 
 input chain does not elide -- up to 48 lane-ops per lane-sample while a retarget is in flight,
 floor 0*.
 
-**#808 DSP amendment (host/SDK delivery pending):** the trim-only dispatch now
+**#808 DSP amendment (final qualification/review pending):** the trim-only dispatch now
 consults the existing all-identity plan once before the sample loop. When both
 sections are settled identity across the bank, its dual/mono body performs trim,
 sanitization, signed-zero normalization and output accounting, with no SVF

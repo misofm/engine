@@ -7,8 +7,8 @@ half. **Landed**: phase 3.
 the HPF/LPF tier. Fixed 12 dB/oct Butterworth filters are the accepted slice; #191
 variable slopes remain separate. The native owner and existing input queues now
 apply off-render prepared targets with a fixed 64-update coefficient ramp. Shared
-host admission validates mixed batches atomically; SDK helper and shipped-artifact
-closure remain pending. The historical phase 3 tiering below describes the original decision; this amendment
+host admission validates mixed batches atomically, and browser/headless SDKs share
+the same helper. Final corrected-artifact qualification and review remain pending. The historical phase 3 tiering below describes the original decision; this amendment
 supersedes its requirement to deliver slope changes together with liveness.
 
 `refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and

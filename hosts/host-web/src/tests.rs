@@ -3785,6 +3785,35 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         assert!(ready.in_flight.iter().all(|count| *count == 0));
     }
 
+    // A command selector outside the builtin pair vocabulary is malformed wire shape, rather
+    // than an unknown effect parameter: the builtin command owns selectors 0, 3 and 4 only.
+    let mut invalid_selector = input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_prepared_input_filter(&mut invalid_selector, 0, 0, 300.0, 2_000.0);
+    stage_command(
+        &mut invalid_selector,
+        1,
+        COMMAND_INPUT_FILTERS,
+        255,
+        2,
+        0,
+        0,
+        7,
+        0,
+        [300.0, 2_000.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        invalid_selector.submit_prepared_commands(2, companion_bytes),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        invalid_selector.command_report().reason,
+        COMMAND_REASON_MALFORMED
+    );
+    assert_eq!(invalid_selector.command_report().rejected_index, 1);
+    let ready = invalid_selector.ready.as_ref().unwrap();
+    assert_eq!(ready.input_filter_shadows[0].revision, 0);
+    assert!(ready.in_flight.iter().all(|count| *count == 0));
+
     // A full unrelated matrix queue refuses the mixed transaction while leaving the builtin
     // shadow at its committed seed.
     let mut full = input_filter_console_host(QUANTUM, 2);

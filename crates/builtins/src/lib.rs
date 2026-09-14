@@ -874,6 +874,7 @@ thread_local! {
     static CHANNEL_SYMMETRY_LANE_READS: Cell<usize> = const { Cell::new(usize::MAX) };
     static CHANNEL_SYMMETRY_OBSERVE_POST_RAMP: Cell<bool> = const { Cell::new(false) };
     static CHANNEL_SYMMETRY_LAST_POST_RAMP_READS: Cell<usize> = const { Cell::new(usize::MAX) };
+    static FILTER_PREFIX_KERNEL_FRAMES: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 #[cfg(test)]
@@ -1209,9 +1210,9 @@ impl<L: Lane> InputStage<L> {
         self.symmetry = candidate;
     }
 
-    /// Filter-aware post-ramp refresh. The legacy trim-only helper retains its exact extraction
-    /// count; this companion adds the newly live target/step/countdown words when a filter prefix
-    /// has just run.
+    /// Filter-aware post-ramp refresh. This retains the trim words and adds every live filter
+    /// target/step/countdown word, so both trim-only and filter-prefix paths publish one complete
+    /// channel-symmetry witness.
     fn refresh_filter_channel_symmetry_post_ramp(&mut self) {
         self.refresh_channel_symmetry_post_ramp();
         let mut candidate = self.symmetry;
@@ -1329,6 +1330,22 @@ impl<L: Lane> InputStage<L> {
         core::array::from_fn(|channel| {
             core::array::from_fn(|section| lane_words::<L>(&words[channel][section]))
         })
+    }
+
+    /// Bound the combined filter body to the countdown that still exists in its processed lanes.
+    /// A settled section must enter the elided suffix immediately; the fixed policy's 64-sample
+    /// ceiling is only a bound for an active countdown, not work every prefix must perform.
+    fn filter_prefix_frames(&self, frames: usize, channels: core::ops::Range<usize>) -> usize {
+        let mut remaining = 0_u32;
+        for channel in channels {
+            for section in 0..2 {
+                for lane in 0..self.members {
+                    remaining = remaining.max(self.filter_remaining[channel][section][lane]);
+                }
+            }
+        }
+        let remaining = remaining.min(INPUT_FILTER_RAMP_SAMPLES);
+        frames.min(usize::try_from(remaining).unwrap_or(usize::MAX))
     }
 
     fn settle_filter(&mut self, frames: usize, channels: core::ops::Range<usize>) {
@@ -1654,11 +1671,13 @@ impl<L: Lane> InputStage<L> {
         // arm is the call this function has always made, on the prepared coefficient words, with
         // the elision plan Job 1 decided -- byte-identical work.
         let report = if self.filter_ramping {
-            let prefix = frames.min(INPUT_FILTER_RAMP_SAMPLES as usize);
+            let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
+            #[cfg(test)]
+            FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter::<L>(
                 &mut left[..prefix * L::WIDTH],
                 &mut right[..prefix * L::WIDTH],
@@ -1726,7 +1745,7 @@ impl<L: Lane> InputStage<L> {
             self.settle(frames, 0..2);
             #[cfg(test)]
             begin_post_ramp_observation();
-            self.refresh_channel_symmetry_post_ramp();
+            self.refresh_filter_channel_symmetry_post_ramp();
             #[cfg(test)]
             end_post_ramp_observation();
             report
@@ -1795,11 +1814,13 @@ impl<L: Lane> InputStage<L> {
         // one channel's words and not the other's.
         debug_assert!(self.trim_ramp_channels_agree());
         let report = if self.filter_ramping {
-            let prefix = frames.min(INPUT_FILTER_RAMP_SAMPLES as usize);
+            let prefix = self.filter_prefix_frames(frames, 0..1);
             if self.ramping {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
+            #[cfg(test)]
+            FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter_mono::<L>(
                 &mut left[..prefix * L::WIDTH],
                 prefix,
@@ -1873,7 +1894,7 @@ impl<L: Lane> InputStage<L> {
             self.mirror_trim_ramp();
             #[cfg(test)]
             begin_post_ramp_observation();
-            self.refresh_channel_symmetry_post_ramp();
+            self.refresh_filter_channel_symmetry_post_ramp();
             #[cfg(test)]
             end_post_ramp_observation();
             report

@@ -1,8 +1,9 @@
 use super::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport, BuiltinResetKind,
     CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP,
-    CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock, InputStage,
-    Matrix2x2, Simd4, Simd8, prepare_sections, test_support,
+    CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
+    FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, Simd4, Simd8, prepare_sections,
+    test_support,
 };
 
 fn selected_snapshot(metrics: super::MeterMetricSet) -> super::MeterSnapshot {
@@ -263,8 +264,8 @@ fn post_ramp_symmetry_extracts_each_word_once() {
     });
     assert_eq!(stage.symmetry, oracle);
     assert_eq!(
-        extractions, 30,
-        "one extraction per side of each of 15 word pairs"
+        extractions, 78,
+        "one extraction per side of each of 39 trim/filter word pairs"
     );
 
     for lane in 0..8 {
@@ -278,7 +279,7 @@ fn post_ramp_symmetry_extracts_each_word_once() {
         mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
     });
     assert_eq!(stage.symmetry, mono_oracle);
-    assert_eq!(mono_extractions, 30);
+    assert_eq!(mono_extractions, 78);
 }
 
 #[test]
@@ -298,6 +299,104 @@ fn post_ramp_symmetry_helper_is_off_for_settled_blocks() {
         usize::MAX
     );
     CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(false));
+}
+
+#[test]
+fn trim_refresh_preserves_asymmetric_settled_filter_steps() {
+    fn check<L: super::Lane>() {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let mut stage = InputStage::<L>::new(&[track]);
+        let target = super::prepare_input_filter_pair(48_000, 120.0, 0.0)
+            .unwrap()
+            .targets[0];
+        let mut left = vec![0.1; 64 * L::WIDTH];
+        let mut right = left.clone();
+        stage.apply_prepared_filter(
+            0,
+            super::PreparedInputFilterTarget {
+                lanes: BuiltinLaneSelector::Left,
+                ..target
+            },
+        );
+        stage.process(&mut left, &mut right, 64);
+        stage.apply_prepared_filter(0, target);
+        stage.process(&mut left, &mut right, 64);
+        assert!(
+            !stage.compute_lane_channel_symmetry(0),
+            "settled steps differ"
+        );
+        stage.set_trim_db(0, BuiltinLaneSelector::Both, 6.0, 128);
+        stage.process(&mut left, &mut right, 64);
+        assert!(!stage.lane_channel_symmetry(0));
+        assert_eq!(
+            stage.symmetry & 1,
+            0,
+            "trim must retain the filter mismatch"
+        );
+    }
+    check::<f32>();
+    check::<Simd4>();
+    check::<Simd8>();
+}
+
+#[test]
+fn filter_prefix_ends_at_countdown_for_dual_and_mono_paths() {
+    use super::prepare_input_filter_pair;
+
+    fn prepare_stage<L: super::Lane>() -> InputStage<L> {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        InputStage::<L>::new(&[track])
+    }
+
+    fn ramp_filter_to_one<L: super::Lane>(stage: &mut InputStage<L>) {
+        let active = prepare_input_filter_pair(48_000, 120.0, 8_000.0).unwrap();
+        for target in active.targets {
+            stage.apply_prepared_filter(0, target);
+        }
+        let mut left = vec![1.0; 64 * L::WIDTH];
+        let mut right = left.clone();
+        stage.process(&mut left, &mut right, 64);
+
+        let disabled = prepare_input_filter_pair(48_000, 0.0, 0.0).unwrap();
+        for target in disabled.targets {
+            stage.apply_prepared_filter(0, target);
+        }
+        let mut left = vec![1.0; 63 * L::WIDTH];
+        let mut right = left.clone();
+        stage.process(&mut left, &mut right, 63);
+    }
+
+    let mut dual = prepare_stage::<f32>();
+    ramp_filter_to_one(&mut dual);
+    dual.set_trim_db(0, BuiltinLaneSelector::Both, 6.0, 256);
+    FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(usize::MAX));
+    let mut left = vec![1.0; 128];
+    let mut right = left.clone();
+    dual.process(&mut left, &mut right, 128);
+    assert_eq!(FILTER_PREFIX_KERNEL_FRAMES.with(Cell::get), 1);
+    assert_eq!(dual.remaining[0][0], 128);
+    assert_eq!(dual.filter_remaining[0][0][0], 0);
+    assert!(dual.plan.elided.into_iter().flatten().all(|elided| elided));
+
+    let mut mono = prepare_stage::<f32>();
+    ramp_filter_to_one(&mut mono);
+    mono.set_trim_db(0, BuiltinLaneSelector::Both, 6.0, 256);
+    FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(usize::MAX));
+    let mut mono_left = vec![1.0; 128];
+    mono.process_mono(&mut mono_left, 128);
+    assert_eq!(FILTER_PREFIX_KERNEL_FRAMES.with(Cell::get), 1);
+    assert_eq!(mono.remaining[0][0], 128);
+    assert_eq!(mono.filter_remaining[0][0][0], 0);
+    // Mono leaves right integrators frozen until disengagement; its processed plane is elided.
+    assert!(mono.plan.elided[0].into_iter().all(|elided| elided));
 }
 
 fn process_reference(

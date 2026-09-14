@@ -3829,7 +3829,7 @@ impl CommandRecord {
             return Err(COMMAND_REASON_MALFORMED);
         }
         if !matches!(self.parameter_id, 0 | 3 | 4) {
-            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+            return Err(COMMAND_REASON_MALFORMED);
         }
         if self.parameter_id != 0 && self.values[1].to_bits() != 0 {
             return Err(COMMAND_REASON_MALFORMED);

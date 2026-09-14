@@ -320,3 +320,22 @@ and mechanism evidence; signed zero, negative, NaN/Inf, polarity/output recovery
 and mono reference comparisons; and malformed raw-selector refusal. No new test
 framework, benchmark or unrelated optimization. Rebuild once after focused gates,
 then run final packed browser/headless/artifact gates and a fresh review verdict.
+
+Attempt2 implementation checkpoint: Luna supplied the bounded source fixes and
+adverse dual/mono lane fixture; root completed the explicit Left→Both→trim
+regression at scalar/Simd4/Simd8. All14 builtin unit tests,9 live-filter fixtures,
+10 lane elision comparisons and the host atomic/raw-selector test pass. Strict
+builtins/lane/host-web test Clippy with the existing host test-support feature
+passes. The actual combined-kernel callsite records one frame for disable63+128
+in both dual and mono paths, with the processed identity plan restored and the
+long trim ramp continuing. Mono's right integrators remain intentionally frozen;
+its identity proof addresses the processed left plane, not the frozen plane.
+The updated per-word symmetry traversal extracts78words once instead of30,
+reflecting all39 required trim/filter word pairs; there is no timing claim.
+
+Corrected Rust Wasm SHA256 is
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`.
+The earlier `42f499...` artifact and its passing package/headless checks are
+attempt1 evidence only. Final corrected package/browser qualification and the
+fresh attempt2 verdict remain pending. SDK README now documents atomic pair use,
+Hz/zero semantics and the fixed transition; no release version has been changed.

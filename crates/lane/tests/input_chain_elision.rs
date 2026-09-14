@@ -18,7 +18,8 @@
 use lane::kernels::builtins::{
     InputChainCoef, InputChainPlan, InputChainReport, InputChainState, InputTrimRamp,
     NONFINITE_LIMIT, input_chain_block, input_chain_block_elided, input_chain_block_mono_elided,
-    input_chain_plan, input_chain_ramp_block, input_chain_ramp_block_elided, no_lanes,
+    input_chain_plan, input_chain_ramp_block, input_chain_ramp_block_elided,
+    input_chain_ramp_block_mono, input_chain_ramp_block_mono_elided, no_lanes,
 };
 use lane::kernels::{SvfCoef, svf_step};
 use lane::{Lane, Simd4, Simd8};
@@ -723,18 +724,33 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
         };
         let seed = InputTrimRamp {
             current: [L::splat(1.0); 2],
-            target: [L::splat(2.0); 2],
-            step: [L::splat(0.125); 2],
-            remaining: [L::splat(8.0); 2],
+            target: [L::splat(-2.0); 2],
+            step: [L::splat(-0.1875); 2],
+            remaining: [L::splat(16.0); 2],
         };
         let mut reference_ramp = seed;
         let mut actual_ramp = seed;
         let mut reference_state = InputChainState::default();
         let mut actual_state = InputChainState::default();
-        let mut reference_left = vec![1.0; 17 * L::WIDTH];
-        let mut reference_right = reference_left.clone();
-        let mut actual_left = reference_left.clone();
-        let mut actual_right = reference_right.clone();
+        let mut input_left = vec![1.0; 17 * L::WIDTH];
+        for (frame, samples) in input_left.chunks_exact_mut(L::WIDTH).enumerate() {
+            let value = match frame {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f32::NAN,
+                3 => f32::INFINITY,
+                4 => f32::NEG_INFINITY,
+                5 => 1.0e30,
+                15 => 9.0e29,
+                _ => -0.75,
+            };
+            samples.fill(value);
+        }
+        let input_right = input_left.clone();
+        let mut reference_left = input_left.clone();
+        let mut reference_right = input_right.clone();
+        let mut actual_left = input_left.clone();
+        let mut actual_right = input_right.clone();
         let reference = input_chain_ramp_block(
             &mut reference_left,
             &mut reference_right,
@@ -785,6 +801,87 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
                 bits(actual_ramp.remaining[channel])
             );
         }
+
+        assert!(
+            bits(L::select(reference.nonfinite[0], L::splat(1.0), L::zero()))
+                .contains(&1.0_f32.to_bits()),
+            "the adverse trim/input episode must exercise output recovery reporting"
+        );
+
+        // The collapsed path is the same differential claim over one plane. Keep the adverse
+        // samples and polarity crossing in this representative mono episode as well.
+        let mut mono_reference_left = input_left.clone();
+        let mut mono_actual_left = mono_reference_left.clone();
+        let mut mono_reference_state = InputChainState::default();
+        let mut mono_actual_state = InputChainState::default();
+        let mut mono_reference_ramp = seed;
+        let mut mono_actual_ramp = seed;
+        let mono_reference = input_chain_ramp_block_mono(
+            &mut mono_reference_left,
+            17,
+            &c,
+            &mut mono_reference_state,
+            &mut mono_reference_ramp,
+        );
+        let mono_actual = input_chain_ramp_block_mono_elided(
+            &mut mono_actual_left,
+            17,
+            &c,
+            &mut mono_actual_state,
+            &mut mono_actual_ramp,
+            &plan,
+        );
+        assert_eq!(
+            mono_reference_left
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            mono_actual_left
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            "mono adverse samples"
+        );
+        for (reference_channel, actual_channel) in mono_reference_state
+            .section
+            .iter()
+            .zip(mono_actual_state.section.iter())
+        {
+            for (reference_section, actual_section) in
+                reference_channel.iter().zip(actual_channel.iter())
+            {
+                assert_eq!(bits(reference_section.ic1), bits(actual_section.ic1));
+                assert_eq!(bits(reference_section.ic2), bits(actual_section.ic2));
+            }
+        }
+        for channel in 0..2 {
+            assert_eq!(
+                bits(mono_reference_ramp.current[channel]),
+                bits(mono_actual_ramp.current[channel])
+            );
+            assert_eq!(
+                bits(mono_reference_ramp.remaining[channel]),
+                bits(mono_actual_ramp.remaining[channel])
+            );
+        }
+        assert_eq!(
+            bits(mono_reference.sanitized[0]),
+            bits(mono_actual.sanitized[0]),
+            "mono sanitization report"
+        );
+        assert_eq!(
+            bits(L::select(
+                mono_reference.nonfinite[0],
+                L::splat(1.0),
+                L::zero(),
+            )),
+            bits(L::select(
+                mono_actual.nonfinite[0],
+                L::splat(1.0),
+                L::zero(),
+            )),
+            "mono output recovery report"
+        );
     }
     check::<f32>();
     check::<Simd4>();
