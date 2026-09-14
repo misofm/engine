@@ -15,6 +15,16 @@ the byte length and SHA-256 of every artifact. A Node or Bun headless consumer n
 toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
 so the host and Wasm cannot silently come from different releases.
 
+### Release 0.3.0 compatibility
+
+`@misofm/engine@0.3.0` carries the accepted live EQ cuts and builtin HPF/LPF controls. It uses
+the matching AudioWorklet Wasm artifact (`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`),
+so metadata and runtime bytes must be taken from this package together. The dedicated EQ state is
+464 bytes (116 words) per channel, with the existing common header; the legacy 304-byte and
+intermediate 456-byte channel payloads are refused. Existing Session V1 defaults and the original
+four-band parameter IDs remain compatible. This minor release does not overwrite or promise binary
+state compatibility with `0.2.6`.
+
 `npm run build` prepares `dist/`; `npm run check:package` additionally packs it, imports every
 public entry from a fresh extraction, boots the embedded Wasm, renders one quantum, and proves a
 one-byte Wasm mutation is rejected by the manifest digest before compilation.

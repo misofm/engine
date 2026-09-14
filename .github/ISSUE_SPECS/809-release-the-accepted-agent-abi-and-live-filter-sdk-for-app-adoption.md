@@ -84,3 +84,12 @@ source has passed required CI. Frozen Wasm is
 `7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`.
 The numbered-issue audit found all414 local specs represented among518 remote
 issues; #809 number/title match and #804 remains open. Root owns all publication.
+
+Luna XHIGH attempt1 checkpoint: SDK/package-lock0.3.0, the existing workflow's
+five release identity guards and Wasm pin, matching mode/mock/negative fixtures,
+and concise binary-state compatibility documentation are updated. No source DSP,
+ABI, helper or published artifact has changed, and no new release machinery was
+introduced. PASS: existing npm publish-mode/trust tests, generated SDK check,
+SDK types and publishable-package check using the accepted #808 artifact; diff
+check clean. Fresh Astra MEDIUM source/package review and main integration remain.
+No package is published yet.
