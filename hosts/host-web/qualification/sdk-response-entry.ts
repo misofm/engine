@@ -499,19 +499,11 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       callbackSeen.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
-    const notifications = [...automaticNotifications];
-    const notificationKeys = new Set(notifications.map((notification) => [
-      notification.job.toString(), notification.revision.toString(), notification.metadata.sequence.toString(),
-    ].join(":")));
+    // Both automatic reads and explicit pumps invoke onUpdate. Keep its live list: the first
+    // callback can report a gap while the same poll is still draining its recovery window.
+    const notifications = automaticNotifications;
     for (let attempt = 0; attempt < CONTINUOUS_BLOCKS; attempt += 1) {
       const notification = await subscription.pump();
-      if (notification !== undefined) {
-        const key = [notification.job.toString(), notification.revision.toString(), notification.metadata.sequence.toString()].join(":");
-        if (!notificationKeys.has(key)) {
-          notificationKeys.add(key);
-          notifications.push(notification);
-        }
-      }
       if (notification?.status === "gap" && subscription.readLatest() !== undefined) break;
     }
     const first = subscription.readLatest();
