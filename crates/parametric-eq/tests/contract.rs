@@ -10,9 +10,10 @@
 mod support;
 
 use effect_contract::{
-    AutomationRate, EffectProcessBlock, NativeEffectFactory, ParameterChannel, ParameterDomain,
-    ParameterMapping, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, validate_descriptor,
+    AutomationRate, EffectProcessBlock, EffectTargetError, EffectTargetRequest,
+    NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel, ParameterDomain,
+    ParameterMapping, PreparedEffectTarget, ResetKind, ResponseSnapshotSection, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, validate_descriptor,
 };
 use engine::SampleRateHz;
 use parametric_eq::{
@@ -154,7 +155,7 @@ fn descriptor_is_frozen() {
         assert!(parameter.readable);
     }
     assert_eq!(SECTIONS, EQ_SECTION_COUNT);
-    assert_eq!(SECTIONS * WORDS_PER_BAND * 4, LANE_BYTES);
+    assert_eq!(SECTIONS * WORDS_PER_BAND * 4 + 2 * 4, LANE_BYTES);
 }
 
 /// Enables band one as a bell at `1 kHz`, `0 dB`, on the left channel only.
@@ -175,6 +176,51 @@ fn expected_words(gain: f32) -> EqSvfWords {
         SampleRateHz(48_000),
     )
     .expect("legal design")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_target(
+    slot: usize,
+    channel: ParameterChannel,
+    enabled: bool,
+    kind: EqBandKind,
+    frequency: f32,
+    gain: f32,
+    q: f32,
+    slope: f32,
+) -> PreparedEffectTarget {
+    let coefficients = if enabled {
+        design_svf(kind, frequency, gain, q, slope, SampleRateHz(48_000)).expect("target design")
+    } else {
+        EqSvfWords::IDENTITY
+    };
+    let mut words = [0_u32; effect_contract::PREPARED_EFFECT_TARGET_WORDS];
+    words[..6].copy_from_slice(&[
+        u32::from(enabled),
+        kind as u32,
+        frequency.to_bits(),
+        gain.to_bits(),
+        q.to_bits(),
+        slope.to_bits(),
+    ]);
+    for (destination, source) in words[6..].iter_mut().zip(coefficients.to_array()) {
+        *destination = source.to_bits();
+    }
+    PreparedEffectTarget {
+        slot: slot as u32,
+        channel,
+        words,
+    }
+}
+
+fn empty_response_section() -> ResponseSnapshotSection {
+    ResponseSnapshotSection {
+        id: 0,
+        kind: 0,
+        enabled: false,
+        word_count: 0,
+        words: [0; 7],
+    }
 }
 
 /// E6: an automation point starts a sixty-four sample linear ramp of the six words (D11).
@@ -438,6 +484,175 @@ fn state_restore_continues_active_ramp_bit_exactly() {
     assert_eq!(snapshot(source.as_ref()), snapshot(restored.as_ref()));
 }
 
+/// Prepared targets apply at a block boundary, retain dedicated enable state, and settle exactly
+/// after the current-then-advance 64-sample ramp.
+#[test]
+fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
+    let values = values();
+    let mut effect = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    let mut target_values = values.clone();
+    target_values[48].value = 1.0;
+    target_values[50].value = 1_000.0;
+    target_values[52].value = 1.0;
+    let mut changed = vec![false; target_values.len()];
+    changed[48] = true;
+    changed[50] = true;
+    changed[52] = true;
+    let mut prepared = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Left,
+        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+    }; 12];
+    let count = <ParametricEqFactory as NativeEffectTargetPreparation>::prepare_targets(
+        &ParametricEqFactory,
+        EffectTargetRequest {
+            sample_rate: 48_000,
+            values: &target_values,
+            changed: &changed,
+        },
+        &mut prepared,
+    )
+    .expect("target preparation");
+    assert_eq!(count, 1);
+    let target = prepared[0];
+    assert_eq!(target.slot, 0);
+    assert_eq!(target.channel, ParameterChannel::Left);
+    let before = snapshot(effect.as_ref());
+    effect
+        .apply_prepared_target(&target)
+        .expect("prepared target");
+    let in_flight = snapshot(effect.as_ref());
+    assert_eq!(word(&in_flight.1, 0), word(&before.1, 0));
+    assert_eq!(word(&in_flight.1, 114), 1);
+
+    let mut first = [1.0_f32; 1];
+    let mut first_right = [0.0_f32; 1];
+    effect.process(
+        EffectProcessBlock::new(&mut first, &mut first_right, None, 0, &[], 128)
+            .expect("first sample"),
+    );
+    let mid_ramp = snapshot(effect.as_ref());
+    let mut restored = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("restore prepare");
+    restored
+        .restore_state_payload(
+            1,
+            StatePayloadInput::new(
+                &mid_ramp.0,
+                &mid_ramp.1,
+                &mid_ramp.2,
+                restored.metadata().state_sizes,
+            )
+            .expect("mid-ramp input"),
+        )
+        .expect("mid-ramp restore");
+    let mut rest = [1.0_f32; 63];
+    let mut rest_right = [0.0_f32; 63];
+    let mut restored_rest = rest;
+    let mut restored_rest_right = rest_right;
+    effect.process(
+        EffectProcessBlock::new(&mut rest, &mut rest_right, None, 1, &[], 128).expect("ramp tail"),
+    );
+    restored.process(
+        EffectProcessBlock::new(
+            &mut restored_rest,
+            &mut restored_rest_right,
+            None,
+            1,
+            &[],
+            128,
+        )
+        .expect("restored ramp tail"),
+    );
+    assert_eq!(rest.map(f32::to_bits), restored_rest.map(f32::to_bits));
+    assert_eq!(restored_rest_right, rest_right);
+    let settled = snapshot(effect.as_ref());
+    let designed = design_svf(
+        EqBandKind::HighPass,
+        1_000.0,
+        0.0,
+        1.0,
+        1.0,
+        SampleRateHz(48_000),
+    )
+    .expect("design");
+    for (index, word_bits) in designed
+        .to_array()
+        .into_iter()
+        .map(f32::to_bits)
+        .enumerate()
+    {
+        assert_eq!(word(&settled.1, 2 + index), word_bits, "word {index}");
+    }
+    assert_eq!(word(&settled.1, 114), 1);
+
+    let mut response_left = [empty_response_section(); EQ_SECTION_COUNT];
+    let mut response_right = [empty_response_section(); EQ_SECTION_COUNT];
+    effect
+        .copy_response_snapshot(effect_contract::ResponseSnapshotRequest {
+            bypassed: false,
+            left: &mut response_left,
+            right: &mut response_right,
+        })
+        .expect("response");
+    assert!(
+        response_left[4].enabled,
+        "public response preserves HPF enable"
+    );
+    assert!(!response_right[4].enabled);
+
+    let disabled = prepared_target(
+        0,
+        ParameterChannel::Left,
+        false,
+        EqBandKind::HighPass,
+        1_000.0,
+        0.0,
+        1.0,
+        1.0,
+    );
+    effect
+        .apply_prepared_target(&disabled)
+        .expect("disable target");
+    let mut disable_left = [1.0_f32; 64];
+    let mut disable_right = [0.0_f32; 64];
+    effect.process(
+        EffectProcessBlock::new(&mut disable_left, &mut disable_right, None, 64, &[], 128)
+            .expect("disable ramp"),
+    );
+    let disabled_state = snapshot(effect.as_ref());
+    assert_eq!(word(&disabled_state.1, 114), 0);
+}
+
+/// A general band's prepared-only enable/kind cannot be changed through the live target hook, and
+/// rejecting it leaves the coefficients, retained targets and witness state untouched.
+#[test]
+fn prepared_target_rejects_general_enable_change_without_mutation() {
+    let configured = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 1.0, 1.0);
+    let mut effect = ParametricEqFactory
+        .prepare(request(&configured, false))
+        .expect("prepare");
+    let before = snapshot(effect.as_ref());
+    let target = prepared_target(
+        1,
+        ParameterChannel::Left,
+        false,
+        EqBandKind::Bell,
+        1_000.0,
+        0.0,
+        1.0,
+        1.0,
+    );
+    assert_eq!(
+        effect.apply_prepared_target(&target),
+        Err(EffectTargetError::Domain)
+    );
+    assert_eq!(snapshot(effect.as_ref()), before);
+}
+
 /// A payload claiming an invalid prelaunch version is rejected, never silently migrated.
 #[test]
 fn an_invalid_version_payload_is_rejected() {
@@ -516,7 +731,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     assert_eq!(word(&common, 0), 1, "the layout version is stamped");
     assert_eq!(
         word(&common, 1),
-        (SECTIONS * WORDS_PER_BAND * 2) as u32,
+        (SECTIONS * WORDS_PER_BAND * 2 + 2 * 2) as u32,
         "the data word count is stamped"
     );
 
@@ -589,6 +804,21 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
     let (common, mut left, right) = before;
     let poisoned = f32::from_bits(band_word(&left, 0, 2)) + 1.0e-3;
     left[8..12].copy_from_slice(&poisoned.to_bits().to_le_bytes());
+    assert_eq!(
+        effect.restore_state_payload(
+            1,
+            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
+                .expect("input"),
+        ),
+        Err(StatePayloadError {
+            code: "effect.state.payload"
+        })
+    );
+
+    // A settled lane must carry exact +0.0 increments. A bank section can still run the ramp
+    // kernel because a peer lane is moving, so a finite forged step would otherwise drift.
+    let (common, mut left, right) = before;
+    left[8 * 4..9 * 4].copy_from_slice(&1.0_f32.to_bits().to_le_bytes());
     assert_eq!(
         effect.restore_state_payload(
             1,

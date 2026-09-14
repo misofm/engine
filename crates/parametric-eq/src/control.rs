@@ -24,6 +24,75 @@ const VALUE_COUNT: usize = PARAMETER_COUNT * 2;
 const MAXIMUM_TARGETS: usize = EQ_SECTION_COUNT * 2;
 const SEMANTIC_WORDS: usize = 6;
 
+/// Decodes and validates one prepared EQ target at its render boundary.
+///
+/// The factory's preparation path proves the semantic-to-coefficient relationship off the render
+/// thread. The render-side hook repeats only bounded record-shape, canonical and numerical checks
+/// it can establish from the self-contained record; it never invokes descriptor validation or the
+/// trigonometric designer.
+pub(crate) fn decode_prepared_target(
+    target: &PreparedEffectTarget,
+) -> Result<(usize, ParameterChannel, BandTarget, EqSvfWords), EffectTargetError> {
+    let slot = target.slot as usize;
+    if slot >= EQ_SECTION_COUNT {
+        return Err(EffectTargetError::Shape);
+    }
+    let words = &target.words;
+    let enabled = match words[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(EffectTargetError::Domain),
+    };
+    let kind = match words[1] {
+        1 => EqBandKind::Bell,
+        2 => EqBandKind::LowShelf,
+        3 => EqBandKind::HighShelf,
+        4 => EqBandKind::LowPass,
+        5 => EqBandKind::HighPass,
+        6 => EqBandKind::Notch,
+        _ => return Err(EffectTargetError::Domain),
+    };
+    let frequency = f32::from_bits(words[2]);
+    let gain = f32::from_bits(words[3]);
+    let q = f32::from_bits(words[4]);
+    let slope = f32::from_bits(words[5]);
+    let target_band = BandTarget {
+        enabled,
+        kind,
+        frequency,
+        gain,
+        q,
+        slope,
+    };
+    if slot == 0 && kind != EqBandKind::HighPass {
+        return Err(EffectTargetError::Domain);
+    }
+    if slot == 5 && kind != EqBandKind::LowPass {
+        return Err(EffectTargetError::Domain);
+    }
+    if (slot == 0 || slot == 5)
+        && (gain.to_bits() != 0.0_f32.to_bits() || slope.to_bits() != 1.0_f32.to_bits())
+    {
+        return Err(EffectTargetError::Domain);
+    }
+    if is_negative_zero(frequency)
+        || is_negative_zero(gain)
+        || is_negative_zero(q)
+        || is_negative_zero(slope)
+        || !frequency.is_finite()
+        || !gain.is_finite()
+        || !q.is_finite()
+        || !slope.is_finite()
+    {
+        return Err(EffectTargetError::Domain);
+    }
+    let coefficient_words = EqSvfWords::from_array(core::array::from_fn(|index| {
+        f32::from_bits(words[SEMANTIC_WORDS + index])
+    }));
+    validate_target_coefficients(slot, target_band, &words[SEMANTIC_WORDS..])?;
+    Ok((slot, target.channel, target_band, coefficient_words))
+}
+
 /// One final section configuration and the words designed from it.
 #[derive(Clone, Copy)]
 struct PreparedSection {

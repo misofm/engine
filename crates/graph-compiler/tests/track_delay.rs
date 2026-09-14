@@ -197,20 +197,20 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 
 /// The zero-delay plan has the current semantic digest for this feature set.
 ///
-/// The pre-track-delay comparison was measured at 17682b4 and re-pinned by #241. The clean main
-/// baseline at 39288df produced the #241 pin (`213617...acf4b`), but #805's six-section prepared
-/// EQ state size legitimately changes the candidate's effect-state estimate. A temporary canonical
-/// dump on both revisions is 34,051 bytes over 685 lines and differs only in the trailing estimate
-/// row: `declared_effect_bytes` is 5,544 -> 8,280, and both plan-byte totals are 147,679 ->
-/// 150,415. Nine EQ entries each grow by 304 bytes (`2 sections * 19 f32 words * 4 bytes * 2
-/// lanes`), for the independently derived 2,736-byte total. Every structural and PDC field is
-/// identical, including `total_delay_samples = 0` and `delay_bytes = 0`.
+/// The pre-track-delay comparison was measured at 17682b4 and re-pinned by #241. Issue #805
+/// independently accounted for its prepared EQ state growth: nine instances added 2,736 bytes,
+/// producing the baseline `e9e6b012...209433e4` recorded in that issue's canonical derivation.
 ///
-/// The pin therefore moves with the current semantic plan while the structural off-delay gate
-/// above continues to prove that no zero-length delay node or ring was introduced. Measured
-/// mutation evidence remains: emitting a zero-length entry for every track leaves this digest
-/// unchanged because it contributes no `delay_bytes`; `a_zero_delay_session_lowers_no_delay_node`
-/// catches that program mutation.
+/// Issue #807 retains two dedicated-cut enable words per channel: each EQ's serialized state
+/// grows from 920 to 936 bytes, so nine instances add exactly 144 bytes. Applying only that
+/// change to the preserved #805 canonical text gives the compiler's actual new hash below:
+/// `declared_effect_bytes` 8,280 -> 8,424 and both plan-byte totals 150,415 -> 150,559.
+/// Every other canonical byte is retained in that independently derived expected text. The
+/// numbered #807 spec records the matching computed/compiled hashes and exact estimate row.
+///
+/// The structural off-delay gate above still proves that no zero-length delay node or ring was
+/// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
+/// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
 #[test]
 fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
     assert_eq!(
@@ -220,17 +220,10 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
     );
 }
 
-/// The historical schema-repin rationale and canonical comparison for #241 remain in
-/// `docs/derivations/241-schema-repins.md`.
-///
-/// The current pin is updated for #805 because prepared EQ state size changed from 616 to 920
-/// bytes per instance. Nine instances therefore add `9 * (920 - 616) = 2,736` declared-effect
-/// bytes; the canonical estimate's two plan-byte totals grow by the same amount. Structural and
-/// PDC fields remain unchanged, including zero total delay samples and zero delay bytes. The
-/// complete derivation is recorded in the numbered #805 spec.
-///
+/// Historical #241 schema arithmetic remains in `docs/derivations/241-schema-repins.md`;
+/// the numbered #805 and #807 specs preserve their subsequent state-size derivations.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "e9e6b012399cabe3632462622519bebac71e31af17813a31aa84d857209433e4";
+    "eb3ca77606e93cf9aa13f475415ecbf6e70ee1cdd074a0cca9e46cbb18e0ea10";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

@@ -11,11 +11,11 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan, PreparedNativeEffectBank, StatePayloadInput,
-    StatePayloadOutput, TailSamples,
+    PrepareEffectBankRequest, PreparedAutomationSpan, PreparedEffectTarget,
+    PreparedNativeEffectBank, StatePayloadInput, StatePayloadOutput, TailSamples,
 };
 use lane::Backend;
-use parametric_eq::ParametricEqFactory;
+use parametric_eq::{EqBandKind, ParametricEqFactory, design_svf};
 use support::{COMMON_BYTES, LANE_BYTES, Payload, point, request, set_initial, snapshot, values};
 
 /// The bank width and backend this build actually executes, or `None` on a scalar-only target.
@@ -29,6 +29,74 @@ fn foreign_bank() -> (BankWidth, Backend) {
     match native_bank() {
         Some((BankWidth::Eight, _)) => (BankWidth::Four, Backend::Simd4),
         _ => (BankWidth::Eight, Backend::Simd8),
+    }
+}
+
+fn hpf_target() -> PreparedEffectTarget {
+    let words = design_svf(
+        EqBandKind::HighPass,
+        1_000.0,
+        0.0,
+        1.0,
+        1.0,
+        engine::SampleRateHz(48_000),
+    )
+    .expect("target design");
+    let mut encoded = [0_u32; effect_contract::PREPARED_EFFECT_TARGET_WORDS];
+    encoded[..6].copy_from_slice(&[
+        1,
+        EqBandKind::HighPass as u32,
+        1_000.0_f32.to_bits(),
+        0.0_f32.to_bits(),
+        1.0_f32.to_bits(),
+        1.0_f32.to_bits(),
+    ]);
+    for (destination, source) in encoded[6..].iter_mut().zip(words.to_array()) {
+        *destination = source.to_bits();
+    }
+    PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Left,
+        words: encoded,
+    }
+}
+
+fn state_word(payload: &[u8], index: usize) -> u32 {
+    u32::from_le_bytes(
+        payload[index * 4..index * 4 + 4]
+            .try_into()
+            .expect("state word"),
+    )
+}
+
+#[test]
+fn bank_prepared_target_updates_only_the_selected_lane() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values_by_track: Vec<_> = (0..lanes).map(|_| values()).collect();
+    let requests: Vec<_> = values_by_track
+        .iter()
+        .map(|values| request(values, false))
+        .collect();
+    let factory = ParametricEqFactory;
+    let mut bank = factory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+        })
+        .expect("bank request")
+        .expect("native bank");
+    let target = hpf_target();
+    bank.apply_prepared_target_lane(0, &target)
+        .expect("bank target");
+    let (_, selected_left, _) = snapshot_bank(&*bank, 0);
+    assert_eq!(state_word(&selected_left, 114), 1);
+    if lanes > 1 {
+        let (_, untouched_left, _) = snapshot_bank(&*bank, 1);
+        assert_eq!(state_word(&untouched_left, 114), 0);
     }
 }
 

@@ -15,8 +15,8 @@ use effect_contract::{
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload.
-pub const LANE_BYTES: usize = 456;
+/// Bytes in each channel section of the current payload (114 section words plus two cut enables).
+pub const LANE_BYTES: usize = 464;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -217,7 +217,7 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 920 bytes; production admits megabytes (`maximum_effect_state_bytes` is
+        // The current layout is 936 bytes; production admits megabytes (`maximum_effect_state_bytes` is
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
