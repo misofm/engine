@@ -1,5 +1,11 @@
 # 268 Engine architecture synthesis: preserve the runtime, close fan delivery, and reject speculative compiler surface
 
+> **Disposition — 2026-09-14: superseded; close as not planned once this record is upstream.**
+> Owner-authorized age review retires this historical roadmap/attempt. It does not
+> claim all historical gates passed. See
+> [the issue review](../../docs/audits/issue-triage-2026-09-14.md)
+> for current evidence and surviving ownership. The original record below is preserved.
+
 One-line summary: Thirteen source-backed comparisons found no public system that combines V2's
 built-in native/Wasm bit identity with fan-runnable session closure; preserve the runtime, correct one
 stale numeric-policy document, finish the existing content-addressed delivery train, and defer all
