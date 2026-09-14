@@ -184,3 +184,20 @@ maximum successors, bank isolation and the actual identity trim-body dispatch.
 Builtin and lane tests, strict relevant clippy and Wasm checks pass. No timing run
 or new evidence framework was added. Public metadata remains prepared-only pending
 host/SDK closure; this completes DSP tranche1, not issue #808.
+
+
+### Tranche2 queue/compiler checkpoint
+
+PreparedFilter now travels through the existing scalar/bank input queues, whose
+drains freeze available-at-entry counts. Its 40-byte record remains within the
+64-byte bound; actual slot accounting and the existing mutation transcript reflect
+the growth. A first asymmetric filter target reaches the real bank collapse/dual
+comparison without being overwritten during disengage. Scalar Both preserves the
+witness. Live-console inputs declare Infinite tail; plain disabled inputs remain
+FiniteZero, and direct runtime queries account for in-flight ramps.
+
+PASS: nine builtin filter fixtures, six input-drain fixtures, actual bank/scalar
+queue checks, existing 10,000-case compiler mutation transcript and allocation
+tracker checks, strict relevant clippy, native/Wasm compiler checks. No new queue,
+scheduler, benchmark or test framework. Shared host preparation/admission and SDK
+closure remain; #808 remains attempt1/open.

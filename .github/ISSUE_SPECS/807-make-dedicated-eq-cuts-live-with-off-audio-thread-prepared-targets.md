@@ -963,3 +963,6 @@ shared live prepared-control path are delivered to engine main. No npm publicati
 or app deployment is claimed: #808 builtin filters, #809 SDK release, adapter#111
 and app#222 remain. The completed clean/pushed #807 worktree is eligible for removal;
 checked evidence is upstream and local artifact/log copies remain outside it.
+
+Main qualification34864733241 also passed for merge4cdc878f. The completed #807
+worktree has been removed cleanly; its branch/history and external evidence remain.

@@ -20,7 +20,7 @@ use builtins::{
     BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
     FaderMuteBuiltins, FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
     MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
-    MeterTap, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, ResponseAnalysisError,
@@ -85,9 +85,9 @@ pub struct SelectedMeterRequest {
 /// `BuiltinParameterUpdateRate::BlockTarget` and this comment said so, listing every other row as
 /// `PreparedOnly`. That list has been overtaken twice and is not maintained here any more: #140 B
 /// made `fader_db` and `mute` live ([`TrackFaderRecord`]), and #210 phase 3 made `trim_db` and
-/// `polarity_invert` live ([`TrackInputRecord`]). The rows that remain `PreparedOnly` are
-/// `hpf_hz`, `lpf_hz` and `delay_samples`, and the descriptor table is the authority rather than
-/// this paragraph.
+/// `polarity_invert` live ([`TrackInputRecord`]), and tranche2 adds prepared filter targets to
+/// that same queue. The row that remains `PreparedOnly` is `delay_samples`, and the descriptor
+/// table is the authority rather than this paragraph.
 ///
 /// What is still true of *this* record, and is the reason it is its own type: it addresses the
 /// matrix stage and nothing else, because a bounded SPSC queue has exactly one consumer and the
@@ -141,7 +141,7 @@ pub enum TrackFaderRecord {
     },
 }
 
-/// One live-console trim or polarity record for a track's **input** stage (#210 phase 3).
+/// One live-console trim, polarity or prepared-filter record for a track's **input** stage.
 ///
 /// # Why this is a third record type and a third queue
 ///
@@ -193,6 +193,15 @@ pub enum TrackInputRecord {
         /// Ramp length in sample updates for the flip.
         smoothing_samples: u32,
     },
+    /// Apply one already-prepared HPF or LPF target to the addressed lanes.
+    ///
+    /// The target carries the lane's final pair for response/readback association, while its
+    /// section and six coefficients are the only words the render owner applies. Preparation
+    /// validates the pair and designs these words off the render thread.
+    PreparedFilter {
+        /// One section target, addressed to one or both channels.
+        target: PreparedInputFilterTarget,
+    },
 }
 
 impl LiveConsoleRecord for TrackInputRecord {
@@ -205,6 +214,7 @@ impl LiveConsoleRecord for TrackInputRecord {
         // which is the structural half of the hook rule.
         let lanes = match *self {
             Self::TrimDb { lanes, .. } | Self::PolarityInvert { lanes, .. } => lanes,
+            Self::PreparedFilter { target } => target.lanes,
         };
         match lanes {
             BuiltinLaneSelector::Both => SymmetryEvent::Preserve,
@@ -426,7 +436,11 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
             let Some(control) = control.as_mut() else {
                 continue;
             };
-            while let Ok(record) = control.try_pop() {
+            let available = control.available_at_entry();
+            for _ in 0..available {
+                let Ok(record) = control.try_pop() else {
+                    break;
+                };
                 // The one hook. `admit` takes the record by trait, not by kind, so a record type
                 // added to this queue later cannot reach the render state without declaring what
                 // it does to the witness (`effect_contract::symmetry::LiveConsoleRecord`).
@@ -447,6 +461,9 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
                         smoothing_samples,
                     } => bank
                         .set_polarity_invert(lane, lanes, inverted, smoothing_samples)
+                        .map_err(render_error)?,
+                    TrackInputRecord::PreparedFilter { target } => bank
+                        .apply_prepared_filter(lane, target)
                         .map_err(render_error)?,
                 }
             }
@@ -2029,7 +2046,7 @@ impl PreparedBuiltinsSession {
                 "$.builtins.processors",
             ));
         }
-        let expected_tails = match expected_tails(session) {
+        let expected_tails = match expected_tails(session, &self.track_controls) {
             Ok(value) => value,
             Err(()) => {
                 diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
@@ -2954,13 +2971,24 @@ fn processors_match(
     bindings == processors.len() && actual == expected
 }
 
-fn expected_tails(session: &CompiledSession) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
+fn expected_tails(
+    session: &CompiledSession,
+    controls: &[TrackControlProducer],
+) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
     let mut values: Vec<(Box<str>, BuiltinTail)> =
         Vec::with_capacity(session.normalized_model().tracks.len());
     for track in &session.normalized_model().tracks {
         let parameters = track_parameters(track, u32::MAX).map_err(|_| ())?;
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
-        values.push((track.id.as_str().into(), chain.tail()));
+        let tail = if controls
+            .iter()
+            .any(|control| control.track_id.as_ref() == track.id.as_str())
+        {
+            BuiltinTail::Infinite
+        } else {
+            chain.tail()
+        };
+        values.push((track.id.as_str().into(), tail));
     }
     values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(values)
@@ -3206,6 +3234,11 @@ fn prepare_session_builtins_with_console_and_policy(
         let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted bank coefficients")
             .into_input_builtins();
+        let tail = if control_capacity.contains_key(track.id.as_str()) {
+            BuiltinTail::Infinite
+        } else {
+            tail
+        };
         tails.push((Box::<str>::from(track.id.as_str()), tail));
         bank_inputs.push((Box::<str>::from(track.id.as_str()), bank_input));
         let graph_id = StableGraphId::parse(track.id.as_str()).expect("preflighted stable ID");
@@ -3815,7 +3848,11 @@ struct ConsoleInputProcessor {
 }
 impl GraphRuntimeProcessor for ConsoleInputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        while let Ok(record) = self.control.try_pop() {
+        let available = self.control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = self.control.try_pop() else {
+                break;
+            };
             self.live.admit(&record);
             match record {
                 TrackInputRecord::TrimDb {
@@ -3833,6 +3870,10 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
                 } => self
                     .input
                     .set_polarity_invert(lanes, inverted, smoothing_samples),
+                TrackInputRecord::PreparedFilter { target } => self
+                    .input
+                    .apply_prepared_filter(target)
+                    .map_err(render_error)?,
             }
         }
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -8626,10 +8667,12 @@ mod tests {
             "the selected tail pair executed"
         );
 
-        let command = TrackInputRecord::TrimDb {
-            lanes: BuiltinLaneSelector::Right,
-            db: -6.0,
-            smoothing_samples: 0,
+        let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
+        let command = TrackInputRecord::PreparedFilter {
+            target: builtins::PreparedInputFilterTarget {
+                lanes: BuiltinLaneSelector::Left,
+                ..prepared.targets[0]
+            },
         };
         for bound in [&mut collapsed, &mut separate] {
             bound
@@ -8654,7 +8697,7 @@ mod tests {
         assert_ne!(
             &collapsed_asymmetric[..frames],
             &collapsed_asymmetric[frames..],
-            "asymmetric right input reaches real output"
+            "asymmetric left input filter reaches real output"
         );
 
         let recovered_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -10906,6 +10949,52 @@ mod tests {
             vec![("vocal", BuiltinTail::Infinite)]
         );
     }
+
+    #[test]
+    fn disabled_live_console_input_has_infinite_tail_but_plain_input_does_not() {
+        let mut model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+                .expect("parse");
+        for track in &mut model.tracks {
+            track.builtins.left.hpf_hz = 0.0;
+            track.builtins.left.lpf_hz = 0.0;
+            track.builtins.right.hpf_hz = 0.0;
+            track.builtins.right.lpf_hz = 0.0;
+        }
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile");
+        let plain = prepare_session_builtins(&compiled, &[], caps()).expect("plain");
+        assert_eq!(
+            plain.tails().collect::<Vec<_>>(),
+            vec![("vocal", BuiltinTail::FiniteZero)]
+        );
+
+        let live = prepare_session_builtins_with_console(
+            &compiled,
+            &[],
+            &[TrackControlRequest {
+                track_id: "vocal".to_owned(),
+                queue_capacity: NonZeroUsize::new(1).expect("queue"),
+            }],
+            caps(),
+        )
+        .expect("live");
+        assert_eq!(
+            live.tails().collect::<Vec<_>>(),
+            vec![("vocal", BuiltinTail::Infinite)]
+        );
+    }
+
     #[test]
     fn rejects_duplicate_and_unknown_meter_transactionally() {
         let config = MeterConfig {
@@ -11637,12 +11726,12 @@ mod tests {
         // ramp words per channel (32), the authoritative `[[u32; 8]; 2]` countdown (64), and the
         // `ramping` flag with its padding (8).
         //
-        // A *console-leased* preparation moves by +575 per controlled track at depth 8 instead:
+        // A *console-leased* preparation moves by +827 per controlled track at depth 8 instead:
         // the same +171, plus 40 for the wider `TrackControlProducer` vector entry (96 -> 136, the
-        // third producer) and 364 for the third bounded ring -- a 256-byte header at 64-byte
-        // alignment plus 108 bytes of slot payload, which is byte-for-byte what the fader ring
-        // costs, because `TrackInputRecord` and `TrackFaderRecord` are both 12 bytes. 1_884 ->
-        // 2_459 on this fixture with one depth-8 channel. `maximum_single_allocation_bytes` moves
+        // third producer) and 616 for the third bounded ring -- a 256-byte header at 64-byte
+        // alignment plus 360 bytes of slot payload (`TrackInputRecord` is 40 bytes after the
+        // prepared-filter target arm). 1_884 -> 2_711 on this fixture with one depth-8 channel.
+        // `maximum_single_allocation_bytes` moves
         // 344 -> 656 with `StripPreparation`, which is the largest single allocation at one track.
         //
         // Issue #519 adds the meter metric selection to the sealed request identity. Nothing else
@@ -11651,7 +11740,7 @@ mod tests {
         // relative to the report rather than as literals -- case 32 admits at the payload and case
         // 33 rejects one byte below it, whatever the payload is.
         assert_eq!(
-            transcript_hash, 7_866_884_810_278_916_745,
+            transcript_hash, 12_634_700_477_153_627_939,
             "updated only through a deliberate frozen-case change"
         );
     }
@@ -11727,6 +11816,41 @@ mod tests {
         assert!(
             processor.channel_symmetry().eligible(),
             "a `Both` retarget is symmetry-preserving on the per-node arm too"
+        );
+
+        // A prepared filter target uses the same frozen queue and preserves the same witness
+        // rule. The first sample is the old current coefficient; sample A+64 reaches the target.
+        let (mut producer, mut processor) = build();
+        let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
+        producer
+            .try_push(TrackInputRecord::PreparedFilter {
+                target: builtins::PreparedInputFilterTarget {
+                    lanes: BuiltinLaneSelector::Both,
+                    ..prepared.targets[0]
+                },
+            })
+            .expect("room");
+        let mut left = [1.0_f32; 65];
+        let mut right = [1.0_f32; 65];
+        processor
+            .process(GraphBindingBlock {
+                left: &mut left,
+                right: &mut right,
+                first_sample: 0,
+            })
+            .expect("render");
+        assert_eq!(left[0].to_bits(), 1.0_f32.to_bits());
+        assert_ne!(left[64].to_bits(), left[0].to_bits());
+        assert_eq!(
+            left.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            right
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            processor.channel_symmetry().eligible(),
+            "a Both prepared filter target preserves the scalar witness"
         );
 
         // A per-lane retarget declines the `LIVE` term and moves one plane only.

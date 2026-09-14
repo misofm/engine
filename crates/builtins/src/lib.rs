@@ -3203,8 +3203,8 @@ impl InputBuiltins {
     ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecord`
     ///   implements `LiveConsoleRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
     ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
-    ///   dispatch reads the witness. `hpf_hz` and `lpf_hz` remain `PreparedOnly` and have no
-    ///   write path at all.
+    ///   dispatch reads the witness. Filter targets use the same upstream queue and clear the
+    ///   witness according to their addressed lanes.
     #[must_use]
     pub fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         let mut witness = ChannelSymmetryWitness::SYMMETRIC;
@@ -3291,7 +3291,8 @@ impl InputBuiltins {
     }
     pub fn tail(&self) -> BuiltinTail {
         let track = self.stage.lane_track(0);
-        if track.left.hpf.enabled
+        if self.stage.filter_ramping
+            || track.left.hpf.enabled
             || track.left.lpf.enabled
             || track.right.hpf.enabled
             || track.right.lpf.enabled

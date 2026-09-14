@@ -200,7 +200,7 @@ They disagree about how much it costs to compute it, and that disagreement is th
 Source: `crates/parametric-eq/src/lib.rs` and the shared
 `crates/lane/src/kernels.rs` SVF. The prepared EQ has six physical cascade sections in render
 order: dedicated HPF, the four original general bands, and dedicated LPF. The public general-band
-count remains four; the dedicated cuts are prepared-only and default disabled. The standing fixture
+count remains four; the dedicated cuts are live through prepared targets since #807 and default disabled. The standing fixture
 still has one active general band, with the other five physical sections at the identity. The
 stationary EQ path pins a local effective cascade depth of 2 in both its dual and mono forms; this
 is an EQ dispatch choice and does not change `Lane::SVF_CASCADE_DEPTH` for other kernels. Per
@@ -260,9 +260,10 @@ as a structural estimate: each channel's section-indexed arrays (`sections: [Sec
 physical-section entries, and the prepared `initial` target storage gains two entries per channel
 and lane. Target-specific resident memory must come from
 the source type's `size_of` and allocator accounting; neither the two-entry deltas nor the payload
-values above are measured resident allocation sizes. The four-general-band automation scratch
-remains four-band-sized because
-the two dedicated cuts are prepared-only.
+values above are measured resident allocation sizes. The preceding allocation inventory records #805. Since #807, all six physical
+sections accept bounded prepared targets; scalar and bank render paths no longer
+design coefficients from raw automation spans. The #807 issue records the actual
+owner/queue accounting and the 464-byte per-channel state layout.
 
 Native x86-64 `size_of` recount at #805's final compatibility checkpoint:
 
@@ -372,14 +373,26 @@ feature is **not** a recount trigger. Neither is it a `KERNEL_ROSTER` change
 wasm artifact must carry, and no builtin kernel has a row in it -- the two new bodies join
 `input_chain_block`'s five siblings, none of which the roster sees.
 
-One thing the ramping arm does **not** do, and the reason it is one body rather than four: it does
-not consult the elision plan. Over a decided-elidable section the unelided body computes the same
+Historically, the trim-ramping arm did not consult the elision plan. Over a decided-elidable section the unelided body computes the same
 `v |-> v + 0.0` map and writes back the same `+0.0` integrators, which is the appendix below's own
 proof, so the ramping arm renders the elision-planned bits without a second three-shape dispatch to
 keep bit-identical to the first. What it costs is `24 x sections` lane-ops that the settled arm
 would have elided, on the blocks a ramp is in flight and on those only. Charged honestly: *ramping
 input chain does not elide -- up to 48 lane-ops per lane-sample while a retarget is in flight,
 floor 0*.
+
+**#808 DSP amendment (host/SDK delivery pending):** the trim-only dispatch now
+consults the existing all-identity plan once before the sample loop. When both
+sections are settled identity across the bank, its dual/mono body performs trim,
+sanitization, signed-zero normalization and output accounting, with no SVF
+coefficient or integrator access. Mixed/nonidentity banks retain the existing
+fallback. Live filter transitions use a bounded prefix of at most64frames, then
+the appropriate settled suffix; the fixed64 law processes current words before
+advancing and first uses the exact target at A+64. In-flight ramps prohibit
+elision; exact disabled completion clears the addressed integrators and refreshes
+the plan. Thus the old recurrence gap above no longer applies to all-disabled
+trim/polarity ramps. Retained target/step/initial words, countdowns and control
+queues still consume memory. No timing or new measured floor is claimed.
 
 Input time alignment (`builtins.*.delay_samples`, issue #210 phase 2) is **0** as well, and it is a
 named gap term rather than a floor row: *input delay — 1 load + 1 store per lane-sample when

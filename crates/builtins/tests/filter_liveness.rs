@@ -1,8 +1,8 @@
 #![allow(missing_docs)]
 
 use builtins::{
-    BuiltinChain, BuiltinInputBank, BuiltinLaneSelector, BuiltinParameters, DualMonoBlock,
-    InputBuiltins, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
+    BuiltinChain, BuiltinInputBank, BuiltinLaneSelector, BuiltinParameters, BuiltinTail,
+    DualMonoBlock, InputBuiltins, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
     prepare_input_filter_pair, validate_prepared_input_filter_target,
 };
 use effect_contract::{ResponseSnapshotRequest, ResponseSnapshotSection};
@@ -308,4 +308,29 @@ fn filter_ramp_endpoint_is_partition_invariant_and_reset_honors_kind() {
     full.process(DualMonoBlock::new(&mut full_left, &mut full_right, 0).expect("block"));
     assert_ne!(keep_left[0].to_bits(), full_left[0].to_bits());
     assert_eq!(full_left[0].to_bits(), 1.0_f32.to_bits());
+}
+
+#[test]
+fn input_tail_is_infinite_while_a_filter_target_is_ramping() {
+    let prepared = prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
+    let mut input = disabled();
+    assert_eq!(input.tail(), BuiltinTail::FiniteZero);
+    input
+        .apply_prepared_filter(prepared.targets[0])
+        .expect("target");
+    assert_eq!(input.tail(), BuiltinTail::Infinite);
+    let mut left = vec![1.0; 64];
+    let mut right = left.clone();
+    input.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(input.tail(), BuiltinTail::Infinite);
+
+    let disabled_pair = prepare_input_filter_pair(48_000, 0.0, 0.0).expect("disabled");
+    input
+        .apply_prepared_filter(disabled_pair.targets[0])
+        .expect("disable");
+    assert_eq!(input.tail(), BuiltinTail::Infinite);
+    let mut left = vec![1.0; 64];
+    let mut right = left.clone();
+    input.process(DualMonoBlock::new(&mut left, &mut right, 64).expect("block"));
+    assert_eq!(input.tail(), BuiltinTail::FiniteZero);
 }
