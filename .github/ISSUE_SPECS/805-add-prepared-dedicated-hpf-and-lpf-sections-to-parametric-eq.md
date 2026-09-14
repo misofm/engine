@@ -412,3 +412,20 @@ pass (8;2actualartifact cases intentionally await rebuiltWasm). Evidence:
 exactbyteaccounting, zeroallocations, max249192bytes, count7refusal and coherent
 header one-byte truncation refusal. BothSDKparserentrypaths have6/7/truncated
 cases. Root must rebuildWasm and clear all3prior headless failures beforePASS.
+
+## Attempt 1 — rebuilt artifact and full SDK gates
+
+Fresh ordinary Wasm build after response correction produced
+cc128e5f26df1bb13d981d5700c387de9a09143ca2cc0acfa8ad7c36b426c5e0
+in /tmp/804-805-response-artifacts. The earlier b0bff artifact is superseded
+for final response qualification. Full headless:254tests PASS,0fail/skip; all
+three previous failures cleared (/tmp/805-headless-final.log). The normal
+artifact/static/callgraph/allocation/SIMD and boot-budget gates pass
+(/tmp/805-artifact-final.log), and the publishable SDK tarball/CLI gate passes
+(/tmp/805-package-final.log). This is package qualification, not publication.
+All affected crates pass all-target/all-feature clippy with-Dwarnings. A
+default-feature-only invocation exposed an existing unused test helper; the
+normal all-feature configuration resolved that. Root fixed one new test-only
+manual-char-comparison lint with the equivalent array pattern, no suppression.
+Final clippy log /tmp/805-response-clippy-all-features-final.log.
+Actual browser matrix qualification and final Astra verdict remain next.

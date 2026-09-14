@@ -49,7 +49,7 @@ fn raw_field<'a>(row: &'a str, field: &str) -> &'a str {
         .unwrap_or_else(|| panic!("row names {field}: {row}"))
         + marker.len();
     let end = row[start..]
-        .find(|character: char| character == ',' || character == '\n')
+        .find([',', '\n'])
         .expect("raw field closes")
         + start;
     row[start..end].trim()
