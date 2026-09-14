@@ -437,3 +437,13 @@ shared live prepared-control path are delivered to engine main. No npm publicati
 or app deployment is claimed: #808 builtin filters, #809 SDK release, adapter#111
 and app#222 remain. The completed clean/pushed #807 worktree is eligible for removal;
 checked evidence is upstream and local artifact/log copies remain outside it.
+
+### #808 qualified implementation, 2026-09-14
+
+Builtin filters now share the accepted live EQ helper and atomic host admission,
+with atomic HPF/LPF pair authoring, fixed64 coefficient updates, target response,
+and disabled-filter elision during trim ramps. Fresh Astra MEDIUM attempt2 PASS
+atf383b12b follows the bounded symmetry/endpoint/refusal corrections. Corrected
+Wasm7e925d93…24999e7 passes packed artifact gates,255headless tests and allthree
+actual browser qualifications. Required CI/merge and remote closure follow;
+no SDK/adapter publication or app deployment is claimed yet.

@@ -339,3 +339,18 @@ The earlier `42f499...` artifact and its passing package/headless checks are
 attempt1 evidence only. Final corrected package/browser qualification and the
 fresh attempt2 verdict remain pending. SDK README now documents atomic pair use,
 Hz/zero semantics and the fixed transition; no release version has been changed.
+
+### Attempt2 final qualification and verdict
+
+Fresh Astra MEDIUM **PASS** at `f383b12b018b11b31981ab637a7946e657dbea08`:
+all four attempt1 findings corrected with discriminating regressions; no blocking
+correctness, realtime, atomicity, mono, reset, resource or SDK findings remain.
+Final Wasm `7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`
+passed shipped export/static/callgraph checks, the publishable-tarball gate and
+all255 headless tests. The unpacked SDK archive passed actual Chromium151.0.7922.34,
+Firefox153.0 and WebKit26.5 qualification, including existing mutation checks.
+The mixed eight-command EQ+Left-builtin episode requires exact original ACK counts,
+matching application samples and post-ramp PCM/captured-target-response parity.
+Generated results and deployment matrix bind these runs to the reviewed source
+and Wasm. No benchmark or new listening claim was added. Required remote CI and
+merge remain before delivery; SDK publication remains #809.
