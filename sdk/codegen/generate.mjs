@@ -50,6 +50,7 @@ const ARTIFACT_SET = [
   "miso-engine-v1-audio-worklet.js",
   "miso-engine-v1-audio-worklet.simd128.wasm",
   "miso-engine-v1-parameter-metadata.json",
+  "prepared-control.js",
 ];
 
 function deepFreezeSource() {

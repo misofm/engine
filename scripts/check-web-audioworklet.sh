@@ -156,10 +156,11 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet-host.js \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
-  miso-engine-v1-parameter-metadata.json)
+  miso-engine-v1-parameter-metadata.json \
+  prepared-control.js)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact six frozen outputs" >&2
+  echo "artifact directory does not contain the exact seven frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }

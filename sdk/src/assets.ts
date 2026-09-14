@@ -9,6 +9,7 @@ export const BUNDLED_ENGINE_FILES = Object.freeze({
   hostDeclaration: "miso-engine-v1-audio-worklet-host.d.ts",
   parameterMetadata: "miso-engine-v1-parameter-metadata.json",
   abiLayout: "miso-engine-v1-abi-layout.json",
+  preparedControl: "prepared-control.js",
   manifest: "miso-engine-v1-sdk-manifest.json",
 } as const);
 

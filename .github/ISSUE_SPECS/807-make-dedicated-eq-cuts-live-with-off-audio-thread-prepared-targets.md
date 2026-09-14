@@ -716,3 +716,23 @@ fader batches, missing/extra/unsafe/stale targets, full unrelated queues, invali
 before valid overwrites, successive transactions before render, original indexes,
 config preservation and zero allocations/designer calls must pass before release.
 Assignment8's shared browser preparation helper is next; issue remains open, attempt1.
+
+
+### Assignment8 recoverable draft, 2026-09-14
+
+Checkpoint the bounded Luna browser transport/helper draft without claiming assignment8
+completion. The worklet calls real config-copy/prepared admission exports; helper asset
+inclusion and private host correlator branches are present. Root restored ordinary
+`command()` routing: production activation remains assignment10.
+
+Syntax checks, helper construction against generated ABI, generated SDK check, source
+policy and diff check passed. Browser defaults reported 30 passes and 11 failures
+without the required built artifact; this is not a passing browser integration result.
+Package smoke did not start because its TypeScript dependency was unavailable. No
+benchmark or final artifact build was performed.
+
+Known helper corrections remain before use: separate transferred/ACK comparison bytes,
+immutable error construction, synchronous existing-instance/raw-byte entry point,
+post-await lifecycle guards, known-ordinary bypass of the prepared pending slot, and
+one authoritative encoded semantic snapshot. Preserve this draft and finish the same
+component; no new attempt/verdict or completion claim.
