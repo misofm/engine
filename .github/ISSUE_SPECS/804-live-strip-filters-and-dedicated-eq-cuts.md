@@ -82,3 +82,21 @@ Baseline engine main: `551f6d7e`. Planning only; no source implementation or
 qualification is claimed. Existing unrelated #774 work is preserved. The dirty
 primary app checkout is outside this work; integrations use isolated worktrees
 from fetched remote main. Child contracts and sequencing follow Astra scope.
+
+## Approved first slices and slope decision
+
+Astra XHIGH approved the bounded design at `/tmp/804-astra-dsp-plan.md`;
+its durable first child is #805. Order: #147 structured parameter/unit surface,
+#805 prepared EQ cuts, a separately scoped off-render live EQ control child,
+then a separately scoped live builtin-filter child. Fresh Astra MEDIUM reviews
+one coherent attempt per child. Do not give one implementer the whole program.
+
+Dedicated cuts use the current second-order TPT SVF authority: 12 dB/oct with
+independent Q. Higher slopes and first-order variants remain #191 post-launch
+product decisions; no inert slope parameter or UI is shipped. Existing four
+bands and IDs remain unchanged. App-authored builtin filter cutoff values are
+zero; claim identity-elided filter DSP, not zero retained metadata/state.
+
+#147 is amended to preserve the existing metadata `name` as machine key, derive
+builtin units from Rust authority, and add object-shaped edits over the existing
+live console. No duplicate `key` metadata column or suffix rename is introduced.
