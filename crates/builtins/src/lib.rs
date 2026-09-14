@@ -971,7 +971,7 @@ pub(crate) struct InputStage<L: Lane> {
     /// including an enable whose current words are still identity. Retarget, ramp completion,
     /// disabled endpoint clearing, reset and explicit state restoration use this authority.
     /// A settled elided section keeps its integrators untouched; boundary recovery can only move
-    /// them toward +0, so it cannot make an elidable section unsafe. The required all-identity
+    /// them toward +0, so it cannot invalidate an elidable section. The required all-identity
     /// trim-ramp path preserves sanitization, trim timing and signed-zero normalization.
     /// See `docs/rulings/builtins-input-liveness-d2.md`.
     plan: InputChainPlan,
