@@ -777,7 +777,7 @@ class MisoAudioWorkletHost {
       || (validCommandReason(message.reason)
         && message.config instanceof Uint8Array
         && message.config.buffer instanceof ArrayBuffer
-        && ((message.result === RESULT_OK && message.config.byteLength === 272)
+        && ((message.result === RESULT_OK && message.config.byteLength === pending.configBytes)
           || (message.result !== RESULT_OK && message.config.byteLength === 0)));
     const validSessionMap = pending.response !== "sessionMap" || (
       message.result === RESULT_OK && Array.isArray(message.tracks)
@@ -945,6 +945,7 @@ class MisoAudioWorkletHost {
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
+        configBytes: stamped.rack === 255 && stamped.effectIndex === 0 ? 48 : 272,
         spectrumOperation: stamped.operation,
         spectrumBuffer: stamped.buffer,
         spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,

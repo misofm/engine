@@ -282,3 +282,12 @@ retains two scalar owners per track and two input banks, so its exact builtin pr
 payload grows by 7,488 bytes and plan payload by 4,864. All four C resource-lifecycle tests,
 including exact/one-below caps and allocator balance, pass; strict test Clippy and format
 pass. No production accounting gate was relaxed. Workspace continuation is pending.
+
+Luna XHIGH shared-helper checkpoint: EQ and builtin kind12 now use the same cache,
+preparation workspace, pending batch and ACK commit lifecycle. Browser config copies and
+headless config copies use the existing scratch with the builtin48-byte layout; all
+coefficient preparation remains in Rust. The SDK console's twelve-kind submission now
+includes an actual builtin pair, and the writer test fills the real input queue to prove
+that a two-target pair remains one pending original command through backpressure.
+All23 focused console/writer tests pass against the rebuilt Wasm; JavaScript syntax,
+SDK TypeScript and diff checks pass. Actual browser matrix and whole-issue review remain.

@@ -84,6 +84,7 @@ const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const EQ_CONFIG_FIELDS = ["tag", "requestId", "trackIndex", "rack", "effectIndex"];
 const PREPARED_COMMAND_FIELDS = ["tag", "requestId", "count", "records", "companion"];
 const EQ_CONFIG_BYTES = 272;
+const INPUT_FILTER_CONFIG_BYTES = 48;
 const PREPARED_COMPANION_HEADER_BYTES = 24;
 const PREPARED_COMPANION_RECORD_BYTES = 80;
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
@@ -1467,10 +1468,13 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return;
     }
     let result;
+    const builtin = message.rack === 255 && message.effectIndex === 0;
     try {
-      result = this.exports.miso_engine_web_v1_eq_target_config_copy(
-        this.handle, message.trackIndex, message.rack, message.effectIndex,
-      );
+      result = builtin
+        ? this.exports.miso_engine_web_v1_input_filters_config_copy(this.handle, message.trackIndex)
+        : this.exports.miso_engine_web_v1_eq_target_config_copy(
+          this.handle, message.trackIndex, message.rack, message.effectIndex,
+        );
     } catch (_) {
       result = RESULT_INTERNAL;
     }
@@ -1481,11 +1485,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     let config = new Uint8Array(0);
     if (result === RESULT_OK) {
       const pointer = this.exports.miso_engine_web_v1_eq_target_config_ptr(this.handle);
-      if (!u32(pointer) || pointer === 0 || pointer + EQ_CONFIG_BYTES > this.memoryBuffer.byteLength) {
+      const configBytes = builtin ? INPUT_FILTER_CONFIG_BYTES : EQ_CONFIG_BYTES;
+      if (!u32(pointer) || pointer === 0 || pointer + configBytes > this.memoryBuffer.byteLength) {
         this.sticky(RESULT_INTERNAL, message.requestId);
         return;
       }
-      config = new Uint8Array(this.memoryBuffer, pointer, EQ_CONFIG_BYTES).slice();
+      config = new Uint8Array(this.memoryBuffer, pointer, configBytes).slice();
     }
     let reason = 0;
     if (result === RESULT_INVALID_ARGUMENT) {

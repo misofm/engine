@@ -1076,20 +1076,26 @@ export class WasmBoundary {
 
   #preparedConfigCopy(address: PreparedAddress): PreparedConfigReply {
     const handle = this.#live();
-    const result = Number(this.#exports.miso_engine_web_v1_eq_target_config_copy(
-      handle, address.trackIndex, address.rack, address.effectIndex,
-    ));
+    const builtin = address.rack === 255 && address.effectIndex === 0;
+    const result = builtin
+      ? Number(this.#exports.miso_engine_web_v1_input_filters_config_copy(handle, address.trackIndex))
+      : Number(this.#exports.miso_engine_web_v1_eq_target_config_copy(
+        handle, address.trackIndex, address.rack, address.effectIndex,
+      ));
     const ok = constantValue("resultCodes", "ok");
     if (result === ok) {
       const pointer = Number(this.#exports.miso_engine_web_v1_eq_target_config_ptr(handle));
-      const bytes = structBytes("eqTargetConfig");
+      const bytes = structBytes(builtin ? "builtinInputConfig" : "eqTargetConfig");
       if (pointer === 0 || pointer + bytes > this.#exports.memory.buffer.byteLength) {
-        throw new MisoEngineError("the engine returned a malformed prepared EQ configuration", {
-          phase: "asset",
-          code: "abiMismatch",
-          result: constantValue("resultCodes", "abiMismatch"),
-          diagnostics: [{ code: "sdk.prepared.config", path: "eqTargetConfig" }],
-        });
+        throw new MisoEngineError(
+          `the engine returned a malformed prepared ${builtin ? "builtin input-filter" : "EQ"} configuration`,
+          {
+            phase: "asset",
+            code: "abiMismatch",
+            result: constantValue("resultCodes", "abiMismatch"),
+            diagnostics: [{ code: "sdk.prepared.config", path: builtin ? "builtinInputConfig" : "eqTargetConfig" }],
+          },
+        );
       }
       return { result, reason: commandReasonValue("none"), config: new Uint8Array(
         this.#exports.memory.buffer, pointer, bytes,

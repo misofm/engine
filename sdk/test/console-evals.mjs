@@ -91,9 +91,10 @@ describe("issue 322 -- shared semantic console", () => {
         compressor.parameter("threshold", -24, { channel: "both" }),
         compressor.bypass(false),
         compressor.observe("Gain Reduction", true, 2),
+        track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }),
       );
       assert.equal(first.ok, true);
-      assert.equal(first.admitted, 10);
+      assert.equal(first.admitted, 11);
       assert.equal(first.reasonName, "none");
       assert.equal(first.appliedAtSample, 0n);
 
