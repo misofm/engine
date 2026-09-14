@@ -5,7 +5,7 @@
 //! checked against the row the facade itself reports, and every source-control rejection is typed.
 
 use builtins::{MeterMetricSet, MeterTap};
-use core::mem::size_of;
+use core::mem::{size_of, size_of_val};
 use host_core::{
     EffectControlProducer, HostConsoleRequest, HostMeterRequest, HostPrepareCaps,
     HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
@@ -373,7 +373,7 @@ fn retained_bytes_projection_matches_the_live_set() {
 }
 
 #[test]
-fn effect_control_report_uses_actual_native_capacity_and_strings() {
+fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let console = HostConsoleRequest {
         control_queue_depth: core::num::NonZeroUsize::new(4),
@@ -392,19 +392,42 @@ fn effect_control_report_uses_actual_native_capacity_and_strings() {
         "launch EQ fixture has one effect per track"
     );
     let table = (handles.effect_controls.capacity() * size_of::<EffectControlProducer>()) as u64;
-    let payload = handles
+    let mut payload = handles
         .effect_controls
         .iter()
         .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
         .map(|bytes| bytes as u64)
         .sum::<u64>();
-    let largest_owned = handles
+    let mut largest_owned = handles
         .effect_controls
         .iter()
         .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
         .map(|bytes| bytes as u64)
         .max()
         .unwrap_or(0);
+    let shared_factory = handles.effect_controls[0].owner().unwrap().factory();
+    for producer in &handles.effect_controls {
+        let owner = producer.owner().expect("live EQ owner");
+        assert!(std::sync::Arc::ptr_eq(shared_factory, owner.factory()));
+        for bytes in [
+            size_of_val(owner),
+            size_of_val(owner.committed()),
+            size_of_val(owner.candidate()),
+            size_of_val(owner.dirty()),
+        ] {
+            payload += bytes as u64;
+            largest_owned = largest_owned.max(bytes as u64);
+        }
+    }
+    // All nine owners retain the same factory Arc: charge its actual header/layout once.
+    let factory_bytes = core::alloc::Layout::new::<[core::sync::atomic::AtomicUsize; 2]>()
+        .extend(core::alloc::Layout::for_value(shared_factory.as_ref()))
+        .expect("factory layout")
+        .0
+        .pad_to_align()
+        .size() as u64;
+    payload += factory_bytes;
+    largest_owned = largest_owned.max(factory_bytes);
     assert_eq!(
         prepared
             .report
