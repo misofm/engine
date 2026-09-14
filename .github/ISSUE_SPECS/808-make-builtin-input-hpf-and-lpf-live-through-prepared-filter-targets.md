@@ -137,3 +137,19 @@ These are narrow bridge/wording clarifications, not a prerequisite framework exp
 ## Decision and evidence record
 
 Astra XHIGH scope: ready for root's numbered issue brief. Implementation attempt1 and Astra MEDIUM verdict pending. Existing TPT equations, numerical corpus and primary citations remain the DSP authority; this child adds coefficient-ramp scheduling, owner admission and associated response truthfulness. Record observed listening only; do not invent listening evidence. Root records actual checkpoints, focused gates, reviewed verdict and remote issue synchronization before claiming delivery.
+
+
+### Execution start, 2026-09-14
+
+Root accepts the frozen Astra XHIGH scope and its three bounded sequential Luna
+tranches. Attempt1 starts from accepted EQ checkpoint1b81f56a in isolated
+`codex/808-live-input-filters`; #807 is PASS/closed and PR#811 is awaiting required
+CI/merge. Its implementation is frozen, so #808 is the sole active feature WIP.
+Merge the delivered EQ main lineage before final builtin qualification/PR.
+
+Boundary audit found all414 numbered local specs represented among518 GitHub issues;
+#804/#808/#809 remain open and #805/#807 are closed. #808's number/title match.
+The current command vocabulary ends at polarityInvert11: inputFilters12 is free.
+Start only tranche1 builtin preparation/ramp/identity behavior. Keep public metadata
+prepared-only until queue/host/SDK closure. Reuse existing fixtures and counters,
+run no benchmark, and checkpoint focused-green work before adding another tranche.
