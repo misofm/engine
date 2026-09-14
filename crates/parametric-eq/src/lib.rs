@@ -61,6 +61,7 @@ use lane::kernels::{
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
+mod control;
 mod response;
 
 pub use response::{
@@ -654,6 +655,15 @@ pub fn word_spectral_norm(words: EqSvfWords) -> f64 {
 /// Largest spectral norm accepted from a rounded word set: one `f32` rounding above contractive.
 const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 
+/// Conservative finite bound for the three output-mix words accepted at the prepared-target
+/// boundary. It is derived from the descriptor's legal gain, Q and shelf-slope domains: with
+/// `A = 10^(gain/40)`, `A < 4` and `1/A < 4`; with `Q >= 0.1` and `S >= 0.1`, the shelf damping
+/// word is below `sqrt(74) < 9`. Therefore high-shelf `|m1| < 9*3*4 = 108`, low-shelf `|m1| <
+/// 9*3 = 27`, bell `|m1| < 40`, and all remaining mix magnitudes are at most 16. The rounded
+/// boundary freezes 128, leaving room for the single f32 rounding while rejecting arbitrary huge
+/// finite payloads.
+const OUTPUT_MIX_BOUND: f32 = 128.0;
+
 /// Designs one section's six `f32` words from the frozen RBJ parameter domain.
 ///
 /// # Errors
@@ -693,15 +703,34 @@ pub fn design_svf(
         let rounded = value as f32;
         if rounded == 0.0 { 0.0 } else { rounded }
     }));
-    if !words.to_array().into_iter().all(f32::is_finite)
+    validate_rounded_svf(words)?;
+    Ok(words)
+}
+
+/// Validates the rounded words that the SVF kernel actually consumes.
+///
+/// This is shared by the trigonometric designer and the prepared-target decoder. The decoder
+/// calls it without redesigning a section, so this predicate proves finiteness, canonical zeros,
+/// the existing state-transition shape, the conservative output-mix bound, and the rounded
+/// spectral-norm limit. It cannot prove that arbitrary stable coefficient words implement the
+/// semantic cutoff or Q in a target header; the Rust preparer remains the coefficient authority.
+fn validate_rounded_svf(words: EqSvfWords) -> Result<(), EqDesignError> {
+    let values = words.to_array();
+    if !values.iter().all(|value| value.is_finite())
+        || values
+            .iter()
+            .any(|value| *value == 0.0 && value.to_bits() != 0)
         || !(0.0..1.0).contains(&words.c1)
         || words.a2 <= 0.0
         || words.a3 < 0.0
+        || words.m0.abs() > OUTPUT_MIX_BOUND
+        || words.m1.abs() > OUTPUT_MIX_BOUND
+        || words.m2.abs() > OUTPUT_MIX_BOUND
         || word_spectral_norm(words) > NORM_TOLERANCE
     {
         return Err(EqDesignError::Coefficients);
     }
-    Ok(words)
+    Ok(())
 }
 
 /// `true` if `value` is inside the domain of numeric field `field` (0 frequency, 1 gain, 2 Q,
