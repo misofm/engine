@@ -2387,6 +2387,7 @@ fn input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngi
     })
 }
 
+#[cfg(feature = "test-support")]
 fn effect_input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
         .expect("accepted command fixture");
@@ -2499,6 +2500,7 @@ fn stage_prepared_input_filter(
 /// Build one companion for the existing EQ owner and the builtin input owner. Each helper is
 /// called separately so both targets are prepared from their own committed revision, then the
 /// already designed records are coalesced into the shared companion wire image.
+#[cfg(feature = "test-support")]
 fn stage_mixed_prepared_eq_and_input_filter(host: &mut AudioWorkletEngineHost) -> u32 {
     stage_prepared_eq_parameter(host, 0, 0, 1, 0, 4, -12.0);
     let eq_companion = host.prepared_companion_mut().expect("prepared companion")[..104].to_vec();

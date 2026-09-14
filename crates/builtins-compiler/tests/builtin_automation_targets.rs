@@ -72,12 +72,10 @@ fn refused_targets_are_exactly_the_prepared_only_rows() {
     }
     // The deferred tier, named so that reopening it is a deliberate edit here as well as in the
     // ABI: `delay_samples` remains prepared-only; the input-filter pair is live through #808.
-    for id in [11_u32] {
-        assert!(
-            !admitted.contains(&id),
-            "builtin parameter {id} is deferred and must not be an automation target"
-        );
-    }
+    assert!(
+        !admitted.contains(&11),
+        "delay_samples remains prepared-only and must not be an automation target"
+    );
     // Issue #210 phase 3 admitted these two. The assertion is here so that a phase that reverted
     // the liveness would have to revert this line too.
     for id in [1_u32, 2] {

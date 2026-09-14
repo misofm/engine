@@ -354,3 +354,18 @@ matching application samples and post-ramp PCM/captured-target-response parity.
 Generated results and deployment matrix bind these runs to the reviewed source
 and Wasm. No benchmark or new listening claim was added. Required remote CI and
 merge remain before delivery; SDK publication remains #809.
+
+### Attempt3 CI-only correction
+
+PR#812 qualification34875278294 exposed Clippy's single-element-loop refusal in
+the automation-target test: after HPF/LPF became live, only prepared-only ID11
+remained. The test now asserts that ID directly. Two host test helpers are also
+gated by their sole caller's existing test-support feature, so default-feature
+Clippy stays clean. No production, ABI, SDK or Wasm bytes change.
+
+PASS: exact CI workspace/all-target/all-feature Clippy; default-feature host
+lib/test Clippy; all3 builtin automation cross-checks; format/diff checks.
+Astra MEDIUM reviewed the two-file delta and recorded **attempt3 PASS**, preserving
+attempt2's full runtime/artifact/browser qualification. #808 was reopened for the
+CI correction and is closed again once this evidence is upstream; required CI
+must be green before PR#812 merges.
