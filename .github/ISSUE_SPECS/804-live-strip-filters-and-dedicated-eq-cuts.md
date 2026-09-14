@@ -149,3 +149,10 @@ The next #807 checkpoint completes original-command host preflight and focused q
 refusal/staging gates, including actual counter, observation and solo rollback checks.
 Real EQ runtime application and exact budget tests remain before assignment 4 acceptance.
 No live-cut activation or release is claimed; the complete evidence is in #807.
+
+
+#807 now has real EQ queued PCM evidence: scalar/bank parity, mono-collapse exit with
+an asymmetric retarget, and FIFO overlap against an independently prepared final state.
+A reordered negative control fails as required; the restored fixture and complete host
+suite pass. Exact assignment-4 resource fixtures remain, followed by owner/host/SDK
+integration. No public live-cut activation, package publication or app deployment yet.

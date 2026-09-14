@@ -343,15 +343,21 @@ mod tests {
         launch_native_effect_registry, prepare_native_session_effects,
     };
     use effect_contract::{
-        EffectControlRecord, EffectPrepareError, EffectProcessBlock, NativeEffectFactory,
-        NativeEffectRegistry, PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
+        EffectControlLane, EffectControlRecord, EffectPrepareError, EffectProcessBlock,
+        EffectTargetRequest, InitialParameterValue, NativeEffectFactory, NativeEffectRegistry,
+        NativeEffectTargetPreparation, ParameterChannel as ContractParameterChannel,
+        PrepareEffectBankRequest, PrepareEffectRequest, PreparedEffectTarget, PreparedNativeEffect,
         PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
-    use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
+    use engine::realtime::{
+        PlanarBufferMut, PreparedRenderPlan, Producer, QueueGeneration, RenderIo, RenderTime,
+        audit, bounded_spsc,
+    };
     use graph::{
         GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
         GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
     };
+    use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
         RouteDestination, RouteSource, Sidechain, SidechainDeclaration, StableId, Submix,
@@ -371,6 +377,8 @@ mod tests {
         include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+    const PARAMETRIC_EQ_BANK_CONSOLE_FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 
     #[test]
     fn route_helpers_map_every_typed_variant_to_its_graph_node() {
@@ -654,6 +662,26 @@ mod tests {
         Box::new(AsymmetricTrackImpulseBinding {
             left: 0.03125 * (index + 1) as f32,
             right: -0.015625 * 9_u32.saturating_sub(index) as f32,
+        })
+    }
+
+    fn equal_parametric_eq_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("parametric-EQ fixture track id");
+        let level = 0.03125 * (index + 1) as f32;
+        Box::new(SustainedTrackBinding {
+            left: level,
+            right: level,
         })
     }
 
@@ -5283,6 +5311,575 @@ mod tests {
                 .enumerate()
                 .all(|(index, sample)| index == 0 || index == frames || *sample == 0.0),
             "bypass retains the dry impulse without changing the rack graph"
+        );
+    }
+
+    struct RawEqProducer {
+        track_id: String,
+        producer: Producer<EffectControlRecord>,
+    }
+
+    struct QueuedEqArtifact {
+        artifact: PreparedGraphArtifact,
+        producers: Vec<RawEqProducer>,
+        initial_values: Vec<InitialParameterValue>,
+    }
+
+    struct BoundQueuedEq {
+        plan: PreparedRenderPlan,
+        producers: Vec<RawEqProducer>,
+        initial_values: Vec<InitialParameterValue>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct EqEdit {
+        parameter_id: u32,
+        channel: ContractParameterChannel,
+        value: f32,
+    }
+
+    fn queued_eq_model() -> session::SessionModel {
+        let mut model = parse_session_json(PARAMETRIC_EQ_BANK_CONSOLE_FIXTURE)
+            .expect("parametric-EQ bank console fixture");
+        assert_eq!(
+            model.tracks.len(),
+            8,
+            "the queued fixture has one full bank"
+        );
+        model.quantum_frames = 32;
+        for track in &mut model.tracks {
+            assert_eq!(track.simd1.effects.len(), 1);
+            assert_eq!(
+                track.simd1.effects[0].identity,
+                EffectIdentity::Native {
+                    effect_id: StableId::parse("miso.parametric-eq").expect("EQ identity")
+                }
+            );
+            // Session preparation supplies the accepted canonical sixty-value seed. Keeping the
+            // session rows empty makes every target in this fixture start from the same symmetric
+            // state and leaves the target preparation as the only semantic edit path.
+            track.simd1.effects[0].params.clear();
+        }
+        model
+    }
+
+    fn queued_eq_session(model: &session::SessionModel) -> session::CompiledSession {
+        compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled queued-EQ fixture")
+    }
+
+    fn compile_queued_eq(
+        model: &session::SessionModel,
+        registry: &NativeEffectRegistry,
+        plan_id: u64,
+        dispatch: Backend,
+    ) -> QueuedEqArtifact {
+        let session = queued_eq_session(model);
+        let mut effects = prepare_native_session_effects(
+            &session,
+            registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("prepared queued-EQ effects");
+        assert_eq!(effects.entries.len(), 8);
+        assert!(
+            effects
+                .entries
+                .iter()
+                .all(|entry| { entry.rack == EffectRack::Simd1 && entry.effect_id == "eq" })
+        );
+        let initial_values = effects
+            .entries
+            .first()
+            .expect("first EQ entry")
+            .bank_preparation
+            .initial_values
+            .to_vec();
+        assert_eq!(
+            initial_values.len(),
+            60,
+            "the retained EQ seed is 60 values"
+        );
+        let mut producers = Vec::with_capacity(effects.entries.len());
+        for entry in &mut effects.entries {
+            let capacity = NonZeroUsize::new(entry.metadata.automation_capacity as usize)
+                .expect("EQ automation capacity");
+            let (producer, consumer) =
+                bounded_spsc(capacity, QueueGeneration(0)).expect("raw fixture queue");
+            // This is an exclusively owned fixture route. Production publication remains behind
+            // the checked effect-compiler producer, which still refuses prepared targets here.
+            entry.control = Some(Box::new(EffectControlLane::new_with_target_staging(
+                consumer,
+                entry.bank_preparation.bypass,
+            )));
+            producers.push(RawEqProducer {
+                track_id: entry.track_id.clone(),
+                producer,
+            });
+        }
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch,
+            plan_id,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("queued-EQ graph: {:?}", failure.diagnostics));
+        QueuedEqArtifact {
+            artifact,
+            producers,
+            initial_values,
+        }
+    }
+
+    fn bind_queued_eq(queued: QueuedEqArtifact) -> BoundQueuedEq {
+        let graph = queued.artifact.graph;
+        let envelope = graph.envelope;
+        let nodes = graph
+            .required_bindings
+            .iter()
+            .map(|node| {
+                GraphNodeBinding::new(node.clone(), equal_parametric_eq_input_binding(node))
+            })
+            .collect();
+        let plan = graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("queued-EQ bind: {}", failure.code));
+        BoundQueuedEq {
+            plan,
+            producers: queued.producers,
+            initial_values: queued.initial_values,
+        }
+    }
+
+    fn prepared_eq_records_with_seed(
+        initial_values: &[InitialParameterValue],
+        sample_rate: u32,
+        seed: &[EqEdit],
+        edits: &[EqEdit],
+    ) -> Vec<EffectControlRecord> {
+        let mut values = initial_values.to_vec();
+        let mut changed = vec![false; values.len()];
+        let parameter_index = |parameter_id: u32| {
+            PARAMETRIC_EQ_DESCRIPTOR
+                .parameters
+                .iter()
+                .position(|parameter| parameter.id.0 == parameter_id)
+                .expect("EQ parameter id") as u32
+        };
+        let set_value = |values: &mut [InitialParameterValue],
+                         parameter_index: u32,
+                         channel: ContractParameterChannel,
+                         value: f32| {
+            let channels = match channel {
+                ContractParameterChannel::Left => [Some(ContractParameterChannel::Left), None],
+                ContractParameterChannel::Right => [None, Some(ContractParameterChannel::Right)],
+                ContractParameterChannel::Both => [
+                    Some(ContractParameterChannel::Left),
+                    Some(ContractParameterChannel::Right),
+                ],
+            };
+            for channel in channels.into_iter().flatten() {
+                let value_slot = values
+                    .iter_mut()
+                    .find(|candidate| {
+                        candidate.parameter_index == parameter_index && candidate.channel == channel
+                    })
+                    .expect("accepted 60-value slot");
+                value_slot.value = value;
+            }
+        };
+        for edit in seed {
+            set_value(
+                &mut values,
+                parameter_index(edit.parameter_id),
+                edit.channel,
+                edit.value,
+            );
+        }
+        for edit in edits {
+            let parameter_index = parameter_index(edit.parameter_id);
+            let channels = match edit.channel {
+                ContractParameterChannel::Left => [Some(ContractParameterChannel::Left), None],
+                ContractParameterChannel::Right => [None, Some(ContractParameterChannel::Right)],
+                ContractParameterChannel::Both => [
+                    Some(ContractParameterChannel::Left),
+                    Some(ContractParameterChannel::Right),
+                ],
+            };
+            for channel in channels.into_iter().flatten() {
+                let (index, value_slot) = values
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_, value)| {
+                        value.parameter_index == parameter_index && value.channel == channel
+                    })
+                    .expect("accepted 60-value slot");
+                value_slot.value = edit.value;
+                changed[index] = true;
+            }
+        }
+        let mut out = vec![
+            PreparedEffectTarget {
+                slot: 0,
+                channel: ContractParameterChannel::Both,
+                words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+            };
+            ParametricEqFactory.maximum_targets()
+        ];
+        let count = ParametricEqFactory
+            .prepare_targets(
+                EffectTargetRequest {
+                    sample_rate,
+                    values: &values,
+                    changed: &changed,
+                },
+                &mut out,
+            )
+            .expect("real EQ target preparation");
+        out.truncate(count);
+        out.into_iter()
+            .map(EffectControlRecord::PreparedTarget)
+            .collect()
+    }
+
+    fn prepared_eq_records(
+        initial_values: &[InitialParameterValue],
+        sample_rate: u32,
+        edits: &[EqEdit],
+    ) -> Vec<EffectControlRecord> {
+        prepared_eq_records_with_seed(initial_values, sample_rate, &[], edits)
+    }
+
+    fn queue_records(producer: &mut RawEqProducer, records: &[EffectControlRecord]) {
+        for record in records {
+            producer
+                .producer
+                .try_push(*record)
+                .unwrap_or_else(|_| panic!("queued target for {}", producer.track_id));
+        }
+    }
+
+    fn queue_all(producers: &mut [RawEqProducer], records: &[EffectControlRecord]) {
+        for producer in producers {
+            queue_records(producer, records);
+        }
+    }
+
+    fn assert_prepared_selector(
+        records: &[EffectControlRecord],
+        slot: u32,
+        channel: ContractParameterChannel,
+        label: &str,
+    ) {
+        assert_eq!(records.len(), 1, "{label} emits one physical target");
+        match records[0] {
+            EffectControlRecord::PreparedTarget(target) => {
+                assert_eq!(target.slot, slot, "{label} physical slot");
+                assert_eq!(target.channel, channel, "{label} selector");
+            }
+            EffectControlRecord::Parameter { .. }
+            | EffectControlRecord::Observe { .. }
+            | EffectControlRecord::Bypass(_) => panic!("{label} is not a prepared target"),
+        }
+    }
+
+    fn render_queued_eq(plan: &mut BoundQueuedEq, block: u64) -> Vec<f32> {
+        let mut pcm = vec![0.0_f32; 64];
+        plan.plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, 32, 32)
+                        .expect("queued-EQ output"),
+                },
+                RenderTime {
+                    absolute_sample: block * 32,
+                },
+            )
+            .expect("queued-EQ render");
+        pcm
+    }
+
+    #[test]
+    fn prepared_eq_target_queue_collapses_then_matches_always_dual_and_scalar() {
+        let model = queued_eq_model();
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: registry
+                .get_shared_ascii("miso.parametric-eq")
+                .expect("registered launch parametric EQ"),
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar launch registry");
+        let candidate = compile_queued_eq(&model, &registry, 8_071, host_dispatch());
+        let oracle = compile_queued_eq(&model, &registry, 8_072, host_dispatch());
+        let scalar = compile_queued_eq(&model, &scalar_registry, 8_073, Backend::Scalar);
+        let width = BankWidth::for_backend(candidate.artifact.report.rack_cohorts.dispatch);
+        let expected_banks = width.map_or(0, |width| 8 / width.lanes() as usize);
+        assert_eq!(
+            candidate.artifact.graph.prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(oracle.artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(scalar.artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(
+            candidate
+                .artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocation::Simd1)
+                .len(),
+            0,
+            "the eight EQ tracks fill the actual bank width"
+        );
+
+        let mut untouched =
+            bind_queued_eq(compile_queued_eq(&model, &registry, 8_076, host_dispatch()));
+        let dry_first = render_queued_eq(&mut untouched, 0);
+        assert!(
+            dry_first
+                .iter()
+                .all(|sample| sample.to_bits() == 1.125_f32.to_bits())
+        );
+        let mut candidate = bind_queued_eq(candidate);
+        let mut oracle = bind_queued_eq(oracle);
+        let mut scalar = bind_queued_eq(scalar);
+        candidate.plan.arm_mono_collapse(&|_| true);
+        oracle.plan.force_mono_collapse_off(true);
+        scalar.plan.force_mono_collapse_off(true);
+
+        let hpf = prepared_eq_records(
+            &candidate.initial_values,
+            48_000,
+            &[
+                EqEdit {
+                    parameter_id: 65,
+                    channel: ContractParameterChannel::Both,
+                    value: 1.0,
+                },
+                EqEdit {
+                    parameter_id: 66,
+                    channel: ContractParameterChannel::Both,
+                    value: 1_600.0,
+                },
+            ],
+        );
+        assert_eq!(hpf.len(), 1, "symmetric HPF edits coalesce to one target");
+        assert_eq!(
+            match hpf[0] {
+                EffectControlRecord::PreparedTarget(target) => target.channel,
+                EffectControlRecord::Parameter { .. }
+                | EffectControlRecord::Observe { .. }
+                | EffectControlRecord::Bypass(_) => panic!("expected prepared target"),
+            },
+            ContractParameterChannel::Both
+        );
+        queue_all(&mut candidate.producers, &hpf);
+        queue_all(&mut oracle.producers, &hpf);
+        queue_all(&mut scalar.producers, &hpf);
+
+        let candidate_first = render_queued_eq(&mut candidate, 0);
+        let oracle_first = render_queued_eq(&mut oracle, 0);
+        let scalar_first = render_queued_eq(&mut scalar, 0);
+        assert_pcm_bits_equal(
+            std::slice::from_ref(&candidate_first),
+            &[oracle_first],
+            "collapsed first block matches dual oracle",
+        );
+        assert_pcm_bits_equal(
+            std::slice::from_ref(&candidate_first),
+            &[scalar_first],
+            "banked and scalar first block agree",
+        );
+        assert!(
+            candidate_first
+                .iter()
+                .zip(&dry_first)
+                .any(|(sample, dry)| sample.to_bits() != dry.to_bits()),
+            "the queued HPF target changes the independently rendered dry response"
+        );
+        assert!(candidate.plan.bank_collapse_counters()[0] > 0);
+
+        let right_retarget = prepared_eq_records_with_seed(
+            &candidate.initial_values,
+            48_000,
+            &[
+                EqEdit {
+                    parameter_id: 65,
+                    channel: ContractParameterChannel::Both,
+                    value: 1.0,
+                },
+                EqEdit {
+                    parameter_id: 66,
+                    channel: ContractParameterChannel::Both,
+                    value: 1_600.0,
+                },
+            ],
+            &[EqEdit {
+                parameter_id: 66,
+                channel: ContractParameterChannel::Right,
+                value: 4_000.0,
+            }],
+        );
+        queue_records(&mut candidate.producers[0], &right_retarget);
+        queue_records(&mut oracle.producers[0], &right_retarget);
+        queue_records(&mut scalar.producers[0], &right_retarget);
+        for block in 1..5 {
+            let candidate_pcm = render_queued_eq(&mut candidate, block);
+            let oracle_pcm = render_queued_eq(&mut oracle, block);
+            let scalar_pcm = render_queued_eq(&mut scalar, block);
+            assert_pcm_bits_equal(
+                std::slice::from_ref(&candidate_pcm),
+                &[oracle_pcm],
+                &format!("right-only retarget block {block}"),
+            );
+            assert_pcm_bits_equal(
+                &[candidate_pcm],
+                &[scalar_pcm],
+                &format!("right-only scalar block {block}"),
+            );
+        }
+        assert!(
+            candidate.plan.bank_collapse_transitions()[0] > 0,
+            "the first right-only target disengages the collapsed bank"
+        );
+    }
+
+    #[test]
+    fn prepared_eq_target_queue_fifo_left_both_left_matches_final_dual_batch() {
+        let model = queued_eq_model();
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let candidate = compile_queued_eq(&model, &registry, 8_074, host_dispatch());
+        let oracle = compile_queued_eq(&model, &registry, 8_075, host_dispatch());
+        let width = BankWidth::for_backend(candidate.artifact.report.rack_cohorts.dispatch);
+        assert_eq!(
+            candidate.artifact.graph.prepared_bank_count(),
+            width.map_or(0, |width| 8 / width.lanes() as usize)
+        );
+        let mut candidate = bind_queued_eq(candidate);
+        let mut oracle = bind_queued_eq(oracle);
+        candidate.plan.arm_mono_collapse(&|_| true);
+        oracle.plan.force_mono_collapse_off(true);
+
+        let enabled = EqEdit {
+            parameter_id: 65,
+            channel: ContractParameterChannel::Both,
+            value: 1.0,
+        };
+        let warm_frequency = EqEdit {
+            parameter_id: 66,
+            channel: ContractParameterChannel::Both,
+            value: 1_600.0,
+        };
+        let warm = [enabled, warm_frequency];
+        let initial_hpf = prepared_eq_records(&candidate.initial_values, 48_000, &warm);
+        queue_all(&mut candidate.producers, &initial_hpf);
+        queue_all(&mut oracle.producers, &initial_hpf);
+        for block in 0..3 {
+            let candidate_pcm = render_queued_eq(&mut candidate, block);
+            let oracle_pcm = render_queued_eq(&mut oracle, block);
+            assert_pcm_bits_equal(
+                &[candidate_pcm],
+                &[oracle_pcm],
+                &format!("warmed block {block}"),
+            );
+        }
+        let x = EqEdit {
+            parameter_id: 66,
+            channel: ContractParameterChannel::Left,
+            value: 500.0,
+        };
+        let y = EqEdit {
+            parameter_id: 66,
+            channel: ContractParameterChannel::Both,
+            value: 1_000.0,
+        };
+        let z = EqEdit {
+            parameter_id: 66,
+            channel: ContractParameterChannel::Left,
+            value: 2_000.0,
+        };
+        // Each separately admitted batch is prepared from its complete prior accepted target.
+        let left_x = prepared_eq_records_with_seed(&candidate.initial_values, 48_000, &warm, &[x]);
+        let both_y = prepared_eq_records_with_seed(
+            &candidate.initial_values,
+            48_000,
+            &[enabled, warm_frequency, x],
+            &[y],
+        );
+        let left_z =
+            prepared_eq_records_with_seed(&candidate.initial_values, 48_000, &[enabled, y], &[z]);
+        assert_prepared_selector(&left_x, 0, ContractParameterChannel::Left, "Left X");
+        assert_prepared_selector(&both_y, 0, ContractParameterChannel::Both, "Both Y");
+        assert_prepared_selector(&left_z, 0, ContractParameterChannel::Left, "Left Z");
+        queue_all(&mut candidate.producers, &left_x);
+        queue_all(&mut candidate.producers, &both_y);
+        queue_all(&mut candidate.producers, &left_z);
+
+        // The oracle prepares the final configuration in one independent request. It neither
+        // replays the three candidate batches nor reuses any candidate target payload.
+        let final_targets = prepared_eq_records_with_seed(
+            &oracle.initial_values,
+            48_000,
+            &warm,
+            &[
+                EqEdit {
+                    parameter_id: 66,
+                    channel: ContractParameterChannel::Left,
+                    value: 2_000.0,
+                },
+                EqEdit {
+                    parameter_id: 66,
+                    channel: ContractParameterChannel::Right,
+                    value: 1_000.0,
+                },
+            ],
+        );
+        assert_eq!(final_targets.len(), 2);
+        assert_prepared_selector(
+            &final_targets[..1],
+            0,
+            ContractParameterChannel::Left,
+            "final Left Z",
+        );
+        assert_prepared_selector(
+            &final_targets[1..],
+            0,
+            ContractParameterChannel::Right,
+            "final Right Y",
+        );
+        queue_all(&mut oracle.producers, &final_targets);
+
+        for block in 3..7 {
+            let candidate_pcm = render_queued_eq(&mut candidate, block);
+            let oracle_pcm = render_queued_eq(&mut oracle, block);
+            assert_pcm_bits_equal(
+                &[candidate_pcm],
+                &[oracle_pcm],
+                &format!("FIFO target block {block}"),
+            );
+        }
+        assert!(
+            candidate.plan.bank_collapse_transitions()[0] > 0,
+            "the final left/right target state survives collapse restoration"
         );
     }
 

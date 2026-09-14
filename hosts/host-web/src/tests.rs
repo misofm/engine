@@ -3113,16 +3113,18 @@ fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
 }
 
 /// #140 A / E1: an effect-parameter command takes effect on the first sample of the block its
-/// acknowledgement named, and on no earlier sample.
+/// acknowledgement named, with the current coefficient used for that sample before the ramp
+/// advances. The first changed sample is therefore one sample later.
 ///
 /// The proof is a two-host comparison rather than a closed-form value: the EQ's own 64-sample
 /// coefficient ramp is its DSP, not this issue's, so what is gated here is the *boundary*. The
 /// control host receives nothing; every block before `applied_at_sample` must be bit-identical
-/// between the two, and the block at `applied_at_sample` must differ on its very first sample.
+/// between the two. At `applied_at_sample`, both channels remain bit-identical for sample 0 and
+/// differ at sample 1 as the current-then-advance ramp contract takes effect.
 ///
 /// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm
 /// below `effect.processor.process(block)` -> the first differing block is one later and the
-/// `differs at its first sample` assertion fails.
+/// sample-1 assertions fail.
 #[test]
 fn an_effect_parameter_command_names_the_exact_application_sample() {
     const QUANTUM: u32 = 128;
@@ -3164,15 +3166,25 @@ fn an_effect_parameter_command_names_the_exact_application_sample() {
     feed_and_render(&mut commanded, 1, 2, 0.25);
     let clean = control.output_pcm().expect("control").to_vec();
     let moved = commanded.output_pcm().expect("commanded").to_vec();
-    assert_ne!(
+    assert_eq!(
         clean[0].to_bits(),
         moved[0].to_bits(),
-        "the block at applied_at_sample differs at its first sample",
+        "the current coefficient remains in force for sample 0 on the left",
     );
-    assert_ne!(
+    assert_eq!(
         clean[QUANTUM as usize].to_bits(),
         moved[QUANTUM as usize].to_bits(),
-        "a `channel = both` command lowers to one span per lane, so the right lane moved too",
+        "the current coefficient remains in force for sample 0 on the right",
+    );
+    assert_ne!(
+        clean[1].to_bits(),
+        moved[1].to_bits(),
+        "the left coefficient changes at sample 1 after the ramp advances",
+    );
+    assert_ne!(
+        clean[QUANTUM as usize + 1].to_bits(),
+        moved[QUANTUM as usize + 1].to_bits(),
+        "a `channel = both` command lowers to one span per lane, so the right lane changes at sample 1",
     );
 }
 

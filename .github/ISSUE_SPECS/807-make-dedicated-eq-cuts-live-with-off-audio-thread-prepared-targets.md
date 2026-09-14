@@ -410,3 +410,37 @@ and `cargo test --locked -p host-web late_mixed_effect_refusal_preserves_observa
 Wasm checks for effect-contract, effect-compiler and host-web; formatting and diff checks.
 No timed benchmark. Real EQ scalar/bank application and exact resource-budget evidence
 remain assignment-4 work before assignments 5–10. #807 still has no final verdict.
+
+
+### Assignment 4 follow-through — real EQ queued PCM proof
+
+Luna XHIGH implemented actual EQ queue-to-graph/rack fixtures; root strengthened the
+accepted semantic seeds, untouched dry reference, and independent final-state oracle.
+One dev-only graph-compiler dependency exposes the existing concrete Rust preparer;
+no production factory opt-in or public raw target path was added. Real bank and forced
+scalar arms receive generated targets through fixture-owned bounded queues. A Both
+HPF target permits actual collapse; a Right frequency retarget during the 64-update
+ramp disengages it and renders bit-identically to always-dual bank and scalar arms.
+The untouched render verifies the known dry signal, and commanded PCM differs from it.
+
+The FIFO fixture uses one enabled HPF section with actual Left X, Both Y, Left Z
+selectors. Its oracle prepares final Left Z/Right Y in one separate request without
+reusing candidate payloads. Root temporarily reordered the candidate to Left X,
+Left Z, Both Y: the test failed at FIFO block 3 as expected. Root restored source and
+the focused tests passed. The direct lane FIFO test also now uses the same physical
+slot for all three selectors; the earlier different-slot fixture was insufficient.
+
+Full host regression exposed an old first-sample-change assertion inherited from before
+assignment 3. Its replacement enforces the frozen current-then-advance rule: both lanes
+match baseline at acknowledged sample A and differ at A+1 for the representative gain
+step; prior blocks and exact ACK sample remain checked. No DSP timing was changed here.
+
+Gates PASS: `cargo test --locked -p graph-compiler prepared_eq_target` (2 tests,
+including root's final oracle strengthening); existing launch EQ fixture; complete
+`cargo test --locked -p graph-compiler --lib` (72 tests before root's focused oracle
+strengthening); contract live_control; corrected host timing test; final complete
+`cargo test --locked -p host-web` (93 unit, 2 integration, 2 existing ignored unchanged);
+Wasm graph-compiler check; strict all-target Clippy for graph-compiler and host-web;
+formatting and diff checks. Clippy's redundant test clones were removed without a
+lint exemption. No benchmark. Exact queue/lane/decoded allocation and budget fixtures
+remain before assignment-4 acceptance. Assignments 5–10 and final review remain open.

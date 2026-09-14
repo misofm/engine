@@ -60,8 +60,8 @@ fn prepared_targets_retain_fifo_order_for_overlapping_selectors() {
     let mut lane = EffectControlLane::new_with_target_staging(consumer, false);
     for record in [
         prepared_target(3, ParameterChannel::Left, 0x11),
-        prepared_target(4, ParameterChannel::Both, 0x22),
-        prepared_target(5, ParameterChannel::Left, 0x33),
+        prepared_target(3, ParameterChannel::Both, 0x22),
+        prepared_target(3, ParameterChannel::Left, 0x33),
     ] {
         producer.try_push(record).expect("room");
     }
@@ -80,8 +80,8 @@ fn prepared_targets_retain_fifo_order_for_overlapping_selectors() {
             .collect::<Vec<_>>(),
         vec![
             (3, ParameterChannel::Left, 0x11),
-            (4, ParameterChannel::Both, 0x22),
-            (5, ParameterChannel::Left, 0x33),
+            (3, ParameterChannel::Both, 0x22),
+            (3, ParameterChannel::Left, 0x33),
         ],
         "prepared selectors are applied as a FIFO: left X, both Y, left Z"
     );
