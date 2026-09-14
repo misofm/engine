@@ -80,3 +80,16 @@ Accepted Wasm remains
 `c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
 The local candidate retains development version 0.2.5 and MUST NOT be published;
 new immutable metadata, required main CI and release verification remain pending.
+
+## Required browser fixture correction
+
+PR #802 CI run 34803508846 found a snapshot race in the existing continuous
+spectrum fixture. Exact local reproduction shows all numeric/PCM/meter/span
+predicates pass, but callbackCount=2 while the copied statuses list contains
+only gap: it is copied before the new bounded recovery publishes ready.
+Evidence `/tmp/miso-801-verifier/ci-chromium-raw.json`. Scope is amended only to
+`hosts/host-web/qualification/sdk-response-entry.ts`: retain the live callback
+notification list, already populated by automatic and manual pump publications,
+and remove redundant copied/manual-deduplicated collection. Keep all existing
+run.mjs predicates and tolerances unchanged. No SDK, DSP or package bytes change;
+source attempt-2 numerical acceptance stands, required CI remains pending.
