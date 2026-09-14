@@ -874,3 +874,22 @@ Headless qualification found three stale fixture expectations (artifact count an
 old EQ row/queue costs); those test updates are in progress. Packed-browser runtime
 qualification and final adversarial verdict are still pending. No benchmark,
 release, merge or issue completion is claimed.
+
+
+### Assignment10 packed browser/headless qualification, 2026-09-14
+
+The existing qualification runner passed Chromium151.0.7922.34, Firefox153.0 and
+WebKit26.5 against the unpacked npm archive, including its compiled SDK modules and
+workers. The live EQ episode edits all six cut controls plus an existing band gain,
+requires ACK/fresh target capture, and compares finite post-A+64 browser/headless PCM
+within1e-6. Existing fault mutations pass. The checked deployment matrix identifies
+source candidate695b38bb25f7d6b548fd04fa20474d87cc3ebd87 and the new Wasm pin.
+
+Final headless eval suite:254 passed,0 failed. The writer fixture retains ordinary
+compressor two-slot saturation and exercises prepared EQ coalescing/backpressure
+with its22 semantic rows and a deliberately small two-target queue. Package tarball,
+static/object, direct native/Wasm PCM, strict Rust lint and the focused production
+transaction/realtime gates are green. No benchmark or extra framework was added.
+
+Implementation attempt1 is ready for fresh Astra MEDIUM adversarial review. No final
+verdict, merge, release or closure is claimed yet; #807 and #804 remain open.
