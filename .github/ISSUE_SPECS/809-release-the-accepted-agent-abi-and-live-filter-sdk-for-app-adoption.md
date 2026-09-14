@@ -93,3 +93,18 @@ introduced. PASS: existing npm publish-mode/trust tests, generated SDK check,
 SDK types and publishable-package check using the accepted #808 artifact; diff
 check clean. Fresh Astra MEDIUM source/package review and main integration remain.
 No package is published yet.
+
+### Attempt1 source/package verdict
+
+Fresh Astra MEDIUM **PASS** for ea8efbc0..275484b6: existing release mode,
+trust and trust-list parser checks pass; the packed fresh consumer passes public
+imports, declarations, embedded runtime and integrity checks. All seven artifact
+manifest hashes match the accepted runtime. Candidate source is
+`275484b65ca37a7a7ec50ef2015e38bd437062ea`; local preparation archive
+`/tmp/809-candidate-pack/misofm-engine-0.3.0.tgz` SHA256 is
+`0da5f34d6d5e021f543acf21053b6176931548f3bbc584301c42c2f278f5b804`.
+This verdict establishes source/package readiness only. Final main integration,
+required CI and immutable qualification/publication/registry verification remain;
+no registry release is claimed. App #222 may use these exact accepted candidate
+bytes for its already authorized temporary preparation, with tracked registry
+pins unchanged until the actual release.
