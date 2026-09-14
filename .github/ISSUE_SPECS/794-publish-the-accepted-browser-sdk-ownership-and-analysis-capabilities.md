@@ -149,3 +149,14 @@ identities and record new source/archive/registry/provenance identities separate
 Then adapter#95 cuts its exact-dependency patch before app#210 final adoption and
 deployment. This is the existing authorized release scope's defect correction;
 publication is not yet complete for the corrected bytes.
+
+Final correction metadata checkpoint `e45323a6` prepares unused SDK 0.2.6.
+Fresh Astra MEDIUM independently verified exactly four metadata/fixture paths,
+publish-mode security gates, and a packed 0.2.6 archive. All 96 non-package.json
+files are byte-identical to the browser-accepted `a0949481` candidate; the sole
+package.json change is version 0.2.5 to 0.2.6. Candidate SHA256:
+`8219178d591c76d820d7ad2e2f7b894fe7f39185f89667f59c675fad603b81eb`.
+No source/codegen/Wasm changes. Existing exact-main/SHA, qualified archive,
+immutable-version refusal, OIDC-only publish, SLSA PURL/SHA512/workflow/gitCommit
+checks remain intact. Evidence under `/tmp/miso-801-verifier/release026-*`.
+Required main CI and actual qualify/publish/verify are still pending.
