@@ -74,7 +74,7 @@ For the exclusive host-web owner, admission is:
 
 This is the browser/headless owner contract, not a claim of atomic cross-queue publication while an unrelated native render thread runs concurrently. Native users of the producer/preparer seam must admit while they exclusively own the plan between blocks. A concurrent native command endpoint requires its own admission envelope/scheduler and is outside this issue.
 
-All runtime queues stay bounded at preparation. Add `Consumer::available_at_entry()` (one acquire cursor snapshot, modular occupancy <=capacity, no counter changes) or an equivalent frozen-drain API in `engine/realtime/spsc.rs`. `EffectControlLane::stage` freezes that count once and pops at most that many records. Never use the present producer-chasing `while try_pop` for the extended path. Later publications wait for the next stage entry. The caller supplies separate preallocated semantic-span and prepared-target staging; `Staged` reports both counts. Their combined count cannot exceed the queue's admitted entry count. An opted-in EQ queue may not stage a raw semantic Parameter record as a fallback.
+All runtime queues stay bounded at preparation. Add `Consumer::available_at_entry()` (one acquire cursor snapshot, modular occupancy <=capacity, no counter changes) or an equivalent frozen-drain API in `engine/realtime/spsc.rs`. `EffectControlLane::stage` freezes that count once and pops at most that many records. Never use the present producer-chasing `while try_pop` for the extended path. Later publications wait for the next stage entry. The caller supplies preallocated semantic-span staging; each opted-in `EffectControlLane` owns optional FIFO prepared-target staging sized to its actual queue capacity, and `Staged` reports both counts. The retained prefix remains available until the next stage call; banks need no second packed-target array or target-offset table. Their combined count cannot exceed the queue's admitted entry count. An opted-in EQ queue may not stage a raw semantic Parameter record as a fallback.
 
 ## Browser and headless coefficient location
 
@@ -174,7 +174,7 @@ Primary files: `crates/effect-contract/src/live.rs`, `crates/effect-contract/src
 
 Now append `PreparedTarget` to `EffectControlRecord`; implement concrete preallocated target staging, both staged counts, bounded entry-count drain and symmetry folding. Wire actual scalar application before process and actual bank application only after desymmetrization inside `process_inner`. Preserve the existing EQ desymmetrization copy. A prepared record cannot be consumed by an ignore/no-op arm. A producer/admission route that cannot deliver prepared targets must refuse them **before publication**, never after issuing an admission report. No production prepared-capable EQ owner is published before cutover.
 
-Required exhaustive-match glue: all `EffectControlRecord` and `Staged` consumers in the four files, existing LiveConsoleRecord symmetry construction, constructor/preparation calls supplying separate preallocated span/target slices, and the existing producer preflight where it checks supported record delivery. Non-EQ effects keep their normal semantic path and default unsupported hooks. Update actual queue-size/resource accounting and directly affected budget tests at this checkpoint, including the existing calculation in `crates/host-core/src/prepare.rs` if it embeds record size: the larger record affects **every queue** using the enum, with `(depth+1)` slots. Do not postpone an otherwise false memory budget until assignment 5.
+Required exhaustive-match glue: all `EffectControlRecord` and `Staged` consumers in the four files, existing LiveConsoleRecord symmetry construction, constructor/preparation calls establishing lane-owned target storage, and a checked producer wrapper that preflights supported record delivery before publication. Non-EQ effects keep their normal semantic path and default unsupported hooks. Update actual queue-size/resource accounting and directly affected budget tests at this checkpoint, including the existing calculation in `crates/host-core/src/prepare.rs` if it embeds record size: the larger record affects **every queue** using the enum, with `(depth+1)` slots. Do not postpone an otherwise false memory budget until assignment 5.
 
 Gate: contract live-control/SPSC tests, graph/rack focused tests, native/Wasm builds of affected runtime crates, `EffectControlRecord <= 64` assertion, no producer-chasing drain, bounded staging without drop, and collapsed-to-dual target survival against an always-dual oracle. Direct fixture admission can exercise real completed EQ hooks under exclusive ownership; it is not evidence for the still-unconnected public host route. Deliberately incomplete: owner shadow, public companion admission and final integration gates.
 
@@ -303,3 +303,65 @@ Queue delivery, owner/admission, browser/headless wiring, capability activation,
 Implementation is paused at the user's request for another Codex account to resume. All source checkpoints are pushed on `codex/807-live-eq`, through `e81df55b61f563fa26952608e7383d3c060cb956`. #147 and #805 are merged/closed; #807 assignments 1–3 are complete, assignments 4–10 remain. #808, #809, adapter #111 and app #222 have not entered implementation/release. No public live-cut activation, package publication or app deployment is claimed.
 
 The self-contained [resume handoff](https://github.com/misofm/engine/blob/codex/807-live-eq/docs/handoffs/804-account-switch-2026-09-14/README.md) records branches, exact commits, accepted decisions, test evidence, preserved plans, downstream requirements and the next bounded task. All agents are stopped. Before assignment 4, freeze its staging layout and amend the brief using the linked handoff's Astra XHIGH queue/accounting recommendation; no assignment-4 source has been written. #807 remains attempt 1 and still requires its final fresh Astra MEDIUM review. Keep this issue open.
+
+
+### Resumed assignment 4 amendment — 2026-09-14
+
+Root accepts the lane-owned staging alternative after Astra XHIGH read-only source review.
+This supersedes the historical caller-supplied target-slice requirement in the copied
+assignment-4 brief; the semantic-span API remains caller-supplied. #807 remains attempt 1.
+
+- Each opted-in EffectControlLane owns optional FIFO target backing sized exactly to the
+  consumer's actual capacity. Allocate it off render in a separate constructor outside the
+  realtime-marked implementation. Unsupported owners retain no target backing. Reset only
+  the staged prefix count at stage entry; snapshot available_at_entry once and pop no more
+  than that snapshot. Semantic spans keep their existing canonical coalescing. Prepared
+  targets are never sorted or deduplicated across batches; Left X, Both Y, Left Z applies
+  left Z/right Y. Combined staged counts cannot exceed the frozen admitted entry count.
+  Constructor capacity makes prepared-target overflow unreachable for admitted records.
+- Scalar execution applies the retained prefix before processing. Bank execution stages and
+  folds witnesses in begin_block, restores channels when collapse ends, then applies each
+  lane's FIFO prefix inside process_inner. No second packed-target allocation or target
+  offsets are introduced. Unsupported application is an explicit invariant failure, never
+  an ignored record or successful no-op.
+- Replace the public raw EffectControlProducer.producer endpoint with a checked wrapper
+  retaining capacity/try_push usage and a private raw producer. Unsupported delivery is
+  distinct from Full, returns the original record, and leaves queue/full counters untouched.
+  Provide no raw accessor, Deref escape, or caller-controlled capability setter. Production
+  PreparedTarget publication remains refused at this checkpoint, with the factory capability
+  still None. Explicit low-level exclusively owned component fixtures may exercise the real
+  EQ apply hooks. Later owner transactions enable checked target publication; opted-in
+  owners must also refuse unlowered Parameter records. Host-web preflights every original
+  command before any publication or observation mutation, preserving original refusal indexes
+  and atomic mixed-batch refusal. A post-preflight push failure is an invariant error.
+- Charge every actual effect queue, including unsupported/non-EQ queues, using
+  bounded_spsc_retained_payload::<EffectControlRecord>(actual_capacity), where actual capacity
+  is min(requested_depth, automation_capacity). Include sentinel, full enum layout, shared
+  header and Arc counts. A checked graph estimate helper runs after semantic_estimate is
+  cloned and before capped_estimate/cap validation while entries still own their controls.
+  Charge queue payload and actual lane/target storage once to graph_metadata_bytes,
+  incremental_plan_bytes and session_plus_plan_bytes; compare each actual backing/header
+  allocation for largest_allocation_bytes. Account enlarged lane owner layouts using actual
+  scalar boxes versus bank Box<[Option<EffectControlLane>]> allocations; do not pretend
+  banked lanes retain separate scalar boxes. Keep target-neutral semantic graph identity and
+  HostPrepareReport.control_retained_bytes (source-control table/ID arena) unchanged.
+- Charge the entire host-web Box<[(u32, AdmittedCommand)]> backing once, using its actual
+  2*MAXIMUM_COMMAND_RECORDS + 2*track_count length and type layout, to bridge_metadata_bytes
+  and bridge_retained_bytes before final budget validation. Include it in both largest
+  bridge/named allocation maxima. Preserve the separate public 48-byte wire-staging charge.
+  No new ABI report row or general accounting redesign.
+
+Bounded implementation files: effect-contract live/symmetry and exports, graph runtime,
+rack runtime; necessary glue in effect-compiler prepare/exports, graph-compiler
+estimate/compile, host-web lib and directly affected tests. Console-free EffectBankStage
+and unrelated DSP implementations stay outside this assignment.
+
+Required focused gates: <=64-byte record; frozen non-chasing drain; actual scalar/bank EQ
+application; FIFO overlapping selectors; first asymmetric bank targets survive channel
+restoration against an always-dual oracle; zero dropped admitted targets; native/Wasm
+builds and realtime policy. Resource/refusal gates cover console-off zero charge, non-EQ
+and pre-cutover EQ queues, capped depth/sentinel, absent unsupported target storage,
+scalar/bank charges exactly once, exact budget acceptance and one-byte-below refusal,
+independent largest allocation, unsupported publication with unchanged counters/queues/
+observation state, mixed late refusal atomicity, and working ordinary semantic commands.
+Assignments 5–10, public live activation and final fresh Astra MEDIUM review remain pending.

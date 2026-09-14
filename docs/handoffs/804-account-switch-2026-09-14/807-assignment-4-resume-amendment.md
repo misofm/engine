@@ -1,6 +1,6 @@
 # Assignment 4 resume amendment — Astra XHIGH findings
 
-Status: final read-only recommendation received at account-switch pause. No source edits. Root must freeze the staging choice and amend the numbered issue before implementing; do not treat the alternative below as already approved.
+Status: resumed 2026-09-14. Root accepted lane-owned optional FIFO target staging after a fresh Astra XHIGH source review and amended numbered issue #807 before implementation. The numbered spec’s resumed assignment-4 amendment is authoritative; the findings below preserve the handoff context.
 
 ## Queue and graph accounting
 
