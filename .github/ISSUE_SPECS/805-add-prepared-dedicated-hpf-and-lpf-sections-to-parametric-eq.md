@@ -300,3 +300,102 @@ host-web FFI and both SDK live-response parsers. No failures are waived.
 Astra XHIGH is defining the minimum bounded6section transport correction and
 malformed-payload defenses before implementation. This is the existing response
 compatibility requirement; no new live-cut capability is claimed.
+
+## Approved response compatibility amendment
+
+Root accepts the following Astra XHIGH correction as the minimum existing six-section response product contract. The named dependency paths are explicitly authorized; this does not add a generic response framework or depend on #774. Preserve prior failed integration evidence and the same final adversarial verdict.
+
+# #805 bounded response-consumer compatibility correction
+
+Decision: approve one Luna XHIGH implementation pass, then Astra MEDIUM review, under
+#805's already-required six-section response outcome. No #774 framework work. This
+read-only Astra planning pass changed no repository file and ran no test workloads.
+Root must checkpoint the catalog tranche and amend #805 before implementation.
+
+## Contract and authority
+
+- Preserve EQ response order `[1, 2, 3, 4, 5, 6]`: four historical bands, HPF, LPF.
+- Add `pub const RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS: usize = 6` in
+  `crates/effect-contract/src/lib.rs`, beside the existing response-contract exports.
+  This location is already a dependency of graph, host-core, and host-web. Do not
+  introduce a graph-to-host dependency or change the engine foundation's contract.
+- `hosts/host-web/src/lib.rs` exports `LIVE_RESPONSE_MAXIMUM_SECTIONS` as an alias
+  of that authority beside `LIVE_RESPONSE_MAXIMUM_OWNERS`; document per owner/channel.
+- Publish `maximumLiveResponseSections` through the existing ABI generator, then
+  let both SDK parsers consume `LiveContract.maximumSections` from that generated value.
+- Keep `WebLiveResponseSection` exactly 44 bytes and its seven payload words unchanged.
+  Count seven is invalid; payload word-count seven remains valid and is unrelated.
+
+## Exact implementation targets: ten narrow source/test/gate paths
+
+1. `crates/effect-contract/src/lib.rs`: the single public maximum above.
+2. `crates/graph/src/runtime.rs`: `emit_response_snapshot_owner` fixed arrays at
+   694–695; scalar staging at 758 and bank staging at 855; both `section_capacity`
+   expressions currently choose 2 for input filters and 4 otherwise. Use the shared
+   maximum for effect arrays/capacity; keep the input-filter request length two.
+   Keep all capture storage on the stack and preserve zero-allocation copying.
+3. `crates/host-core/src/response.rs`: `COLLECTOR_SECTION_CAPACITY` at 234 aliases
+   the shared maximum. Preserve caller-selected smaller limits and existing bounds.
+   In existing tests, collector call at 1044 must request the shared maximum;
+   preview arrays at 877–878 must size as points × actual descriptor.sections.len(),
+   not the old 16. Add six-section assertions to the existing real mixed-track proof.
+4. `hosts/host-web/src/lib.rs`: public alias only; keep fixed 1 MiB capture capacity.
+5. `hosts/host-web/src/ffi.rs`: import/use the maximum in producer `copy_owner`
+   at 1419–1420, `parse_live_sections` at 1583, and `parse_live_snapshot` owner
+   guards at 1678–1679. Add focused tests within existing live_response_ffi_tests.
+6. `tools/parameter-metadata/src/abi_layout.rs`: import the host alias and emit
+   `maximumLiveResponseSections` beside the existing live-response maximum constants.
+7. `scripts/check-abi-layout-v1.py`: strict constants-key whitelist at 455/463
+   and numeric expectation table at 514 require the new key and value six.
+8. `sdk/src/core/live-response.ts`: add maximumSections to LiveContract and its
+   generated initialization; replace caps in BOTH parseObservedSections (489)
+   and TrackResponseModule.#parseSections (848). Preserve all range/padding checks.
+9. `sdk/test/response-evals.mjs`: stopped real-Wasm preview expectation at 169
+   changes to six; assert historical IDs followed by cuts and default-disabled cuts.
+10. `sdk/test/live-response-evals.mjs`: live member mask at 228 becomes six entries
+    (default cuts false); add compact six-valid/seven-invalid/truncated cases here
+    covering both SDK parser entry paths, using generated record offsets/strides.
+
+These ten paths are the minimum honest scope discovered, rather than five incomplete
+paths: the extra graph and native collector limits are real producer failures, and
+schema validation is strict. No new test framework, source module, or dependency.
+
+## Capture and buffer sizing
+
+- Live staging reserves all 256 owner records, then appends actual identity lengths
+  and actual left/right section slices with checked arithmetic. Required byte count:
+  header + 256 × owner_record_bytes + sum(identity bytes + (L_count+R_count)×44).
+- At maximum identities and six sections/channel the maximum raw payload is
+  `104 + 256 × (64 + 3×127 + 2×6×44) = 249192` bytes, within existing 1 MiB.
+  Add a focused assertion computed from Rust sizes/shared limits, plus exact byte
+  accounting for a real captured six-section owner. Do not enlarge staging or weaken
+  the request-side maximumResultBytes checks. Existing heap admission charges the
+  actual fixed capture buffer, so its retained-byte budget remains correct.
+- Preview production already derives section_count from prepared.descriptor() and
+  response_buffer_budget multiplies that count by points; no production edit there.
+  Native preview test buffers must likewise derive the actual descriptor count.
+
+## Focused acceptance and normal generated outputs
+
+- Extend existing native FFI real-capture test to assert EQ six left/right sections
+  and unchanged input-filter two; keep its zero-allocation/free measurement and typed
+  undersized-buffer refusal. Test native producer/parser acceptance six, rejection
+  seven, and a one-byte-truncated six-record payload (coherent header when applicable).
+- Both SDK parsers must accept valid six-record captures and reject count seven and
+  truncated six-record captures with typed invalid-payload errors. Retain padding,
+  enabled/word-count checks. Do not mistake a stale resultBytes header refusal for
+  proving section-range validation. Keep one real-Wasm six-section round trip.
+- Normal generation updates `sdk/assets/miso-engine-v1-abi-layout.json`,
+  `sdk/src/generated/abi.ts`, and `scripts/fixtures/abi-layout-v1-self-test.json`.
+  The latter must be regenerated with parameter-metadata --print-abi-layout; existing
+  parameter-metadata test requires it equal current generator output. SDK codegen is
+  generic and needs NO edits; the guessed check-web-abi-layout-v1.py does not exist.
+- Run focused host-core response tests, host-web live_response_ffi_tests, and graph
+  response-snapshot tests; parameter-metadata tests; ABI validator + existing self-test;
+  SDK generated/types checks; fmt/diff checks. No new benchmark or broad fixture sweep.
+- Rust/FFI changes require normal Wasm rebuild and artifact repin, then normal builder
+  into a fresh empty directory. Use existing build-web-audioworklet.sh repin flow;
+  root owns final pin/checkpoint. Never reuse /tmp/804-805-artifacts as fresh evidence.
+- Run required check-sdk-headless.sh once against the rebuilt artifact. The prior
+  250-pass/3-fail run is retained evidence; all three response-suite failures must
+  clear, including response-subscription-evals without changing that suite's contract.
