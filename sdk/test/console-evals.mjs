@@ -50,6 +50,26 @@ function feed(engine, block) {
   }
 }
 
+function encodeBrowserCommands(commands) {
+  const records = new Uint8Array(commands.length * ABI_LAYOUT.commandRecord.bytes);
+  const view = new DataView(records.buffer);
+  const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+  for (const [index, command] of commands.entries()) {
+    const base = index * ABI_LAYOUT.commandRecord.bytes;
+    view.setUint8(base + at("kind"), command.kind);
+    view.setUint8(base + at("rack"), command.rack);
+    view.setUint8(base + at("channel"), command.channel);
+    view.setUint32(base + at("trackIndex"), command.trackIndex, true);
+    view.setUint32(base + at("effectIndex"), command.effectIndex, true);
+    view.setUint32(base + at("parameterId"), command.parameterId, true);
+    view.setUint32(base + at("smoothingSamples"), command.smoothingSamples, true);
+    command.values.forEach((value, valueIndex) => {
+      view.setFloat32(base + at("values") + valueIndex * 4, value, true);
+    });
+  }
+  return records;
+}
+
 describe("issue 322 -- shared semantic console", () => {
   test("all eleven command kinds are built by name and admitted by live Wasm", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
@@ -129,7 +149,94 @@ describe("issue 322 -- shared semantic console", () => {
         .parameter("threshold", 100),
       /at most/,
     );
+    const compressor = console.edit.track("t").effect("simd1", 0, "miso.compressor");
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: -18, unit: "db" }),
+      /unknown field 'unit'/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: true }),
+      /must be numeric/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: Number.NaN }),
+      /finite/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: 100 }),
+      /at most/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "lookahead", value: 1 }),
+      /not live-updatable/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: -18, channel: "diagonal" }),
+      /channel must be left, right, or both/,
+    );
+    assert.throws(
+      () => compressor.parameter({ key: "threshold", value: -18, smoothingSamples: 1.5 }),
+      /smoothingSamples must be a u32/,
+    );
+    const delay = console.edit.track("t").effect("dynamic", 0, "miso.delay");
+    assert.throws(
+      () => delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" }),
+      /shared and must address both lanes/,
+    );
     assert.equal(calls, 0);
+  });
+
+  test("object and positional effect edits share records and change rendered PCM", async () => {
+    async function renderAfter(edit) {
+      const engine = await createOfflineEngine(compressorDocument(), {
+        asset,
+        console: { commandQueueRecords: 64 },
+      });
+      try {
+        const shape = engine.shape();
+        feed(engine, 0);
+        engine.render();
+        const console = engine.console();
+        const parameter = console.edit.track("t").effect("simd1", 0, "miso.compressor");
+        const report = edit === undefined ? undefined : await console.submit(edit(parameter));
+        const output = [];
+        for (let block = 1; block < 4; block += 1) {
+          feed(engine, block);
+          output.push(engine.render());
+        }
+        return { report, output, quantumFrames: shape.quantumFrames };
+      } finally {
+        engine.dispose();
+      }
+    }
+
+    const baseline = await renderAfter();
+    const object = await renderAfter((parameter) => parameter.parameter({
+      key: "threshold",
+      value: -80,
+      channel: "both",
+      smoothingSamples: 0,
+    }));
+    const positional = await renderAfter((parameter) =>
+      parameter.parameter("threshold", -80, { channel: "both", smoothingSamples: 0 }));
+
+    assert.equal(object.report?.ok, true);
+    assert.equal(object.report?.admitted, 1);
+    assert.equal(object.report?.appliedAtSample, BigInt(object.quantumFrames));
+    for (const [index, block] of object.output.entries()) {
+      assert.deepEqual([...block.left], [...positional.output[index].left], `left block ${index}`);
+      assert.deepEqual([...block.right], [...positional.output[index].right], `right block ${index}`);
+    }
+    assert.notDeepEqual(
+      [...object.output[0].left],
+      [...baseline.output[0].left],
+      "the live object edit must affect the next rendered block",
+    );
+    assert.notDeepEqual(
+      [...object.output.at(-1).left],
+      [...baseline.output.at(-1).left],
+      "the live object edit must remain audible after the compressor settles",
+    );
   });
 
   test("browser transport maps the same semantic record and acknowledgement", async () => {
@@ -178,6 +285,72 @@ describe("issue 322 -- shared semantic console", () => {
         values: [-6, 0, 0, 0],
       }],
     });
+  });
+
+  test("browser transport carries the object edit record and actual report", async () => {
+    const engine = await createOfflineEngine(compressorDocument(), {
+      asset,
+      console: { commandQueueRecords: 64 },
+    });
+    let request;
+    const host = {
+      async sessionMap() {
+        return {
+          tag: "miso.sessionmap.v1",
+          requestId: 1,
+          result: 0,
+          ...engine.sessionMap(),
+        };
+      },
+      async command(value) {
+        request = value;
+        const records = encodeBrowserCommands(value.commands);
+        const report = engine.submitCommands(records, value.commands.length);
+        return {
+          tag: "miso.ack.v1",
+          requestId: 2,
+          result: report.result,
+          reason: report.reason,
+          rejectedIndex: report.rejectedIndex,
+          admitted: report.admitted,
+          appliedAtSample: report.appliedAtSample,
+          records,
+        };
+      },
+    };
+    try {
+      const console = await createBrowserConsole(host);
+      const parameter = console.edit.track("t").effect("simd1", 0, "miso.compressor");
+      const objectEdit = parameter.parameter({
+        key: "threshold",
+        value: -18,
+        channel: "both",
+        smoothingSamples: 64,
+      });
+      const positionalEdit = parameter.parameter("threshold", -18, {
+        channel: "both",
+        smoothingSamples: 64,
+      });
+      assert.deepEqual(objectEdit, positionalEdit, "the overloads normalize to one LaneEdit");
+      const report = await console.submit(objectEdit);
+      assert.equal(report.ok, true);
+      assert.equal(report.reasonName, "none");
+      assert.equal(report.appliedAtSample, 0n);
+      assert.deepEqual(request, {
+        commands: [{
+          kind: 5,
+          rack: 0,
+          channel: 2,
+          trackIndex: 0,
+          effectIndex: 0,
+          parameterId: 1,
+          smoothingSamples: 64,
+          values: [-18, 0, 0, 0],
+        }],
+      });
+    } finally {
+      engine.dispose();
+    }
   });
 
   test("a torn acknowledgement is rejected after, never before, transport answers", async () => {

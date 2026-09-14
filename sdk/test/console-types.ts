@@ -78,6 +78,7 @@ gate.parameter("lookahead", 1);
 
 const compressor = track.effect("simd1", 0, "miso.compressor");
 compressor.parameter("threshold", -18, { channel: "both" });
+compressor.parameter({ key: "threshold", value: -18, channel: "both", smoothingSamples: 64 });
 compressor.observe("Gain Reduction", true, 4);
 // @ts-expect-error lookahead is absent from the causal launch compressor
 compressor.parameter("lookahead", 1);
@@ -85,6 +86,14 @@ compressor.parameter("lookahead", 1);
 compressor.parameter("delay time", 20);
 // @ts-expect-error tap names are descriptor-specific
 compressor.observe("Output Level", true);
+// @ts-expect-error object edits keep key/value pairs discriminated
+compressor.parameter({ key: "threshold", value: true });
+// @ts-expect-error a prepared-only parameter is absent from live object edits
+compressor.parameter({ key: "lookahead", value: 1 });
+// @ts-expect-error object edits reject guessed units instead of converting them
+compressor.parameter({ key: "threshold", value: -18, unit: "db" });
+// @ts-expect-error unknown parameter keys are not accepted
+compressor.parameter({ key: "missing", value: 0 });
 
 const multiband = track.effect("dynamic", 0, "miso.multiband-compressor");
 multiband.parameter("low_threshold", -18, { channel: "both" });
@@ -95,6 +104,8 @@ const delay = track.effect("dynamic", 0, "miso.delay");
 delay.parameter("cross feedback", 0.5, { channel: "both" });
 // @ts-expect-error cross feedback is shared and cannot address one lane
 delay.parameter("cross feedback", 0.5, { channel: "left" });
+// @ts-expect-error cross feedback is shared and cannot address one lane in object form
+delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" });
 // @ts-expect-error delay declares no observation tap
 delay.observe("Gain Reduction", true);
 

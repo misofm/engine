@@ -95,3 +95,22 @@ and diff hygiene. The first SDK type check reported missing node_modules (exit
 `bash scripts/check-sdk-types.sh`, which passed. This is a compiling checkpoint,
 not the complete attempt or adversarial PASS; object-edit tranche and its
 real-engine/package evidence follow.
+
+## Attempt 1 — object-edit tranche checkpoint
+
+Luna XHIGH added the catalog-derived object-edit union and overload, preserving
+the positional path. Unknown own fields are refused before transport. Strict
+types, generated-source checking, six console evals and diff hygiene passed.
+Real headless Wasm evidence checks actual admission samples, changed PCM and
+object/positional parity; the browser facade test bridges to the same real Wasm
+admission report (adapter parity, not an AudioWorklet execution claim).
+Evidence: `/tmp/147-tranche2-evidence.md`.
+
+Root's clean artifact build compiled successfully but detected an expected
+packaging consequence of extracting Rust unit authority: Wasm bytes changed
+from `c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`
+to `86ae6b94bbd0c7624bdcc0654c5517288741424b2c69f6d0c23fe191e8529dca`.
+The normal builder correctly refused the stale pin. Root will refresh the
+current artifact pin, regenerate assets and run matching-artifact package and
+headless gates before independent Astra MEDIUM review. Published 0.2.6 bytes
+and its historical release evidence remain immutable.
