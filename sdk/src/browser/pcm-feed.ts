@@ -255,7 +255,7 @@ function isAbortSignal(value: unknown): value is AbortSignal {
 }
 
 function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  return signal.reason;
 }
 
 function throwIfRunwayAborted(signal: AbortSignal | undefined): void {

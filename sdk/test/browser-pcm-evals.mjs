@@ -717,6 +717,15 @@ test("PCM runway timeout and abort release observers, preserving cancellation re
   controller.abort(reason);
   await assert.rejects(wait, (error) => error === reason);
   assert.equal(controls(cancelled.ring)[MSB1_CONTROL.READ_INDEX], readBefore);
+  // null is a legal explicit abort reason; retain it both during a wait and before entry.
+  const nullController = new AbortController();
+  const nullWait = waitForPcmRunway(runwayOptions(cancelled, { signal: nullController.signal }));
+  nullController.abort(null);
+  await assert.rejects(nullWait, (error) => error === null);
+  await assert.rejects(
+    waitForPcmRunway(runwayOptions(cancelled, { signal: nullController.signal })),
+    (error) => error === null,
+  );
   runwayWrite(cancelled, 0);
   await waitForPcmRunway(runwayOptions(cancelled));
 });
