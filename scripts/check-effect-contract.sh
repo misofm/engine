@@ -37,15 +37,17 @@ bash scripts/test-effect-runtime-fixtures.sh .
 # without one -- the completeness statement lives here rather than in a hand-maintained list, so a
 # new effect crate is failing until it carries the test.
 #
-# Two directories are deliberately not products:
+# These directories are deliberately not products:
 #   * `crates/conformance` owns the reference mock the harness validates itself with;
 #   * `crates/graph-compiler`'s factories are `#[cfg(test)]` mocks inside its own unit
 #     tests (bank-bind failure and scalar-only fallbacks), not effects anybody can instantiate.
+#   * `crates/effect-compiler` and `crates/host-core` have only `#[cfg(test)]` EQ
+#     wrappers for owner attachment/preparation; production EQ retains its conformance test.
 conformance_crates=()
 while IFS= read -r source; do
     crate_dir="${source%%/src/*}"
     case "$crate_dir" in
-        crates/conformance | crates/graph-compiler) continue ;;
+        crates/conformance | crates/graph-compiler | crates/effect-compiler | crates/host-core) continue ;;
     esac
     conformance_crates+=("$crate_dir")
     if [[ ! -f "$crate_dir/tests/conformance.rs" ]]; then

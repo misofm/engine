@@ -2747,15 +2747,13 @@ mod tests {
                     assert_eq!(lane.target_staging_retained_bytes() as u64, target_bytes);
                     entry.control = Some(Box::new(lane));
                 } else {
-                    assert_eq!(
-                        entry
-                            .control
-                            .as_deref()
-                            .expect("attached unsupported lane")
-                            .target_staging_retained_bytes() as u64,
-                        0,
-                        "unsupported owners retain no target backing"
-                    );
+                    // Production EQ now owns target staging. Construct an ordinary lane
+                    // explicitly to keep the independent accounting proof for both layouts.
+                    let (_, consumer) =
+                        bounded_spsc(capacity, QueueGeneration(0)).expect("fixture ordinary queue");
+                    let lane = EffectControlLane::new(consumer, entry.bank_preparation.bypass);
+                    assert_eq!(lane.target_staging_retained_bytes(), 0);
+                    entry.control = Some(Box::new(lane));
                 }
             }
 
@@ -2828,7 +2826,7 @@ mod tests {
                 host_dispatch(),
                 8_usize,
                 false,
-                "bank-unsupported-target",
+                "bank-ordinary-lane",
             ),
             (
                 &scalar_registry,

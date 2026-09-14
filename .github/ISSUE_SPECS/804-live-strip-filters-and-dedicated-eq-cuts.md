@@ -382,3 +382,25 @@ requested or added.
 #807 implementation and local qualification are accepted. PR#811 required CI and
 merged delivery remain pending; close/synchronize #807 in the delivery workflow once
 this evidence is upstream. Parent#804 continues with #808, #809, adapter#111 and app#222.
+
+
+### Required-CI compatibility correction — attempt2 PASS
+
+Required run34861401024 exposed three assumptions missed by local qualification:
+the graph accounting fixture still treated production EQ as target-unsupported;
+the SDK deletion gate interpreted a private owner label as a retired engine state;
+and the conformance discovery scan classified cfg(test)-only compiler/host wrappers
+as product factories. #807 was reopened for this bounded correction.
+
+The accounting fixture now explicitly constructs its ordinary lane case, retaining
+exact independent byte arithmetic and cap assertions. The helper consistently uses
+private owner label `targets`. Existing mock-directory exclusions now include the
+verified effect-compiler/host-core test wrappers; all eight production effect
+factories still run the shared conformance harness. No DSP, ABI or Wasm changes.
+
+PASS: focused graph resource test, SDK deletion gate plus37 mutation checks, shared
+sync/async helper tests, formatting, and the existing effect-contract conformance
+run (eight production factories, zero failed gates). Fresh Astra MEDIUM reviewed the
+four-file correction and recorded attempt2 PASS with no blockers. All other jobs in
+the prior required run passed, including DSP, math, Wasm guests, cross-target and
+all three browsers. Restart required CI on this correction before merging PR#811.

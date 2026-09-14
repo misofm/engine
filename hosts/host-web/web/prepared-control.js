@@ -341,7 +341,7 @@ export function createPreparedControl(options) {
     }
     generation = config.generation;
     const owner = {
-      status: "prepared", address, generation: config.generation,
+      status: "targets", address, generation: config.generation,
       revision: config.revision, values: config.values,
     };
     owners.set(keyOf(address), owner);
@@ -472,7 +472,7 @@ export function createPreparedControl(options) {
       if (owner.status === "refusal") {
         return { refusal: { ...owner, rejectedEditIndex: group.rows[0]?.index ?? 0 } };
       }
-      if (owner.status !== "prepared") continue;
+      if (owner.status !== "targets") continue;
       if (owner.revision === 0xffffffffffffffffn) return { refusal: {
         result: schema.resultBackpressure, reason: schema.reasonBackpressure,
         rejectedEditIndex: group.rows[0].index,
@@ -497,7 +497,7 @@ export function createPreparedControl(options) {
       if (owner.status === "refusal") {
         return { refusal: { ...owner, rejectedEditIndex: group.rows[0]?.index ?? 0 } };
       }
-      if (owner.status !== "prepared") continue;
+      if (owner.status !== "targets") continue;
       if (owner.revision === 0xffffffffffffffffn) return { refusal: {
         result: schema.resultBackpressure, reason: schema.reasonBackpressure,
         rejectedEditIndex: group.rows[0].index,
@@ -526,7 +526,7 @@ export function createPreparedControl(options) {
     for (let index = 0; index < preparedOwners.length; index += 1) {
       const owner = preparedOwners[index];
       const current = owners.get(keyOf(owner.address));
-      if (current?.status !== "prepared") throw failure(schema.resultWrongState);
+      if (current?.status !== "targets") throw failure(schema.resultWrongState);
       current.values = owner.prepared.values.slice();
       current.revision = nextRevisions[index];
     }
