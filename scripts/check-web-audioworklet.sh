@@ -183,6 +183,15 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_console_track_id \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
+  miso_engine_web_v1_eq_target_close \
+  miso_engine_web_v1_eq_target_open \
+  miso_engine_web_v1_eq_target_prepare \
+  miso_engine_web_v1_eq_target_rejected_edit_index \
+  miso_engine_web_v1_eq_target_request_capacity \
+  miso_engine_web_v1_eq_target_request_ptr \
+  miso_engine_web_v1_eq_target_result_bytes \
+  miso_engine_web_v1_eq_target_result_capacity \
+  miso_engine_web_v1_eq_target_result_ptr \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \

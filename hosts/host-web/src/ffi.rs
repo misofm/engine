@@ -3266,6 +3266,60 @@ pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
     })
 }
 
+/// Open the bounded EQ target-preparation workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_open() -> u32 {
+    crate::control_targets::open()
+}
+
+/// Return the writable EQ target request buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_request_ptr() -> u32 {
+    crate::control_targets::request_ptr()
+}
+
+/// Return the EQ target request capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_request_capacity() -> u32 {
+    crate::control_targets::request_capacity()
+}
+
+/// Prepare the staged EQ target request.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_prepare(request_bytes: u32) -> u32 {
+    crate::control_targets::prepare(request_bytes)
+}
+
+/// Return the EQ target result buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_ptr() -> u32 {
+    crate::control_targets::result_ptr()
+}
+
+/// Return the current EQ target result length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_bytes() -> u32 {
+    crate::control_targets::result_bytes()
+}
+
+/// Return the EQ target result capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_capacity() -> u32 {
+    crate::control_targets::result_capacity()
+}
+
+/// Return the original edit index from the most recent refusal.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_rejected_edit_index() -> u32 {
+    crate::control_targets::rejected_edit_index()
+}
+
+/// Close the EQ target-preparation workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
+    crate::control_targets::close()
+}
+
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {

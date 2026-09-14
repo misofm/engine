@@ -998,6 +998,7 @@ dependencies = [
  "lane",
  "math",
  "microfft",
+ "parametric-eq",
  "protocol",
  "session",
  "source",

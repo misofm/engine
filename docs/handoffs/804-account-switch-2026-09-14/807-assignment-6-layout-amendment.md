@@ -48,7 +48,7 @@ layouts are defined in6; their real operations and allocations belong to7.
 
 Prefix `miso_engine_web_v1_eq_target_`: open()->u32, request_ptr()->u32,
 request_capacity()->u32, prepare(request_bytes:u32)->u32, result_ptr()->u32,
-result_bytes()->u32, result_capacity()->u32, close()->u32.
+result_bytes()->u32, result_capacity()->u32, rejected_edit_index()->u32, close()->u32.
 
 Explicit open prewarms/reuses one TLS Option<Box<EqTargetWorkspace>> off audio;
 unavailable production capability returns existing RESULT_UNSUPPORTED. Closed
@@ -92,3 +92,15 @@ existing production-tool caller, not permission to add benchmark machinery or ru
 extra timed workloads. Assignment7 must also preserve original wire indexes through
 coalescing: today's host capacity loop reports lowered indexes, which are insufficient
 once prepared targets and mixed-command expansion change the mapping.
+
+## Original edit failure provenance
+
+Assignment8/9 design exposed one missing fact: grouping edits by owner loses the
+original failing command index if preparation returns only a status. Add the narrow
+rejected_edit_index accessor above, backed by one workspace u32. Per-edit validation
+failure records that request's zero-based edit index; success, closed state, and
+header/seed/capability or other non-edit failures return u32::MAX. The stateless core
+preparer carries the optional edit index in its error. The shared helper maps it to
+the original batch index; it must not repeat preparation or copy Rust validation
+into JavaScript. This status field does not alter or clear result backing/length.
+Root accepts this additive refinement before assignment6 integration.

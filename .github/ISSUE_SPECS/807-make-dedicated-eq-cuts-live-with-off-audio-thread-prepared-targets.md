@@ -646,3 +646,40 @@ verification or optimization. Proceed directly to assignment 6 under its accepte
 layout amendment; retain critical correctness/realtime gates and defer optional
 expansion. Assignments 6–10 and the fresh final adversarial review remain pending;
 production EQ capability is still absent. No public activation or release claim.
+
+
+### Assignment 6 implementation checkpoint — stateless preparation ABI
+
+Luna XHIGH implemented one retained EQ factory capability, a stateless host-core
+preparer using fixed temporary arrays, bounded little-endian browser workspace,
+and nine additive exports. Every request supplies rate, all 60 accepted seeds and
+its original edits; output is copied only after successful preparation. Production
+open still returns Unsupported until assignment10. Generated Rust-derived layouts,
+ABI validators, SDK JSON and TypeScript are updated; no final Wasm repin.
+
+Root accepted one small provenance refinement in the layout amendment:
+rejected_edit_index returns the request edit index, or u32::MAX for non-edit
+failures/success/closed state, without changing retained output. The shared helper
+can therefore preserve original command indexes without duplicating Rust validation.
+Root corrected a discovered truncated-header panic, added a compact unaligned
+header/truncation/count fixture, tied companion capacity to twice the actual command
+cap, and added compile-time native/Wasm structure-size assertions. The real EQ
+fixture now checks asymmetric nondefault seeds and exact Both-edit final values.
+
+Gates PASS: native host-core/host-web checks; focused real facade (1) and browser
+boundary tests (2); root strict host-core/host-web all-target Clippy with
+host-core/control-provider, Wasm host-web check, fmt/diff. Luna's ABI schema/self-test
+(17 existing mutations), SDK generated-surface check also pass. No benchmarks or
+expanded matrix. Actual production workspace lifecycle, allocation measurement and
+browser/headless integration remain part of the assignment10 connected-route proof.
+Proceed to assignment7 admission; keep the issue open, attempt1.
+
+Assignment7 follows the accepted minimal design: reuse decoded staging with original
+wire indexes and one prepared-owner marker per edited owner; gather <=12 targets on
+the stack from one retained companion frame. Check combined ordinary/prepared/solo
+queue capacity before any push, then publish everything before owner/solo commit and
+ACK. Expected refusal discards only Open/Poisoned candidates; an unexpected partial
+publication is a terminal invariant failure. Config-copy uses a checked monotonic
+u64 host generation. Owner failures use their first semantic wire index, queue
+capacity failures the first contributing wire index, and malformed/stale/orphan
+batch envelopes index0. No extra owner list, target cache or admission framework.

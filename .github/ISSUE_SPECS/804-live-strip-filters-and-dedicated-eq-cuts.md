@@ -197,3 +197,10 @@ transactions, revision overflow and prewarmed zero-allocation/free gates pass.
 Preparation ABI and host/browser integration are next. Per the user's direction,
 reuse existing critical evidence and prioritize the working end-to-end route over
 optional verification and optimization. No production activation or release yet.
+
+
+#807 now includes the stateless preparation interface, fixed browser workspace and
+generated additive ABI. Focused real-EQ and malformed-header checks, native/Wasm,
+Clippy and generated ABI gates pass. The next step connects prepared targets to
+atomic host admission, then the shared browser/headless helper. Production activation
+and all releases/deployment remain pending.

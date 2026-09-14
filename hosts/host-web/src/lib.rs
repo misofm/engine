@@ -5058,6 +5058,11 @@ fn record_admission_counter_clear(elements: usize) {
     });
 }
 
+pub mod control_targets;
+pub use control_targets::{
+    WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
+    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+};
 mod ffi;
 
 pub use ffi::*;

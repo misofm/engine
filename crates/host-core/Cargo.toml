@@ -41,6 +41,7 @@ dsp-reference.workspace = true
 # independently prepared scalar instance of the same effect. A dev-dependency only: nothing in the
 # facade's own source knows a concrete effect crate.
 compressor.workspace = true
+parametric-eq.workspace = true
 source.workspace = true
 
 [lints]

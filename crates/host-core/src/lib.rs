@@ -91,9 +91,14 @@
 
 #[cfg(feature = "control-provider")]
 pub mod builtin_batch_endpoint;
+pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub use control_preparation::{
+    EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
+    EqTargetPreparerError,
+};
 pub mod prepare;
 pub mod render_session;
 pub mod response;
@@ -162,6 +167,7 @@ pub use spectrum::{
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
 pub use effect_compiler::{
     EffectControlProducer, EffectControlResources, EffectObservationHandle, EffectRack,
+    parametric_eq_target_preparation_factory,
 };
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
