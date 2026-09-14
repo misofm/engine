@@ -291,3 +291,12 @@ includes an actual builtin pair, and the writer test fills the real input queue 
 that a two-target pair remains one pending original command through backpressure.
 All23 focused console/writer tests pass against the rebuilt Wasm; JavaScript syntax,
 SDK TypeScript and diff checks pass. Actual browser matrix and whole-issue review remain.
+
+The complete SDK headless suite passes255tests and the packed-package and shipped
+Wasm static/callgraph/export gates pass. Workspace continuation found only the session
+validator's obsolete HPF-rejection mutation; it now checks an unknown builtin ID while
+retaining the prepared-only delay refusal. All9 session-validator tests pass; all other
+workspace targets passed in the completed no-fail-fast run. The existing browser live-EQ
+comparison now submits an eight-command mixed batch including a Left builtin pair,
+requires both hosts to acknowledge all original commands, and preserves the existing
+post-ramp PCM and captured-target-response comparisons. Browser execution follows.
