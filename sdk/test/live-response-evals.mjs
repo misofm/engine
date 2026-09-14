@@ -4,7 +4,9 @@ import { test } from "node:test";
 import { createEngine } from "../src/browser/engine.ts";
 import { BrowserTrackResponse } from "../src/browser/response.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { TrackResponseModule, parseTrackResponseState } from "../src/core/live-response.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
@@ -74,6 +76,114 @@ const browserQuery = {
   grid: { kind: "logarithmic", points: 2, minimumHz: 20, maximumHz: 20_000 },
   channels: "both",
 };
+
+function responseCapture(sectionCount = 6) {
+  const resultLayout = ABI_LAYOUT.structures.liveResponseResult;
+  const ownerLayout = ABI_LAYOUT.structures.liveResponseOwner;
+  const sectionLayout = ABI_LAYOUT.structures.liveResponseSection;
+  const fieldOffset = (layout, name) => layout.fields.find((field) => field.name === name).offset;
+  const resultBytes = resultLayout.bytes + ownerLayout.bytes + 3
+    + sectionCount * sectionLayout.bytes * 2;
+  const capture = new Uint8Array(resultBytes);
+  const view = new DataView(capture.buffer);
+  const setU32 = (layout, base, name, value) => view.setUint32(base + fieldOffset(layout, name), value, true);
+  const setU64 = (layout, base, name, value) => view.setBigUint64(base + fieldOffset(layout, name), value, true);
+  setU32(resultLayout, 0, "structSize", resultLayout.bytes);
+  setU32(resultLayout, 0, "abiVersion", ABI_LAYOUT.abiVersion);
+  setU32(resultLayout, 0, "result", 0);
+  setU32(resultLayout, 0, "mode", 1);
+  setU32(resultLayout, 0, "meaning", 1);
+  setU32(resultLayout, 0, "channels", 3);
+  setU32(resultLayout, 0, "points", 0);
+  setU32(resultLayout, 0, "ownerCount", 1);
+  setU32(resultLayout, 0, "excludedCount", 0);
+  setU32(resultLayout, 0, "sampleRateHz", 48_000);
+  setU64(resultLayout, 0, "capturedSample", 7n);
+  setU64(resultLayout, 0, "snapshotToken", 9n);
+  setU64(resultLayout, 0, "resultBytes", BigInt(resultBytes));
+  const owner = resultLayout.bytes;
+  const strings = owner + ownerLayout.bytes;
+  const left = strings + 3;
+  const right = left + sectionCount * sectionLayout.bytes;
+  setU32(resultLayout, 0, "ownersOffset", owner);
+  setU32(resultLayout, 0, "ownerRecordBytes", ownerLayout.bytes);
+  setU32(resultLayout, 0, "sectionRecordBytes", sectionLayout.bytes);
+  setU32(ownerLayout, owner, "trackIdOffset", strings);
+  setU32(ownerLayout, owner, "trackIdBytes", 1);
+  setU32(ownerLayout, owner, "nativeIdOffset", strings + 1);
+  setU32(ownerLayout, owner, "nativeIdBytes", 1);
+  setU32(ownerLayout, owner, "stableIdOffset", strings + 2);
+  setU32(ownerLayout, owner, "stableIdBytes", 1);
+  setU32(ownerLayout, owner, "rack", 1);
+  setU32(ownerLayout, owner, "slot", 2);
+  setU32(ownerLayout, owner, "kind", 1);
+  setU32(ownerLayout, owner, "availability", 1);
+  setU32(ownerLayout, owner, "leftOffset", left);
+  setU32(ownerLayout, owner, "leftCount", sectionCount);
+  setU32(ownerLayout, owner, "rightOffset", right);
+  setU32(ownerLayout, owner, "rightCount", sectionCount);
+  for (let index = 0; index < sectionCount; index += 1) {
+    for (const [base, enabled] of [[left, index === 0], [right, index === 0]]) {
+      const section = base + index * sectionLayout.bytes;
+      setU32(sectionLayout, section, "id", index + 1);
+      setU32(sectionLayout, section, "kind", 1);
+      setU32(sectionLayout, section, "enabled", enabled ? 1 : 0);
+      setU32(sectionLayout, section, "wordCount", 0);
+    }
+  }
+  capture.set(new TextEncoder().encode("tns"), strings);
+  return capture;
+}
+
+function responseParserModule() {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  return new TrackResponseModule({
+    memory,
+    miso_engine_web_v1_track_response_request_ptr: () => 64,
+    miso_engine_web_v1_track_response_request_bytes: () => 48,
+    miso_engine_web_v1_track_response_track_id_ptr: () => 128,
+    miso_engine_web_v1_track_response_track_id_capacity: () => 127,
+    miso_engine_web_v1_track_response_analysis: () => 0,
+    miso_engine_web_v1_track_response_result_ptr: () => 256,
+    miso_engine_web_v1_track_response_result_bytes: () => 0,
+    miso_engine_web_v1_track_response_snapshot_ptr: () => 512,
+    miso_engine_web_v1_track_response_snapshot_capacity: () => 1 << 20,
+    miso_engine_web_v1_track_response_snapshot_set_bytes: () => 0,
+  });
+}
+
+test("live response parsers accept six sections and reject seven or truncated records", () => {
+  const valid = responseCapture();
+  const state = parseTrackResponseState(valid);
+  const module = responseParserModule();
+  const query = {
+    trackId: "t",
+    grid: { kind: "linear", points: 2, minimumHz: 20, maximumHz: 20_000 },
+    channels: "both",
+  };
+  assert.equal(module.querySnapshotIfChanged(query, valid, state).changed, false);
+
+  const ownerLayout = ABI_LAYOUT.structures.liveResponseOwner;
+  const resultLayout = ABI_LAYOUT.structures.liveResponseResult;
+  const fieldOffset = (layout, name) => layout.fields.find((field) => field.name === name).offset;
+  const seven = valid.slice();
+  new DataView(seven.buffer).setUint32(
+    resultLayout.bytes + fieldOffset(ownerLayout, "leftCount"),
+    7,
+    true,
+  );
+  const truncated = valid.slice(0, -1);
+  new DataView(truncated.buffer).setBigUint64(
+    fieldOffset(resultLayout, "resultBytes"),
+    BigInt(truncated.byteLength),
+    true,
+  );
+  for (const malformed of [seven, truncated]) {
+    assert.throws(() => parseTrackResponseState(malformed), MisoEngineError);
+    assert.throws(() => module.querySnapshotIfChanged(query, malformed, state), MisoEngineError);
+  }
+  module.close();
+});
 
 test("browser live response copies the snapshot, owns arrays, serializes one query, and closes pending work", async () => {
   const worker = new FakeWorker();
@@ -225,7 +335,7 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
       ["simd1", "eq", true],
       ["dynamic", "comp", false],
     ]);
-    assert.deepEqual(first.members[1].enabledLeft, [true, false, false, false]);
+    assert.deepEqual(first.members[1].enabledLeft, [true, false, false, false, false, false]);
     assert.equal(first.members[2].excludedReason, "linearResponseUnavailable");
     const firstFrequencies = first.frequenciesHz.slice();
     const firstLeft = first.leftDb.slice();

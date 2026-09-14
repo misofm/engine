@@ -399,3 +399,16 @@ schema validation is strict. No new test framework, source module, or dependency
 - Run required check-sdk-headless.sh once against the rebuilt artifact. The prior
   250-pass/3-fail run is retained evidence; all three response-suite failures must
   clear, including response-subscription-evals without changing that suite's contract.
+
+## Attempt 1 — complete bounded response transport checkpoint
+
+Luna implemented the approved single6section authority through graph/native
+collector/hostproducer/nativeparsers/generatedABI/bothSDKparsers. Input filters
+remain2sections, sectionrecord44bytes/7words, capture1MiB. Passed: contract,
+graph response capture, native response, host-web live FFI, metadata, strictABI
+validator+17mutations, generated/type/fmt checks. SDK synthetic response tests
+pass (8;2actualartifact cases intentionally await rebuiltWasm). Evidence:
+/tmp/805-response-bound-evidence.md. Realnativecapture proves6EQ/2inputsections,
+exactbyteaccounting, zeroallocations, max249192bytes, count7refusal and coherent
+header one-byte truncation refusal. BothSDKparserentrypaths have6/7/truncated
+cases. Root must rebuildWasm and clear all3prior headless failures beforePASS.

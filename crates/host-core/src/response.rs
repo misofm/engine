@@ -231,7 +231,7 @@ pub struct ResponseSnapshotCollector {
     owners: Vec<CollectorOwner>,
 }
 
-const COLLECTOR_SECTION_CAPACITY: usize = 4;
+const COLLECTOR_SECTION_CAPACITY: usize = effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS;
 
 struct CollectorOwner {
     track_id: String,
@@ -874,8 +874,8 @@ mod tests {
             let mut frequencies = [0.0; 4];
             let mut left = [0.0; 4];
             let mut right = [0.0; 4];
-            let mut sections_left = [0.0; 16];
-            let mut sections_right = [0.0; 16];
+            let mut sections_left = vec![0.0; frequencies.len() * eq.descriptor().sections.len()];
+            let mut sections_right = vec![0.0; frequencies.len() * eq.descriptor().sections.len()];
             let summary = eq
                 .query_into(
                     ResponsePreviewGrid::Linear {
@@ -1041,7 +1041,12 @@ mod tests {
         )
         .expect("mixed prepared session");
         let mut host = prepare_host_runtime(&compiled, &caps).expect("prepared host");
-        let mut collector = ResponseSnapshotCollector::new(48_000, 8, 4, 32);
+        let mut collector = ResponseSnapshotCollector::new(
+            48_000,
+            8,
+            effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS,
+            32,
+        );
         let before_capture = bench_support::alloc::current_thread_counters();
         let capture = host
             .copy_response_snapshot("eq0", &mut collector)
@@ -1081,6 +1086,26 @@ mod tests {
             ResponseSnapshotAvailability::DeclaredUnavailable
         );
         assert!(snapshot.owners[2].left.is_empty());
+        let eq_owner = snapshot
+            .owners
+            .iter()
+            .find(|owner| owner.native_id.as_ref() == "miso.parametric-eq")
+            .expect("EQ owner");
+        assert_eq!(
+            eq_owner.left.len(),
+            effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+        );
+        assert_eq!(
+            eq_owner.right.len(),
+            effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+        );
+        let input_filter_owner = snapshot
+            .owners
+            .iter()
+            .find(|owner| owner.native_id.as_ref() == "miso.builtin.input-filters")
+            .expect("input-filter owner");
+        assert_eq!(input_filter_owner.left.len(), 2);
+        assert_eq!(input_filter_owner.right.len(), 2);
 
         let mut frequencies = [0.0; 5];
         let mut left = [0.0; 5];

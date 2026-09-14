@@ -691,8 +691,8 @@ fn emit_response_snapshot_owner(
     binding: &ResponseOwnerBinding,
     sample_rate_hz: u32,
     summary: ResponseSnapshotSummary,
-    left: &[ResponseSnapshotSection; 4],
-    right: &[ResponseSnapshotSection; 4],
+    left: &[ResponseSnapshotSection; effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS],
+    right: &[ResponseSnapshotSection; effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS],
     sink: &mut dyn ResponseSnapshotSink,
 ) -> Result<(), ResponseSnapshotError> {
     if summary.sample_rate_hz != sample_rate_hz {
@@ -761,9 +761,13 @@ fn copy_scalar_response_snapshot(
         enabled: false,
         word_count: 0,
         words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
-    }; 4];
+    }; effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS];
     let mut right = left;
-    let section_capacity = if binding.rack == 0 { 2 } else { 4 };
+    let section_capacity = if binding.rack == 0 {
+        2
+    } else {
+        effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+    };
     let (summary, bypassed) = match &op.kind {
         NodeKind::Bound(processor) => match processor.copy_response_snapshot(
             sample_rate_hz,
@@ -858,10 +862,15 @@ impl RuntimeUnit {
                     enabled: false,
                     word_count: 0,
                     words: [0; effect_contract::RESPONSE_SNAPSHOT_WORDS],
-                }; 4];
+                };
+                    effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS];
                 let mut right = left;
                 let bypassed = chain.response_snapshot_bypassed(slot, lane);
-                let section_capacity = if binding.rack == 0 { 2 } else { 4 };
+                let section_capacity = if binding.rack == 0 {
+                    2
+                } else {
+                    effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+                };
                 let summary = match chain.copy_response_snapshot_lane(
                     slot,
                     lane,
@@ -4823,8 +4832,14 @@ mod tests {
                 request: OwnerSnapshotRequest<'_>,
             ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
                 assert!(!request.bypassed);
-                assert_eq!(request.left.len(), 4);
-                assert_eq!(request.right.len(), 4);
+                assert_eq!(
+                    request.left.len(),
+                    effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+                );
+                assert_eq!(
+                    request.right.len(),
+                    effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS
+                );
                 request.left[0] = ResponseSnapshotSection {
                     id: 9,
                     kind: 3,

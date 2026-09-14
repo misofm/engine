@@ -2011,6 +2011,7 @@ export const ABI_LAYOUT = deepFreeze(
     "maximumResponseParameterOverrides": 256,
     "maximumResponseResultBytes": 16777216,
     "maximumLiveResponseOwners": 256,
+    "maximumLiveResponseSections": 6,
     "maximumLiveResponseIdBytes": 127,
     "maximumLiveResponsePoints": 4096,
     "liveResponseCaptureBytes": 1048576,
