@@ -1257,6 +1257,18 @@ impl EffectControlProducerHandle {
         self.inner.capacity()
     }
 
+    /// Producer-local successful publication count.
+    #[must_use]
+    pub const fn success_count(&self) -> u64 {
+        self.inner.success_count()
+    }
+
+    /// Producer-local full/overflow count.
+    #[must_use]
+    pub const fn full_count(&self) -> u64 {
+        self.inner.full_count()
+    }
+
     /// Check delivery capability without touching the queue, counters, or record ownership.
     ///
     /// A prepared-capable owner will eventually require all EQ parameter records to arrive with
@@ -1278,6 +1290,95 @@ impl EffectControlProducerHandle {
         self.inner
             .try_push(record)
             .map_err(EffectControlPushError::Full)
+    }
+}
+
+#[cfg(test)]
+mod control_producer_tests {
+    use super::{EffectControlProducerHandle, EffectControlPushError};
+    use core::num::NonZeroUsize;
+    use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
+    use engine::realtime::{QueueGeneration, bounded_spsc};
+
+    fn target(slot: u32) -> EffectControlRecord {
+        EffectControlRecord::PreparedTarget(PreparedEffectTarget {
+            slot,
+            channel: ParameterChannel::Left,
+            words: [slot; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        })
+    }
+
+    fn parameter(value: f32) -> EffectControlRecord {
+        EffectControlRecord::Parameter {
+            parameter_index: 3,
+            channel: ParameterChannel::Left,
+            value,
+        }
+    }
+
+    #[test]
+    fn unsupported_target_is_returned_without_touching_queue_or_full_counter() {
+        let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
+            NonZeroUsize::new(2).expect("capacity"),
+            QueueGeneration(7),
+        )
+        .expect("queue");
+        let mut producer = EffectControlProducerHandle::new(producer, false);
+        producer
+            .try_push(parameter(0.25))
+            .expect("first queue slot");
+        producer
+            .try_push(parameter(0.5))
+            .expect("second queue slot");
+        let record = target(11);
+
+        assert_eq!(producer.success_count(), 2);
+        assert_eq!(producer.full_count(), 0);
+        let refusal = producer.try_push(record).expect_err("unsupported target");
+        match refusal {
+            EffectControlPushError::Unsupported { record: returned } => {
+                assert_eq!(returned, record);
+            }
+            EffectControlPushError::Full(_) => panic!("unsupported is distinct from full"),
+        }
+        assert_eq!(producer.success_count(), 2);
+        assert_eq!(producer.full_count(), 0);
+        assert_eq!(consumer.available_at_entry(), 2);
+    }
+
+    #[test]
+    fn ordinary_semantic_record_publishes_and_full_refusal_preserves_original_record() {
+        let (producer, mut consumer) = bounded_spsc::<EffectControlRecord>(
+            NonZeroUsize::new(1).expect("capacity"),
+            QueueGeneration(9),
+        )
+        .expect("queue");
+        let mut producer = EffectControlProducerHandle::new(producer, false);
+        let first = parameter(0.25);
+        assert!(producer.try_push(first).is_ok());
+        assert_eq!(producer.success_count(), 1);
+        assert_eq!(producer.full_count(), 0);
+        assert_eq!(consumer.try_pop().expect("semantic record"), first);
+
+        let second = parameter(0.5);
+        let third = parameter(0.75);
+        producer.try_push(second).expect("room after pop");
+        let refusal = producer.try_push(third).expect_err("full queue");
+        match refusal {
+            EffectControlPushError::Full(full) => {
+                assert_eq!(full.value, third);
+                assert_eq!(full.generation, QueueGeneration(9));
+                assert_eq!(full.full_count, 1);
+            }
+            EffectControlPushError::Unsupported { .. } => panic!("ordinary record is supported"),
+        }
+        assert_eq!(producer.success_count(), 2);
+        assert_eq!(producer.full_count(), 1);
+        assert_eq!(consumer.available_at_entry(), 1);
+        assert_eq!(
+            consumer.try_pop().expect("retained semantic record"),
+            second
+        );
     }
 }
 

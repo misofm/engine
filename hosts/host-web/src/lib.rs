@@ -1590,6 +1590,24 @@ impl ReadyOwnership {
             }
         }
     }
+
+    /// Preflight one effect record before any publication or observation mutation.
+    ///
+    /// The host admission pass owns the original wire index, so this check belongs beside
+    /// lowering rather than in [`Self::push`].  A prepared-capable owner must reject an
+    /// unlowered semantic parameter before a mixed batch can mutate another destination.  The
+    /// checked producer still runs the same check at publication as an invariant guard; this
+    /// pass is what preserves the original wire index and whole-batch refusal contract.
+    fn preflight_effect(&self, slot: usize, record: EffectControlRecord) -> Result<(), ()> {
+        let effect_base = self.tracks.len().checked_mul(3).ok_or(())?;
+        let effect = slot.checked_sub(effect_base).ok_or(())?;
+        let producer = self
+            .effect_controls
+            .get(effect)
+            .and_then(Option::as_ref)
+            .ok_or(())?;
+        producer.producer.preflight(record).map_err(|_| ())
+    }
 }
 
 /// One decoded record and the payload its destination queue takes (issue #140 C).
@@ -3723,7 +3741,20 @@ fn admit_commands_staged(
                         .into_effect_records(producer.descriptor, &mut staged)
                         .map_err(|reason| refuse(reason, index))?
                 };
-                (track_count * 3 + effect, produced)
+                // Every original effect command is checked before the publication pass can
+                // mutate a queue or the observation mirror.  Keep this tied to `index`: a
+                // per-lane lowering may produce two records, but a refusal still names the
+                // original wire command that caused it.
+                let slot = track_count * 3 + effect;
+                for record in staged.iter().copied().take(produced) {
+                    let AdmittedCommand::Effect(record) = record else {
+                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                    };
+                    if ready.preflight_effect(slot, record).is_err() {
+                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                    }
+                }
+                (slot, produced)
             }
             _ => return Err(refuse(COMMAND_REASON_MALFORMED, index)),
         };

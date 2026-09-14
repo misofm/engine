@@ -388,3 +388,25 @@ producer/counter and mixed late-refusal tests; actual EQ scalar/bank FIFO/asymme
 application fixtures; exact queue/lane/host staging budget and largest-allocation tests;
 focused compiler/host regressions and Wasm checks. Assignments 5–10 and final adversarial
 review remain pending. No public live-cut capability or release is claimed.
+
+
+### Assignment 4 follow-through — preflight and refusal/staging gates
+
+Luna XHIGH added original-command effect delivery preflight before publication and
+observation mutation, plus direct producer and lane-staging fixtures. Root reviewed and
+strengthened mixed-batch rollback to compare actual producer success/full counters,
+observation masks/application samples, in-flight ledger and solo state. Unsupported
+target publication returns the original record without touching a queue or its full
+counter, including when already full; ordinary semantic publication still operates.
+The public mixed-batch fixture uses immutable original-band enable, so its refusal
+contract remains valid when dedicated cuts become live. The synthetic prepared-target
+helper test is internal component evidence, not public prepared admission.
+
+Gates PASS: `cargo test --locked -p effect-compiler --lib control_producer_tests`
+(2 tests); `cargo test --locked -p effect-contract --test live_control` (11 tests);
+`cargo test --locked -p host-web production_effect_delivery_refuses_prepared_target_without_queue_or_full_mutation`
+and `cargo test --locked -p host-web late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index`
+(1 each; root reran the latter after strengthening it); host-web native check;
+Wasm checks for effect-contract, effect-compiler and host-web; formatting and diff checks.
+No timed benchmark. Real EQ scalar/bank application and exact resource-budget evidence
+remain assignment-4 work before assignments 5–10. #807 still has no final verdict.

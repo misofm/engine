@@ -1,5 +1,6 @@
 use core::mem::{offset_of, size_of};
 
+use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -2801,6 +2802,165 @@ fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
+}
+
+#[test]
+fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_mutation() {
+    let mut host = effect_console_host(128, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    let target = EffectControlRecord::PreparedTarget(PreparedEffectTarget {
+        slot: 2,
+        channel: ParameterChannel::Left,
+        words: [0x55; PREPARED_EFFECT_TARGET_WORDS],
+    });
+    let ready = host.ready.as_mut().expect("ready ownership");
+    let effect_slot = ready.effect_slot(0, 1, 0).expect("dynamic EQ slot");
+    let queue_slot = ready.tracks.len() * 3 + effect_slot;
+    let producer = ready
+        .effect_controls
+        .get(effect_slot)
+        .and_then(Option::as_ref)
+        .expect("effect producer");
+    let before_success = producer.producer.success_count();
+    let before_full = producer.producer.full_count();
+    let before_in_flight = ready.in_flight[queue_slot];
+
+    assert!(ready.preflight_effect(queue_slot, target).is_err());
+    assert!(
+        ready
+            .push(queue_slot, AdmittedCommand::Effect(target), 0)
+            .is_err()
+    );
+
+    let producer = ready
+        .effect_controls
+        .get(effect_slot)
+        .and_then(Option::as_ref)
+        .expect("effect producer remains");
+    assert_eq!(producer.producer.success_count(), before_success);
+    assert_eq!(producer.producer.full_count(), before_full);
+    assert_eq!(ready.in_flight[queue_slot], before_in_flight);
+}
+
+#[test]
+fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 1, None);
+    let queue_counters = |ready: &ReadyOwnership| {
+        (
+            ready
+                .controls
+                .iter()
+                .map(|owner| {
+                    [
+                        (owner.producer.success_count(), owner.producer.full_count()),
+                        (owner.fader.success_count(), owner.fader.full_count()),
+                        (owner.input.success_count(), owner.input.full_count()),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            ready
+                .effect_controls
+                .iter()
+                .map(|owner| {
+                    owner
+                        .as_ref()
+                        .map(|owner| (owner.producer.success_count(), owner.producer.full_count()))
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let before_counters = queue_counters(ready);
+    let before_masks = ready.observation_armed.clone();
+    let before_arm_samples = ready.observation_arm_samples.clone();
+    let before_queues = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .in_flight
+        .to_vec();
+    let before_solo = {
+        let state = host.console_solo().expect("solo state");
+        (
+            state.solo_count(),
+            (0..state.track_count())
+                .map(|track| {
+                    (
+                        state.solo(track),
+                        [state.user_mute(track, 0), state.user_mute(track, 1)],
+                        [state.emitted_mute(track, 0), state.emitted_mute(track, 1)],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let before_armed = host.observation_armed_taps();
+
+    // The first two commands are valid and touch separate control destinations. The final
+    // original-band enabled row is immutable. Its refusal must name wire index 2 and prevent
+    // either earlier command from being published.
+    stage_solo(&mut host, 0, 0, true, 0);
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        1,
+        255,
+        0,
+        0,
+        1,
+        1,
+        [0.0; 4],
+    );
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        1,
+        0,
+        1,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(3), RESULT_UNSUPPORTED);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(host.command_report().rejected_index, 2);
+    assert_eq!(host.command_report().admitted, 0);
+
+    assert_eq!(host.observation_armed_taps(), before_armed);
+    let after_queues = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .in_flight
+        .to_vec();
+    assert_eq!(after_queues, before_queues);
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(queue_counters(ready), before_counters);
+    assert_eq!(ready.observation_armed, before_masks);
+    assert_eq!(ready.observation_arm_samples, before_arm_samples);
+
+    let after_solo = {
+        let state = host.console_solo().expect("solo state");
+        (
+            state.solo_count(),
+            (0..state.track_count())
+                .map(|track| {
+                    (
+                        state.solo(track),
+                        [state.user_mute(track, 0), state.user_mute(track, 1)],
+                        [state.emitted_mute(track, 0), state.emitted_mute(track, 1)],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(after_solo, before_solo);
 }
 
 /// #140 B / E1: a fader command's acknowledgement names the exact sample it takes effect at.

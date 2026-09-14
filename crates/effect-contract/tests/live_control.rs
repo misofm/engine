@@ -6,8 +6,8 @@
 //! signal delayed by exactly the effect's declared latency (so bypass preserves PDC).
 
 use effect_contract::{
-    AutomationSpanKind, BypassShunt, EffectControlLane, EffectControlRecord, ParameterChannel,
-    PreparedAutomationSpan,
+    AutomationSpanKind, BypassShunt, EffectControlLane, EffectControlRecord,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
 };
 use engine::realtime::{QueueGeneration, bounded_spsc};
 
@@ -33,6 +33,108 @@ fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControl
         channel,
         value,
     }
+}
+
+fn prepared_target(slot: u32, channel: ParameterChannel, marker: u32) -> EffectControlRecord {
+    EffectControlRecord::PreparedTarget(PreparedEffectTarget {
+        slot,
+        channel,
+        words: [marker; PREPARED_EFFECT_TARGET_WORDS],
+    })
+}
+
+#[test]
+fn prepared_control_record_stays_within_the_frozen_sixty_four_byte_bound() {
+    assert!(core::mem::size_of::<EffectControlRecord>() <= 64);
+    assert_eq!(
+        core::mem::size_of::<PreparedEffectTarget>(),
+        56,
+        "the twelve-word target remains the fixed Copy payload"
+    );
+}
+
+#[test]
+fn prepared_targets_retain_fifo_order_for_overlapping_selectors() {
+    let (mut producer, consumer) =
+        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
+    let mut lane = EffectControlLane::new_with_target_staging(consumer, false);
+    for record in [
+        prepared_target(3, ParameterChannel::Left, 0x11),
+        prepared_target(4, ParameterChannel::Both, 0x22),
+        prepared_target(5, ParameterChannel::Left, 0x33),
+    ] {
+        producer.try_push(record).expect("room");
+    }
+
+    let mut staging = [idle(); 4];
+    let staged = lane.stage(&mut staging, 0, None);
+    assert_eq!(staged.staged, 0);
+    assert_eq!(staged.staged_targets, 3);
+    assert!(!staged.target_error);
+    assert!(staged.staged + staged.staged_targets <= 3);
+    let targets = lane.prepared_targets();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| (target.slot, target.channel, target.words[0]))
+            .collect::<Vec<_>>(),
+        vec![
+            (3, ParameterChannel::Left, 0x11),
+            (4, ParameterChannel::Both, 0x22),
+            (5, ParameterChannel::Left, 0x33),
+        ],
+        "prepared selectors are applied as a FIFO: left X, both Y, left Z"
+    );
+}
+
+#[test]
+fn unsupported_lane_has_no_target_storage_and_reports_target_error() {
+    let (mut producer, consumer) =
+        bounded_spsc::<EffectControlRecord>(depth(2), QueueGeneration(0)).expect("queue");
+    let mut lane = EffectControlLane::new(consumer, false);
+    assert!(!lane.has_target_staging());
+    assert_eq!(lane.target_staging_retained_bytes(), 0);
+    producer
+        .try_push(prepared_target(1, ParameterChannel::Left, 0x44))
+        .expect("room");
+
+    let mut staging = [idle(); 2];
+    let staged = lane.stage(&mut staging, 0, None);
+    assert_eq!(staged.staged, 0);
+    assert_eq!(staged.staged_targets, 0);
+    assert!(staged.target_error);
+    assert!(lane.prepared_targets().is_empty());
+}
+
+#[test]
+fn prepared_lane_refuses_raw_semantic_records_and_resets_target_prefix() {
+    let (mut producer, consumer) =
+        bounded_spsc::<EffectControlRecord>(depth(2), QueueGeneration(0)).expect("queue");
+    let mut lane = EffectControlLane::new_with_target_staging(consumer, false);
+    producer
+        .try_push(parameter(7, ParameterChannel::Left, 0.5))
+        .expect("room");
+    let mut staging = [idle(); 2];
+    let semantic = lane.stage(&mut staging, 0, None);
+    assert_eq!(semantic.staged, 0);
+    assert_eq!(semantic.staged_targets, 0);
+    assert!(semantic.target_error);
+    assert!(lane.prepared_targets().is_empty());
+
+    producer
+        .try_push(prepared_target(2, ParameterChannel::Both, 0x55))
+        .expect("room");
+    let target = lane.stage(&mut staging, 128, None);
+    assert_eq!(target.staged_targets, 1);
+    assert!(!target.target_error);
+    assert_eq!(lane.prepared_targets()[0].words[0], 0x55);
+
+    // The next entry snapshot has no records. The old prefix must not remain visible to a
+    // processor that sees an empty block.
+    let fresh = lane.stage(&mut staging, 256, None);
+    assert_eq!(fresh.staged, 0);
+    assert_eq!(fresh.staged_targets, 0);
+    assert!(lane.prepared_targets().is_empty());
 }
 
 /// Red mutation: delete the `existing > key` insertion leg in `EffectControlLane::stage` so

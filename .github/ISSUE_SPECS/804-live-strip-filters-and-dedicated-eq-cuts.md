@@ -143,3 +143,9 @@ acceptance fixtures and host preflight are still pending. #807 remains attempt 1
 with no public live-cut activation or final PASS. #808, #809, adapter #111 and app
 #222 remain subsequent delivery work. The active app/adapter worktrees remain clean
 at their preserved preparation checkpoints. Parent #804 remains open.
+
+
+The next #807 checkpoint completes original-command host preflight and focused queue/
+refusal/staging gates, including actual counter, observation and solo rollback checks.
+Real EQ runtime application and exact budget tests remain before assignment 4 acceptance.
+No live-cut activation or release is claimed; the complete evidence is in #807.
