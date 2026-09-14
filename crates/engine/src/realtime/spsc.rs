@@ -413,6 +413,23 @@ impl<T: Send + 'static> Consumer<T> {
     pub const fn underrun_count(&self) -> u64 {
         self.empty
     }
+    /// Snapshots the number of records available at this drain entry.
+    ///
+    /// The producer cursor is loaded once with `Acquire`, then compared with this consumer's
+    /// local cursor using the ring's modular cursor space. The returned count is bounded by the
+    /// logical capacity under the SPSC ownership invariant. This method does not mutate cursors,
+    /// caches, or counters, so later producer publication cannot enlarge the already-returned
+    /// count; callers can use it to freeze a bounded drain before popping.
+    #[must_use]
+    pub fn available_at_entry(&self) -> usize {
+        let producer = self.ring().producer.0.load(Ordering::Acquire);
+        let consumer = self.local;
+        if producer >= consumer {
+            producer - consumer
+        } else {
+            self.ring().slots_len - consumer + producer
+        }
+    }
     /// Whether the queue currently holds nothing for this consumer.
     ///
     /// This is the bounded, counter-free observation the scheduler uses to decide whether a
@@ -602,5 +619,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn available_at_entry_is_bounded_and_handles_wrapped_cursors() {
+        let (mut producer, mut consumer) =
+            bounded_spsc(NonZeroUsize::new(3).expect("capacity"), QueueGeneration(11))
+                .expect("queue");
+
+        assert_eq!(consumer.available_at_entry(), 0);
+        for value in 0..3 {
+            producer.try_push(value).expect("space");
+        }
+        assert_eq!(consumer.available_at_entry(), 3);
+
+        assert_eq!(consumer.try_pop(), Ok(0));
+        assert_eq!(consumer.try_pop(), Ok(1));
+        assert_eq!(consumer.available_at_entry(), 1);
+        producer.try_push(3).expect("space after pop");
+        producer.try_push(4).expect("space after pop");
+        assert_eq!(consumer.available_at_entry(), 3);
+
+        assert_eq!(consumer.try_pop(), Ok(2));
+        assert_eq!(consumer.try_pop(), Ok(3));
+        assert_eq!(consumer.available_at_entry(), 1);
+    }
+
+    #[test]
+    fn available_at_entry_freezes_before_later_publication() {
+        let (mut producer, consumer) =
+            bounded_spsc(NonZeroUsize::new(3).expect("capacity"), QueueGeneration(12))
+                .expect("queue");
+        producer.try_push(7).expect("space");
+
+        let frozen = consumer.available_at_entry();
+        producer.try_push(8).expect("space");
+        producer.try_push(9).expect("space");
+
+        assert_eq!(frozen, 1);
+        assert_eq!(consumer.available_at_entry(), 3);
     }
 }

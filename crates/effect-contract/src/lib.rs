@@ -5,10 +5,15 @@
 #![allow(missing_docs)]
 
 mod live;
+mod prepared_target;
 mod response;
 mod step;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
+pub use prepared_target::{
+    EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
+    PREPARED_EFFECT_TARGET_WORDS, PreparedEffectTarget,
+};
 pub use response::{
     NativeEffectResponseFactory, PreparedResponseAnalysis, RESPONSE_SNAPSHOT_WORDS,
     ResponseAmplitudeReference, ResponseAnalysisDescriptor, ResponseAnalysisError,
@@ -1483,6 +1488,16 @@ pub trait NativeEffectFactory: Send + Sync {
         None
     }
 
+    /// Returns this owner's optional prepared-target capability.
+    ///
+    /// The capability is borrowed from the factory so a control-plane owner that uses it must
+    /// retain the factory handle for the capability's lifetime. Effects without prepared target
+    /// support keep the default `None`; this hook changes no descriptor bytes or existing prepare
+    /// behavior.
+    fn target_preparation(&self) -> Option<&dyn NativeEffectTargetPreparation> {
+        None
+    }
+
     /// Binds `width` tracks into one homogeneous bank, or declines.
     ///
     /// # The three-outcome rule (issue #95; frozen for every implementation)
@@ -1630,6 +1645,19 @@ pub trait PreparedNativeEffect: Send {
         Err(ParameterAccessError::Unsupported)
     }
 
+    /// Applies one already-prepared target at a block boundary.
+    ///
+    /// Preparation and numerical design happen on the control or worker plane through the
+    /// factory capability. The default refuses without inspecting or mutating the target, and
+    /// every implementation must preserve state on rejection.
+    fn apply_prepared_target(
+        &mut self,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        let _ = target;
+        Err(EffectTargetError::Unsupported)
+    }
+
     /// Reads one parameter's resident current and target values without advancing state.
     ///
     /// `parameter_index` is a zero-based index into [`EffectDescriptor::parameters`], not a
@@ -1720,6 +1748,20 @@ pub trait PreparedNativeEffectBank: Send {
     fn metadata(&self) -> PreparedBankMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+
+    /// Applies one already-prepared target to one bank lane at a block boundary.
+    ///
+    /// Preparation and numerical design happen on the control or worker plane through the
+    /// factory capability. The default refuses without inspecting or mutating the bank, and
+    /// every implementation must preserve state on rejection.
+    fn apply_prepared_target_lane(
+        &mut self,
+        lane: usize,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        let _ = (lane, target);
+        Err(EffectTargetError::Unsupported)
+    }
 
     /// Read one declared [`ObservationCost::Resident`] tap for **every lane at once**.
     ///

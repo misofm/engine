@@ -266,3 +266,9 @@ Astra XHIGH found that the existing EQ Channel::process_section driver pre-advan
 ## Attempt 1 implementation baseline
 
 Prepared-cut child #805 merged at 80f2918b5aba5b2428c5f5cc76c24f46b4e0edde with required qualification34820834881 PASS; #147 is included. The numbered-spec/GitHub boundary audit found no missing numbered issues; #805 is verified closed, and #807/#808/#809 remain open. Root starts bounded assignment1 on codex/807-live-eq from this merged baseline. Request/target/error types may derive Clone and Copy; borrowed request slices do not own heap state. No production capability opt-in until assignment10.
+
+### Assignment 1 checkpoint — fixed handoff and queue snapshot
+
+Luna XHIGH implemented the 56-byte Copy target, borrowed Copy request, small typed errors, optional factory capability and default Unsupported scalar/bank hooks. Consumer::available_at_entry takes one acquire snapshot and computes bounded modular occupancy without mutating cursors, caches or counters. Empty/full/wrapped cursor and later-publication cases are covered. Root reviewed the contract and clarified separation of off-audio design from bounded admission validation; preparation errors leave caller output unchanged.
+
+Focused gates PASS: effect-contract46tests; SPSC6tests; existing Loom release model1test; native and Wasm checks of both affected crates; formatting and diff checks. No effect opts in; no queue enum enlargement, target admission, DSP application or live-cut claim occurs at this checkpoint. Assignments2–10 and the final fresh Astra MEDIUM adversarial verdict remain required.
