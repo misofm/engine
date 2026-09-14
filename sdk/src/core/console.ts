@@ -53,21 +53,35 @@ type EnumerationLabel<P> = P extends {
   readonly enumChoices: readonly (infer Choice)[];
 } ? Choice extends { readonly label: infer Label extends string } ? Label : never : never;
 
+type ParameterValue<P> = P extends { readonly domainName: "boolean" }
+  ? boolean
+  : P extends { readonly domainName: "enumeration" }
+    ? EnumerationLabel<P>
+    : number;
+
+type ParameterOptions<P> = P extends { readonly channelPolicyName: "shared" }
+  ? SmoothingOptions & { readonly channel?: "both" }
+  : LaneOptions;
+
 export type LiveEffectParameterValue<
   E extends EffectId,
   N extends LiveEffectParameterName<E>,
-> = ParameterRow<E, N> extends { readonly domainName: "boolean" }
-  ? boolean
-  : ParameterRow<E, N> extends { readonly domainName: "enumeration" }
-    ? EnumerationLabel<ParameterRow<E, N>>
-    : number;
+> = ParameterValue<ParameterRow<E, N>>;
 
 export type LiveEffectParameterOptions<
   E extends EffectId,
   N extends LiveEffectParameterName<E>,
-> = ParameterRow<E, N> extends { readonly channelPolicyName: "shared" }
-  ? SmoothingOptions & { readonly channel?: "both" }
-  : LaneOptions;
+> = ParameterOptions<ParameterRow<E, N>>;
+
+/** One catalog-derived object edit for a live effect parameter. */
+export type LiveEffectParameterEdit<E extends EffectId> = LiveParameter<E> extends infer P
+  ? P extends { readonly name: infer N extends LiveEffectParameterName<E> }
+    ? {
+      readonly key: N;
+      readonly value: ParameterValue<P>;
+    } & ParameterOptions<P>
+    : never
+  : never;
 
 export interface MatrixValues {
   readonly ll: number;
@@ -99,6 +113,69 @@ function u32(value: number, name: string): number {
 
 function smoothing(options: SmoothingOptions): number {
   return u32(options.smoothingSamples ?? 0, "smoothingSamples");
+}
+
+type RuntimeParameterOptions = {
+  readonly channel?: unknown;
+  readonly smoothingSamples?: unknown;
+};
+
+function runtimeSmoothing(options: RuntimeParameterOptions): number {
+  const sampleCount = options.smoothingSamples ?? 0;
+  if (typeof sampleCount !== "number") {
+    throw new MisoUsageError("smoothingSamples must be a number");
+  }
+  return u32(sampleCount, "smoothingSamples");
+}
+
+function runtimeChannel(channel: unknown): ConsoleChannel {
+  if (channel === undefined || channel === "both") return "both";
+  if (channel === "left" || channel === "right") return channel;
+  throw new MisoUsageError("channel must be left, right, or both");
+}
+
+const LIVE_PARAMETER_EDIT_FIELDS = new Set(["key", "value", "channel", "smoothingSamples"]);
+
+interface NormalizedParameterEdit {
+  readonly key: string;
+  readonly value: unknown;
+  readonly options: RuntimeParameterOptions;
+}
+
+function normalizeParameterEdit(
+  keyOrEdit: unknown,
+  value: unknown,
+  options: RuntimeParameterOptions | undefined,
+): NormalizedParameterEdit {
+  if (typeof keyOrEdit === "string") {
+    return { key: keyOrEdit, value, options: options ?? {} };
+  }
+  if (keyOrEdit === null || typeof keyOrEdit !== "object" || Array.isArray(keyOrEdit)) {
+    throw new MisoUsageError("a live parameter edit must be an object");
+  }
+  for (const field of Reflect.ownKeys(keyOrEdit)) {
+    if (typeof field !== "string" || !LIVE_PARAMETER_EDIT_FIELDS.has(field)) {
+      throw new MisoUsageError(`live parameter edit has unknown field '${String(field)}'`);
+    }
+  }
+  const edit = keyOrEdit as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(edit, "key")) {
+    throw new MisoUsageError("live parameter edit requires a key");
+  }
+  if (!Object.prototype.hasOwnProperty.call(edit, "value")) {
+    throw new MisoUsageError("live parameter edit requires a value");
+  }
+  if (typeof edit.key !== "string") {
+    throw new MisoUsageError("live parameter edit key must be a string");
+  }
+  return {
+    key: edit.key,
+    value: edit.value,
+    options: {
+      channel: edit.channel,
+      smoothingSamples: edit.smoothingSamples,
+    },
+  };
 }
 
 function finite(value: number, name: string, minimum?: number, maximum?: number): number {
@@ -276,8 +353,18 @@ export class EffectEdits<E extends EffectId> {
   parameter<N extends LiveEffectParameterName<E>>(
     name: N,
     value: LiveEffectParameterValue<E, N>,
-    options: LiveEffectParameterOptions<E, N> = {} as LiveEffectParameterOptions<E, N>,
+    options?: LiveEffectParameterOptions<E, N>,
+  ): LaneEdit;
+  parameter(edit: LiveEffectParameterEdit<E>): LaneEdit;
+  parameter<N extends LiveEffectParameterName<E>>(
+    keyOrEdit: string | LiveEffectParameterEdit<E>,
+    value?: unknown,
+    options: RuntimeParameterOptions = {},
   ): LaneEdit {
+    const normalized = normalizeParameterEdit(keyOrEdit, value, options);
+    const name = normalized.key;
+    value = normalized.value;
+    options = normalized.options;
     const descriptor = CATALOG.effects.find((row) => row.id === this.#effectId);
     const row = descriptor?.parameters.find(
       (candidate) => candidate.name === name,
@@ -312,7 +399,7 @@ export class EffectEdits<E extends EffectId> {
         row.maximum ?? undefined,
       );
     }
-    const requestedChannel = options.channel ?? "both";
+    const requestedChannel = runtimeChannel(options.channel);
     if (row.channelPolicyName === "shared" && requestedChannel !== "both") {
       throw new MisoUsageError(`${this.#effectId}.${row.name} is shared and must address both lanes`);
     }
@@ -321,7 +408,7 @@ export class EffectEdits<E extends EffectId> {
       channel: CHANNELS[requestedChannel],
       effectIndex: this.#effectIndex,
       parameterId: row.id,
-      smoothingSamples: smoothing(options),
+      smoothingSamples: runtimeSmoothing(options),
       values: values(scalar),
     });
   }

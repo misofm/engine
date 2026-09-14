@@ -67,6 +67,10 @@ type ConsoleClass = Assert<Exact<typeof barrel.EngineConsole, typeof consoleSurf
 type ConsoleEditsClass =
   Assert<Exact<typeof barrel.ConsoleEdits, typeof consoleSurface.ConsoleEdits>>;
 type ConsoleRackType = Assert<Exact<barrel.ConsoleRack, consoleSurface.ConsoleRack>>;
+type ConsoleLiveParameterEdit = Assert<Exact<
+  barrel.LiveEffectParameterEdit<"miso.compressor">,
+  consoleSurface.LiveEffectParameterEdit<"miso.compressor">
+>>;
 
 // --- core/lattice.ts: everything but the two collided names, which are renamed ------------------
 
@@ -160,6 +164,7 @@ export type BarrelSurfacePins = [
   ConsoleClass,
   ConsoleEditsClass,
   ConsoleRackType,
+  ConsoleLiveParameterEdit,
   LatticePointsFn,
   LatticeResolveStepFn,
   LatticeIndexForDecimalFn,

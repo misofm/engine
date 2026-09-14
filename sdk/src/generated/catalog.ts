@@ -214,6 +214,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 1,
         "name": "polarity_invert",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "perLane",
         "mapping": "boolean",
         "domain": "booleanExact",
@@ -242,6 +244,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 2,
         "name": "trim_db",
+        "unit": 1,
+        "unitName": "db",
         "scope": "perLane",
         "mapping": "decibelAmplitude",
         "domain": "finiteInclusive",
@@ -270,6 +274,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 3,
         "name": "hpf_hz",
+        "unit": 2,
+        "unitName": "hz",
         "scope": "perLane",
         "mapping": "hertz",
         "domain": "disabledOrRateKeyedHertz",
@@ -303,6 +309,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 4,
         "name": "lpf_hz",
+        "unit": 2,
+        "unitName": "hz",
         "scope": "perLane",
         "mapping": "hertz",
         "domain": "disabledOrRateKeyedHertz",
@@ -336,6 +344,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 5,
         "name": "fader_db",
+        "unit": 1,
+        "unitName": "db",
         "scope": "perLane",
         "mapping": "decibelAmplitude",
         "domain": "finiteInclusive",
@@ -364,6 +374,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 6,
         "name": "mute",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "perLane",
         "mapping": "boolean",
         "domain": "booleanExact",
@@ -392,6 +404,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 7,
         "name": "matrix_ll",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "matrixShared",
         "mapping": "linear",
         "domain": "finiteInclusive",
@@ -420,6 +434,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 8,
         "name": "matrix_lr",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "matrixShared",
         "mapping": "linear",
         "domain": "finiteInclusive",
@@ -448,6 +464,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 9,
         "name": "matrix_rl",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "matrixShared",
         "mapping": "linear",
         "domain": "finiteInclusive",
@@ -476,6 +494,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 10,
         "name": "matrix_rr",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "matrixShared",
         "mapping": "linear",
         "domain": "finiteInclusive",
@@ -504,6 +524,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 11,
         "name": "delay_samples",
+        "unit": 4,
+        "unitName": "samples",
         "scope": "perLane",
         "mapping": "linear",
         "domain": "finiteInclusive",
@@ -532,6 +554,8 @@ export const CATALOG = deepFreeze(
       {
         "id": 12,
         "name": "pan",
+        "unit": 5,
+        "unitName": "linear",
         "scope": "perLane",
         "mapping": "linear",
         "domain": "finiteInclusive",

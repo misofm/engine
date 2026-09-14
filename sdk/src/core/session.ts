@@ -121,21 +121,6 @@ const IDENTITY_MATRIX: Matrix2x2 = Object.freeze({ ll: 1, lr: 0, rl: 0, rr: 1 })
  */
 const BUILTIN_STRIP_EFFECT_ID = "strip";
 
-/**
- * Which schema unit token a builtin parameter's automation spans carry.
- *
- * The builtin rows carry a `mapping` rather than the `unitName` the effect rows carry, so the two
- * vocabularies are joined here. Booleans ride the `linear` token, which is what
- * `fixtures/session/v1/builtins-automation.json` writes for `polarity_invert`: the schema's unit
- * set has no boolean member and `linear` is the one that imposes no domain of its own.
- */
-const BUILTIN_UNIT_BY_MAPPING: ReadonlyMap<string, string> = new Map([
-  ["boolean", "linear"],
-  ["decibelAmplitude", "db"],
-  ["hertz", "hz"],
-  ["linear", "linear"],
-]);
-
 function fail(path: string, message: string): never {
   throw new MisoUsageError(`${path}: ${message}`);
 }
@@ -959,11 +944,12 @@ function resolveAutomationTarget(
     if (row.scope !== "perLane" && target.channel !== "both") {
       fail(`${path}.channel`, `${row.name} is one shared value and is addressed as 'both'`);
     }
-    const unit = BUILTIN_UNIT_BY_MAPPING.get(row.mapping);
-    if (unit === undefined) {
-      throw new MisoUsageError(`no schema unit token for builtin mapping ${row.mapping}`);
-    }
-    return { parameterId: row.id, unit, effectId: BUILTIN_STRIP_EFFECT_ID, row: undefined };
+    return {
+      parameterId: row.id,
+      unit: row.unitName,
+      effectId: BUILTIN_STRIP_EFFECT_ID,
+      row: undefined,
+    };
   }
   if (!RACKS.includes(target.rack)) {
     fail(`${path}.rack`, "expected simd1, dynamic, simd2 or builtins");

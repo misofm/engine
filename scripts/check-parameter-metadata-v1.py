@@ -112,7 +112,7 @@ RESPONSE_SCOPES = {"parametricEqCascade", "builtinInputFilterSubtotal"}
 RESPONSE_BYPASSES = {"effectWideIdentityWithSections", "noEffectBypass"}
 
 BUILTIN_PARAMETER_KEYS = {
-    "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
+    "id", "name", "unit", "unitName", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
     "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "step",
 }
 
@@ -250,6 +250,7 @@ def validate(document: dict) -> None:
     require(set(builtins) == {"response", "parameters"}, "builtin keys")
     validate_response(builtins["response"], "builtinInputFilterSubtotal", "noEffectBypass")
     seen_ids: set[int] = set()
+    seen_names: set[str] = set()
     live_names: set[str] = set()
     for parameter in builtins["parameters"]:
         require(set(parameter) == BUILTIN_PARAMETER_KEYS, "builtin parameter keys")
@@ -257,6 +258,9 @@ def validate(document: dict) -> None:
         require(parameter["id"] not in seen_ids, "builtin id uniqueness")
         seen_ids.add(parameter["id"])
         require(isinstance(parameter["name"], str) and parameter["name"], "builtin name")
+        require(parameter["name"] not in seen_names, "builtin name uniqueness")
+        seen_names.add(parameter["name"])
+        require(UNITS.get(parameter["unit"]) == parameter["unitName"], "builtin unit name agrees with value")
         require(parameter["scope"] in BUILTIN_SCOPES, "builtin scope")
         require(parameter["mapping"] in BUILTIN_MAPPINGS, "builtin mapping")
         require(parameter["domain"] in BUILTIN_DOMAINS, "builtin domain")
@@ -330,6 +334,9 @@ def validate(document: dict) -> None:
         require(ids == sorted(ids), "parameter ids ascend")
         require(len(set(ids)) == len(ids), "parameter id uniqueness")
         require(all(value >= 1 for value in ids), "parameter ids are nonzero")
+        names = [parameter["name"] for parameter in effect["parameters"]]
+        require(all(isinstance(name, str) and name for name in names), "parameter names")
+        require(len(set(names)) == len(names), "parameter name uniqueness")
         for parameter in effect["parameters"]:
             validate_effect_parameter(parameter)
         # Issue #278: never absent. The port table is the authority a session's
@@ -638,6 +645,20 @@ def self_test() -> int:
             "a prepared-only builtin claims to be live",
             lambda d: d["builtins"]["parameters"][2].update(liveUpdatable=True),
         ),
+        (
+            "builtin unit name disagrees with value",
+            lambda d: d["builtins"]["parameters"][10].update(unitName="linear"),
+        ),
+        (
+            "builtin key is duplicated",
+            lambda d: d["builtins"]["parameters"][1].update(
+                name=d["builtins"]["parameters"][0]["name"]
+            ),
+        ),
+        (
+            "builtin key is empty",
+            lambda d: d["builtins"]["parameters"][0].update(name=""),
+        ),
         # The two red mutations on the **live-set literal** itself (#210 phase 3). Both are
         # internally consistent -- `liveUpdatable` still follows `updateRate`, the smoothing
         # policy still matches -- so every other rule in `validate` passes them, and only the
@@ -723,6 +744,16 @@ def self_test() -> int:
         (
             "parameter ids descend",
             lambda d: d["effects"][0]["parameters"].reverse(),
+        ),
+        (
+            "effect key is duplicated",
+            lambda d: d["effects"][0]["parameters"][1].update(
+                name=d["effects"][0]["parameters"][0]["name"]
+            ),
+        ),
+        (
+            "effect key is empty",
+            lambda d: d["effects"][0]["parameters"][0].update(name=""),
         ),
         (
             "an automatable effect parameter denies being live",

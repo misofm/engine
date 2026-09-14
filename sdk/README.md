@@ -159,6 +159,16 @@ await console.submit(
     .parameter("threshold", -24, { channel: "both" }),
 );
 
+// The additive object form keeps the catalog name as the parameter key.
+await console.submit(
+  vocal.effect("simd1", 0, "miso.compressor").parameter({
+    key: "threshold",
+    value: -24,
+    channel: "both",
+    smoothingSamples: 64,
+  }),
+);
+
 for (let block = 0; block < blocks; block += 1) {
   for (const source of shape.sources) {
     engine.submitSource({ sourceId: source.id, generation: 1n, startFrame, planes, endOfRegion });
@@ -172,6 +182,11 @@ engine.dispose();
 
 `shape()` is the whole point of boot v1. Nothing in it was parsed out of the document's text, so a
 consumer that reads its rate from it cannot be told 48000 by a fallback that never looked.
+
+Live effect edit `key` values are the catalog's semantic `name` strings, and `value` is already in
+the row's declared `unitName` (for example, compressor `threshold` is in `db`). The object form
+accepts `key`, `value`, `channel`, and `smoothingSamples`; unknown fields are refused before a
+transport call. The positional form remains available for existing callers.
 
 `BootOptions` is five optional keys over the engine's own 64-byte block. Absent means zero means
 *the engine's* default — in particular `maximumMemoryBytes` absent selects the engine's named

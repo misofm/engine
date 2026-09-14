@@ -244,6 +244,29 @@ pub struct BuiltinParameterDescriptor {
     pub lattice: effect_contract::ParameterLattice,
 }
 
+/// Return the schema unit for one builtin parameter.
+///
+/// This is the single authority shared by the persisted lattice adapter and the metadata
+/// generator. The `delay_samples` name exception is intentional: its linear mapping stores a
+/// sample count, while matrix/pan and the other linear builtin values use the unitless linear
+/// vocabulary.
+#[must_use]
+pub fn builtin_parameter_unit(
+    descriptor: &BuiltinParameterDescriptor,
+) -> effect_contract::ParameterUnit {
+    match descriptor.mapping {
+        BuiltinParameterMapping::DecibelAmplitude => effect_contract::ParameterUnit::Db,
+        BuiltinParameterMapping::Hertz => effect_contract::ParameterUnit::Hz,
+        BuiltinParameterMapping::Boolean | BuiltinParameterMapping::Linear => {
+            if descriptor.name == "delay_samples" {
+                effect_contract::ParameterUnit::Samples
+            } else {
+                effect_contract::ParameterUnit::Linear
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinParameterScope {
     PerLane,
@@ -382,7 +405,7 @@ pub fn builtin_parameter_lattice_points(
 ) -> Result<BuiltinLatticePoints, effect_contract::LatticeError> {
     use effect_contract::{
         AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
-        ParameterMapping, ParameterUnit, SmoothingRule, canonical_descriptor_decimal,
+        ParameterMapping, SmoothingRule, canonical_descriptor_decimal,
         parameter_lattice_points_parts,
     };
 
@@ -411,17 +434,7 @@ pub fn builtin_parameter_lattice_points(
             false,
         ),
     };
-    let unit = match descriptor.mapping {
-        BuiltinParameterMapping::DecibelAmplitude => ParameterUnit::Db,
-        BuiltinParameterMapping::Hertz => ParameterUnit::Hz,
-        BuiltinParameterMapping::Boolean | BuiltinParameterMapping::Linear => {
-            if descriptor.name == "delay_samples" {
-                ParameterUnit::Samples
-            } else {
-                ParameterUnit::Linear
-            }
-        }
-    };
+    let unit = builtin_parameter_unit(descriptor);
     let mapping = match descriptor.mapping {
         BuiltinParameterMapping::Boolean => ParameterMapping::Stepped,
         BuiltinParameterMapping::Hertz => ParameterMapping::Logarithmic,

@@ -8,12 +8,97 @@
 //! something that does not exist. For every live builtin parameter the acknowledgement must be
 //! `RESULT_OK`.
 
+use builtins::{BUILTIN_PARAMETER_DESCRIPTORS, builtin_parameter_unit};
 use effect_compiler::launch_native_effect_registry;
+use effect_contract::ParameterUnit;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
     COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
     RESULT_UNSUPPORTED, WebBootOptions,
 };
+
+fn builtin_rows(document: &str) -> Vec<&str> {
+    let builtins_start = document
+        .find("\"builtins\": {")
+        .expect("document names builtins");
+    let effects_start = document[builtins_start..]
+        .find("\"effects\": [")
+        .expect("document closes builtins before effects")
+        + builtins_start;
+    document[builtins_start..effects_start]
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("{ \"id\":") && line.contains("\"scope\":"))
+        .collect()
+}
+
+fn quoted_field<'a>(row: &'a str, field: &str) -> &'a str {
+    let marker = format!("\"{field}\": \"");
+    let start = row
+        .find(&marker)
+        .unwrap_or_else(|| panic!("builtin row names {field}: {row}"))
+        + marker.len();
+    let end = row[start..].find('"').expect("builtin field closes") + start;
+    &row[start..end]
+}
+
+fn unit_name(unit: ParameterUnit) -> &'static str {
+    match unit {
+        ParameterUnit::Db => "db",
+        ParameterUnit::Hz => "hz",
+        ParameterUnit::Milliseconds => "milliseconds",
+        ParameterUnit::Samples => "samples",
+        ParameterUnit::Linear => "linear",
+        ParameterUnit::Ratio => "ratio",
+    }
+}
+
+/// The metadata must carry the same explicit unit authority that the builtin lattice uses.
+///
+/// Red mutations: dropping `unit`/`unitName` makes the row lookup fail, changing delay to linear
+/// makes the fixed semantic anchors fail, and duplicating a name violates the emitted table check.
+#[test]
+fn builtin_metadata_has_authoritative_units_and_unique_keys() {
+    let document = parameter_metadata::render();
+    let rows = builtin_rows(&document);
+    assert_eq!(rows.len(), BUILTIN_PARAMETER_DESCRIPTORS.len());
+
+    let mut names = std::collections::HashSet::new();
+    for row in &rows {
+        let name = quoted_field(row, "name");
+        assert!(!name.is_empty(), "builtin keys are nonempty");
+        assert!(names.insert(name), "builtin keys are unique: {name}");
+    }
+
+    for descriptor in &BUILTIN_PARAMETER_DESCRIPTORS {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(&format!("\"name\": \"{}\"", descriptor.name)))
+            .unwrap_or_else(|| panic!("metadata emits builtin {}", descriptor.name));
+        let expected = match descriptor.name {
+            "hpf_hz" | "lpf_hz" => ParameterUnit::Hz,
+            "trim_db" | "fader_db" => ParameterUnit::Db,
+            "delay_samples" => ParameterUnit::Samples,
+            "polarity_invert" | "mute" | "matrix_ll" | "matrix_lr" | "matrix_rl" | "matrix_rr"
+            | "pan" => ParameterUnit::Linear,
+            name => panic!("unexpected builtin parameter {name}"),
+        };
+        assert_eq!(
+            builtin_parameter_unit(descriptor),
+            expected,
+            "{descriptor:?}"
+        );
+        assert!(
+            row.contains(&format!(
+                "\"unit\": {}, \"unitName\": \"{}\"",
+                expected as u32,
+                unit_name(expected)
+            )),
+            "{} carries its explicit unit",
+            descriptor.name
+        );
+    }
+}
 
 /// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
 fn session_with_every_effect(effects: &[&str]) -> String {
