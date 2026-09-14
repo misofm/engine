@@ -93,3 +93,27 @@ notification list, already populated by automatic and manual pump publications,
 and remove redundant copied/manual-deduplicated collection. Keep all existing
 run.mjs predicates and tolerances unchanged. No SDK, DSP or package bytes change;
 source attempt-2 numerical acceptance stands, required CI remains pending.
+
+## Corrected SDK 0.2.6 published and verified
+
+PR #802 merged source `cdf629d6bfd0224b3532dd0abd04b9581240da56`; required
+PR qualification 34803929416 and exact-main qualification 34804388382 PASS.
+Qualification 34804755779 built and preserved one immutable 0.2.6 archive.
+Original OIDC publish 34804976202 accepted/signed the package; its 60-second
+registry-convergence check timed out while npm processed it. No republish occurred.
+After registry convergence, verify-only 34805198433 PASS using the same qualified
+archive. Registry public version/latest are 0.2.6 and downloaded bytes match exactly.
+
+Archive SHA256: `8219178d591c76d820d7ad2e2f7b894fe7f39185f89667f59c675fad603b81eb`.
+SHA1: `35569fbe5fb61626abca04b64d93b852b5b38748`.
+Integrity: `sha512-IL3x8280+G75SlLxeznUwFwIve+uoHgf5OVXNid+PTsZneJX/k94rXGWhBTYwutCaWiLQf6N0cr9ZEH7AaTZ3g==`.
+Accepted Wasm SHA256 remains
+`c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
+Fresh Astra MEDIUM independently verified fresh public imports, strict types,
+CLI 0.2.6, npm 11.19.0 signatures and verified SLSA DSSE binding the exact PURL,
+archive SHA512, trusted engine workflow/main source and original invocation
+`34804976202/attempts/1`. Report `/tmp/miso-801-verifier/registry026-verdict.md`;
+machine acceptance/provenance/signatures and registry archive are preserved
+beside it. Source/candidate/package/registry acceptance is PASS.
+Adapter #95 now adopts exact SDK 0.2.6 in its separate immutable patch before
+app #210 final adoption and deployment. Prior 0.2.5 evidence is retained.
