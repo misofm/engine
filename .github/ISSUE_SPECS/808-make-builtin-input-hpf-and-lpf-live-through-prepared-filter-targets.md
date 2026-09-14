@@ -201,3 +201,21 @@ queue checks, existing 10,000-case compiler mutation transcript and allocation
 tracker checks, strict relevant clippy, native/Wasm compiler checks. No new queue,
 scheduler, benchmark or test framework. Shared host preparation/admission and SDK
 closure remain; #808 remains attempt1/open.
+
+
+### Tranche2 stateless preparation checkpoint
+
+The shared host-core facade now validates four-value builtin seeds and every
+original edit in order, supports atomic pairs, emits only touched final sections
+and coalesces Both only for identical whole pairs/words. Admission can reuse its
+semantic-only edit operation without invoking the designer. The existing helper
+workspace grows its request buffer to4144bytes and retains the944-byte result
+buffer. Only input_filters_prepare is added; lifecycle, pointers and diagnostics
+reuse the existing exports. The builtin result uses four values and the frozen
+12-word target layout; refusal preserves the previous valid result.
+
+PASS: four focused host-core checks, three host-web workspace checks, native/Wasm
+checks and strict relevant library clippy. Root maps unsupported builtin selectors
+to malformed as required by the command-shape contract. Public metadata remains
+prepared-only. Next: committed/candidate shadows and shared mixed-batch admission,
+then the existing helper/SDK integration. No release or whole-issue PASS yet.

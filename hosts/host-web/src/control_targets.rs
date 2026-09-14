@@ -2,11 +2,14 @@
 
 #![allow(missing_docs)]
 
+use builtins::{BuiltinLaneSelector, PreparedInputFilterTarget};
 use core::{cell::RefCell, mem::size_of};
 use effect_contract::ParameterChannel;
 use host_core::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
-    EqTargetPreparerError,
+    EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
+    INPUT_FILTER_VALUE_COUNT, InputFilterEdit, InputFilterEditErrorKind, InputFilterPreparer,
+    InputFilterPreparerError,
 };
 
 pub const EQ_TARGET_REQUEST_HEADER_BYTES: usize = 32;
@@ -18,6 +21,18 @@ pub const EQ_TARGET_TARGET_BYTES: usize = 56;
 pub const EQ_TARGET_RESULT_CAPACITY: usize = EQ_TARGET_RESULT_HEADER_BYTES
     + EQ_VALUE_COUNT * 4
     + EQ_TARGET_CAPACITY * EQ_TARGET_TARGET_BYTES;
+pub const INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES: usize = 32;
+pub const INPUT_FILTER_EDIT_BYTES: usize = 16;
+pub const INPUT_FILTER_TARGET_REQUEST_CAPACITY: usize = INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES
+    + INPUT_FILTER_VALUE_COUNT * 4
+    + INPUT_FILTER_EDIT_CAPACITY * INPUT_FILTER_EDIT_BYTES;
+/// The one shared request buffer accommodates both EQ and builtin target preparation.
+pub const TARGET_REQUEST_CAPACITY: usize =
+    if EQ_TARGET_REQUEST_CAPACITY > INPUT_FILTER_TARGET_REQUEST_CAPACITY {
+        EQ_TARGET_REQUEST_CAPACITY
+    } else {
+        INPUT_FILTER_TARGET_REQUEST_CAPACITY
+    };
 pub const PREPARED_EFFECT_COMPANION_CAPACITY: usize = size_of::<WebPreparedEffectCompanionHeader>()
     + 2 * crate::MAXIMUM_COMMAND_RECORDS as usize * size_of::<WebPreparedEffectCompanionRecord>();
 
@@ -47,6 +62,7 @@ const _: () = {
     assert!(size_of::<WebPreparedEffectCompanionHeader>() == 24);
     assert!(size_of::<WebPreparedEffectCompanionRecord>() == 80);
     assert!(size_of::<WebEqTargetConfig>() == 272);
+    assert!(size_of::<WebInputFilterEdit>() == INPUT_FILTER_EDIT_BYTES);
 };
 
 #[repr(C)]
@@ -66,6 +82,15 @@ pub struct WebEqTargetEdit {
     pub parameter_id: u32,
     pub channel: u32,
     pub value: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct WebInputFilterEdit {
+    pub parameter_id: u32,
+    pub channel: u32,
+    pub value0: f32,
+    pub value1: f32,
 }
 
 #[repr(C)]
@@ -136,10 +161,11 @@ impl Default for WebEqTargetConfig {
 }
 
 pub struct EqTargetWorkspace {
-    pub request: [u8; EQ_TARGET_REQUEST_CAPACITY],
+    pub request: [u8; TARGET_REQUEST_CAPACITY],
     pub result: [u8; EQ_TARGET_RESULT_CAPACITY],
     pub result_bytes: usize,
     pub preparer: EqTargetPreparer,
+    pub input_filter_preparer: InputFilterPreparer,
     pub rejected_edit_index: u32,
     pub rejected_reason: u32,
 }
@@ -147,10 +173,11 @@ pub struct EqTargetWorkspace {
 impl EqTargetWorkspace {
     fn new(preparer: EqTargetPreparer) -> Self {
         Self {
-            request: [0; EQ_TARGET_REQUEST_CAPACITY],
+            request: [0; TARGET_REQUEST_CAPACITY],
             result: [0; EQ_TARGET_RESULT_CAPACITY],
             result_bytes: 0,
             preparer,
+            input_filter_preparer: InputFilterPreparer,
             rejected_edit_index: u32::MAX,
             rejected_reason: crate::COMMAND_REASON_NONE,
         }
@@ -222,7 +249,7 @@ pub fn request_ptr() -> u32 {
 pub fn request_capacity() -> u32 {
     WORKSPACE.with(|slot| {
         if slot.try_borrow().is_ok_and(|workspace| workspace.is_some()) {
-            EQ_TARGET_REQUEST_CAPACITY as u32
+            TARGET_REQUEST_CAPACITY as u32
         } else {
             0
         }
@@ -282,6 +309,58 @@ fn preparation_refusal(error: EqTargetPreparerError) -> (u32, u32) {
         crate::RESULT_INVALID_ARGUMENT
     };
     (result, reason)
+}
+
+fn input_filter_request_header(request: &[u8]) -> Result<(u32, u32), u32> {
+    if request.len() < INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES {
+        return Err(crate::RESULT_INVALID_ARGUMENT);
+    }
+    let struct_size = get_u32(request, 0).ok_or(crate::RESULT_INVALID_ARGUMENT)?;
+    let version = get_u32(request, 4).ok_or(crate::RESULT_INVALID_ARGUMENT)?;
+    let rate = get_u32(request, 8).ok_or(crate::RESULT_INVALID_ARGUMENT)?;
+    let seeds = get_u32(request, 12).ok_or(crate::RESULT_INVALID_ARGUMENT)?;
+    let edits = get_u32(request, 16).ok_or(crate::RESULT_INVALID_ARGUMENT)?;
+    if struct_size as usize != INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES
+        || version != crate::ABI_VERSION
+        || seeds as usize != INPUT_FILTER_VALUE_COUNT
+        || edits as usize > INPUT_FILTER_EDIT_CAPACITY
+        || request[20..32].iter().any(|byte| *byte != 0)
+    {
+        return Err(crate::RESULT_INVALID_ARGUMENT);
+    }
+    let exact = INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES
+        + INPUT_FILTER_VALUE_COUNT * 4
+        + edits as usize * INPUT_FILTER_EDIT_BYTES;
+    if exact != request.len() {
+        return Err(if exact > request.len() {
+            crate::RESULT_BUFFER_TOO_SMALL
+        } else {
+            crate::RESULT_INVALID_ARGUMENT
+        });
+    }
+    Ok((rate, edits))
+}
+
+fn input_filter_preparation_refusal(error: InputFilterPreparerError) -> (u32, u32) {
+    let reason = match error {
+        InputFilterPreparerError::Edit {
+            kind: InputFilterEditErrorKind::Parameter,
+            ..
+        } => crate::COMMAND_REASON_MALFORMED,
+        InputFilterPreparerError::Edit {
+            kind: InputFilterEditErrorKind::Domain,
+            ..
+        }
+        | InputFilterPreparerError::Domain => crate::COMMAND_REASON_DOMAIN,
+        InputFilterPreparerError::Edit {
+            kind: InputFilterEditErrorKind::Shape,
+            ..
+        }
+        | InputFilterPreparerError::Rate
+        | InputFilterPreparerError::Shape
+        | InputFilterPreparerError::Design => crate::COMMAND_REASON_MALFORMED,
+    };
+    (crate::RESULT_INVALID_ARGUMENT, reason)
 }
 
 pub fn prepare(request_bytes: u32) -> u32 {
@@ -390,6 +469,142 @@ pub fn prepare(request_bytes: u32) -> u32 {
     })
 }
 
+/// Prepare the staged builtin input-filter request in the same shared workspace as EQ.
+pub fn input_filter_prepare(request_bytes: u32) -> u32 {
+    WORKSPACE.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return crate::RESULT_INTERNAL;
+        };
+        let Some(workspace) = slot.as_deref_mut() else {
+            return crate::RESULT_WRONG_STATE;
+        };
+        workspace.rejected_edit_index = u32::MAX;
+        workspace.rejected_reason = crate::COMMAND_REASON_MALFORMED;
+        if request_bytes as usize > workspace.request.len() {
+            return crate::RESULT_BUFFER_TOO_SMALL;
+        }
+        let request = &workspace.request[..request_bytes as usize];
+        let (rate, edit_count) = match input_filter_request_header(request) {
+            Ok(header) => header,
+            Err(result) => return result,
+        };
+        let mut seeds = [0.0_f32; INPUT_FILTER_VALUE_COUNT];
+        for (index, seed) in seeds.iter_mut().enumerate() {
+            let Some(value) = get_f32(
+                request,
+                INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES + index * 4,
+            ) else {
+                return crate::RESULT_INVALID_ARGUMENT;
+            };
+            *seed = value;
+        }
+        let mut edits = [InputFilterEdit {
+            parameter_id: 0,
+            channel: ParameterChannel::Both,
+            value0: 0.0,
+            value1: 0.0,
+        }; INPUT_FILTER_EDIT_CAPACITY];
+        for (index, edit) in edits.iter_mut().enumerate().take(edit_count as usize) {
+            let offset = INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES
+                + INPUT_FILTER_VALUE_COUNT * 4
+                + index * INPUT_FILTER_EDIT_BYTES;
+            let (Some(parameter_id), Some(channel), Some(value0), Some(value1)) = (
+                get_u32(request, offset),
+                get_u32(request, offset + 4),
+                get_f32(request, offset + 8),
+                get_f32(request, offset + 12),
+            ) else {
+                return crate::RESULT_INVALID_ARGUMENT;
+            };
+            let Some(channel) = (match channel {
+                0 => Some(ParameterChannel::Left),
+                1 => Some(ParameterChannel::Right),
+                2 => Some(ParameterChannel::Both),
+                _ => None,
+            }) else {
+                workspace.rejected_edit_index = index as u32;
+                workspace.rejected_reason = crate::COMMAND_REASON_MALFORMED;
+                return crate::RESULT_INVALID_ARGUMENT;
+            };
+            *edit = InputFilterEdit {
+                parameter_id,
+                channel,
+                value0,
+                value1,
+            };
+        }
+        let mut targets = [PreparedInputFilterTarget {
+            lanes: BuiltinLaneSelector::Both,
+            section: 0,
+            pair: [0.0; 2],
+            coefficients: [0.0; 6],
+        }; INPUT_FILTER_TARGET_CAPACITY];
+        let (values, count) = match workspace.input_filter_preparer.prepare(
+            rate,
+            &seeds,
+            &edits[..edit_count as usize],
+            &mut targets,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                workspace.rejected_edit_index = error.index();
+                let (result, reason) = input_filter_preparation_refusal(error);
+                workspace.rejected_reason = reason;
+                return result;
+            }
+        };
+        let mut output = [0_u8; EQ_TARGET_RESULT_CAPACITY];
+        put_u32(&mut output, 0, EQ_TARGET_RESULT_HEADER_BYTES as u32);
+        put_u32(&mut output, 4, crate::ABI_VERSION);
+        put_u32(&mut output, 8, INPUT_FILTER_VALUE_COUNT as u32);
+        put_u32(&mut output, 12, count as u32);
+        // The shared EQ factory remains the one retained allocation for this workspace.
+        let factory_bytes = workspace.preparer.factory_allocation_bytes();
+        let workspace_bytes = size_of::<EqTargetWorkspace>() + factory_bytes;
+        put_u64(&mut output, 16, workspace_bytes as u64);
+        put_u64(
+            &mut output,
+            24,
+            size_of::<EqTargetWorkspace>().max(factory_bytes) as u64,
+        );
+        for (index, value) in values.iter().copied().enumerate() {
+            put_u32(
+                &mut output,
+                EQ_TARGET_RESULT_HEADER_BYTES + index * 4,
+                value.to_bits(),
+            );
+        }
+        for (index, target) in targets[..count].iter().enumerate() {
+            let offset = EQ_TARGET_RESULT_HEADER_BYTES
+                + INPUT_FILTER_VALUE_COUNT * 4
+                + index * EQ_TARGET_TARGET_BYTES;
+            put_u32(&mut output, offset, target.section);
+            put_u32(
+                &mut output,
+                offset + 4,
+                match target.lanes {
+                    BuiltinLaneSelector::Left => 0,
+                    BuiltinLaneSelector::Right => 1,
+                    BuiltinLaneSelector::Both => 2,
+                },
+            );
+            put_u32(&mut output, offset + 8, target.pair[0].to_bits());
+            put_u32(&mut output, offset + 12, target.pair[1].to_bits());
+            // Words 2..5 are reserved and remain zero in the shared 12-word record.
+            for (word, value) in target.coefficients.iter().copied().enumerate() {
+                put_u32(&mut output, offset + 8 + (word + 6) * 4, value.to_bits());
+            }
+        }
+        let result_bytes = EQ_TARGET_RESULT_HEADER_BYTES
+            + INPUT_FILTER_VALUE_COUNT * 4
+            + count * EQ_TARGET_TARGET_BYTES;
+        workspace.result[..result_bytes].copy_from_slice(&output[..result_bytes]);
+        workspace.result_bytes = result_bytes;
+        workspace.rejected_reason = crate::COMMAND_REASON_NONE;
+        crate::RESULT_OK
+    })
+}
+
 pub fn result_ptr() -> u32 {
     WORKSPACE.with(|slot| {
         slot.try_borrow()
@@ -487,7 +702,7 @@ mod tests {
         assert_eq!(size_of::<WebPreparedEffectCompanionRecord>(), 80);
         assert_eq!(size_of::<WebEqTargetConfig>(), 272);
         assert_eq!(open(), crate::RESULT_OK);
-        assert_eq!(request_capacity(), EQ_TARGET_REQUEST_CAPACITY as u32);
+        assert_eq!(request_capacity(), TARGET_REQUEST_CAPACITY as u32);
         WORKSPACE.with(|slot| {
             let mut slot = slot.borrow_mut();
             let workspace = slot.as_deref_mut().expect("opened workspace");
@@ -523,5 +738,103 @@ mod tests {
         assert_eq!(close(), crate::RESULT_OK);
         assert_eq!(request_ptr(), 0);
         assert_eq!(close(), crate::RESULT_WRONG_STATE);
+    }
+
+    #[test]
+    fn production_capability_prepares_builtin_filters_and_preserves_last_result_on_refusal() {
+        assert_eq!(open(), crate::RESULT_OK);
+        let request_bytes = INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES
+            + INPUT_FILTER_VALUE_COUNT * 4
+            + INPUT_FILTER_EDIT_BYTES;
+        WORKSPACE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let workspace = slot.as_deref_mut().expect("opened workspace");
+            workspace.request.fill(0);
+            put_u32(
+                &mut workspace.request,
+                0,
+                INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES as u32,
+            );
+            put_u32(&mut workspace.request, 4, crate::ABI_VERSION);
+            put_u32(&mut workspace.request, 8, 48_000);
+            put_u32(&mut workspace.request, 12, INPUT_FILTER_VALUE_COUNT as u32);
+            put_u32(&mut workspace.request, 16, 1);
+            for (index, value) in [100.0_f32, 1_000.0, 100.0, 1_000.0].into_iter().enumerate() {
+                put_u32(
+                    &mut workspace.request,
+                    INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES + index * 4,
+                    value.to_bits(),
+                );
+            }
+            let edit_offset =
+                INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES + INPUT_FILTER_VALUE_COUNT * 4;
+            put_u32(&mut workspace.request, edit_offset, 0);
+            put_u32(&mut workspace.request, edit_offset + 4, 2);
+            put_u32(&mut workspace.request, edit_offset + 8, 300.0_f32.to_bits());
+            put_u32(
+                &mut workspace.request,
+                edit_offset + 12,
+                2_000.0_f32.to_bits(),
+            );
+        });
+        assert_eq!(input_filter_prepare(request_bytes as u32), crate::RESULT_OK);
+        assert_eq!(result_bytes(), 48 + 2 * EQ_TARGET_TARGET_BYTES as u32);
+        assert_eq!(rejected_edit_index(), u32::MAX);
+        assert_eq!(rejected_reason(), crate::COMMAND_REASON_NONE);
+        WORKSPACE.with(|slot| {
+            let slot = slot.borrow();
+            let workspace = slot.as_ref().expect("opened workspace");
+            for (section, offset) in [(0, 48), (1, 104)] {
+                assert_eq!(get_u32(&workspace.result, offset).unwrap(), section);
+                assert_eq!(get_u32(&workspace.result, offset + 4).unwrap(), 2);
+                assert_eq!(
+                    get_u32(&workspace.result, offset + 8).unwrap(),
+                    300.0_f32.to_bits()
+                );
+                assert_eq!(
+                    get_u32(&workspace.result, offset + 12).unwrap(),
+                    2_000.0_f32.to_bits()
+                );
+                for word in 2..6 {
+                    assert_eq!(
+                        get_u32(&workspace.result, offset + 8 + word * 4).unwrap(),
+                        0
+                    );
+                }
+                assert_ne!(get_u32(&workspace.result, offset + 32).unwrap(), 0);
+            }
+        });
+        let before = WORKSPACE.with(|slot| {
+            let slot = slot.borrow();
+            let workspace = slot.as_ref().expect("opened workspace");
+            let mut result = [0_u8; 160];
+            result.copy_from_slice(&workspace.result[..160]);
+            result
+        });
+        WORKSPACE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let workspace = slot.as_deref_mut().expect("opened workspace");
+            let edit_offset =
+                INPUT_FILTER_TARGET_REQUEST_HEADER_BYTES + INPUT_FILTER_VALUE_COUNT * 4;
+            put_u32(&mut workspace.request, edit_offset, 3);
+            put_u32(
+                &mut workspace.request,
+                edit_offset + 8,
+                2_000.0_f32.to_bits(),
+            );
+            put_u32(&mut workspace.request, edit_offset + 12, 0);
+        });
+        assert_eq!(
+            input_filter_prepare(request_bytes as u32),
+            crate::RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(rejected_edit_index(), 0);
+        assert_eq!(rejected_reason(), crate::COMMAND_REASON_DOMAIN);
+        WORKSPACE.with(|slot| {
+            let slot = slot.borrow();
+            let workspace = slot.as_ref().expect("opened workspace");
+            assert_eq!(&workspace.result[..160], &before);
+        });
+        assert_eq!(close(), crate::RESULT_OK);
     }
 }

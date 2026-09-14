@@ -3326,6 +3326,12 @@ pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
     crate::control_targets::close()
 }
 
+/// Prepare the staged builtin input-filter target request.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_input_filters_prepare(request_bytes: u32) -> u32 {
+    crate::control_targets::input_filter_prepare(request_bytes)
+}
+
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {

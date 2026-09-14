@@ -3,6 +3,30 @@
 **Issue**: #210 (owner ruling, adopted by the coordinator 2026-08-27), implementing #178's schema
 half. **Landed**: phase 3.
 
+**#808 amendment, DSP/queue checkpoint:** #804 supplies the workload that reopens
+the HPF/LPF tier. Fixed12dB/oct Butterworth filters are the accepted slice; #191
+variable slopes remain separate. The native owner and existing input queues now
+apply off-render prepared targets with a fixed64-update coefficient ramp. Public
+metadata/SDK activation remains pending host admission and shipped-client closure.
+The historical phase3 tiering below describes the original decision; this amendment
+supersedes its requirement to deliver slope changes together with liveness.
+
+`refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and
+forces in-flight sections non-elidable. Retarget, completion, reset, evidence state
+writes and integrator restoration use that authority. SampleA uses current words;
+sampleA+64 uses the exact target. Disabled completion clears only the addressed
+integrators before the first identity sample. Settled all-disabled filters execute
+no SVF recurrences even during trim/polarity ramps; trim timing, sanitization and
+signed-zero normalization remain unchanged. Mixed banks keep the existing fallback.
+
+The symmetry read surface includes current/target/step/countdown filter words. Mono
+processing mirrors the ramp state after each block; disengagement restores only
+integrators, preserving newly admitted asymmetric targets. Frozen input drains
+apply the same Left/Right/Both LIVE-latch rules as trim. Live-capable compiled inputs
+retain a conservative Infinite tail even if initially disabled; plain disabled
+inputs without console control retain FiniteZero. Storage and actual input work
+remain accounted for. Session automation syntax does not imply a render feed.
+
 **Class**: a *design* ruling -- what is live, at what price, and what the decision drags with it --
 rather than the null optimization measurement this directory's README describes. It is filed here
 for the same reason `fast-db-tier-boundaries.md` and `multiband-ramping-split-boundary.md` are: it
