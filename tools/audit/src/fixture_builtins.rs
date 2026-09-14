@@ -322,7 +322,7 @@ struct ReferenceMeter {
 // These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi`
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES: u64 = 72;
-const BOXED_INPUT_ENTRY_BYTES: u64 = 288;
+const BOXED_INPUT_ENTRY_BYTES: u64 = 704;
 const BOXED_TAIL_ENTRY_BYTES: u64 = 24;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
@@ -331,7 +331,8 @@ const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 ///
 /// It is no longer *boxed* at preparation -- the section rides `STRIP_PREPARATION_BYTES` -- but
 /// the size is still pinned here because the bank-input table below is an entry of it.
-const INPUT_PROCESSOR_BYTES: u64 = 272;
+// #808: +288 target/step/initial coefficient bytes and +128 countdown bytes.
+const INPUT_PROCESSOR_BYTES: u64 = 688;
 /// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
 /// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
 /// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
@@ -345,7 +346,8 @@ const INPUT_PROCESSOR_BYTES: u64 = 272;
 /// which observes every phase-two allocation through a global allocator and requires the reported
 /// grid to match it exactly -- so a drift here shows up there, on the same three track counts this
 /// projection uses.
-const STRIP_PREPARATION_BYTES: u64 = 656;
+// #808 retains the same additional 416-byte input state inline.
+const STRIP_PREPARATION_BYTES: u64 = 1072;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 const GRAPH_OBSERVER_BINDING_BYTES: u64 = 80;
@@ -5243,7 +5245,7 @@ mod tests {
             // payload lengths and every render-bearing fixture remain unchanged.
             // Re-pinned by issue #519: the metric-selection field grows `MeterAccumulator` by 8
             // bytes after alignment while `MeterSnapshot` remains 160 by using existing padding.
-            "436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0",
+            "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3",
             "accepted joined-corpus manifest identity"
         );
 

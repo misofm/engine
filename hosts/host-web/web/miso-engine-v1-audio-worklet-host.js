@@ -200,12 +200,12 @@ const COMMAND_FIELDS = [
 ];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #210
 // phase 1 added kind 9, solo-in-place; phase 3 added kinds 10 and 11, the live input trim and
-// polarity invert.
+// polarity invert; issue #808 adds kind 12, a live prepared input-filter pair.
 //
-// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 11`. It is one of
+// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 12`. It is one of
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 const NOT_APPLICABLE = 255;
 
 function validCommand(command) {
@@ -777,7 +777,7 @@ class MisoAudioWorkletHost {
       || (validCommandReason(message.reason)
         && message.config instanceof Uint8Array
         && message.config.buffer instanceof ArrayBuffer
-        && ((message.result === RESULT_OK && message.config.byteLength === 272)
+        && ((message.result === RESULT_OK && message.config.byteLength === pending.configBytes)
           || (message.result !== RESULT_OK && message.config.byteLength === 0)));
     const validSessionMap = pending.response !== "sessionMap" || (
       message.result === RESULT_OK && Array.isArray(message.tracks)
@@ -945,6 +945,7 @@ class MisoAudioWorkletHost {
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
+        configBytes: stamped.rack === 255 && stamped.effectIndex === 0 ? 48 : 272,
         spectrumOperation: stamped.operation,
         spectrumBuffer: stamped.buffer,
         spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,

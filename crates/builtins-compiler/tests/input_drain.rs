@@ -13,7 +13,7 @@
 //! the witness, and it cannot go stale against the drain because the drain has no second opinion
 //! to hold.
 
-use builtins::BuiltinLaneSelector;
+use builtins::{BuiltinLaneSelector, prepare_input_filter_pair};
 use builtins_compiler::TrackInputRecord;
 use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
 
@@ -31,6 +31,21 @@ fn polarity(lanes: BuiltinLaneSelector) -> TrackInputRecord {
         inverted: true,
         smoothing_samples: 64,
     }
+}
+
+fn prepared_filter(lanes: BuiltinLaneSelector) -> TrackInputRecord {
+    let prepared = prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
+    TrackInputRecord::PreparedFilter {
+        target: builtins::PreparedInputFilterTarget {
+            lanes,
+            ..prepared.targets[0]
+        },
+    }
+}
+
+#[test]
+fn prepared_filter_record_stays_within_the_frozen_queue_slot_bound() {
+    assert!(core::mem::size_of::<TrackInputRecord>() <= 64);
 }
 
 /// The input chain is upstream of the fader/matrix seam, so every record on this queue gates the
@@ -58,6 +73,7 @@ fn a_per_lane_record_desymmetrizes_and_a_both_record_preserves() {
     for build in [
         trim as fn(BuiltinLaneSelector) -> TrackInputRecord,
         polarity,
+        prepared_filter,
     ] {
         for (lanes, expected) in [
             (BuiltinLaneSelector::Left, SymmetryEvent::Desymmetrize),

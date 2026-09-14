@@ -137,3 +137,286 @@ These are narrow bridge/wording clarifications, not a prerequisite framework exp
 ## Decision and evidence record
 
 Astra XHIGH scope: ready for root's numbered issue brief. Implementation attempt1 and Astra MEDIUM verdict pending. Existing TPT equations, numerical corpus and primary citations remain the DSP authority; this child adds coefficient-ramp scheduling, owner admission and associated response truthfulness. Record observed listening only; do not invent listening evidence. Root records actual checkpoints, focused gates, reviewed verdict and remote issue synchronization before claiming delivery.
+
+
+### Execution start, 2026-09-14
+
+Root accepts the frozen Astra XHIGH scope and its three bounded sequential Luna
+tranches. Attempt1 starts from accepted EQ checkpoint1b81f56a in isolated
+`codex/808-live-input-filters`; #807 is PASS/closed and PR#811 is awaiting required
+CI/merge. Its implementation is frozen, so #808 is the sole active feature WIP.
+Merge the delivered EQ main lineage before final builtin qualification/PR.
+
+Boundary audit found all414 numbered local specs represented among518 GitHub issues;
+#804/#808/#809 remain open and #805/#807 are closed. #808's number/title match.
+The current command vocabulary ends at polarityInvert11: inputFilters12 is free.
+Start only tranche1 builtin preparation/ramp/identity behavior. Keep public metadata
+prepared-only until queue/host/SDK closure. Reuse existing fixtures and counters,
+run no benchmark, and checkpoint focused-green work before adding another tranche.
+
+
+### Tranche1 initial DSP checkpoint — implementation continues
+
+Luna implemented the pure builtin pair preparer/validator, fixed64 coefficient-ramp
+state and kernels, disabled endpoint clearing, plan/symmetry/reset integration,
+target response snapshots, and all-identity trim-ramp bodies. Existing builtin tests,
+lane input-chain elision tests and the builtin Wasm check pass; four focused new
+fixtures cover launch-rate preparation, first-sample/target response, trim finiteness
+and symmetric bank mono/dual PCM. Public metadata remains prepared-only.
+
+Root found two concrete gaps before queue wiring: bank target application currently
+updates every SIMD member instead of taking one lane address, and target validation
+must associate exact identity with that section's zero cutoff. Correct these in the
+same bounded tranche before proceeding; preserve padding and unrelated ramps.
+Representative endpoint/partition, asymmetric lane, disable/reset and identity-body
+mechanism checks also remain before the tranche is complete. This is a buildable
+recovery checkpoint, not tranche completion or a whole-issue adversarial verdict.
+No benchmark or new framework was introduced; #808 remains attempt1/open.
+
+
+### Tranche1 completion checkpoint
+
+The bank setter now addresses one populated lane and preserves neighboring and padding
+ramps. Target validation requires exact identity iff the addressed cutoff is +0,
+rejects -0 and inconsistent pairs, and retains the fixed numerical safety bound.
+Focused gates cover exact endpoints/partitioning, retarget/disable/reset, launch-rate
+maximum successors, bank isolation and the actual identity trim-body dispatch.
+Builtin and lane tests, strict relevant clippy and Wasm checks pass. No timing run
+or new evidence framework was added. Public metadata remains prepared-only pending
+host/SDK closure; this completes DSP tranche1, not issue #808.
+
+
+### Tranche2 queue/compiler checkpoint
+
+PreparedFilter now travels through the existing scalar/bank input queues, whose
+drains freeze available-at-entry counts. Its 40-byte record remains within the
+64-byte bound; actual slot accounting and the existing mutation transcript reflect
+the growth. A first asymmetric filter target reaches the real bank collapse/dual
+comparison without being overwritten during disengage. Scalar Both preserves the
+witness. Live-console inputs declare Infinite tail; plain disabled inputs remain
+FiniteZero, and direct runtime queries account for in-flight ramps.
+
+PASS: nine builtin filter fixtures, six input-drain fixtures, actual bank/scalar
+queue checks, existing 10,000-case compiler mutation transcript and allocation
+tracker checks, strict relevant clippy, native/Wasm compiler checks. No new queue,
+scheduler, benchmark or test framework. Shared host preparation/admission and SDK
+closure remain; #808 remains attempt1/open.
+
+
+### Tranche2 stateless preparation checkpoint
+
+The shared host-core facade now validates four-value builtin seeds and every
+original edit in order, supports atomic pairs, emits only touched final sections
+and coalesces Both only for identical whole pairs/words. Admission can reuse its
+semantic-only edit operation without invoking the designer. The existing helper
+workspace grows its request buffer to4144bytes and retains the944-byte result
+buffer. Only input_filters_prepare is added; lifecycle, pointers and diagnostics
+reuse the existing exports. The builtin result uses four values and the frozen
+12-word target layout; refusal preserves the previous valid result.
+
+PASS: four focused host-core checks, three host-web workspace checks, native/Wasm
+checks and strict relevant library clippy. Root maps unsupported builtin selectors
+to malformed as required by the command-shape contract. Public metadata remains
+prepared-only. Next: committed/candidate shadows and shared mixed-batch admission,
+then the existing helper/SDK integration. No release or whole-issue PASS yet.
+
+The private builtin unit designer counter records calls at SvfSection::design: real
+off-thread pair preparation is positive, while scalar/bank target application,
+rendering, mono disengagement and cached reset paths record zero. Its focused gate
+passes. This adds no production API or instrumentation feature; actual host batch
+allocation/refusal gates and the shipped callback call graph remain for closure.
+
+
+### Tranche2 host admission checkpoint
+
+Command12 and the builtin `(track,255,0)` owner now use the existing shared
+transaction. Four-value committed/candidate shadows are seeded from normalized
+track builtins and charged in the host report. Every original transition is
+validated without design; final targets must match generation/revision, complete
+pair, touched sections and numerical safety before all destination capacities are
+checked. Publication precedes all shadow commits and the original-count/sample ACK.
+The new input_filters_config_copy export writes48bytes into the existing272-byte
+config scratch and reuses its existing pointer. No additional workspace lifecycle.
+
+PASS: host-web feature tests104passed/two existing ignored, including mixed
+EQ+builtin+fader success/refusal, builtin late-invalid/stale/unrelated-full-queue
+rollback, actual zero-allocation admission/render and actual shadow accounting.
+Wasm check passed. Root fixed two iterator-style clippy findings; strict host-web
+lib/tests clippy and six focused prepared-owner tests pass afterward.
+
+Public metadata, shared helper adapter, SDK methods and shipped-artifact parity
+remain. Final closure must also exercise malformed builtin companion coverage and
+the generated/shipped command vocabulary. This is not a whole-issue PASS or release.
+
+The existing builtin atomicity test now also mutates a valid companion to remove a
+section, duplicate/overlap a target, inject unsafe coefficients and set reserved
+words. All four refuse with zero admitted records, unchanged committed shadow and
+revision, and untouched queue counters. The focused host test passes.
+
+
+### Tranche3 metadata and SDK authoring checkpoint
+
+IDs3/4 now declare BlockTarget, Linear64CoefficientUpdates and
+KeepTargetResetCurrent, matching the implemented host/scalar/bank path. Session
+automation syntax accepts them while still declaring that it has no render feed.
+Command12, the two additive exports, the16-byte input edit and48-byte builtin
+config are represented in generated metadata/ABI assets. SDK TrackEdits adds
+hpfHz, lpfHz and inputFilters; the pair produces one LaneEdit and uses the generated
+builtin domains/Hz metadata. Existing numeric builtin conventions are preserved.
+
+PASS: builtin contract/filter fixtures, automation-target cross-check, SDK type
+check and generated/assets checks, command vocabulary and metadata/ABI self-tests.
+Root completed strict lib/tests clippy for builtins, session, parameter-metadata and
+host-web; session library tests6passed/two existing ignored. Runtime SDK tests were
+not run against an old artifact: shared-helper integration and a rebuilt shipped
+module remain next. No release version or artifact pin changed in this checkpoint.
+
+Root integration checkpoint: rebuilt the frozen Rust Wasm with the pinned builder;
+SHA256 `42f4991252a25fde3b57df5352a1d6acc5094b97aa4d031662e72cc66beb332b`.
+The artifact export gate now includes exactly the two additive builtin preparation/config
+exports. Final JavaScript closure qualification follows the shared-helper checkpoint.
+The mandatory workspace check exposed a stale independent C resource model. Its scalar,
+four-lane and eight-lane mirrors now include the three retained coefficient sets and
+per-section countdowns: +416 bytes per scalar owner, +2,432 per input bank. The fixture
+retains two scalar owners per track and two input banks, so its exact builtin preparation
+payload grows by 7,488 bytes and plan payload by 4,864. All four C resource-lifecycle tests,
+including exact/one-below caps and allocator balance, pass; strict test Clippy and format
+pass. No production accounting gate was relaxed. Workspace continuation is pending.
+
+Luna XHIGH shared-helper checkpoint: EQ and builtin kind12 now use the same cache,
+preparation workspace, pending batch and ACK commit lifecycle. Browser config copies and
+headless config copies use the existing scratch with the builtin48-byte layout; all
+coefficient preparation remains in Rust. The SDK console's twelve-kind submission now
+includes an actual builtin pair, and the writer test fills the real input queue to prove
+that a two-target pair remains one pending original command through backpressure.
+All23 focused console/writer tests pass against the rebuilt Wasm; JavaScript syntax,
+SDK TypeScript and diff checks pass. Actual browser matrix and whole-issue review remain.
+
+The complete SDK headless suite passes255tests and the packed-package and shipped
+Wasm static/callgraph/export gates pass. Workspace continuation found only the session
+validator's obsolete HPF-rejection mutation; it now checks an unknown builtin ID while
+retaining the prepared-only delay refusal. All9 session-validator tests pass; all other
+workspace targets passed in the completed no-fail-fast run. The existing browser live-EQ
+comparison now submits an eight-command mixed batch including a Left builtin pair,
+requires both hosts to acknowledge all original commands, and preserves the existing
+post-ramp PCM and captured-target-response comparisons. Browser execution follows.
+
+### Attempt1 verdict and bounded attempt2
+
+Fresh Astra MEDIUM adversarial review at `9bf53e96`: **FAIL**. Three source defects
+and one fixture gap remain: trim-only symmetry refresh omits retained filter
+state; the combined prefix always runs64frames even when a disable countdown
+ends earlier; invalid raw pair selectors return unknown-parameter instead of
+malformed; the new identity-trim comparison lacks adverse samples and mono.
+No failing review is superseded by the passing pre-review package tests.
+
+Root approves attempt2 limited to these corrections and existing fixtures.
+Every applicable symmetry refresh must include filter target/step/countdown,
+preserving bounded per-word extraction. The combined prefix ends at the maximum
+actual remaining filter countdown across processed lanes/sections, bounded by64,
+so a settled disabled suffix immediately uses the existing identity path. Add the
+Left-then-Both filter/trim symmetry regression; disable63+128 with concurrent trim
+and mechanism evidence; signed zero, negative, NaN/Inf, polarity/output recovery
+and mono reference comparisons; and malformed raw-selector refusal. No new test
+framework, benchmark or unrelated optimization. Rebuild once after focused gates,
+then run final packed browser/headless/artifact gates and a fresh review verdict.
+
+Attempt2 implementation checkpoint: Luna supplied the bounded source fixes and
+adverse dual/mono lane fixture; root completed the explicit Left→Both→trim
+regression at scalar/Simd4/Simd8. All14 builtin unit tests,9 live-filter fixtures,
+10 lane elision comparisons and the host atomic/raw-selector test pass. Strict
+builtins/lane/host-web test Clippy with the existing host test-support feature
+passes. The actual combined-kernel callsite records one frame for disable63+128
+in both dual and mono paths, with the processed identity plan restored and the
+long trim ramp continuing. Mono's right integrators remain intentionally frozen;
+its identity proof addresses the processed left plane, not the frozen plane.
+The updated per-word symmetry traversal extracts78words once instead of30,
+reflecting all39 required trim/filter word pairs; there is no timing claim.
+
+Corrected Rust Wasm SHA256 is
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`.
+The earlier `42f499...` artifact and its passing package/headless checks are
+attempt1 evidence only. Final corrected package/browser qualification and the
+fresh attempt2 verdict remain pending. SDK README now documents atomic pair use,
+Hz/zero semantics and the fixed transition; no release version has been changed.
+
+### Attempt2 final qualification and verdict
+
+Fresh Astra MEDIUM **PASS** at `f383b12b018b11b31981ab637a7946e657dbea08`:
+all four attempt1 findings corrected with discriminating regressions; no blocking
+correctness, realtime, atomicity, mono, reset, resource or SDK findings remain.
+Final Wasm `7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`
+passed shipped export/static/callgraph checks, the publishable-tarball gate and
+all255 headless tests. The unpacked SDK archive passed actual Chromium151.0.7922.34,
+Firefox153.0 and WebKit26.5 qualification, including existing mutation checks.
+The mixed eight-command EQ+Left-builtin episode requires exact original ACK counts,
+matching application samples and post-ramp PCM/captured-target-response parity.
+Generated results and deployment matrix bind these runs to the reviewed source
+and Wasm. No benchmark or new listening claim was added. Required remote CI and
+merge remain before delivery; SDK publication remains #809.
+
+### Attempt3 CI-only correction
+
+PR#812 qualification34875278294 exposed Clippy's single-element-loop refusal in
+the automation-target test: after HPF/LPF became live, only prepared-only ID11
+remained. The test now asserts that ID directly. Two host test helpers are also
+gated by their sole caller's existing test-support feature, so default-feature
+Clippy stays clean. No production, ABI, SDK or Wasm bytes change.
+
+PASS: exact CI workspace/all-target/all-feature Clippy; default-feature host
+lib/test Clippy; all3 builtin automation cross-checks; format/diff checks.
+Astra MEDIUM reviewed the two-file delta and recorded **attempt3 PASS**, preserving
+attempt2's full runtime/artifact/browser qualification. #808 was reopened for the
+CI correction and is closed again once this evidence is upstream; required CI
+must be green before PR#812 merges.
+
+### Attempt4 CI resource-fixture correction
+
+Qualification34875764291 passed runtime, DSP, cross-target, SDK and all three
+browser jobs but exposed three stale policy/resource expectations. The bounded
+correction changes only one scanned comment word and existing resource fixtures
+plus their manifest consumers. No runtime arithmetic or ABI changes.
+
+Independent native accounting adds416 bytes per input owner:288 cached
+coefficient bytes plus128 countdown bytes. Two scalar owners add832 bytes per
+track; input processor size is688, boxed entry704 and preparation row1072.
+All nine fixture rows retain allocation counts and meter bytes; maximum
+allocation is max(previous,1072*tracks). Manifest SHA256 is
+`9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3`.
+Browser bridge metadata/retained grow16 bytes (the input shadow slice, rate and
+alignment); builtin retained grows832; graph plan grows2432 (largest retained
+bank variant:2304 coefficient plus128 countdown bytes). Only these five
+resource fields change; PCM/source digests remain unchanged.
+
+Fresh Astra MEDIUM **attempt4 PASS**: independently checked all nine rows and
+manifest consumers; no blocking findings. PASS:49 release audit tests, existing
+fixture/policy mutations, both benchmark-validator self-tests with zero timed
+workloads, browser/native resource parity plus26 mutations, strict audit/bench
+Clippy and the feature-enabled actual allocation tracker (1 passed). A first
+tracker invocation omitted test-support and ran zero tests; the corrected
+feature-enabled run supplies the evidence. Rebuilt Wasm remains exactly
+`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`,
+preserving accepted runtime/browser qualification. Required remote CI and merge
+remain; no benchmark or optimization was performed.
+
+### Bounded attempt5: derived graph audit identity
+
+Qualification34877814180 passes the corrected audit unit/resource fixtures and
+all three browser runs. Its realtime graph trace passes the zero-violation and
+ownership predicates, then fails the sealed whole-record checksum because that
+record embeds the newly accepted resource manifest hash. Root authorizes the
+final bounded attempt: prove the record differs only in that manifest identity,
+update its sole active checksum consumer, and run the existing exact graph trace
+and its direct script tests. Preserve all runtime and trace predicates. No new
+framework or runtime changes; a failing fifth verdict requires rescope.
+
+Fresh Astra MEDIUM **attempt5 PASS** against726e1a51. Exact million-block
+graph all-TID trace passes; existing trace-validator mutations, nine fatal
+graph-audit probes and the50-file builtin fixture audit pass. New audit record
+SHA256 is `3a5ae2622fb44bd2ddc3423c487f21ccaaac8cc1b9dc82635f316cb6afd38914`.
+Replacing its single accepted-manifest hash with the prior436a73ee... value
+recovers exact prior record SHA256
+`b54ed8e03bd039f803b71321995f0f848aea2095582873f7e96fd49c7155dff7`;
+all other bytes are unchanged. Reviewer independently repeated this derivation.
+All other jobs in34877814180 passed. Only the derived checksum consumer changes;
+no runtime or predicate changes. Required CI must pass before merge.

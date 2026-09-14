@@ -188,6 +188,14 @@ the row's declared `unitName` (for example, compressor `threshold` is in `db`). 
 accepts `key`, `value`, `channel`, and `smoothingSamples`; unknown fields are refused before a
 transport call. The positional form remains available for existing callers.
 
+Builtin input filters use `track.hpfHz(hz, { channel? })`, `track.lpfHz(hz, { channel? })`,
+or `track.inputFilters({ hpfHz, lpfHz }, { channel? })`. Values are in Hz; zero disables
+that filter. Both enabled cutoffs must satisfy `hpfHz < lpfHz`. Use `inputFilters`
+when changing both cutoffs would otherwise pass through an invalid intermediate pair:
+it is one atomic command, including during writer backpressure. The filters have fixed
+12 dB/oct Butterworth response and a fixed 64-sample coefficient transition. Browser and
+headless consoles prepare targets through the same Rust authority.
+
 `BootOptions` is five optional keys over the engine's own 64-byte block. Absent means zero means
 *the engine's* default — in particular `maximumMemoryBytes` absent selects the engine's named
 `DEFAULT_MAXIMUM_MEMORY_BYTES`, which this SDK documents and never restates.

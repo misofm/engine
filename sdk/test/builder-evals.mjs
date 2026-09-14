@@ -446,29 +446,33 @@ describe("validation refusals name the offending path", () => {
       base.source("t", { channels: 1, bitDepth: 16, frames: 480, content: CONTENT_B }));
   });
 
-  test("a prepared-only builtin is refused as an automation target", () => {
-    // The schema refuses `hpf_hz`, `lpf_hz` and `delay_samples` because a span addressed at a
-    // parameter with no post-preparation write path could only ever be inert. Red mutation: admit
-    // every builtin row, and the engine refuses the document instead -- later, and less clearly.
+  test("live input filters are accepted while delay remains prepared-only", () => {
     const base = session({ id: "auto", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
       .track("t", { source: "stem" });
-    for (const parameter of ["hpf_hz", "lpf_hz", "delay_samples"]) {
-      assert.throws(
-        () =>
-          base.automation({
-            id: "a",
-            target: { trackId: "t", rack: "builtins", parameter, channel: "left" },
-            segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: 0, endValue: 1 }],
-          }),
-        (error) => {
-          assert.ok(error instanceof MisoUsageError);
-          assert.match(error.message, /automation\("a"\)\.target\.parameter/);
-          assert.match(error.message, /prepared-only/);
-          return true;
-        },
+    for (const [parameter, startValue, endValue] of [["hpf_hz", 80, 120], ["lpf_hz", 8_000, 12_000]]) {
+      assert.doesNotThrow(() =>
+        base.automation({
+          id: parameter,
+          target: { trackId: "t", rack: "builtins", parameter, channel: "left" },
+          segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue, endValue }],
+        }),
       );
     }
+    assert.throws(
+      () =>
+        base.automation({
+          id: "delay_samples",
+          target: { trackId: "t", rack: "builtins", parameter: "delay_samples", channel: "left" },
+          segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: 0, endValue: 1 }],
+        }),
+      (error) => {
+        assert.ok(error instanceof MisoUsageError);
+        assert.match(error.message, /automation\("delay_samples"\)\.target\.parameter/);
+        assert.match(error.message, /prepared-only/);
+        return true;
+      },
+    );
     // A shared matrix coefficient is addressed as `both` and nothing else.
     assert.throws(
       () =>

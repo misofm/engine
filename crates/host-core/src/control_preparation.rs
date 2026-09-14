@@ -1,5 +1,9 @@
-//! Bounded, stateless EQ target preparation used by browser hosts.
+//! Bounded, stateless EQ and builtin input-filter target preparation used by browser hosts.
 
+use builtins::{
+    BuiltinLaneSelector, PreparedInputFilterTarget, prepare_input_filter_pair,
+    validate_input_filter_pair,
+};
 use core::alloc::Layout;
 use core::sync::atomic::AtomicUsize;
 use effect_contract::{
@@ -16,6 +20,13 @@ pub const EQ_VALUE_COUNT: usize = 60;
 pub const EQ_EDIT_CAPACITY: usize = 256;
 /// Maximum prepared EQ target records.
 pub const EQ_TARGET_CAPACITY: usize = 12;
+
+/// Number of semantic builtin input-filter values in lane order: LH, LL, RH, RL.
+pub const INPUT_FILTER_VALUE_COUNT: usize = 4;
+/// Maximum input-filter edits in one bounded request.
+pub const INPUT_FILTER_EDIT_CAPACITY: usize = 256;
+/// Maximum coalesced input-filter section targets.
+pub const INPUT_FILTER_TARGET_CAPACITY: usize = 4;
 
 /// One descriptor-checked semantic edit.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +93,212 @@ impl EqTargetPreparerError {
             _ => u32::MAX,
         }
     }
+}
+
+/// One semantic input-filter edit before target design.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InputFilterEdit {
+    /// Stable builtin parameter ID: 0 for an atomic pair, 3 for HPF, 4 for LPF.
+    pub parameter_id: u32,
+    /// Addressed lane(s).
+    pub channel: ParameterChannel,
+    /// HPF or pair value.
+    pub value0: f32,
+    /// LPF value for an atomic pair; must be +0 for one-sided edits.
+    pub value1: f32,
+}
+
+/// Refusal kinds for one original input-filter edit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputFilterEditErrorKind {
+    /// Unsupported parameter ID.
+    Parameter,
+    /// Invalid cutoff, ordering, rate or non-finite value.
+    Domain,
+    /// Candidate row shape or one-sided payload was not representable.
+    Shape,
+}
+
+/// Why bounded input-filter preparation was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputFilterPreparerError {
+    /// Sample rate is outside the launch set.
+    Rate,
+    /// Request, seed or output shape is outside the fixed bound.
+    Shape,
+    /// A seed pair is outside the filter domain.
+    Domain,
+    /// A semantic edit failed at its original wire index.
+    Edit {
+        /// Original zero-based edit index.
+        index: u32,
+        /// Refusal kind.
+        kind: InputFilterEditErrorKind,
+    },
+    /// Final target design or safety validation failed.
+    Design,
+}
+
+impl InputFilterPreparerError {
+    /// Returns the original edit index or `u32::MAX`.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        match self {
+            Self::Edit { index, .. } => index,
+            _ => u32::MAX,
+        }
+    }
+}
+
+/// Apply one semantic edit to a candidate without designing coefficients.
+///
+/// The operation validates every addressed lane before mutating either the candidate or its
+/// dirty-section mask. This is the host-admission authority; final target design is separate.
+pub fn apply_input_filter_edit(
+    sample_rate_hz: u32,
+    candidate: &mut [f32; INPUT_FILTER_VALUE_COUNT],
+    dirty: &mut [bool; INPUT_FILTER_VALUE_COUNT],
+    edit: InputFilterEdit,
+) -> Result<(), InputFilterEditErrorKind> {
+    if !matches!(edit.parameter_id, 0 | 3 | 4) {
+        return Err(InputFilterEditErrorKind::Parameter);
+    }
+    if (edit.parameter_id == 3 || edit.parameter_id == 4)
+        && edit.value1.to_bits() != 0.0_f32.to_bits()
+    {
+        return Err(InputFilterEditErrorKind::Shape);
+    }
+    let mut next = *candidate;
+    let mut next_dirty = *dirty;
+    let lanes = match edit.channel {
+        ParameterChannel::Left => [Some(0_usize), None],
+        ParameterChannel::Right => [Some(2_usize), None],
+        ParameterChannel::Both => [Some(0_usize), Some(2_usize)],
+    };
+    for lane_start in lanes.into_iter().flatten() {
+        let (hpf, lpf) = match edit.parameter_id {
+            0 => (edit.value0, edit.value1),
+            3 => (edit.value0, candidate[lane_start + 1]),
+            4 => (candidate[lane_start], edit.value0),
+            _ => return Err(InputFilterEditErrorKind::Parameter),
+        };
+        validate_input_filter_pair(sample_rate_hz, hpf, lpf)
+            .map_err(|_| InputFilterEditErrorKind::Domain)?;
+        next[lane_start] = if hpf == 0.0 { 0.0 } else { hpf };
+        next[lane_start + 1] = if lpf == 0.0 { 0.0 } else { lpf };
+        next_dirty[lane_start] |= edit.parameter_id == 0 || edit.parameter_id == 3;
+        next_dirty[lane_start + 1] |= edit.parameter_id == 0 || edit.parameter_id == 4;
+    }
+    *candidate = next;
+    *dirty = next_dirty;
+    Ok(())
+}
+
+/// Stateless preparation authority for live builtin input-filter targets.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InputFilterPreparer;
+
+impl InputFilterPreparer {
+    /// Validate every original edit in wire order, then design only final touched sections.
+    pub fn prepare(
+        &self,
+        sample_rate_hz: u32,
+        seeds: &[f32],
+        edits: &[InputFilterEdit],
+        out: &mut [PreparedInputFilterTarget],
+    ) -> Result<([f32; INPUT_FILTER_VALUE_COUNT], usize), InputFilterPreparerError> {
+        if !is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+            return Err(InputFilterPreparerError::Rate);
+        }
+        if seeds.len() != INPUT_FILTER_VALUE_COUNT
+            || edits.len() > INPUT_FILTER_EDIT_CAPACITY
+            || out.len() < INPUT_FILTER_TARGET_CAPACITY
+        {
+            return Err(InputFilterPreparerError::Shape);
+        }
+        let mut candidate = [0.0_f32; INPUT_FILTER_VALUE_COUNT];
+        candidate.copy_from_slice(seeds);
+        for lane in [0_usize, 2_usize] {
+            validate_input_filter_pair(sample_rate_hz, candidate[lane], candidate[lane + 1])
+                .map_err(|_| InputFilterPreparerError::Domain)?;
+            candidate[lane] = if candidate[lane] == 0.0 {
+                0.0
+            } else {
+                candidate[lane]
+            };
+            candidate[lane + 1] = if candidate[lane + 1] == 0.0 {
+                0.0
+            } else {
+                candidate[lane + 1]
+            };
+        }
+        let mut dirty = [false; INPUT_FILTER_VALUE_COUNT];
+        for (index, edit) in edits.iter().copied().enumerate() {
+            apply_input_filter_edit(sample_rate_hz, &mut candidate, &mut dirty, edit).map_err(
+                |kind| InputFilterPreparerError::Edit {
+                    index: index as u32,
+                    kind,
+                },
+            )?;
+        }
+
+        let mut designed = [[None; 2]; 2];
+        for lane in [0_usize, 2_usize] {
+            if dirty[lane] || dirty[lane + 1] {
+                let pair =
+                    prepare_input_filter_pair(sample_rate_hz, candidate[lane], candidate[lane + 1])
+                        .map_err(|_| InputFilterPreparerError::Design)?;
+                designed[lane / 2] = [Some(pair.targets[0]), Some(pair.targets[1])];
+            }
+        }
+        let mut count = 0;
+        for section in 0..2 {
+            let left_dirty = dirty[section];
+            let right_dirty = dirty[2 + section];
+            let left = designed[0][section];
+            let right = designed[1][section];
+            if left_dirty && right_dirty {
+                let (Some(left), Some(right)) = (left, right) else {
+                    return Err(InputFilterPreparerError::Design);
+                };
+                if target_words_equal(left, right) {
+                    out[count] = PreparedInputFilterTarget {
+                        lanes: BuiltinLaneSelector::Both,
+                        ..left
+                    };
+                    count += 1;
+                    continue;
+                }
+            }
+            if left_dirty {
+                out[count] = PreparedInputFilterTarget {
+                    lanes: BuiltinLaneSelector::Left,
+                    ..left.ok_or(InputFilterPreparerError::Design)?
+                };
+                count += 1;
+            }
+            if right_dirty {
+                out[count] = PreparedInputFilterTarget {
+                    lanes: BuiltinLaneSelector::Right,
+                    ..right.ok_or(InputFilterPreparerError::Design)?
+                };
+                count += 1;
+            }
+        }
+        Ok((candidate, count))
+    }
+}
+
+fn target_words_equal(left: PreparedInputFilterTarget, right: PreparedInputFilterTarget) -> bool {
+    left.pair
+        .iter()
+        .zip(right.pair.iter())
+        .all(|(left, right)| left.to_bits() == right.to_bits())
+        && left
+            .coefficients
+            .iter()
+            .zip(right.coefficients.iter())
+            .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
 /// Stateless fixed-storage facade retaining only the opted-in factory capability.
@@ -337,5 +554,135 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.index(), 0);
         assert_eq!(targets, before);
+    }
+
+    #[test]
+    fn input_filter_pair_edit_coalesces_only_equal_whole_sections() {
+        let preparer = InputFilterPreparer;
+        let seeds = [100.0, 1_000.0, 100.0, 1_000.0];
+        let mut targets = [PreparedInputFilterTarget {
+            lanes: BuiltinLaneSelector::Left,
+            section: 9,
+            pair: [9.0; 2],
+            coefficients: [9.0; 6],
+        }; INPUT_FILTER_TARGET_CAPACITY];
+        let (values, count) = preparer
+            .prepare(
+                48_000,
+                &seeds,
+                &[InputFilterEdit {
+                    parameter_id: 0,
+                    channel: ParameterChannel::Both,
+                    value0: 200.0,
+                    value1: 2_000.0,
+                }],
+                &mut targets,
+            )
+            .unwrap();
+        assert_eq!(values, [200.0, 2_000.0, 200.0, 2_000.0]);
+        assert_eq!(count, 2);
+        assert_eq!(targets[0].lanes, BuiltinLaneSelector::Both);
+        assert_eq!(targets[1].lanes, BuiltinLaneSelector::Both);
+
+        let seeds = [100.0, 1_000.0, 200.0, 2_000.0];
+        let (values, count) = preparer
+            .prepare(
+                48_000,
+                &seeds,
+                &[InputFilterEdit {
+                    parameter_id: 3,
+                    channel: ParameterChannel::Both,
+                    value0: 300.0,
+                    value1: 0.0,
+                }],
+                &mut targets,
+            )
+            .unwrap();
+        assert_eq!(values, [300.0, 1_000.0, 300.0, 2_000.0]);
+        assert_eq!(count, 2);
+        assert_eq!(targets[0].lanes, BuiltinLaneSelector::Left);
+        assert_eq!(targets[1].lanes, BuiltinLaneSelector::Right);
+        assert_eq!(targets[0].section, 0);
+        assert_eq!(targets[1].section, 0);
+
+        let (values, count) = preparer
+            .prepare(
+                48_000,
+                &seeds,
+                &[InputFilterEdit {
+                    parameter_id: 4,
+                    channel: ParameterChannel::Right,
+                    value0: 3_000.0,
+                    value1: 0.0,
+                }],
+                &mut targets,
+            )
+            .unwrap();
+        assert_eq!(values, [100.0, 1_000.0, 200.0, 3_000.0]);
+        assert_eq!(count, 1);
+        assert_eq!(targets[0].lanes, BuiltinLaneSelector::Right);
+        assert_eq!(targets[0].section, 1);
+    }
+
+    #[test]
+    fn input_filter_refuses_crossing_before_a_later_overwrite() {
+        let preparer = InputFilterPreparer;
+        let mut targets = [PreparedInputFilterTarget {
+            lanes: BuiltinLaneSelector::Left,
+            section: 9,
+            pair: [9.0; 2],
+            coefficients: [9.0; 6],
+        }; INPUT_FILTER_TARGET_CAPACITY];
+        let error = preparer
+            .prepare(
+                48_000,
+                &[100.0, 1_000.0, 100.0, 1_000.0],
+                &[
+                    InputFilterEdit {
+                        parameter_id: 3,
+                        channel: ParameterChannel::Left,
+                        value0: 2_000.0,
+                        value1: 0.0,
+                    },
+                    InputFilterEdit {
+                        parameter_id: 4,
+                        channel: ParameterChannel::Left,
+                        value0: 5_000.0,
+                        value1: 0.0,
+                    },
+                ],
+                &mut targets,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            InputFilterPreparerError::Edit {
+                index: 0,
+                kind: InputFilterEditErrorKind::Domain,
+            }
+        );
+        assert_eq!(targets[0].section, 9);
+    }
+
+    #[test]
+    fn input_filter_rejects_negative_zero_in_unused_one_sided_word() {
+        let mut candidate = [100.0, 1_000.0, 100.0, 1_000.0];
+        let mut dirty = [false; INPUT_FILTER_VALUE_COUNT];
+        assert_eq!(
+            apply_input_filter_edit(
+                48_000,
+                &mut candidate,
+                &mut dirty,
+                InputFilterEdit {
+                    parameter_id: 3,
+                    channel: ParameterChannel::Left,
+                    value0: 200.0,
+                    value1: -0.0,
+                },
+            ),
+            Err(InputFilterEditErrorKind::Shape)
+        );
+        assert_eq!(candidate, [100.0, 1_000.0, 100.0, 1_000.0]);
+        assert_eq!(dirty, [false; INPUT_FILTER_VALUE_COUNT]);
     }
 }

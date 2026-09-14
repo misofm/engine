@@ -14,9 +14,8 @@
 //!
 //! The rule being derived: an automation target names something the render plane can be told to
 //! change, which is exactly a row declaring `BuiltinParameterUpdateRate::BlockTarget`.
-//! `PreparedOnly` rows -- `hpf_hz`, `lpf_hz`, `delay_samples` -- have no post-preparation write
-//! path at all, so a span addressed at one could only ever be inert syntax, and the schema refuses
-//! them rather than accepting them and doing nothing.
+//! The remaining `PreparedOnly` row -- `delay_samples` -- has no post-preparation write path, so a
+//! span addressed at it could only ever be inert syntax, and the schema refuses it.
 
 use builtins::{BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterScope, BuiltinParameterUpdateRate};
 use session::{BUILTIN_AUTOMATION_EFFECT_ID, BUILTIN_AUTOMATION_TARGETS};
@@ -72,13 +71,11 @@ fn refused_targets_are_exactly_the_prepared_only_rows() {
         );
     }
     // The deferred tier, named so that reopening it is a deliberate edit here as well as in the
-    // ABI: `hpf_hz`, `lpf_hz` and `delay_samples`.
-    for id in [3_u32, 4, 11] {
-        assert!(
-            !admitted.contains(&id),
-            "builtin parameter {id} is deferred and must not be an automation target"
-        );
-    }
+    // ABI: `delay_samples` remains prepared-only; the input-filter pair is live through #808.
+    assert!(
+        !admitted.contains(&11),
+        "delay_samples remains prepared-only and must not be an automation target"
+    );
     // Issue #210 phase 3 admitted these two. The assertion is here so that a phase that reverted
     // the liveness would have to revert this line too.
     for id in [1_u32, 2] {

@@ -22,6 +22,17 @@ export interface LaneOptions extends SmoothingOptions {
   readonly channel?: ConsoleChannel;
 }
 
+/** The two cutoff values carried atomically by one prepared input-filter command. */
+export interface InputFilterValues {
+  readonly hpfHz: number;
+  readonly lpfHz: number;
+}
+
+/** Input-filter edits select a lane but use the builtin fixed 64-update policy. */
+export interface InputFilterOptions {
+  readonly channel?: ConsoleChannel;
+}
+
 type LiveParameter<E extends EffectId> = Extract<
   EffectParameter<E>,
   { readonly liveUpdatable: true }
@@ -319,6 +330,38 @@ export class TrackEdits {
       channel: lane(options),
       smoothingSamples: smoothing(options),
       values: values(enabled ? 1 : 0),
+    });
+  }
+
+  /** Set one lane's HPF cutoff through the prepared input-filter owner. */
+  hpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
+    return trackEdit("inputFilters", this.#trackIndex, {
+      channel: lane(options),
+      parameterId: 3,
+      values: values(builtinNumber("hpf_hz", value)),
+    });
+  }
+
+  /** Set one lane's LPF cutoff through the prepared input-filter owner. */
+  lpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
+    return trackEdit("inputFilters", this.#trackIndex, {
+      channel: lane(options),
+      parameterId: 4,
+      values: values(builtinNumber("lpf_hz", value)),
+    });
+  }
+
+  /** Set both cutoffs as one indivisible wire edit. */
+  inputFilters(filters: InputFilterValues, options: InputFilterOptions = {}): LaneEdit {
+    if (filters === null || typeof filters !== "object" || Array.isArray(filters)) {
+      throw new MisoUsageError("inputFilters requires an object with hpfHz and lpfHz");
+    }
+    return trackEdit("inputFilters", this.#trackIndex, {
+      channel: lane(options),
+      values: values(
+        builtinNumber("hpf_hz", filters.hpfHz),
+        builtinNumber("lpf_hz", filters.lpfHz),
+      ),
     });
   }
 

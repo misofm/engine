@@ -86,14 +86,13 @@ An automation target's `rack` is one of four tokens: the three effect racks `sim
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal
 `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
-`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6), the four
-`matrix_*` coefficients (7-10) and -- since #242, under #239 ruling 5461507633 B4 -- `pan` (12).
-That is **nine** rows, and `BUILTIN_AUTOMATION_TARGETS` in
-`crates/session/src/validate.rs` is the list. The prepared-only rows -- `hpf_hz` (3),
-`lpf_hz` (4), `delay_samples` (11) -- are **refused**, because a span addressed at a parameter with
-no post-preparation write path could only ever be inert. `channel` follows the row's scope: the
-five per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only
-`both`.
+`blockTarget`: `polarity_invert` (1), `trim_db` (2), `hpf_hz` (3), `lpf_hz` (4),
+`fader_db` (5), `mute` (6), the four `matrix_*` coefficients (7-10), and `pan` (12).
+That is **eleven** rows; `BUILTIN_AUTOMATION_TARGETS` in
+`crates/session/src/validate.rs` is the authority. Issue #808 adds the two filter
+rows. The prepared-only `delay_samples` (11) remains refused. The seven per-lane
+rows accept `left`, `right` or `both`; the four shared matrix coefficients accept
+only `both`.
 
 **The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
 any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
@@ -116,10 +115,13 @@ asymmetric upstream of the mono-collapse seam, so it declines that track's colla
 shift the session asked for, so it contributes zero to any node's declared latency and does not
 appear in the compiled plan's route timings or inserted delays. Its rings are charged to the
 plan's existing `graph_delay_bytes` row. It is prepared-only, changed through the ordinary
-transactional session edit, as the cutoffs are -- but **no longer as `trim_db` is**: issue #210
-phase 3 made `trim_db` and `polarity_invert` live (command kinds 10 and 11) and automatable, under
-the ruling in `docs/rulings/builtins-input-liveness-d2.md`. `hpf_hz`, `lpf_hz` and `delay_samples`
-are the three lane keys that remain prepared-only. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
+transactional session edit. Issue #210 phase 3 made trim and polarity live through
+command kinds 10 and 11. Issue #808 adds live HPF/LPF targets through command kind12,
+including an atomic pair edit. Filter coefficients use fixed 64 current-then-advance
+updates after off-render preparation; trim retains its existing smoothing law.
+`delay_samples` is the only lane key that remains prepared-only. The liveness ruling
+is `docs/rulings/builtins-input-liveness-d2.md`; these commands do not add a session
+automation render feed. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
 work; CID/package validity is downstream issue-029 work.
 

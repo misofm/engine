@@ -32,7 +32,7 @@ def usable_text: type == "string" and length > 0 and . != "unknown" and . != "de
 def render_workload:
   . == "full_chain_filters" or . == "identity_chain" or . == "matrix_ramp" or . == "meter_success_full";
 def frozen_manifest_sha256:
-  "436a73ee3205a286e5366edd27c641d74dd266d6f15adf713ce60d36fcfd9ac0";
+  "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3";
 def frozen_input_sha256:
   if .workload_kind == "full_chain_filters" and .sample_rate_hz == 48000 then
     "6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0"

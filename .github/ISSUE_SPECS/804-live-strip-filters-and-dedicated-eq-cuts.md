@@ -426,3 +426,24 @@ host-core Clippy, and the exact previously failing workspace CI command locally
 reviewed the four test-file delta and recorded attempt3 PASS with no blockers.
 No runtime,DSP,ABI,SDK or Wasm changes. Push this correction and require green CI
 before merged delivery; no new test framework or benchmark was introduced.
+
+
+### #807 merged delivery, 2026-09-14
+
+Required qualification34863942121 passed all jobs for4333a227. PR#811 merged as
+4cdc878fc4d38c2d3b3e60de6a6ff616359c1ddb; remote #807 is verified CLOSED and the
+primary checkout is synchronized to that main commit. Dedicated EQ cuts and the
+shared live prepared-control path are delivered to engine main. No npm publication
+or app deployment is claimed: #808 builtin filters, #809 SDK release, adapter#111
+and app#222 remain. The completed clean/pushed #807 worktree is eligible for removal;
+checked evidence is upstream and local artifact/log copies remain outside it.
+
+### #808 qualified implementation, 2026-09-14
+
+Builtin filters now share the accepted live EQ helper and atomic host admission,
+with atomic HPF/LPF pair authoring, fixed64 coefficient updates, target response,
+and disabled-filter elision during trim ramps. Fresh Astra MEDIUM attempt2 PASS
+atf383b12b follows the bounded symmetry/endpoint/refusal corrections. Corrected
+Wasm7e925d93…24999e7 passes packed artifact gates,255headless tests and allthree
+actual browser qualifications. Required CI/merge and remote closure follow;
+no SDK/adapter publication or app deployment is claimed yet.

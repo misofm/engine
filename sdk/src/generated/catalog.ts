@@ -84,6 +84,12 @@ export const CATALOG = deepFreeze(
       "name": "polarityInvert",
       "applied": true,
       "plane": "render"
+    },
+    {
+      "value": 12,
+      "name": "inputFilters",
+      "applied": true,
+      "plane": "render"
     }
   ],
   "commandReasons": [
@@ -288,11 +294,11 @@ export const CATALOG = deepFreeze(
           "96000": 47998.867
         },
         "default": 0,
-        "updateRate": "preparedOnly",
-        "smoothing": "none",
-        "reset": "restorePreparedValue",
+        "updateRate": "blockTarget",
+        "smoothing": "linear64CoefficientUpdates",
+        "reset": "keepTargetResetCurrent",
         "disabledValue": 0,
-        "liveUpdatable": false,
+        "liveUpdatable": true,
         "step": {
           "unit": "cents",
           "size": "20",
@@ -323,11 +329,11 @@ export const CATALOG = deepFreeze(
           "96000": 47998.867
         },
         "default": 0,
-        "updateRate": "preparedOnly",
-        "smoothing": "none",
-        "reset": "restorePreparedValue",
+        "updateRate": "blockTarget",
+        "smoothing": "linear64CoefficientUpdates",
+        "reset": "keepTargetResetCurrent",
         "disabledValue": 0,
-        "liveUpdatable": false,
+        "liveUpdatable": true,
         "step": {
           "unit": "cents",
           "size": "20",

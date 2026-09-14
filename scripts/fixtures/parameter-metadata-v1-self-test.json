@@ -14,7 +14,8 @@
     { "value": 8, "name": "observeUnsubscribe", "applied": true, "plane": "observation" },
     { "value": 9, "name": "solo", "applied": true, "plane": "render" },
     { "value": 10, "name": "trimDb", "applied": true, "plane": "render" },
-    { "value": 11, "name": "polarityInvert", "applied": true, "plane": "render" }
+    { "value": 11, "name": "polarityInvert", "applied": true, "plane": "render" },
+    { "value": 12, "name": "inputFilters", "applied": true, "plane": "render" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
@@ -42,8 +43,8 @@
     "parameters": [
       { "id": 1, "name": "polarity_invert", "unit": 5, "unitName": "linear", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 2, "name": "trim_db", "unit": 1, "unitName": "db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
-      { "id": 3, "name": "hpf_hz", "unit": 2, "unitName": "hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
-      { "id": 4, "name": "lpf_hz", "unit": 2, "unitName": "hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 3, "name": "hpf_hz", "unit": 2, "unitName": "hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linear64CoefficientUpdates", "reset": "keepTargetResetCurrent", "disabledValue": 0.0, "liveUpdatable": true, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 4, "name": "lpf_hz", "unit": 2, "unitName": "hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linear64CoefficientUpdates", "reset": "keepTargetResetCurrent", "disabledValue": 0.0, "liveUpdatable": true, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 5, "name": "fader_db", "unit": 1, "unitName": "db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 5, "md": 10, "lg": 30, "xl": 60 } } },
       { "id": 6, "name": "mute", "unit": 5, "unitName": "linear", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 7, "name": "matrix_ll", "unit": 5, "unitName": "linear", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
@@ -51,7 +52,7 @@
       { "id": 9, "name": "matrix_rl", "unit": 5, "unitName": "linear", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 10, "name": "matrix_rr", "unit": 5, "unitName": "linear", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
       { "id": 11, "name": "delay_samples", "unit": 4, "unitName": "samples", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": 0.0, "maximum": 48000.0, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "step": { "unit": "absolute", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
-      { "id": 12, "name": "pan", "unit": 5, "unitName": "linear", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } }
+      { "id": 12, "name": "pan", "unit": 5, "unitName": "linear", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } }
     ]
   },
   "effects": [
@@ -983,6 +984,102 @@
           "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 65,
+          "name": "hpf-enabled",
+          "displayUnit": "on/off",
+          "unit": 5, "unitName": "linear",
+          "domain": 2, "domainName": "boolean",
+          "minimum": null, "maximum": null, "default": 0.0,
+          "mapping": 4, "mappingName": "stepped",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 66,
+          "name": "hpf-frequency",
+          "displayUnit": "Hz",
+          "unit": 2, "unitName": "hz",
+          "domain": 1, "domainName": "continuous",
+          "minimum": 10.0, "maximum": 20000.0, "default": 80.0,
+          "mapping": 2, "mappingName": "logarithmic",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 67,
+          "name": "hpf-q",
+          "displayUnit": "Q",
+          "unit": 6, "unitName": "ratio",
+          "domain": 1, "domainName": "continuous",
+          "minimum": 0.1, "maximum": 18.0, "default": 0.70710677,
+          "mapping": 2, "mappingName": "logarithmic",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 81,
+          "name": "lpf-enabled",
+          "displayUnit": "on/off",
+          "unit": 5, "unitName": "linear",
+          "domain": 2, "domainName": "boolean",
+          "minimum": null, "maximum": null, "default": 0.0,
+          "mapping": 4, "mappingName": "stepped",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 82,
+          "name": "lpf-frequency",
+          "displayUnit": "Hz",
+          "unit": 2, "unitName": "hz",
+          "domain": 1, "domainName": "continuous",
+          "minimum": 10.0, "maximum": 20000.0, "default": 18000.0,
+          "mapping": 2, "mappingName": "logarithmic",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
+        },
+        {
+          "id": 83,
+          "name": "lpf-q",
+          "displayUnit": "Q",
+          "unit": 6, "unitName": "ratio",
+          "domain": 1, "domainName": "continuous",
+          "minimum": 0.1, "maximum": 18.0, "default": 0.70710677,
+          "mapping": 2, "mappingName": "logarithmic",
+          "automationRate": 2, "automationRateName": "block",
+          "channelPolicy": 2, "channelPolicyName": "perLane",
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "ports": [
@@ -990,7 +1087,7 @@
         { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": [],
-      "response": { "id": 1, "name": "Parametric EQ Response", "axisUnit": "hz", "unit": "db", "amplitudeReference": "unity", "channels": "independent", "mode": "requestedConfiguration", "cadence": "explicitQuery", "sectionOutput": "totalAndOptionalSections", "cost": "computed", "floorDb": -120.0, "totalScope": "parametricEqCascade", "bypass": "effectWideIdentityWithSections", "sections": [{ "id": 1, "name": "Band 1" },{ "id": 2, "name": "Band 2" },{ "id": 3, "name": "Band 3" },{ "id": 4, "name": "Band 4" }] }
+      "response": { "id": 1, "name": "Parametric EQ Response", "axisUnit": "hz", "unit": "db", "amplitudeReference": "unity", "channels": "independent", "mode": "requestedConfiguration", "cadence": "explicitQuery", "sectionOutput": "totalAndOptionalSections", "cost": "computed", "floorDb": -120.0, "totalScope": "parametricEqCascade", "bypass": "effectWideIdentityWithSections", "sections": [{ "id": 1, "name": "Band 1" },{ "id": 2, "name": "Band 2" },{ "id": 3, "name": "Band 3" },{ "id": 4, "name": "Band 4" },{ "id": 5, "name": "HPF" },{ "id": 6, "name": "LPF" }] }
     },
     {
       "id": "miso.soft-clip",

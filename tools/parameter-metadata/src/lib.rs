@@ -28,14 +28,14 @@
 //!
 //! # `commandKinds` is the whole vocabulary, and `plane` says what each kind moves
 //!
-//! Every kind the wire decodes is a row here -- all eleven of them. Before the kind-vocabulary
+//! Every kind the wire decodes is a row here -- all twelve of them. Before the kind-vocabulary
 //! gate this table stopped at `effectBypass` while the Rust constants, the host JS `COMMAND_KINDS`
 //! set and the `.d.ts` enum all carried eight, and nothing noticed: an app reading its vocabulary
 //! from this file could not learn that `observeSubscribe`/`observeUnsubscribe` exist.
 //!
 //! The two observation kinds are not DSP kinds, so each row carries `plane`. `applied` keeps its
 //! issue #140 meaning -- the ABI applies this kind rather than declaring and refusing it, which is
-//! true of all eleven -- and `plane` distinguishes the nine that move state the render thread reads
+//! true of all twelve -- and `plane` distinguishes the ten that move state the render thread reads
 //! (`"render"`) from the two that bind or unbind an entry in the `miso.observe.v1` subscription
 //! map and change nothing rendered (`"observation"`).
 //!
@@ -44,11 +44,10 @@
 //! console/monitor state rather than a strip DSP parameter, so it has no parameter descriptor, no
 //! domain table and no session key to be automated from.
 //!
-//! `trimDb` and `polarityInvert` (issue #210 phase 3) are the opposite case and the ordinary one:
-//! both are `"render"` kinds *and* strip DSP parameters, so each has a `builtins` row, and those
-//! two rows flipped to `"blockTarget"` with `"smoothing": "linearNUpdates"` in the same change --
-//! which is what makes their `liveUpdatable` flag `true` here. A reader that trusted the old
-//! `false` would have concluded there was no write path; there now is.
+//! `trimDb`, `polarityInvert` and `inputFilters` are the opposite case and the ordinary one:
+//! all are `"render"` kinds *and* strip DSP parameters, so each has a `builtins` row. The filter
+//! rows use the fixed `"linear64CoefficientUpdates"` policy because the command carries prepared
+//! coefficient targets; their `liveUpdatable` flag is derived from `"blockTarget"`.
 //!
 //! # Issue #242 (parameter lattice and named step sizes)
 //!
@@ -94,14 +93,14 @@ use effect_contract::{
     SmoothingRule, StepSize, StepUnit,
 };
 use host_web::{
-    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
-    COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_PAN,
-    COMMAND_POLARITY_INVERT, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, COMMAND_SOLO, COMMAND_TRIM_DB,
-    MAXIMUM_COMMAND_RECORDS,
+    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB,
+    COMMAND_INPUT_FILTERS, COMMAND_MATRIX, COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE,
+    COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_PAN, COMMAND_POLARITY_INVERT, COMMAND_REASON_BACKPRESSURE,
+    COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE,
+    COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
+    COMMAND_RECORD_BYTES, COMMAND_SOLO, COMMAND_TRIM_DB, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -170,6 +169,7 @@ pub fn render() -> String {
             true,
             PLANE_RENDER,
         ),
+        (COMMAND_INPUT_FILTERS, "inputFilters", true, PLANE_RENDER),
     ];
     for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
         out.push_str(&format!(
@@ -738,6 +738,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         match parameter.smoothing {
             BuiltinSmoothingPolicy::None => "none",
             BuiltinSmoothingPolicy::LinearNUpdates => "linearNUpdates",
+            BuiltinSmoothingPolicy::Linear64CoefficientUpdates => "linear64CoefficientUpdates",
         },
         match parameter.reset {
             BuiltinParameterReset::RestorePreparedValue => "restorePreparedValue",

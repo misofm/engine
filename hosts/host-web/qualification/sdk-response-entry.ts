@@ -942,19 +942,22 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     if (initial === undefined) throw new Error("track response subscription returned no initial result");
     const initialQueries = stats.queries;
     const console = await browser.console();
+    const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
     const edits = (owner: EngineConsole) => {
       const eq = owner.edit.track("track").effect("simd1", 0, "miso.parametric-eq");
       return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
         eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
         eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
-        eq.parameter("lpf-enabled", true)];
+        eq.parameter("lpf-enabled", true), owner.edit.track("track").inputFilters(builtinPair, { channel: "left" })];
     };
     const command = await console.submit(...edits(console));
     const headlessCommand = await headlessConsole.submit(...edits(headlessConsole));
     if (!headlessCommand.ok || command.appliedAtSample !== headlessCommand.appliedAtSample) {
-      throw new Error("browser/headless live EQ acknowledgements disagree");
+      throw new Error("browser/headless live EQ and builtin-filter acknowledgements disagree");
     }
-    if (!command.ok) throw new Error("queued response subscription control edit was refused");
+    if (!command.ok || command.admitted !== 8 || headlessCommand.admitted !== 8) {
+      throw new Error("queued response subscription EQ and builtin-filter edits were refused or split");
+    }
     const beforeRender = subscription.readLatest();
     const unchangedBeforeRender = beforeRender !== undefined
       && responseValuesEqual(initial, beforeRender)
@@ -1078,6 +1081,14 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
         capturedSample: afterRender.capturedSample.toString(),
         postRampComparedFrames,
         postRampMaximumDifference,
+      },
+      liveInputFilters: {
+        appliedAtSample: command.appliedAtSample.toString(),
+        hpfHz: builtinPair.hpfHz,
+        lpfHz: builtinPair.lpfHz,
+        channel: "left",
+        mixedBatchAdmitted: command.admitted === 8 && headlessCommand.admitted === 8,
+        browserHeadlessAckParity: command.appliedAtSample === headlessCommand.appliedAtSample,
       },
       initial: serializeTrackResponse(initial),
       afterRender: serializeTrackResponse(afterRender),

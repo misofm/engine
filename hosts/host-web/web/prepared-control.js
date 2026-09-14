@@ -44,6 +44,7 @@ function schemaOf(layout) {
     if (!Number.isSafeInteger(command[name])) throw new Error(`missing generated ABI command field ${name}`);
   }
   const valueCount = arrayLength(layout, "eqTargetConfig", "values");
+  const inputFilterValueCount = arrayLength(layout, "builtinInputConfig", "values");
   return Object.freeze({
     abiVersion: layout.abiVersion,
     validResults: new Set(layout.constants?.resultCodes?.map?.((item) => item.value) ?? []),
@@ -56,6 +57,7 @@ function schemaOf(layout) {
     resultInternal: constant(layout, "resultCodes", "internal"),
     resultReprepare: constant(layout, "resultCodes", "reprepareRequired"),
     effectParamKind: constant(layout, "wireCommandKinds", "effectParam"),
+    inputFiltersKind: constant(layout, "wireCommandKinds", "inputFilters"),
     maximumCommandRecords: scalarConstant(layout, "maximumCommandRecords"),
     command: Object.freeze({
       bytes: commandRecord.bytes,
@@ -83,6 +85,8 @@ function schemaOf(layout) {
       editParameterId: field(layout, "eqTargetEdit", "parameterId"),
       editChannel: field(layout, "eqTargetEdit", "channel"),
       editValue: field(layout, "eqTargetEdit", "value"),
+      inputEditBytes: structure(layout, "inputFilterEdit").bytes,
+      inputEditValue1: field(layout, "inputFilterEdit", "value1"),
     }),
     result: Object.freeze({
       headerBytes: structure(layout, "eqTargetResult").bytes,
@@ -108,6 +112,18 @@ function schemaOf(layout) {
       generation: field(layout, "eqTargetConfig", "hostGeneration"),
       revision: field(layout, "eqTargetConfig", "ownerRevision"),
       values: field(layout, "eqTargetConfig", "values"),
+      count: valueCount,
+    }),
+    builtinConfig: Object.freeze({
+      bytes: structure(layout, "builtinInputConfig").bytes,
+      structSize: field(layout, "builtinInputConfig", "structSize"),
+      abiVersion: field(layout, "builtinInputConfig", "abiVersion"),
+      sampleRate: field(layout, "builtinInputConfig", "sampleRateHz"),
+      valueCount: field(layout, "builtinInputConfig", "valueCount"),
+      generation: field(layout, "builtinInputConfig", "hostGeneration"),
+      revision: field(layout, "builtinInputConfig", "ownerRevision"),
+      values: field(layout, "builtinInputConfig", "values"),
+      count: inputFilterValueCount,
     }),
     companion: Object.freeze({
       headerBytes: structure(layout, "preparedEffectCompanionHeader").bytes,
@@ -179,28 +195,29 @@ function decodeCommands(records, count, schema) {
   return rows;
 }
 
-function readConfig(bytes, sampleRateHz, schema) {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== schema.config.bytes) throw failure(schema.resultInternal);
+function readConfig(bytes, sampleRateHz, schema, family) {
+  const layout = family === "builtin" ? schema.builtinConfig : schema.config;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== layout.bytes) throw failure(schema.resultInternal);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint32(schema.config.structSize, true) !== schema.config.bytes
-      || view.getUint32(schema.config.abiVersion, true) !== schema.abiVersion
-      || view.getUint32(schema.config.sampleRate, true) !== sampleRateHz
-      || view.getUint32(schema.config.valueCount, true) !== schema.valueCount) throw failure(schema.resultInternal);
+  if (view.getUint32(layout.structSize, true) !== layout.bytes
+      || view.getUint32(layout.abiVersion, true) !== schema.abiVersion
+      || view.getUint32(layout.sampleRate, true) !== sampleRateHz
+      || view.getUint32(layout.valueCount, true) !== layout.count) throw failure(schema.resultInternal);
   let generation;
   let revision;
   try {
-    generation = checkedU64(view.getBigUint64(schema.config.generation, true), true);
-    revision = checkedU64(view.getBigUint64(schema.config.revision, true));
+    generation = checkedU64(view.getBigUint64(layout.generation, true), true);
+    revision = checkedU64(view.getBigUint64(layout.revision, true));
   } catch (_) { throw failure(schema.resultInternal); }
-  const values = new Float32Array(schema.valueCount);
+  const values = new Float32Array(layout.count);
   for (let index = 0; index < values.length; index += 1) {
-    values[index] = view.getFloat32(schema.config.values + index * 4, true);
+    values[index] = view.getFloat32(layout.values + index * 4, true);
     if (!Number.isFinite(values[index])) throw failure(schema.resultInternal);
   }
   return { generation, revision, values };
 }
 
-function readPreparationResult(exports, memory, schema) {
+function readPreparationResult(exports, memory, schema, family) {
   const pointer = exports.miso_engine_web_v1_eq_target_result_ptr();
   const bytes = exports.miso_engine_web_v1_eq_target_result_bytes();
   const capacity = exports.miso_engine_web_v1_eq_target_result_capacity();
@@ -208,15 +225,17 @@ function readPreparationResult(exports, memory, schema) {
       || !Number.isSafeInteger(capacity) || bytes < schema.result.headerBytes || bytes > capacity
       || pointer + bytes > memory.buffer.byteLength) throw failure(schema.resultInternal);
   const view = new DataView(memory.buffer, pointer, bytes);
-  const valueCount = view.getUint32(schema.result.valueCount, true);
+  const resultValueCount = view.getUint32(schema.result.valueCount, true);
   const targetCount = view.getUint32(schema.result.targetCount, true);
-  const targetOffset = schema.result.headerBytes + schema.valueCount * 4;
+  const valueCount = family === "builtin" ? schema.builtinConfig.count : schema.valueCount;
+  const targetOffset = schema.result.headerBytes + valueCount * 4;
   const maximumTargets = Math.floor((capacity - targetOffset) / schema.target.bytes);
   if (view.getUint32(schema.result.structSize, true) !== schema.result.headerBytes
       || view.getUint32(schema.result.abiVersion, true) !== schema.abiVersion
-      || valueCount !== schema.valueCount || targetCount > maximumTargets
+      || resultValueCount !== valueCount
+      || targetCount > maximumTargets
       || targetOffset + targetCount * schema.target.bytes !== bytes) throw failure(schema.resultInternal);
-  const values = new Float32Array(schema.valueCount);
+  const values = new Float32Array(valueCount);
   for (let index = 0; index < values.length; index += 1) {
     values[index] = view.getFloat32(schema.result.values + index * 4, true);
     if (!Number.isFinite(values[index])) throw failure(schema.resultInternal);
@@ -237,25 +256,29 @@ function readPreparationResult(exports, memory, schema) {
   return { values, targets };
 }
 
-function buildRequest(exports, memory, sampleRateHz, values, edits, schema) {
+function buildRequest(exports, memory, sampleRateHz, values, edits, schema, family) {
   const pointer = exports.miso_engine_web_v1_eq_target_request_ptr();
   const capacity = exports.miso_engine_web_v1_eq_target_request_capacity();
-  const bytes = schema.request.editOffset + edits.length * schema.request.editBytes;
+  const valueCount = family === "builtin" ? schema.builtinConfig.count : schema.valueCount;
+  const editBytes = family === "builtin" ? schema.request.inputEditBytes : schema.request.editBytes;
+  const editOffset = schema.request.bytes + valueCount * 4;
+  const bytes = editOffset + edits.length * editBytes;
   if (!Number.isSafeInteger(pointer) || pointer <= 0 || !Number.isSafeInteger(capacity)
       || bytes > capacity || pointer + bytes > memory.buffer.byteLength) throw failure(schema.resultInternal);
   const view = new DataView(memory.buffer, pointer, bytes);
   view.setUint32(schema.request.structSize, schema.request.bytes, true);
   view.setUint32(schema.request.abiVersion, schema.abiVersion, true);
   view.setUint32(schema.request.sampleRate, sampleRateHz, true);
-  view.setUint32(schema.request.seedCount, schema.valueCount, true);
+  view.setUint32(schema.request.seedCount, valueCount, true);
   view.setUint32(schema.request.editCount, edits.length, true);
   for (let index = 0; index < 3; index += 1) view.setUint32(schema.request.reserved + index * 4, 0, true);
-  values.forEach((value, index) => view.setFloat32(schema.request.values + index * 4, value, true));
+  values.forEach((value, index) => view.setFloat32(schema.request.bytes + index * 4, value, true));
   edits.forEach((edit, index) => {
-    const offset = schema.request.editOffset + index * schema.request.editBytes;
+    const offset = editOffset + index * editBytes;
     view.setUint32(offset + schema.request.editParameterId, edit.parameterId, true);
     view.setUint32(offset + schema.request.editChannel, edit.channel, true);
     view.setFloat32(offset + schema.request.editValue, edit.value, true);
+    if (family === "builtin") view.setFloat32(offset + schema.request.inputEditValue1, edit.value1, true);
   });
   return bytes;
 }
@@ -334,7 +357,7 @@ export function createPreparedControl(options) {
   }
 
   function acceptConfig(address, bytes) {
-    const config = readConfig(bytes, options.sampleRateHz, schema);
+    const config = readConfig(bytes, options.sampleRateHz, schema, address.rack === 255 ? "builtin" : "eq");
     if (generation !== 0n && generation !== config.generation) {
       invalidate();
       throw failure(schema.resultWrongState);
@@ -392,11 +415,21 @@ export function createPreparedControl(options) {
   function prepareOwner(owner, group) {
     const active = ensureWorkspace();
     if (!active.available) throw active.failure ?? failure(schema.resultUnsupported);
+    const family = group.family;
     const edits = group.rows.map((row) => ({
-      parameterId: row.parameterId, channel: row.channel, value: row.values[0],
+      parameterId: row.parameterId,
+      channel: row.channel,
+      value: row.values[0],
+      value1: row.values[1],
     }));
-    const requestBytes = buildRequest(active.exports, active.memory, options.sampleRateHz, owner.values, edits, schema);
-    const result = active.exports.miso_engine_web_v1_eq_target_prepare(requestBytes);
+    const requestBytes = buildRequest(
+      active.exports, active.memory, options.sampleRateHz, owner.values, edits, schema, family,
+    );
+    const prepare = family === "builtin"
+      ? active.exports.miso_engine_web_v1_input_filters_prepare
+      : active.exports.miso_engine_web_v1_eq_target_prepare;
+    if (typeof prepare !== "function") throw failure(schema.resultInternal);
+    const result = prepare(requestBytes);
     if (result !== schema.resultOk) {
       const localIndex = active.exports.miso_engine_web_v1_eq_target_rejected_edit_index();
       const rejectedEditIndex = Number.isSafeInteger(localIndex) && localIndex < group.rows.length
@@ -405,7 +438,7 @@ export function createPreparedControl(options) {
       if (rejectedEditIndex === undefined) invalidate();
       return { refusal: true, result, reason, rejectedEditIndex };
     }
-    return { owner, prepared: readPreparationResult(active.exports, active.memory, schema) };
+    return { owner, prepared: readPreparationResult(active.exports, active.memory, schema, family) };
   }
 
   function begin(records, count) {
@@ -415,10 +448,14 @@ export function createPreparedControl(options) {
     const transfer = records.slice();
     const groups = new Map();
     for (const row of rows) {
-      if (row.kind !== schema.effectParamKind) continue;
+      const family = row.kind === schema.effectParamKind && row.rack <= 2
+        ? "eq"
+        : row.kind === schema.inputFiltersKind && row.rack === 255 && row.effectIndex === 0
+          ? "builtin" : null;
+      if (family === null) continue;
       const address = { trackIndex: row.trackIndex, rack: row.rack, effectIndex: row.effectIndex };
       const key = keyOf(address);
-      const group = groups.get(key) ?? (groups.set(key, { address, rows: [] }), groups.get(key));
+      const group = groups.get(key) ?? (groups.set(key, { address, family, rows: [] }), groups.get(key));
       group.rows.push(row);
     }
     if (groups.size === 0) return { ordinary: true, transfer, count };

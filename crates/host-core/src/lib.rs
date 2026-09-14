@@ -97,7 +97,9 @@ pub mod control_provider;
 pub mod diagnostics;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
-    EqTargetPreparerError,
+    EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
+    INPUT_FILTER_VALUE_COUNT, InputFilterEdit, InputFilterEditErrorKind, InputFilterPreparer,
+    InputFilterPreparerError, apply_input_filter_edit,
 };
 pub mod prepare;
 pub mod render_session;

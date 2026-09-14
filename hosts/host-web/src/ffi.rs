@@ -3326,6 +3326,12 @@ pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
     crate::control_targets::close()
 }
 
+/// Prepare the staged builtin input-filter target request.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_input_filters_prepare(request_bytes: u32) -> u32 {
+    crate::control_targets::input_filter_prepare(request_bytes)
+}
+
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
@@ -3674,6 +3680,17 @@ pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
     with_host(handle, 0, |host| {
         host.eq_target_config()
             .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
+    })
+}
+
+/// Copy one accepted builtin input-filter configuration into the shared config workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
+    handle: u32,
+    track_index: u32,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.copy_input_filter_config(track_index)
     })
 }
 

@@ -99,10 +99,9 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             // share one coefficient and one ramp, so they flip together or not at all.
             BuiltinParameterUpdateRate::BlockTarget,
             BuiltinParameterUpdateRate::BlockTarget,
-            // `hpf_hz` and `lpf_hz` stay prepared-only: a live filter move needs the parametric
-            // EQ's per-word coefficient-ramp machinery, which the D2 ruling deferred.
-            BuiltinParameterUpdateRate::PreparedOnly,
-            BuiltinParameterUpdateRate::PreparedOnly,
+            // `hpf_hz` and `lpf_hz` are live through the prepared fixed-64 coefficient path.
+            BuiltinParameterUpdateRate::BlockTarget,
+            BuiltinParameterUpdateRate::BlockTarget,
             // Issue #140 B: `fader_db` and `mute` are block targets now.
             BuiltinParameterUpdateRate::BlockTarget,
             BuiltinParameterUpdateRate::BlockTarget,
@@ -123,8 +122,8 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             // rows carry the same policy for the same reason -- one coefficient, one law.
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
-            BuiltinSmoothingPolicy::None,
-            BuiltinSmoothingPolicy::None,
+            BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
+            BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
@@ -140,8 +139,8 @@ fn parameter_descriptors_have_complete_stable_contracts() {
         [
             BuiltinParameterReset::RestorePreparedValue,
             BuiltinParameterReset::RestorePreparedValue,
-            BuiltinParameterReset::RestorePreparedValue,
-            BuiltinParameterReset::RestorePreparedValue,
+            BuiltinParameterReset::KeepTargetResetCurrent,
+            BuiltinParameterReset::KeepTargetResetCurrent,
             BuiltinParameterReset::RestorePreparedValue,
             BuiltinParameterReset::RestorePreparedValue,
             BuiltinParameterReset::KeepTargetResetCurrent,

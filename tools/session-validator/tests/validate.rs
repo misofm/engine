@@ -287,18 +287,15 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "schema.invalid_enum",
     ),
-    // `hpf_hz` (id 3) is `PreparedOnly`: there is no post-preparation write path, so an automation
-    // span addressed at it could only ever be inert. The deferred filter tier is reopened by
-    // changing the ABI, not by writing a session that quietly does nothing.
+    // #808 makes HPF/LPF live. An unknown builtin ID still receives a typed refusal.
     (
         "builtins-automation.json",
         "\"parameter_id\": 2,\n        \"channel\": \"left\"",
-        "\"parameter_id\": 3,\n        \"channel\": \"left\"",
+        "\"parameter_id\": 4294967295,\n        \"channel\": \"left\"",
         1,
         "reference.missing_entity",
     ),
-    // `delay_samples` (id 11) is the same case, and is named separately because its ruling is its
-    // own: a delay change re-times the ring.
+    // `delay_samples` (id 11) remains prepared-only: a delay change re-times the ring.
     (
         "builtins-automation.json",
         "\"parameter_id\": 1,\n        \"channel\": \"right\"",

@@ -544,12 +544,13 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // #779 adds the response-owner binding table/identity strings and grows the prepared
         // effect-bank descriptor; both are retained by this plan and therefore belong in all
         // three graph totals. The independent rows are restated below in `graph_owners`.
-        graph_session_plus_plan_bytes: 226_196
+        // #808: two banks each retain 3 x 4 x 6 x 32 coefficient bytes + 128 countdown bytes.
+        graph_session_plus_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
             + effect_bank_descriptor_delta,
-        graph_incremental_plan_bytes: 226_196
+        graph_incremental_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
@@ -563,16 +564,16 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648 + effect_bank_descriptor_delta,
-        builtin_bank_bytes: 9_369,
+        builtin_bank_bytes: 14_233,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 2_862,
         source_total_bytes: 11_054,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
-        builtin_processor_payload_bytes: 9_963,
+        builtin_processor_payload_bytes: 17_451,
         builtin_meter_payload_bytes: 0,
-        builtin_retained_payload_bytes: 9_963,
+        builtin_retained_payload_bytes: 17_451,
         capi_retained_bytes,
         largest_named_allocation_bytes: 49_167,
         reserved: [0; 4],
@@ -832,6 +833,12 @@ struct InputBuiltinsMirror {
     active: ScalarLaneMaskMirror,
     trim: [f32; 2],
     coef: [[SvfCoefMirror; 2]; 2],
+    // #808: accepted target, update step and full-reset endpoint.
+    filter_target: [[SvfCoefMirror; 2]; 2],
+    filter_step: [[SvfCoefMirror; 2]; 2],
+    filter_initial: [[SvfCoefMirror; 2]; 2],
+    filter_remaining: [[[u32; 8]; 2]; 2],
+    filter_ramping: bool,
     state: [[SvfStateMirror; 2]; 2],
     /// The strip round's prepared-identity elision plan, `[channel][section]`. Restated here
     /// since #210 phase 3: at the scalar width it used to fit entirely inside the struct's tail
@@ -915,6 +922,12 @@ struct InputStageEightMirror {
     active: [u32; 8],
     trim: [[f32; 8]; 2],
     coef: [[SvfCoefEightMirror; 2]; 2],
+    // #808: accepted target, update step and full-reset endpoint.
+    filter_target: [[SvfCoefEightMirror; 2]; 2],
+    filter_step: [[SvfCoefEightMirror; 2]; 2],
+    filter_initial: [[SvfCoefEightMirror; 2]; 2],
+    filter_remaining: [[[u32; 8]; 2]; 2],
+    filter_ramping: bool,
     state: [[SvfStateEightMirror; 2]; 2],
     /// The strip round's prepared-identity elision plan, `[channel][section]`.
     plan: [[bool; 2]; 2],
@@ -935,6 +948,12 @@ struct InputStageFourMirror {
     active: [u32; 4],
     trim: [[f32; 4]; 2],
     coef: [[[f32; 4]; 6]; 4],
+    // #808: accepted target, update step and full-reset endpoint.
+    filter_target: [[[f32; 4]; 6]; 4],
+    filter_step: [[[f32; 4]; 6]; 4],
+    filter_initial: [[[f32; 4]; 6]; 4],
+    filter_remaining: [[[u32; 8]; 2]; 2],
+    filter_ramping: bool,
     state: [[[f32; 4]; 2]; 4],
     /// The strip round's prepared-identity elision plan, `[channel][section]`.
     plan: [[bool; 2]; 2],
@@ -1730,8 +1749,9 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     // padding: 256 + 64 + 16 + 8 + 8 = 352. The consumer array's *heap* is charged separately
     // below, by `strip_control_array`, which the input row now takes exactly as the fader and
     // matrix rows already did.
+    // #808 adds 2,432 bytes: three 768-byte coefficient sets and 128 countdown bytes.
     assert_eq!(
-        builtin_bank_processor, 1_568,
+        builtin_bank_processor, 4_000,
         "primitive builtin bank processor"
     );
     // Strip round job 2: the fader and the matrix are bankable stages too, so this fixture binds
@@ -2088,7 +2108,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_effective_owner_mutations(
         &graph,
-        502_228 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta,
+        511_956 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta,
         "double-live graph/model",
     );
 
@@ -2162,10 +2182,11 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // This total is reached by restating the field lists, and it agrees with
     // `frozen_scratch_report`'s independently measured `builtin_processor_payload_bytes` -- which
     // is the whole point of holding both.
-    assert_effective_owner_mutations(&builtin, 9_963, "current builtin payload");
+    // #808 adds 416 bytes to each scalar input owner, retained twice per track: 9 x 2 x 416.
+    assert_effective_owner_mutations(&builtin, 17_451, "current builtin payload");
     let mut double_builtin = builtin.clone();
     double_builtin.extend(builtin);
-    assert_effective_owner_mutations(&double_builtin, 19_926, "double-live builtin payload");
+    assert_effective_owner_mutations(&double_builtin, 34_902, "double-live builtin payload");
 
     let (current_capi, candidate_epoch, prepared_protocol, capi_largest) =
         complete_capi_owners(current.len(), prospective.len());
@@ -2500,14 +2521,14 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // independently mirrored response-owner graph delta to each live plan.
     assert_eq!(
         oracle.graph,
-        502_228 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta
+        511_956 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta
     );
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
-    // #210 phase 3: 2 x 9_963 (see `builtin_owners`). The #430 outer allowance is graph-owned.
-    assert_eq!(oracle.builtin, 19_926);
+    // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
+    assert_eq!(oracle.builtin, 34_902);
     assert_eq!(oracle.capi, 204_423);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);

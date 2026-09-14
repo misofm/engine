@@ -28,7 +28,12 @@ use engine::{
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
 pub mod corpus;
+pub mod filter_control;
 mod filter_response;
+pub use filter_control::{
+    INPUT_FILTER_RAMP_SAMPLES, InputFilterPair, PreparedInputFilterPair, PreparedInputFilterTarget,
+    prepare_input_filter_pair, validate_input_filter_pair, validate_prepared_input_filter_target,
+};
 pub use filter_response::{
     InputFilterResponseError, InputFilterResponseMode, InputFilterResponseOutput,
     InputFilterResponseRequest, InputFilterResponseSummary, input_filter_response_descriptor,
@@ -49,7 +54,8 @@ use lane::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
             Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, gain_mute_block,
             gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
-            input_chain_plan, input_chain_ramp_block, input_chain_ramp_block_mono, lanes_below,
+            input_chain_plan, input_chain_ramp_block_elided, input_chain_ramp_block_filter,
+            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
             mask_from_flags, matrix2x2_block, matrix2x2_ramp_block, no_lanes,
             plan_is_channel_symmetric, zero_lanes_block,
         },
@@ -373,6 +379,8 @@ pub enum BuiltinSmoothingPolicy {
     None,
     /// Exact linear interpolation over the requested number of sample updates.
     LinearNUpdates,
+    /// Fixed 64-sample linear updates of the prepared SVF coefficient words.
+    Linear64CoefficientUpdates,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -534,9 +542,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
             minimum_hz: 10.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
-        reset: BuiltinParameterReset::RestorePreparedValue,
+        // Live through the prepared input-filter target path. The semantic cutoff remains a
+        // target association value; render receives only the fixed 64-update coefficient ramp.
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
@@ -550,9 +560,9 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
             minimum_hz: 10.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
-        reset: BuiltinParameterReset::RestorePreparedValue,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
@@ -753,6 +763,8 @@ impl SvfSection {
     /// is the issue-036 table, enforced before preparation by
     /// [`validate_builtin_filter_cutoff`].
     fn design(rate: u32, cutoff: f32, high_pass: bool) -> Result<Self, BuiltinParameterError> {
+        #[cfg(test)]
+        FILTER_DESIGN_CALLS.with(|calls| calls.set(calls.get() + 1));
         if cutoff == 0.0 {
             return Ok(Self::IDENTITY);
         }
@@ -857,10 +869,12 @@ const MAX_BANK_LANES: usize = 8;
 
 #[cfg(test)]
 thread_local! {
+    static FILTER_DESIGN_CALLS: Cell<usize> = const { Cell::new(0) };
     static CHANNEL_SYMMETRY_PREDICATE_CALLS: Cell<usize> = const { Cell::new(0) };
     static CHANNEL_SYMMETRY_LANE_READS: Cell<usize> = const { Cell::new(usize::MAX) };
     static CHANNEL_SYMMETRY_OBSERVE_POST_RAMP: Cell<bool> = const { Cell::new(false) };
     static CHANNEL_SYMMETRY_LAST_POST_RAMP_READS: Cell<usize> = const { Cell::new(usize::MAX) };
+    static FILTER_PREFIX_KERNEL_FRAMES: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 #[cfg(test)]
@@ -907,6 +921,18 @@ fn svf_coef<L: Lane>(sections: &[SvfSection; MAX_BANK_LANES]) -> SvfCoef<L> {
     }
 }
 
+#[inline]
+fn zero_svf_coef<L: Lane>() -> SvfCoef<L> {
+    SvfCoef {
+        c1: L::zero(),
+        a2: L::zero(),
+        a3: L::zero(),
+        m0: L::zero(),
+        m1: L::zero(),
+        m2: L::zero(),
+    }
+}
+
 /// The builtin input stage — sanitise, trim, high-pass, low-pass, boundary check — at one width.
 ///
 /// There is exactly one body: a scalar track is `InputStage<f32>` over planar slices, and a bank
@@ -925,40 +951,29 @@ pub(crate) struct InputStage<L: Lane> {
     /// Folded trim and the four section coefficient sets; `[channel][section]`, section `0` is
     /// the high-pass.
     coef: InputChainCoef<L>,
+    /// Accepted current-independent filter targets and per-sample coefficient steps.
+    filter_target: [[SvfCoef<L>; 2]; 2],
+    filter_step: [[SvfCoef<L>; 2]; 2],
+    /// The prepared endpoint used by an explicit full reset.
+    filter_initial: [[SvfCoef<L>; 2]; 2],
+    /// Authoritative per-lane fixed-64 countdowns, indexed `[channel][section][lane]`.
+    filter_remaining: [[[u32; MAX_BANK_LANES]; 2]; 2],
+    filter_ramping: bool,
     /// Retained integrator state, indexed like [`InputChainCoef::section`].
     state: InputChainState<L>,
-    /// Which sections the render path may skip, decided from the words in [`InputStage::coef`]
-    /// and [`InputStage::state`] and re-decided by every write to either.
+    /// Cached permission to skip each section across the whole bank.
     ///
-    /// # Why a live trim cannot make this stale (issue #210 phase 3)
+    /// `section_is_identity` reads the six coefficient words and two integrators of every lane.
+    /// Trim is not part of that predicate, so trim/polarity retargets cannot invalidate it.
+    /// Filter targets arrive as prepared words; the callback never invokes the designer.
     ///
-    /// The plan is a pure function of the **six SVF coefficient words per section and the two
-    /// integrators per section** -- [`section_is_identity`] reads those eight and nothing else.
-    /// `trim` is not among them. `hpf_hz` and `lpf_hz`, which are the only parameters that design
-    /// those six words, remain `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS`, so the
-    /// coefficients are still written exactly once, here.
-    ///
-    /// `trim_db` and `polarity_invert` are live since phase 3 and write [`InputStage::coef`]'s
-    /// `trim` word after preparation -- but a section's elidability does not depend on the value
-    /// the chain multiplies its input by, only on whether the section is the arithmetic identity,
-    /// so that write cannot flip a `true` to a `false` or the reverse. The decision is therefore
-    /// still taken once, at the point the section words are written, and cannot go stale.
-    ///
-    /// **The proviso this leaves for a later phase**: if `hpf_hz` or `lpf_hz` ever become live,
-    /// the premise above fails at exactly the word list this comment names, and that liveness
-    /// requires a command-driven invalidation -- the retarget must recompute the plan the way
-    /// [`InputStage::set_lane_state_words`] and [`InputStage::reset`] already do. See
-    /// `docs/rulings/builtins-input-liveness-d2.md`.
-    ///
-    /// The state words are written by [`InputStage::reset`] and by the evidence-only
-    /// [`InputStage::set_lane_state_words`], and both re-decide the plan.
-    ///
-    /// The render path writes `state` in exactly one place -- the boundary-check recovery in
-    /// [`InputStage::process`], which is `state.andnot(bad)` -- and that write is *monotone*
-    /// toward the identity: it either leaves a word alone or replaces it with the `+0.0` the
-    /// identity pattern wants. So it can never invalidate a `true`, and it is deliberately left
-    /// bit-for-bit as it was rather than made to re-decide the plan. A section it happens to make
-    /// newly elidable simply stays unelided until the next reset, which costs correctness nothing.
+    /// `refresh_filter_plan` recomputes the predicate and forces every in-flight section false,
+    /// including an enable whose current words are still identity. Retarget, ramp completion,
+    /// disabled endpoint clearing, reset and explicit state restoration use this authority.
+    /// A settled elided section keeps its integrators untouched; boundary recovery can only move
+    /// them toward +0, so it cannot invalidate an elidable section. The required all-identity
+    /// trim-ramp path preserves sanitization, trim timing and signed-zero normalization.
+    /// See `docs/rulings/builtins-input-liveness-d2.md`.
     plan: InputChainPlan,
     /// The live trim ramp (#210 phase 3). `ramp.current[c]` is the same value as `coef.trim[c]`
     /// between events -- there is no second copy of the coefficient -- and `ramp.target[c]` is the
@@ -1078,6 +1093,11 @@ impl<L: Lane> InputStage<L> {
             members,
             active: lanes_below::<L>(members),
             coef,
+            filter_target: coef.section,
+            filter_step: [[zero_svf_coef::<L>(); 2]; 2],
+            filter_initial: coef.section,
+            filter_remaining: [[[0; MAX_BANK_LANES]; 2]; 2],
+            filter_ramping: false,
             state,
             plan,
             ramp,
@@ -1190,6 +1210,84 @@ impl<L: Lane> InputStage<L> {
         self.symmetry = candidate;
     }
 
+    /// Filter-aware post-ramp refresh. This retains the trim words and adds every live filter
+    /// target/step/countdown word, so both trim-only and filter-prefix paths publish one complete
+    /// channel-symmetry witness.
+    fn refresh_filter_channel_symmetry_post_ramp(&mut self) {
+        self.refresh_channel_symmetry_post_ramp();
+        let mut candidate = self.symmetry;
+        for section in 0..2 {
+            for (left_word, right_word) in [
+                (
+                    self.filter_target[0][section].c1,
+                    self.filter_target[1][section].c1,
+                ),
+                (
+                    self.filter_target[0][section].a2,
+                    self.filter_target[1][section].a2,
+                ),
+                (
+                    self.filter_target[0][section].a3,
+                    self.filter_target[1][section].a3,
+                ),
+                (
+                    self.filter_target[0][section].m0,
+                    self.filter_target[1][section].m0,
+                ),
+                (
+                    self.filter_target[0][section].m1,
+                    self.filter_target[1][section].m1,
+                ),
+                (
+                    self.filter_target[0][section].m2,
+                    self.filter_target[1][section].m2,
+                ),
+                (
+                    self.filter_step[0][section].c1,
+                    self.filter_step[1][section].c1,
+                ),
+                (
+                    self.filter_step[0][section].a2,
+                    self.filter_step[1][section].a2,
+                ),
+                (
+                    self.filter_step[0][section].a3,
+                    self.filter_step[1][section].a3,
+                ),
+                (
+                    self.filter_step[0][section].m0,
+                    self.filter_step[1][section].m0,
+                ),
+                (
+                    self.filter_step[0][section].m1,
+                    self.filter_step[1][section].m1,
+                ),
+                (
+                    self.filter_step[0][section].m2,
+                    self.filter_step[1][section].m2,
+                ),
+            ] {
+                let left = lane_read::<L>(left_word);
+                let right = lane_read::<L>(right_word);
+                for lane in 0..L::WIDTH {
+                    if candidate & (1 << lane) != 0 && left[lane].to_bits() != right[lane].to_bits()
+                    {
+                        candidate &= !(1 << lane);
+                    }
+                }
+            }
+            for lane in 0..L::WIDTH {
+                if candidate & (1 << lane) != 0
+                    && self.filter_remaining[0][section][lane]
+                        != self.filter_remaining[1][section][lane]
+                {
+                    candidate &= !(1 << lane);
+                }
+            }
+        }
+        self.symmetry = candidate;
+    }
+
     /// Updates only the addressed lane after a live trim/polarity retarget.
     fn refresh_channel_symmetry_lane(&mut self, lane: usize) {
         let bit = 1_u8 << lane;
@@ -1198,6 +1296,171 @@ impl<L: Lane> InputStage<L> {
         } else {
             self.symmetry &= !bit;
         }
+    }
+
+    /// Recompute the elision plan while a filter target is in flight.  An in-flight section is
+    /// conservative even when its current words still happen to be identity words: the target
+    /// is already accepted and the ramp body must execute it.
+    fn refresh_filter_plan(&mut self) {
+        let mut plan = input_chain_plan::<L>(&self.coef, &self.state);
+        for channel in 0..2 {
+            for section in 0..2 {
+                if self.filter_remaining[channel][section]
+                    .iter()
+                    .take(self.members)
+                    .any(|remaining| *remaining != 0)
+                {
+                    plan.elided[channel][section] = false;
+                }
+            }
+        }
+        self.plan = plan;
+    }
+
+    fn load_filter_countdown(&self) -> [[L; 2]; 2] {
+        let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
+        for (channel, channel_words) in words.iter_mut().enumerate() {
+            for (section, section_words) in channel_words.iter_mut().enumerate() {
+                for (lane, word) in section_words.iter_mut().enumerate() {
+                    *word = self.filter_remaining[channel][section][lane]
+                        .min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
+                }
+            }
+        }
+        core::array::from_fn(|channel| {
+            core::array::from_fn(|section| lane_words::<L>(&words[channel][section]))
+        })
+    }
+
+    /// Bound the combined filter body to the countdown that still exists in its processed lanes.
+    /// A settled section must enter the elided suffix immediately; the fixed policy's 64-sample
+    /// ceiling is only a bound for an active countdown, not work every prefix must perform.
+    fn filter_prefix_frames(&self, frames: usize, channels: core::ops::Range<usize>) -> usize {
+        let mut remaining = 0_u32;
+        for channel in channels {
+            for section in 0..2 {
+                for lane in 0..self.members {
+                    remaining = remaining.max(self.filter_remaining[channel][section][lane]);
+                }
+            }
+        }
+        let remaining = remaining.min(INPUT_FILTER_RAMP_SAMPLES);
+        frames.min(usize::try_from(remaining).unwrap_or(usize::MAX))
+    }
+
+    fn settle_filter(&mut self, frames: usize, channels: core::ops::Range<usize>) {
+        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+        for channel in channels {
+            for section in 0..2 {
+                let mut current = self.coef.section[channel][section];
+                let target = self.filter_target[channel][section];
+                let mut remaining = self.filter_remaining[channel][section];
+                remaining = remaining.map(|value| value.saturating_sub(frames));
+                let settle_words = |value: L, target: L, remaining: &[u32; MAX_BANK_LANES]| {
+                    let mut current_words = lane_read::<L>(value);
+                    let target_words = lane_read::<L>(target);
+                    for lane in 0..L::WIDTH {
+                        if remaining[lane] == 0 {
+                            current_words[lane] = target_words[lane];
+                        }
+                    }
+                    lane_words::<L>(&current_words)
+                };
+                current.c1 = settle_words(current.c1, target.c1, &remaining);
+                current.a2 = settle_words(current.a2, target.a2, &remaining);
+                current.a3 = settle_words(current.a3, target.a3, &remaining);
+                current.m0 = settle_words(current.m0, target.m0, &remaining);
+                current.m1 = settle_words(current.m1, target.m1, &remaining);
+                current.m2 = settle_words(current.m2, target.m2, &remaining);
+                self.filter_remaining[channel][section] = remaining;
+                self.coef.section[channel][section] = current;
+            }
+        }
+        self.filter_ramping = (0..2).any(|channel| {
+            (0..2).any(|section| {
+                self.filter_remaining[channel][section]
+                    .iter()
+                    .take(self.members)
+                    .any(|remaining| *remaining != 0)
+            })
+        });
+    }
+
+    /// Apply one already-validated fixed-size target to one section and one or both channels.
+    fn apply_prepared_filter(&mut self, lane: usize, target: PreparedInputFilterTarget) {
+        debug_assert!(target.section < 2);
+        debug_assert!(lane < self.members);
+        let section = target.section as usize;
+        let target_words = target.coefficients;
+        for channel in 0..2 {
+            if !target.lanes.covers(channel) {
+                continue;
+            }
+            let current = self.coef.section[channel][section];
+            let current_values = [
+                current.c1, current.a2, current.a3, current.m0, current.m1, current.m2,
+            ];
+            let mut target_values = [
+                lane_read::<L>(self.filter_target[channel][section].c1),
+                lane_read::<L>(self.filter_target[channel][section].a2),
+                lane_read::<L>(self.filter_target[channel][section].a3),
+                lane_read::<L>(self.filter_target[channel][section].m0),
+                lane_read::<L>(self.filter_target[channel][section].m1),
+                lane_read::<L>(self.filter_target[channel][section].m2),
+            ];
+            let mut step_values = [
+                lane_read::<L>(self.filter_step[channel][section].c1),
+                lane_read::<L>(self.filter_step[channel][section].a2),
+                lane_read::<L>(self.filter_step[channel][section].a3),
+                lane_read::<L>(self.filter_step[channel][section].m0),
+                lane_read::<L>(self.filter_step[channel][section].m1),
+                lane_read::<L>(self.filter_step[channel][section].m2),
+            ];
+            let mut remaining = self.filter_remaining[channel][section];
+            let mut changed = false;
+            for index in 0..6 {
+                let current_word = lane_read::<L>(current_values[index])[lane];
+                target_values[index][lane] = target_words[index];
+                if current_word.to_bits() != target_words[index].to_bits() {
+                    step_values[index][lane] = (target_words[index] - current_word) * (1.0 / 64.0);
+                    changed = true;
+                } else {
+                    step_values[index][lane] = 0.0;
+                }
+            }
+            remaining[lane] = if changed {
+                INPUT_FILTER_RAMP_SAMPLES
+            } else {
+                0
+            };
+            self.filter_target[channel][section] = SvfCoef {
+                c1: lane_words::<L>(&target_values[0]),
+                a2: lane_words::<L>(&target_values[1]),
+                a3: lane_words::<L>(&target_values[2]),
+                m0: lane_words::<L>(&target_values[3]),
+                m1: lane_words::<L>(&target_values[4]),
+                m2: lane_words::<L>(&target_values[5]),
+            };
+            self.filter_step[channel][section] = SvfCoef {
+                c1: lane_words::<L>(&step_values[0]),
+                a2: lane_words::<L>(&step_values[1]),
+                a3: lane_words::<L>(&step_values[2]),
+                m0: lane_words::<L>(&step_values[3]),
+                m1: lane_words::<L>(&step_values[4]),
+                m2: lane_words::<L>(&step_values[5]),
+            };
+            self.filter_remaining[channel][section] = remaining;
+        }
+        self.filter_ramping = (0..2).any(|channel| {
+            (0..2).any(|section| {
+                self.filter_remaining[channel][section]
+                    .iter()
+                    .take(self.members)
+                    .any(|remaining| *remaining != 0)
+            })
+        });
+        self.refresh_filter_plan();
+        self.refresh_channel_symmetry();
     }
 
     /// Largest ramp countdown that is exact in `f32`.
@@ -1374,6 +1637,13 @@ impl<L: Lane> InputStage<L> {
         self.coef.trim[1] = self.coef.trim[0];
     }
 
+    fn mirror_filter_ramp(&mut self) {
+        self.coef.section[1] = self.coef.section[0];
+        self.filter_target[1] = self.filter_target[0];
+        self.filter_step[1] = self.filter_step[0];
+        self.filter_remaining[1] = self.filter_remaining[0];
+    }
+
     /// Sums the populated lanes of an exact-integer lane word.
     fn members_sum(&self, value: L) -> u64 {
         let words = lane_read::<L>(value);
@@ -1400,20 +1670,82 @@ impl<L: Lane> InputStage<L> {
         // The feature's off gate, and the whole of its steady-state cost: one `bool`. The `false`
         // arm is the call this function has always made, on the prepared coefficient words, with
         // the elision plan Job 1 decided -- byte-identical work.
-        let report = if self.ramping {
+        let report = if self.filter_ramping {
+            let prefix = self.filter_prefix_frames(frames, 0..2);
+            if self.ramping {
+                self.load_countdown();
+            }
+            let mut filter_remaining = self.load_filter_countdown();
+            #[cfg(test)]
+            FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
+            let mut report = input_chain_ramp_block_filter::<L>(
+                &mut left[..prefix * L::WIDTH],
+                &mut right[..prefix * L::WIDTH],
+                prefix,
+                &mut self.coef,
+                &mut self.state,
+                &mut self.ramp,
+                self.ramping,
+                &self.filter_target,
+                &self.filter_step,
+                &mut filter_remaining,
+            );
+            if self.ramping {
+                self.settle(prefix, 0..2);
+            }
+            self.settle_filter(prefix, 0..2);
+            self.refresh_filter_plan();
+            if prefix < frames {
+                let suffix_frames = frames - prefix;
+                let suffix = if self.ramping {
+                    self.load_countdown();
+                    let suffix = input_chain_ramp_block_elided::<L>(
+                        &mut left[prefix * L::WIDTH..],
+                        &mut right[prefix * L::WIDTH..],
+                        suffix_frames,
+                        &self.coef,
+                        &mut self.state,
+                        &mut self.ramp,
+                        &self.plan,
+                    );
+                    self.settle(suffix_frames, 0..2);
+                    suffix
+                } else {
+                    input_chain_block_elided::<L>(
+                        &mut left[prefix * L::WIDTH..],
+                        &mut right[prefix * L::WIDTH..],
+                        suffix_frames,
+                        &self.coef,
+                        &mut self.state,
+                        &self.plan,
+                    )
+                };
+                report.sanitized[0] = report.sanitized[0].add(suffix.sanitized[0]);
+                report.sanitized[1] = report.sanitized[1].add(suffix.sanitized[1]);
+                report.nonfinite[0] = L::mask_or(report.nonfinite[0], suffix.nonfinite[0]);
+                report.nonfinite[1] = L::mask_or(report.nonfinite[1], suffix.nonfinite[1]);
+            }
+            #[cfg(test)]
+            begin_post_ramp_observation();
+            self.refresh_filter_channel_symmetry_post_ramp();
+            #[cfg(test)]
+            end_post_ramp_observation();
+            report
+        } else if self.ramping {
             self.load_countdown();
-            let report = input_chain_ramp_block::<L>(
+            let report = input_chain_ramp_block_elided::<L>(
                 left,
                 right,
                 frames,
                 &self.coef,
                 &mut self.state,
                 &mut self.ramp,
+                &self.plan,
             );
             self.settle(frames, 0..2);
             #[cfg(test)]
             begin_post_ramp_observation();
-            self.refresh_channel_symmetry_post_ramp();
+            self.refresh_filter_channel_symmetry_post_ramp();
             #[cfg(test)]
             end_post_ramp_observation();
             report
@@ -1481,14 +1813,76 @@ impl<L: Lane> InputStage<L> {
         // holds: by the time `desymmetrize` runs, this block's drain may legitimately have moved
         // one channel's words and not the other's.
         debug_assert!(self.trim_ramp_channels_agree());
-        let report = if self.ramping {
+        let report = if self.filter_ramping {
+            let prefix = self.filter_prefix_frames(frames, 0..1);
+            if self.ramping {
+                self.load_countdown();
+            }
+            let mut filter_remaining = self.load_filter_countdown();
+            #[cfg(test)]
+            FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
+            let mut report = input_chain_ramp_block_filter_mono::<L>(
+                &mut left[..prefix * L::WIDTH],
+                prefix,
+                &mut self.coef,
+                &mut self.state,
+                &mut self.ramp,
+                self.ramping,
+                &self.filter_target,
+                &self.filter_step,
+                &mut filter_remaining,
+            );
+            if self.ramping {
+                self.settle(prefix, 0..1);
+            }
+            self.settle_filter(prefix, 0..1);
+            self.mirror_filter_ramp();
+            self.refresh_filter_plan();
+            if prefix < frames {
+                let suffix_frames = frames - prefix;
+                let suffix = if self.ramping {
+                    self.load_countdown();
+                    let suffix = input_chain_ramp_block_mono_elided::<L>(
+                        &mut left[prefix * L::WIDTH..],
+                        suffix_frames,
+                        &self.coef,
+                        &mut self.state,
+                        &mut self.ramp,
+                        &self.plan,
+                    );
+                    self.settle(suffix_frames, 0..1);
+                    suffix
+                } else {
+                    input_chain_block_mono_elided::<L>(
+                        &mut left[prefix * L::WIDTH..],
+                        suffix_frames,
+                        &self.coef,
+                        &mut self.state,
+                        &self.plan,
+                    )
+                };
+                report.sanitized[0] = report.sanitized[0].add(suffix.sanitized[0]);
+                report.sanitized[1] = report.sanitized[1].add(suffix.sanitized[1]);
+                report.nonfinite[0] = L::mask_or(report.nonfinite[0], suffix.nonfinite[0]);
+                report.nonfinite[1] = L::mask_or(report.nonfinite[1], suffix.nonfinite[1]);
+            }
+            self.mirror_filter_ramp();
+            self.mirror_trim_ramp();
+            #[cfg(test)]
+            begin_post_ramp_observation();
+            self.refresh_filter_channel_symmetry_post_ramp();
+            #[cfg(test)]
+            end_post_ramp_observation();
+            report
+        } else if self.ramping {
             self.load_countdown();
-            let report = input_chain_ramp_block_mono::<L>(
+            let report = input_chain_ramp_block_mono_elided::<L>(
                 left,
                 frames,
                 &self.coef,
                 &mut self.state,
                 &mut self.ramp,
+                &self.plan,
             );
             // Channel `0` only: the right channel's ramp is not advanced by the one-plane kernel,
             // so it is settled from the left channel's countdown and then duplicated, exactly as
@@ -1500,7 +1894,7 @@ impl<L: Lane> InputStage<L> {
             self.mirror_trim_ramp();
             #[cfg(test)]
             begin_post_ramp_observation();
-            self.refresh_channel_symmetry_post_ramp();
+            self.refresh_filter_channel_symmetry_post_ramp();
             #[cfg(test)]
             end_post_ramp_observation();
             report
@@ -1574,6 +1968,7 @@ impl<L: Lane> InputStage<L> {
     /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
         self.state.section[1] = self.state.section[0];
+        self.refresh_filter_plan();
     }
 
     /// The eight live trim-ramp words of one lane. Evidence only.
@@ -1649,7 +2044,99 @@ impl<L: Lane> InputStage<L> {
                 }
             }
         }
-        self.trim_ramp_channels_agree()
+        if !self.trim_ramp_channels_agree() {
+            return false;
+        }
+        for section in 0..2 {
+            for (left_word, right_word) in [
+                (
+                    self.coef.section[0][section].c1,
+                    self.coef.section[1][section].c1,
+                ),
+                (
+                    self.coef.section[0][section].a2,
+                    self.coef.section[1][section].a2,
+                ),
+                (
+                    self.coef.section[0][section].a3,
+                    self.coef.section[1][section].a3,
+                ),
+                (
+                    self.coef.section[0][section].m0,
+                    self.coef.section[1][section].m0,
+                ),
+                (
+                    self.coef.section[0][section].m1,
+                    self.coef.section[1][section].m1,
+                ),
+                (
+                    self.coef.section[0][section].m2,
+                    self.coef.section[1][section].m2,
+                ),
+                (
+                    self.filter_target[0][section].c1,
+                    self.filter_target[1][section].c1,
+                ),
+                (
+                    self.filter_target[0][section].a2,
+                    self.filter_target[1][section].a2,
+                ),
+                (
+                    self.filter_target[0][section].a3,
+                    self.filter_target[1][section].a3,
+                ),
+                (
+                    self.filter_target[0][section].m0,
+                    self.filter_target[1][section].m0,
+                ),
+                (
+                    self.filter_target[0][section].m1,
+                    self.filter_target[1][section].m1,
+                ),
+                (
+                    self.filter_target[0][section].m2,
+                    self.filter_target[1][section].m2,
+                ),
+                (
+                    self.filter_step[0][section].c1,
+                    self.filter_step[1][section].c1,
+                ),
+                (
+                    self.filter_step[0][section].a2,
+                    self.filter_step[1][section].a2,
+                ),
+                (
+                    self.filter_step[0][section].a3,
+                    self.filter_step[1][section].a3,
+                ),
+                (
+                    self.filter_step[0][section].m0,
+                    self.filter_step[1][section].m0,
+                ),
+                (
+                    self.filter_step[0][section].m1,
+                    self.filter_step[1][section].m1,
+                ),
+                (
+                    self.filter_step[0][section].m2,
+                    self.filter_step[1][section].m2,
+                ),
+            ] {
+                let left = lane_read::<L>(left_word);
+                let right = lane_read::<L>(right_word);
+                for lane in 0..self.members {
+                    if left[lane].to_bits() != right[lane].to_bits() {
+                        return false;
+                    }
+                }
+            }
+            if self.filter_remaining[0][section][..self.members]
+                != self.filter_remaining[1][section][..self.members]
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether this chain may be collapsed at all: the two channels must elide the same sections.
@@ -1668,6 +2155,10 @@ impl<L: Lane> InputStage<L> {
     /// the cheap rule is the one worth keeping: every write to `state` outside the render path
     /// re-decides `plan`.
     fn reset(&mut self) {
+        self.reset_with_kind(BuiltinResetKind::DiscontinuityKeepTargets);
+    }
+
+    fn reset_with_kind(&mut self, kind: BuiltinResetKind) {
         self.state = InputChainState::default();
         // Snap every lane to its target and cancel any ramp in flight, exactly as
         // `FaderRampStage::reset` and `MatrixStage::reset` do: a reset is a state reset, and a
@@ -1681,7 +2172,18 @@ impl<L: Lane> InputStage<L> {
         self.remaining = [[0; MAX_BANK_LANES]; 2];
         self.ramping = false;
         self.coef.trim = self.ramp.current;
-        self.plan = input_chain_plan::<L>(&self.coef, &self.state);
+        if matches!(kind, BuiltinResetKind::FullToPrepared) {
+            self.filter_target = self.filter_initial;
+        }
+        self.coef.section = if matches!(kind, BuiltinResetKind::FullToPrepared) {
+            self.filter_initial
+        } else {
+            self.filter_target
+        };
+        self.filter_step = [[zero_svf_coef::<L>(); 2]; 2];
+        self.filter_remaining = [[[0; MAX_BANK_LANES]; 2]; 2];
+        self.filter_ramping = false;
+        self.refresh_filter_plan();
         self.refresh_channel_symmetry();
     }
 
@@ -1696,6 +2198,41 @@ impl<L: Lane> InputStage<L> {
         let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
         let section = |channel: usize, index: usize| -> SvfSection {
             let coef = &self.coef.section[channel][index];
+            let (m0, m1, m2) = (
+                lane_read::<L>(coef.m0)[lane],
+                lane_read::<L>(coef.m1)[lane],
+                lane_read::<L>(coef.m2)[lane],
+            );
+            let enabled = !(m0 == 1.0 && m1 == 0.0 && m2 == 0.0);
+            SvfSection {
+                c1: lane_read::<L>(coef.c1)[lane],
+                a2: lane_read::<L>(coef.a2)[lane],
+                a3: lane_read::<L>(coef.a3)[lane],
+                k: if enabled { BUTTERWORTH_K } else { 0.0 },
+                m0,
+                m1,
+                m2,
+                enabled,
+            }
+        };
+        PreparedInputTrack {
+            left: InputLane {
+                trim_signed: trim[0],
+                hpf: section(0, 0),
+                lpf: section(0, 1),
+            },
+            right: InputLane {
+                trim_signed: trim[1],
+                hpf: section(1, 0),
+                lpf: section(1, 1),
+            },
+        }
+    }
+
+    fn target_lane_track(&self, lane: usize) -> PreparedInputTrack {
+        let trim = self.coef.trim.map(|value| lane_read::<L>(value)[lane]);
+        let section = |channel: usize, index: usize| -> SvfSection {
+            let coef = &self.filter_target[channel][index];
             let (m0, m1, m2) = (
                 lane_read::<L>(coef.m0)[lane],
                 lane_read::<L>(coef.m1)[lane],
@@ -1751,7 +2288,7 @@ impl<L: Lane> InputStage<L> {
         let bypassed = request.bypassed;
         let left = request.left;
         let right = request.right;
-        let track = self.lane_track(lane);
+        let track = self.target_lane_track(lane);
         let left_sections = [track.left.hpf, track.left.lpf];
         let right_sections = [track.right.hpf, track.right.lpf];
         for (index, (left_section, right_section)) in
@@ -1888,6 +2425,33 @@ impl<L: Lane> InputStage<L> {
                     return false;
                 }
             }
+            let left_target = &self.filter_target[0][section];
+            let right_target = &self.filter_target[1][section];
+            let left_step = &self.filter_step[0][section];
+            let right_step = &self.filter_step[1][section];
+            for (left_word, right_word) in [
+                (left_target.c1, right_target.c1),
+                (left_target.a2, right_target.a2),
+                (left_target.a3, right_target.a3),
+                (left_target.m0, right_target.m0),
+                (left_target.m1, right_target.m1),
+                (left_target.m2, right_target.m2),
+                (left_step.c1, right_step.c1),
+                (left_step.a2, right_step.a2),
+                (left_step.a3, right_step.a3),
+                (left_step.m0, right_step.m0),
+                (left_step.m1, right_step.m1),
+                (left_step.m2, right_step.m2),
+            ] {
+                if lane_read::<L>(left_word)[lane].to_bits()
+                    != lane_read::<L>(right_word)[lane].to_bits()
+                {
+                    return false;
+                }
+            }
+            if self.filter_remaining[0][section][lane] != self.filter_remaining[1][section][lane] {
+                return false;
+            }
         }
         true
     }
@@ -1929,7 +2493,7 @@ impl<L: Lane> InputStage<L> {
                 state.ic2 = lane_words::<L>(&ic2);
             }
         }
-        self.plan = input_chain_plan::<L>(&self.coef, &self.state);
+        self.refresh_filter_plan();
     }
 }
 
@@ -2554,7 +3118,7 @@ impl BuiltinChain {
         self.matrix.set_target(target)
     }
     pub fn reset(&mut self, kind: BuiltinResetKind) {
-        self.input.reset();
+        self.input.reset_with_kind(kind);
         self.matrix.reset();
         if matches!(kind, BuiltinResetKind::FullToPrepared) {
             self.fader_mute.reset();
@@ -2648,8 +3212,8 @@ impl InputBuiltins {
     ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecord`
     ///   implements `LiveConsoleRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
     ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
-    ///   dispatch reads the witness. `hpf_hz` and `lpf_hz` remain `PreparedOnly` and have no
-    ///   write path at all.
+    ///   dispatch reads the witness. Filter targets use the same upstream queue and clear the
+    ///   witness according to their addressed lanes.
     #[must_use]
     pub fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         let mut witness = ChannelSymmetryWitness::SYMMETRIC;
@@ -2668,6 +3232,17 @@ impl InputBuiltins {
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
         self.stage
             .copy_response_snapshot_lane(0, sample_rate_hz, request)
+    }
+
+    /// Applies one trusted, precomputed HPF/LPF section target. The fixed 64-update ramp is
+    /// intentionally independent of the prepared-control smoothing field in this tranche.
+    pub fn apply_prepared_filter(
+        &mut self,
+        target: PreparedInputFilterTarget,
+    ) -> Result<(), BuiltinParameterError> {
+        validate_prepared_input_filter_target(&target)?;
+        self.stage.apply_prepared_filter(0, target);
+        Ok(())
     }
 
     /// Renders one already-validated block. Infallible: the block shape was checked once (F9).
@@ -2719,9 +3294,14 @@ impl InputBuiltins {
     pub fn reset(&mut self) {
         self.stage.reset();
     }
+
+    pub fn reset_with_kind(&mut self, kind: BuiltinResetKind) {
+        self.stage.reset_with_kind(kind);
+    }
     pub fn tail(&self) -> BuiltinTail {
         let track = self.stage.lane_track(0);
-        if track.left.hpf.enabled
+        if self.stage.filter_ramping
+            || track.left.hpf.enabled
             || track.left.lpf.enabled
             || track.right.hpf.enabled
             || track.right.lpf.enabled
@@ -2915,6 +3495,23 @@ impl BuiltinInputBank {
             InputStageKernel::Simd4(stage) => stage.channels_agree(),
             InputStageKernel::Simd8(stage) => stage.channels_agree(),
         }
+    }
+
+    /// Applies one trusted precomputed input-filter target to one populated lane in this bank.
+    pub fn apply_prepared_filter(
+        &mut self,
+        lane: usize,
+        target: PreparedInputFilterTarget,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        validate_prepared_input_filter_target(&target)?;
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => stage.apply_prepared_filter(lane, target),
+            InputStageKernel::Simd8(stage) => stage.apply_prepared_filter(lane, target),
+        }
+        Ok(())
     }
 
     /// Retargets one member lane's `trim_db` on the addressed channels, over an explicit window.

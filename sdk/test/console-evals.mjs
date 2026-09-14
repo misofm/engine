@@ -71,7 +71,7 @@ function encodeBrowserCommands(commands) {
 }
 
 describe("issue 322 -- shared semantic console", () => {
-  test("all eleven command kinds are built by name and admitted by live Wasm", async () => {
+  test("all twelve command kinds are built by name and admitted by live Wasm", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
       console: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 },
@@ -91,9 +91,10 @@ describe("issue 322 -- shared semantic console", () => {
         compressor.parameter("threshold", -24, { channel: "both" }),
         compressor.bypass(false),
         compressor.observe("Gain Reduction", true, 2),
+        track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }),
       );
       assert.equal(first.ok, true);
-      assert.equal(first.admitted, 10);
+      assert.equal(first.admitted, 11);
       assert.equal(first.reasonName, "none");
       assert.equal(first.appliedAtSample, 0n);
 
@@ -108,7 +109,7 @@ describe("issue 322 -- shared semantic console", () => {
 
       const kindNames = [
         "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-        "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",
+        "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
       ];
       assert.deepEqual(
         [...ABI_LAYOUT.constants.wireCommandKinds.map((row) => row.name)].sort(),
@@ -143,6 +144,13 @@ describe("issue 322 -- shared semantic console", () => {
     );
     assert.throws(() => console.edit.track("missing"), MisoUsageError);
     assert.throws(() => console.edit.track("t").faderDb(Number.NaN), /finite/);
+    const hpf = console.edit.track("t").hpfHz(80, { channel: "left" });
+    const pair = console.edit.track("t").inputFilters({ hpfHz: 80, lpfHz: 12_000 });
+    assert.equal(hpf.kind, "inputFilters");
+    assert.equal(hpf.parameterId, 3);
+    assert.equal(pair.kind, "inputFilters");
+    assert.deepEqual(pair.values, [80, 12_000, 0, 0]);
+    assert.equal(calls, 0, "authoring a filter edit does not submit it");
     assert.throws(() => console.edit.track("t").pan(-2, 0), /at least -1/);
     assert.throws(
       () => console.edit.track("t").effect("simd1", 0, "miso.compressor")
