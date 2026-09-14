@@ -619,6 +619,82 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   await subscription.close();
 });
 
+test("automatic spectrum drains once after a gap and preserves coalesced losses", async (t) => {
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (status, sequence, droppedCaptures, captureEpoch = 1n) => ({
+    result: 0, status, target: prepared.target, channels: "both", sampleRateHz: 48_000,
+    quantumFrames: 128, hopFrames: 2_048, sourceUnderrun: false, captureEpoch,
+    sequence: BigInt(sequence), droppedCaptures, windows: BigInt(sequence),
+    capturedSample: BigInt(sequence * 2_048), endSample: BigInt((sequence + 1) * 2_048),
+    analysisEpoch: 1n, historyStartSample: 0n, smoothingMs: 0,
+  });
+  const read = (status, sequence, drops, epoch = 1n) => ({
+    metadata: metadata(status, sequence, drops, epoch),
+    ...(status === "ready" ? { result: {
+      target: prepared.target, channels: "both", sampleRateHz: 48_000,
+      windowFrames: 2_048, binCount: 1, floorDb: -120,
+      frequenciesHz: new Float32Array([0]), leftDb: new Float32Array([0]), rightDb: new Float32Array([0]),
+      capturedSample: BigInt(sequence * 2_048), endSample: BigInt((sequence + 1) * 2_048),
+      snapshotToken: BigInt(sequence), graphSourceUnderrun: false, resultBytes: 37n,
+    } } : {}),
+  });
+  const queued = [];
+  const fast = [];
+  const slow = [];
+  let timer;
+  let calls = 0;
+  let stopped = false;
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }), readObservations: () => [],
+    console: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
+    spectrumRead: async () => { calls++; return await queued.shift(); },
+    spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
+    scheduler: { setInterval: (callback) => { timer = callback; return 1; }, clearInterval: () => {} },
+  });
+  const fastHandle = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 1, onUpdate: (n) => fast.push(n) })).handle;
+  const slowHandle = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 100, onUpdate: (n) => slow.push(n) })).handle;
+  const tick = async (time) => { now = time; timer(); await new Promise((resolve) => setImmediate(resolve)); };
+  queued.push(read("ready", 1, 0n));
+  await tick(43);
+  assert.equal(slow.length, 1);
+  // Native gap reporting leaves its full queue intact; the second read must pop its older window.
+  queued.push(read("gap", 1, 3n), read("ready", 2, 0n));
+  await tick(86);
+  assert.equal(calls, 3);
+  assert.equal(fast.at(-1).status, "gap");
+  assert.equal(fast.at(-1).nativeMissedWindows, 3n);
+  assert.equal(slow.length, 1, "recovery must respect the slower delivery cadence");
+  assert.ok(fastHandle.readLatest(), "the immediate drain recovers an owned window");
+  queued.push(read("pending", 2, 0n));
+  await tick(150);
+  assert.equal(slow.at(-1).nativeMissedWindows, 3n, "older queued metadata cannot erase coalesced loss");
+  assert.equal(slow.at(-1).skippedPublications, 1n);
+  // A second gap in the recovery slot is published, but never recursively drained.
+  queued.push(read("gap", 2, 4n), read("gap", 2, 5n));
+  await tick(193);
+  assert.equal(calls, 6, "one timer poll performs at most two sequential reads");
+  queued.push(read("failed", 0, 0n, 2n));
+  await tick(260);
+  assert.equal(slow.at(-1).nativeMissedWindows, 0n, "a new capture epoch resets undelivered loss");
+  await slowHandle.close();
+  // The owner retains its one-in-flight guard, including while the recovery read is pending.
+  let release;
+  queued.push(read("gap", 0, 1n, 2n), new Promise((resolve) => { release = resolve; }));
+  await tick(303);
+  const pendingCalls = calls;
+  await tick(346);
+  assert.equal(calls, pendingCalls);
+  const closing = fastHandle.close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, "close must await the recovery read");
+  release(read("ready", 1, 0n, 2n));
+  await closing;
+  assert.equal(stopped, true);
+});
+
 test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {
   const prepared = queryFor({ kind: "output", outputId: "out" });
   const metadata = (target = prepared.target, status = "warming") => Object.freeze({

@@ -1299,6 +1299,7 @@ export class ObservationSubscriptionOwner {
       if (state.job !== current) {
         state.nativeMissedEpoch = state.job.metadata.captureEpoch;
         state.nativeMissedSeen = state.job.metadata.droppedCaptures;
+        state.pendingNativeMissed = 0n;
       }
       state.nextDeliveryAt = 0;
       this.#restartTimer();
@@ -1362,6 +1363,7 @@ export class ObservationSubscriptionOwner {
       job, configuration, callback, cursor: job.publicationSequence,
       nativeMissedEpoch: job.metadata.captureEpoch,
       nativeMissedSeen: job.metadata.droppedCaptures,
+      pendingNativeMissed: 0n,
       nextDeliveryAt: 0, closed: false, closing: undefined, publicHandle: undefined,
     };
     state.publicHandle = new SpectrumSubscriptionImpl(this, state);
@@ -1582,6 +1584,20 @@ export class ObservationSubscriptionOwner {
     job.nextCaptureAt = Date.now() + job.captureCadenceMs;
     const read = await spectrumRead(job.query);
     this.#assertEpoch(epoch);
+    this.#publishSpectrumRead(job, read);
+    this.#recordSpectrumLoss(job);
+    // A native gap reports loss before popping the queued window. Automatic polling must drain
+    // once now: waiting another hop can fill the queue again and perpetually return only gaps.
+    // Manual pumps already let their caller request the next read without waiting for a timer.
+    if (this.#transport.scheduler === undefined || read.metadata.status !== "gap") return;
+    for (const state of this.#spectrumHandles.values()) this.#notifySpectrum(state, true);
+    const recovery = await spectrumRead(job.query);
+    this.#assertEpoch(epoch);
+    this.#publishSpectrumRead(job, recovery);
+    this.#recordSpectrumLoss(job);
+  }
+
+  #publishSpectrumRead(job: SpectrumJobState, read: SpectrumStreamRead): void {
     const metadata = cloneSpectrumStreamMetadata(read.metadata);
     const stamp = spectrumPublicationStamp(metadata);
     if (read.result !== undefined) {
@@ -1616,6 +1632,24 @@ export class ObservationSubscriptionOwner {
     }
   }
 
+  #recordSpectrumLoss(job: SpectrumJobState): void {
+    // Capture records queued before a gap can carry an older drop count. Accrue loss before
+    // cadence coalescing so that a recovery publication cannot erase the intervening gap.
+    for (const state of this.#spectrumHandles.values()) {
+      if (state.job !== job) continue;
+      if (job.metadata.captureEpoch > state.nativeMissedEpoch) {
+        state.nativeMissedEpoch = job.metadata.captureEpoch;
+        state.nativeMissedSeen = 0n;
+        state.pendingNativeMissed = 0n;
+      }
+      if (job.metadata.captureEpoch === state.nativeMissedEpoch
+          && job.metadata.droppedCaptures > state.nativeMissedSeen) {
+        state.pendingNativeMissed += job.metadata.droppedCaptures - state.nativeMissedSeen;
+        state.nativeMissedSeen = job.metadata.droppedCaptures;
+      }
+    }
+  }
+
   #notifySpectrum(
     state: SpectrumHandleState,
     respectCadence: boolean,
@@ -1627,18 +1661,8 @@ export class ObservationSubscriptionOwner {
     if (respectCadence && now < state.nextDeliveryAt) return undefined;
     if (job.publicationSequence <= state.cursor) return undefined;
     const skippedPublications = job.publicationSequence - state.cursor - 1n;
-    let nativeMissedWindows = 0n;
-    if (job.metadata.captureEpoch > state.nativeMissedEpoch) {
-      state.nativeMissedEpoch = job.metadata.captureEpoch;
-      state.nativeMissedSeen = 0n;
-    }
-    if (job.metadata.captureEpoch === state.nativeMissedEpoch) {
-      nativeMissedWindows = job.metadata.droppedCaptures >= state.nativeMissedSeen
-        ? job.metadata.droppedCaptures - state.nativeMissedSeen : 0n;
-      if (job.metadata.droppedCaptures > state.nativeMissedSeen) {
-        state.nativeMissedSeen = job.metadata.droppedCaptures;
-      }
-    }
+    const nativeMissedWindows = state.pendingNativeMissed;
+    state.pendingNativeMissed = 0n;
     state.cursor = job.publicationSequence;
     if (respectCadence) state.nextDeliveryAt = now + state.configuration.cadenceMs;
     const notification = Object.freeze({
@@ -2120,6 +2144,7 @@ interface SpectrumHandleState {
   cursor: bigint;
   nativeMissedEpoch: bigint;
   nativeMissedSeen: bigint;
+  pendingNativeMissed: bigint;
   nextDeliveryAt: number;
   closed: boolean;
   closing: Promise<void> | undefined;
