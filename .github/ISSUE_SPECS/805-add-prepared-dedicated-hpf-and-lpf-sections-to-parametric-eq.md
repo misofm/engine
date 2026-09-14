@@ -260,3 +260,28 @@ are explicitly labelled historical. No new measured performance claim follows.
 A small final compatibility test supplement remains for mixed enabled cuts and
 original-band ramps, followed by catalog/prepared-SDK evidence and the fresh
 Astra MEDIUM complete-attempt verdict. #805 is not complete yet.
+
+## Attempt 1 — final compatibility and artifact checkpoint
+
+The compact supplement passes mixed cut enable states/asymmetric parameters at
+Simd4/Simd8 with scalar parity and a scalar tail, disabled cuts around an
+original-band ramp against the direct four-section oracle at all three widths,
+and restored tiny cut-state flushing. Corrected the restore probe offset to
+physical band1 and stale six-section prose identified by Astra.
+Passed: 11 interleave tests, the restored-zero contract probe, full EQ package
+suite, clippy, scalar/SIMD Wasm checks and formatting. Evidence:
+/tmp/805-final-compat-evidence.md. Native size_of Channel=656/2608/5216 bytes
+and PreparedParametricEq=1832/6608/12992 at widths1/4/8, excluding allocator
+overhead; serialized total remains920. Existing host exact-budget-minus-one
+gate passed (/tmp/805-host-memory-cap.log); its cap is declared serialized
+state, not all resident heap allocations.
+
+Root built matching Wasm twice through the existing repin/ordinary builder:
+b0bff10d67bd39e46ea6a4d102b550c0abbf26607e898face54523e269d39765,
+artifacts /tmp/804-805-artifacts. Ordinary build and check-web-audioworklet
+passed, including render allocation/callgraph and SIMD shape gates (EQ dual
+252vector/0scalar, mono126/0). Render-contract gate passed. Logs:
+/tmp/805-wasm-build.log, /tmp/805-artifact-check.log,
+/tmp/805-render-contract.log. No new npm release yet.
+Astra's committed DSP review has no production blocker; final verdict waits
+for generated catalog and prepared SDK/package evidence.

@@ -768,7 +768,7 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
 
     // And a payload that carries `-0.0` restores as `+0.0` rather than being rejected.
     let (common, mut stored, right) = snapshot(effect.as_ref());
-    stored[16 * 4..16 * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
+    stored[(19 + 16) * 4..(19 + 16) * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
     effect
         .restore_state_payload(
             1,

@@ -152,7 +152,7 @@ impl EqBandKind {
 pub struct EqBandDescriptor {
     /// General-band index, `0..EQ_BAND_COUNT`.
     pub index: u8,
-    /// Position in the cascade; equal to `index` in V1.
+    /// Position in the physical cascade; one greater than `index` because HPF is prepended.
     pub cascade_order: u8,
     /// Boolean enable.
     pub enabled: ParameterId,
@@ -1497,7 +1497,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 
 /// The cascade positions this stationary block will actually run, in cascade order.
 ///
-/// All four, unless identity-section elision is admissible — in which case the sections that are
+/// All six, unless identity-section elision is admissible — in which case the sections that are
 /// the exact identity on every lane of *both* channels are dropped from the list, and the cascade
 /// runs shorter.
 ///
@@ -2465,7 +2465,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// * `sections[s].target` -- 6 x 6 words, where the ramp lands;
 /// * `remaining[s][l]`    -- 6 counters, when it lands.
 ///
-/// Two channels that agree on all seventy-six of those words produce bit-identical output from
+/// Two channels that agree on all 114 of those words produce bit-identical output from
 /// bit-identical input, and stay in agreement for as long as no per-channel write arrives:
 /// `advance_words` is the same increment applied to the same word, and `snap` assigns the same
 /// target on the same sample.
@@ -2821,9 +2821,9 @@ pub mod corpus;
 mod interleave_identity {
     use super::{
         BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
-        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, SampleRateHz, Section,
-        cascade_sections, cascade_sections_mono, corpus, process_channels, process_channels_mono,
-        section_state_is_positive_zero,
+        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
+        RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
+        corpus, process_channels, process_channels_mono, section_state_is_positive_zero,
     };
     use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
@@ -2895,9 +2895,42 @@ mod interleave_identity {
         }
     }
 
+    /// Four-band ramp oracle for the one synchronized ramp used below. It mirrors the production
+    /// driver's advance, final snap, and fixed tail without reimplementing coefficient design.
+    fn process_original_four_ramped<L: Lane, const W: usize>(
+        sections: &mut [Section<L>; EQ_BAND_COUNT],
+        io: &mut [f32],
+        frames: usize,
+    ) {
+        for (index, section) in sections.iter_mut().enumerate() {
+            if index == 1 {
+                let ramp = RAMP_SAMPLES as usize - 1;
+                super::advance_words(&mut section.coef, &section.step);
+                lane::kernels::svf_block_ramped::<L>(
+                    &mut io[..ramp * W],
+                    ramp,
+                    &mut section.coef,
+                    &section.step,
+                    ramp - 1,
+                    &mut section.state,
+                );
+                section.coef = section.target;
+                section.step = Default::default();
+                lane::kernels::svf_block::<L>(
+                    &mut io[ramp * W..frames * W],
+                    frames - ramp,
+                    &section.coef,
+                    &mut section.state,
+                );
+            } else {
+                lane::kernels::svf_block::<L>(io, frames, &section.coef, &mut section.state);
+            }
+        }
+    }
+
     /// The exact signed-zero boundary that a disabled cut must preserve for the old four-band
-    /// schedule. This is intentionally a permanent red regression until the prepared path keeps
-    /// the old four-section bits in this configuration.
+    /// schedule. This retained regression records the historical signed-zero compatibility failure
+    /// that the prepared path now fixes with per-lane dry selection.
     fn all_high_pass_channel<L: Lane, const W: usize>() -> Channel<L, W> {
         let disabled = BandTarget {
             enabled: false,
@@ -3049,10 +3082,10 @@ mod interleave_identity {
     }
 
     /// A signed-zero input refuses elision and therefore follows the established full six-section
-    /// per-section path. The direct four-section oracle cannot be used for this case: an identity
-    /// cut deliberately rewrites `-0.0` to `+0.0`, so the refusal is what preserves the old
-    /// six-section bit behavior. Compare the stationary refusal with the nonstationary reference
-    /// at every width and for both dual and collapsed mono entry points.
+    /// per-section path. The direct four-section oracle remains the compatibility authority for
+    /// settled disabled cuts; this six-versus-six comparison checks only that refusal selects the
+    /// corrected schedule consistently. Compare the stationary refusal with the nonstationary
+    /// reference at every width and for both dual and collapsed mono entry points.
     fn compare_signed_zero_refusal<L: Lane, const W: usize>(width: &str, mono: bool, plane: usize) {
         let mut left = block::<W>(0, 0);
         let mut right = block::<W>(0, 3);
@@ -3271,6 +3304,312 @@ mod interleave_identity {
         run::<f32, 1>();
         run::<Simd4, 4>();
         run::<Simd8, 8>();
+    }
+
+    /// Builds a cut-only matrix. The four original bands are disabled so each scalar lane can
+    /// independently exercise neither, HPF-only, LPF-only, or both cuts; the two channels use
+    /// different masks and cutoff/Q words. The enabled LPF is deliberately nontrivial.
+    fn mixed_cut_channel<L: Lane, const W: usize>(
+        statuses: [u8; W],
+        offset: usize,
+        right: bool,
+    ) -> Channel<L, W> {
+        let targets: [[BandTarget; EQ_SECTION_COUNT]; W] = core::array::from_fn(|lane| {
+            let track = (offset + lane) % corpus::LANES;
+            let mut sections = corpus::sections(track);
+            for section in &mut sections[BAND_SECTION_OFFSET..BAND_SECTION_OFFSET + EQ_BAND_COUNT] {
+                section.enabled = false;
+            }
+            let status = statuses[lane];
+            sections[HPF_SECTION] = BandTarget {
+                enabled: status & 1 != 0,
+                kind: EqBandKind::HighPass,
+                frequency: 180.0 + track as f32 * 97.0 + if right { 31.0 } else { 0.0 },
+                gain: 0.0,
+                q: 0.35 + track as f32 * 0.17,
+                slope: 1.0,
+            };
+            sections[LPF_SECTION] = BandTarget {
+                enabled: status & 2 != 0,
+                kind: EqBandKind::LowPass,
+                frequency: 6_000.0 + track as f32 * 1_100.0 + if right { 47.0 } else { 0.0 },
+                gain: 0.0,
+                q: 0.55 + track as f32 * 0.11,
+                slope: 1.0,
+            };
+            sections
+        });
+        Channel::new(targets, corpus::CORPUS_RATE).expect("mixed cut design")
+    }
+
+    fn channel_lane_state_bits<L: Lane, const W: usize>(
+        channel: &Channel<L, W>,
+        lane: usize,
+    ) -> Vec<u32> {
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+        channel.state_bits(&mut words);
+        let mut out = Vec::with_capacity(EQ_SECTION_COUNT * 2);
+        for section in 0..EQ_SECTION_COUNT {
+            let base = section * 2 * W;
+            out.push(words[base + lane]);
+            out.push(words[base + W + lane]);
+        }
+        out
+    }
+
+    fn mixed_cut_scalar_parity<L: Lane, const W: usize>(width: &str) {
+        let left_statuses = core::array::from_fn(|lane| [0_u8, 1, 2, 3, 3, 2, 1, 0][lane]);
+        let right_statuses = core::array::from_fn(|lane| [3_u8, 2, 1, 0, 1, 3, 0, 2][lane]);
+        let mut bank_left = mixed_cut_channel::<L, W>(left_statuses, 0, false);
+        let mut bank_right = mixed_cut_channel::<L, W>(right_statuses, 3, true);
+        let mut scalar_left: [Channel<f32, 1>; W] = core::array::from_fn(|lane| {
+            mixed_cut_channel::<f32, 1>([left_statuses[lane]], lane, false)
+        });
+        let mut scalar_right: [Channel<f32, 1>; W] = core::array::from_fn(|lane| {
+            mixed_cut_channel::<f32, 1>([right_statuses[lane]], lane + 3, true)
+        });
+        const FRAMES: usize = 11;
+        let mut left = vec![0.0_f32; FRAMES * W];
+        let mut right = vec![0.0_f32; FRAMES * W];
+        for frame in 0..FRAMES {
+            for lane in 0..W {
+                let sample = 0.000_001 * (1.0 + frame as f32 * 0.25 + lane as f32 * 0.5);
+                left[frame * W + lane] = sample;
+                right[frame * W + lane] = -sample * 0.7;
+            }
+        }
+        let source = left.clone();
+        let right_source = right.clone();
+        process_channels(
+            (&mut bank_left, &mut bank_right),
+            &mut left,
+            &mut right,
+            FRAMES,
+            true,
+        );
+
+        for lane in 0..W {
+            let mut scalar_left_io = (0..FRAMES)
+                .map(|frame| source[frame * W + lane])
+                .collect::<Vec<_>>();
+            let mut scalar_right_io = (0..FRAMES)
+                .map(|frame| right_source[frame * W + lane])
+                .collect::<Vec<_>>();
+            process_channels(
+                (&mut scalar_left[lane], &mut scalar_right[lane]),
+                &mut scalar_left_io,
+                &mut scalar_right_io,
+                FRAMES,
+                true,
+            );
+            for frame in 0..FRAMES {
+                assert_eq!(
+                    left[frame * W + lane].to_bits(),
+                    scalar_left_io[frame].to_bits(),
+                    "{width} mixed cut left lane {lane} frame {frame}; bank={:#010x} scalar={:#010x}",
+                    left[frame * W + lane].to_bits(),
+                    scalar_left_io[frame].to_bits()
+                );
+                assert_eq!(
+                    right[frame * W + lane].to_bits(),
+                    scalar_right_io[frame].to_bits(),
+                    "{width} mixed cut right lane {lane} frame {frame}"
+                );
+            }
+            assert_eq!(
+                channel_lane_state_bits(&bank_left, lane),
+                channel_lane_state_bits(&scalar_left[lane], 0),
+                "{width} mixed cut left state lane {lane}"
+            );
+            assert_eq!(
+                channel_lane_state_bits(&bank_right, lane),
+                channel_lane_state_bits(&scalar_right[lane], 0),
+                "{width} mixed cut right state lane {lane}"
+            );
+        }
+        // At least one enabled final LPF must have changed the signal; this catches a dropped
+        // remainder section even when all scalar lanes happen to agree with their bank lane.
+        assert!(
+            (0..W).any(|lane| right_statuses[lane] & 2 != 0
+                && (0..FRAMES).any(|frame| {
+                    right[frame * W + lane].to_bits() != right_source[frame * W + lane].to_bits()
+                })),
+            "{width} mixed cut matrix must execute its nontrivial final LPF"
+        );
+        // One scalar track after a complete bank is the corresponding tail shape.
+        let mut tail_channel = mixed_cut_channel::<f32, 1>([3], W, false);
+        let mut tail = (0..FRAMES)
+            .map(|frame| 0.000_001 * (1.0 + frame as f32 * 0.25 + W as f32 * 0.5))
+            .collect::<Vec<_>>();
+        let tail_source = tail.clone();
+        process_channels_mono(&mut tail_channel, &mut tail, FRAMES, true);
+        assert!(
+            tail.iter()
+                .zip(tail_source)
+                .any(|(output, input)| output.to_bits() != input.to_bits()),
+            "{width} scalar tail must execute both dedicated cuts"
+        );
+    }
+
+    #[test]
+    fn mixed_dedicated_cut_masks_match_scalar_lanes_bit_for_bit() {
+        mixed_cut_scalar_parity::<Simd4, 4>("Simd4");
+        mixed_cut_scalar_parity::<Simd8, 8>("Simd8");
+    }
+
+    /// A general-band ramp must keep the old four-band oracle in lockstep while dedicated cuts stay
+    /// disabled. The six-section consumer is explicitly forced onto the fallback by `remaining`.
+    fn disabled_cuts_general_ramp_parity<L: Lane, const W: usize>(width: &str) {
+        const FRAMES: usize = 80;
+        const RAMP_SECTION: usize = BAND_SECTION_OFFSET + 1;
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        let mut four_right = original_four::<L, W>(3);
+        for lane in 0..W {
+            let left_target = corpus::bands((lane + 3) % corpus::LANES)[1]
+                .words(corpus::CORPUS_RATE)
+                .expect("ramp target");
+            let right_target = corpus::bands((lane + 6) % corpus::LANES)[1]
+                .words(corpus::CORPUS_RATE)
+                .expect("ramp target");
+            six_left.start_ramp(RAMP_SECTION, lane, left_target);
+            six_right.start_ramp(RAMP_SECTION, lane, right_target);
+        }
+        four_left[1] = six_left.sections[RAMP_SECTION];
+        four_right[1] = six_right.sections[RAMP_SECTION];
+        let mut six_left_io = vec![0.0_f32; FRAMES * W];
+        let mut six_right_io = vec![0.0_f32; FRAMES * W];
+        for frame in 0..FRAMES {
+            for lane in 0..W {
+                let sample = 0.02 + frame as f32 * 0.0003 + lane as f32 * 0.004;
+                six_left_io[frame * W + lane] = sample;
+                six_right_io[frame * W + lane] = -sample * 0.8;
+            }
+        }
+        let mut four_left_io = six_left_io.clone();
+        let mut four_right_io = six_right_io.clone();
+        assert!(!six_left.no_ramp_in_flight() || !six_right.no_ramp_in_flight());
+        process_channels(
+            (&mut six_left, &mut six_right),
+            &mut six_left_io,
+            &mut six_right_io,
+            FRAMES,
+            false,
+        );
+        process_original_four_ramped::<L, W>(&mut four_left, &mut four_left_io, FRAMES);
+        process_original_four_ramped::<L, W>(&mut four_right, &mut four_right_io, FRAMES);
+        assert_eq!(
+            bits(&six_left_io),
+            bits(&four_left_io),
+            "{width} ramped old-four left output"
+        );
+        assert_eq!(
+            bits(&six_right_io),
+            bits(&four_right_io),
+            "{width} ramped old-four right output"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_left.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_left),
+            "{width} ramped old-four left original state"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_right.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_right),
+            "{width} ramped old-four right original state"
+        );
+    }
+
+    #[test]
+    fn disabled_cuts_with_an_original_band_ramp_match_the_four_section_oracle() {
+        disabled_cuts_general_ramp_parity::<f32, 1>("Scalar");
+        disabled_cuts_general_ramp_parity::<Simd4, 4>("Simd4");
+        disabled_cuts_general_ramp_parity::<Simd8, 8>("Simd8");
+    }
+
+    #[test]
+    fn resident_sizes_are_measured_separately_from_serialized_state() {
+        println!(
+            "resident_size Channel width=1 bytes={}",
+            core::mem::size_of::<Channel<f32, 1>>()
+        );
+        println!(
+            "resident_size Channel width=4 bytes={}",
+            core::mem::size_of::<Channel<Simd4, 4>>()
+        );
+        println!(
+            "resident_size Channel width=8 bytes={}",
+            core::mem::size_of::<Channel<Simd8, 8>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=1 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<f32, 1>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=4 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<Simd4, 4>>()
+        );
+        println!(
+            "resident_size PreparedParametricEq width=8 bytes={}",
+            core::mem::size_of::<PreparedParametricEq<Simd8, 8>>()
+        );
+        println!("serialized_state_bytes total={}", STATE_SIZES.total());
+    }
+
+    #[test]
+    fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
+        for width in [1_usize, 4, 8] {
+            match width {
+                1 => tiny_disabled_cut_state::<f32, 1>("Scalar"),
+                4 => tiny_disabled_cut_state::<Simd4, 4>("Simd4"),
+                _ => tiny_disabled_cut_state::<Simd8, 8>("Simd8"),
+            }
+        }
+    }
+
+    fn tiny_disabled_cut_state<L: Lane, const W: usize>(width: &str) {
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        six_left.sections[HPF_SECTION].state.ic1 = L::splat(1.0e-30);
+        let mut left = vec![0.000_001_f32; 9 * W];
+        let mut right = vec![-0.000_002_f32; 9 * W];
+        let mut old_left = left.clone();
+        assert_eq!(
+            cascade_sections(&six_left, &six_right, &left, &right, 9).1,
+            EQ_SECTION_COUNT,
+            "{width} restored tiny disabled HPF state must refuse elision"
+        );
+        process_channels(
+            (&mut six_left, &mut six_right),
+            &mut left,
+            &mut right,
+            9,
+            true,
+        );
+        process_original_four(&mut four_left, &mut old_left, 9);
+        assert_eq!(
+            bits(&left),
+            bits(&old_left),
+            "{width} tiny HPF state left output"
+        );
+        assert_eq!(
+            original_state_bits(&core::array::from_fn(|band| {
+                six_left.sections[BAND_SECTION_OFFSET + band]
+            })),
+            original_state_bits(&four_left),
+            "{width} tiny HPF state left original state"
+        );
+        let hpf_state = channel_lane_state_bits(&six_left, 0);
+        assert_eq!(
+            hpf_state[0], 0,
+            "{width} executed disabled HPF flushes its restored tiny state"
+        );
     }
 
     #[test]

@@ -264,6 +264,19 @@ values above are measured resident allocation sizes. The four-general-band autom
 remains four-band-sized because
 the two dedicated cuts are prepared-only.
 
+Native x86-64 `size_of` recount at #805's final compatibility checkpoint:
+
+| width | `Channel` bytes | `PreparedParametricEq` bytes |
+|---:|---:|---:|
+| 1 | 656 | 1832 |
+| 4 | 2608 | 6608 |
+| 8 | 5216 | 12992 |
+
+These are target-specific Rust object sizes, excluding allocator overhead. The existing
+`maximum_effect_state_bytes` host cap sums declared serialized state (920 per scalar EQ),
+not all resident heap allocations. The existing exact-budget/one-byte-below host test passes
+with the changed descriptor totals; it is not a total-resident-heap ceiling claim.
+
 ### Scope of disabled-cut elision
 
 A disabled HPF or LPF carries the exact identity coefficient words, but it is omitted only when the
