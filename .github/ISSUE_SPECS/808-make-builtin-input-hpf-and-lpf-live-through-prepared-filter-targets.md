@@ -398,3 +398,25 @@ feature-enabled run supplies the evidence. Rebuilt Wasm remains exactly
 `7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`,
 preserving accepted runtime/browser qualification. Required remote CI and merge
 remain; no benchmark or optimization was performed.
+
+### Bounded attempt5: derived graph audit identity
+
+Qualification34877814180 passes the corrected audit unit/resource fixtures and
+all three browser runs. Its realtime graph trace passes the zero-violation and
+ownership predicates, then fails the sealed whole-record checksum because that
+record embeds the newly accepted resource manifest hash. Root authorizes the
+final bounded attempt: prove the record differs only in that manifest identity,
+update its sole active checksum consumer, and run the existing exact graph trace
+and its direct script tests. Preserve all runtime and trace predicates. No new
+framework or runtime changes; a failing fifth verdict requires rescope.
+
+Fresh Astra MEDIUM **attempt5 PASS** against726e1a51. Exact million-block
+graph all-TID trace passes; existing trace-validator mutations, nine fatal
+graph-audit probes and the50-file builtin fixture audit pass. New audit record
+SHA256 is `3a5ae2622fb44bd2ddc3423c487f21ccaaac8cc1b9dc82635f316cb6afd38914`.
+Replacing its single accepted-manifest hash with the prior436a73ee... value
+recovers exact prior record SHA256
+`b54ed8e03bd039f803b71321995f0f848aea2095582873f7e96fd49c7155dff7`;
+all other bytes are unchanged. Reviewer independently repeated this derivation.
+All other jobs in34877814180 passed. Only the derived checksum consumer changes;
+no runtime or predicate changes. Required CI must pass before merge.
