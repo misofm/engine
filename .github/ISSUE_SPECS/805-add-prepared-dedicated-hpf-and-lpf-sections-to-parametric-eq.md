@@ -453,3 +453,8 @@ Prepared-only scope remains: no live cut edits or npm publication claimed;
 original numeric ramp timing is retained until#807. Native resident type sizes
 exclude allocator overhead and are distinct from the serialized state budget.
 Required CI/merge and remote issue closure are the remaining delivery steps.
+
+PR#810 first required run34817097346 caught formatting after root's final
+test-only Clippy cleanup: rustfmt collapses the new array-pattern expression.
+Root applied rustfmt and verified the full format check. No production or Wasm
+change; the first failing job log is /tmp/805-ci-lint-first.log.
