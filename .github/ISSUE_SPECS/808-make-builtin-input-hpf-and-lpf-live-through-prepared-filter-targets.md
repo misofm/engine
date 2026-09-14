@@ -420,3 +420,10 @@ recovers exact prior record SHA256
 all other bytes are unchanged. Reviewer independently repeated this derivation.
 All other jobs in34877814180 passed. Only the derived checksum consumer changes;
 no runtime or predicate changes. Required CI must pass before merge.
+
+### Merged delivery
+
+Required PR qualification34878694424 passed all expected jobs. PR#812 merged
+as `7c4238000da90358db1bec7ffe9a2459962590b4`; GitHub #808 is closed and
+verified. The accepted runtime and its resource/trace corrections are upstream.
+Public SDK delivery remains #809; the parent app outcome is not yet complete.
