@@ -178,3 +178,9 @@ publication once. Root strengthened real-EQ refusal/state tests; native focused 
 strict Clippy, Wasm and realtime policy pass. Actual owner resource propagation and
 remaining transaction fixtures are still pending before assignment5 acceptance.
 Production live-cut activation and downstream releases remain unperformed.
+
+
+A follow-up #807 caller audit fixed five remaining host-core test accesses to the
+private endpoint. The three affected suites pass (23 tests, one existing ignored),
+and full workspace all-target compilation passes. Resource implementation resumes;
+this is caller correction evidence, not another completed product capability.

@@ -200,7 +200,6 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
         })
         .expect("a control channel for the addressed effect");
     producer
-        .producer
         .try_push(record)
         .expect("room in the bounded queue");
 }

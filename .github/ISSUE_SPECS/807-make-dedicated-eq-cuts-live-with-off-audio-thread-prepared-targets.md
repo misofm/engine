@@ -579,3 +579,15 @@ layout refinement is preserved in docs/handoffs/804-account-switch-2026-09-14/
 807-assignment-6-layout-amendment.md; it includes exact mechanical gate paths and
 forward caller/index findings, without activating the bridge. #807 remains attempt1
 with assignments5–10 and final fresh Astra MEDIUM verdict pending.
+
+
+### Assignment 5 endpoint caller correction
+
+Root's broader caller audit found five remaining private-field accesses in host-core
+integration tests that workspace default-target checking and the earlier selected
+Clippy packages did not cover. Resource implementation paused while root corrected
+only those effect-console/observation/symmetry call sites. Tests PASS: host-core
+effect_console (2), effect_observation (10 plus 1 existing ignored), symmetry_witness
+(11). Full `cargo check --locked --workspace --all-targets` now passes, including
+all dependent test callers. Formatting and diff checks pass. This corrects the
+component checkpoint's incomplete caller coverage; owner resource work resumes next.

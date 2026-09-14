@@ -153,7 +153,6 @@ fn command(console: &mut Console, track_id: &str, value: f32) {
         .expect("a control channel for the addressed effect");
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
         producer
-            .producer
             .try_push(EffectControlRecord::Parameter {
                 parameter_index: BAND_GAIN_INDEX,
                 channel,
