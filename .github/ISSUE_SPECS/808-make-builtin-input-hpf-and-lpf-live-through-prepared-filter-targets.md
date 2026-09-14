@@ -247,3 +247,8 @@ lib/tests clippy and six focused prepared-owner tests pass afterward.
 Public metadata, shared helper adapter, SDK methods and shipped-artifact parity
 remain. Final closure must also exercise malformed builtin companion coverage and
 the generated/shipped command vocabulary. This is not a whole-issue PASS or release.
+
+The existing builtin atomicity test now also mutates a valid companion to remove a
+section, duplicate/overlap a target, inject unsafe coefficients and set reserved
+words. All four refuse with zero admitted records, unchanged committed shadow and
+revision, and untouched queue counters. The focused host test passes.

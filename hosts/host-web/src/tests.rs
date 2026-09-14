@@ -3754,6 +3754,37 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         0
     );
 
+    // Mutate the existing valid frame, exercising the builtin target coverage/safety checks.
+    for mutation in ["missing", "duplicate", "unsafe", "reserved"] {
+        let mut malformed = input_filter_console_host(QUANTUM, 8);
+        let mut frame_bytes = stage_prepared_input_filter(&mut malformed, 0, 0, 300.0, 2_000.0);
+        let frame = malformed.prepared_companion_mut().unwrap();
+        match mutation {
+            "missing" => {
+                frame[16..20].copy_from_slice(&1_u32.to_le_bytes());
+                frame_bytes = 24 + 80;
+            }
+            "duplicate" => frame.copy_within(24..104, 104),
+            "unsafe" => frame[80..84].copy_from_slice(&f32::NAN.to_bits().to_le_bytes()),
+            "reserved" => frame[64..68].copy_from_slice(&1_u32.to_le_bytes()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            malformed.submit_prepared_commands(1, frame_bytes),
+            RESULT_INVALID_ARGUMENT,
+            "{mutation}"
+        );
+        assert_eq!(malformed.command_report().reason, COMMAND_REASON_MALFORMED);
+        assert_eq!(malformed.command_report().admitted, 0);
+        let ready = malformed.ready.as_ref().unwrap();
+        assert_eq!(ready.input_filter_shadows[0].revision, 0);
+        assert_eq!(
+            ready.input_filter_shadows[0].committed,
+            [100.0, 1_000.0, 100.0, 1_000.0]
+        );
+        assert!(ready.in_flight.iter().all(|count| *count == 0));
+    }
+
     // A full unrelated matrix queue refuses the mixed transaction while leaving the builtin
     // shadow at its committed seed.
     let mut full = input_filter_console_host(QUANTUM, 2);
