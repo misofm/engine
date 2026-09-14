@@ -1,5 +1,7 @@
-use core::mem::{offset_of, size_of};
+use core::mem::{offset_of, size_of, size_of_val};
 
+use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
+use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -14,6 +16,16 @@ fn one_track_session(quantum: u32) -> String {
     model.tracks.truncate(1);
     model.routes.truncate(1);
     canonical_session_json(&model).expect("canonical one-track session")
+}
+
+fn one_track_resource_session(quantum: u32) -> String {
+    let mut model = parse_session_json(&one_track_session(quantum)).expect("one-track session");
+    for track in &mut model.tracks {
+        track.simd1.effects.clear();
+        track.dynamic.effects.clear();
+        track.simd2.effects.clear();
+    }
+    canonical_session_json(&model).expect("canonical resource session")
 }
 
 fn one_track_compressor_session(quantum: u32) -> String {
@@ -799,39 +811,231 @@ fn each_boot_option_rule_has_its_own_typed_refusal() {
 }
 
 #[test]
+fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters() {
+    let document = one_track_resource_session(128);
+    let parsed = parse_host_session(&document).expect("resource session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("resource session compile");
+    let shape = compiled_session_shape(&compiled).expect("resource session shape");
+    assert_eq!(shape.effect_count, 0, "resource fixture has no effects");
+
+    let source_id_bytes: u64 = compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .map(|source| source.id.as_str().len() as u64)
+        .sum();
+    let source_control_bytes = control_table_bytes(shape.source_count as usize)
+        .expect("source control table projection")
+        + source_id_arena_bytes(source_id_bytes as usize).expect("source ID projection");
+    let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
+    let expected_decoded_count = (2 * MAXIMUM_COMMAND_RECORDS as usize)
+        .checked_add(2 * shape.track_count as usize)
+        .expect("decoded record count");
+    let decoded_bytes = (expected_decoded_count * size_of::<StagedCommand>()) as u64;
+
+    for (name, options, expected_wire_bytes) in [
+        ("off", boot_options(128), 0_u64),
+        (
+            "on",
+            WebBootOptions {
+                console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+                console_meter_blocks: 0,
+                console_observation_taps: 0,
+                ..boot_options(128)
+            },
+            (MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) as u64,
+        ),
+    ] {
+        let projection = project_buffers(
+            document.len() as u32,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            shape.maximum_source_channels,
+            shape
+                .longest_source_id_bytes
+                .max(shape.longest_track_id_bytes),
+            options,
+            (false, (0, 0)),
+        )
+        .expect("bridge projection");
+        assert_eq!(
+            u64::from(projection.command_records) * u64::from(COMMAND_RECORD_BYTES),
+            expected_wire_bytes
+        );
+
+        let source_ring_frames = if options.source_ring_frames == 0 {
+            default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
+        } else {
+            options.source_ring_frames
+        };
+        let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
+        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let (engine, _) = prepare_host_runtime_with_selected_meters_between_render_calls(
+            &compiled,
+            &caps,
+            &console,
+            &[],
+        )
+        .expect("independent engine preparation");
+        assert_eq!(
+            engine.report.control_retained_bytes, source_control_bytes,
+            "{name}: source-control table and ID arena are exact"
+        );
+        assert_eq!(
+            engine.report.session_model_bytes, session_model_bytes,
+            "{name}: compiled model retention is exact"
+        );
+        assert_eq!(engine.report.observation_retained_bytes, 0);
+        assert_eq!(engine.report.builtin_meter_payload_bytes, 0);
+
+        let host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+        let ready = host.ready.as_ref().expect("ready ownership");
+        assert_eq!(ready.command_decoded.len(), expected_decoded_count);
+        assert_eq!(
+            size_of_val(ready.command_decoded.as_ref()) as u64,
+            decoded_bytes,
+            "{name}: typed decoded backing has exact element size"
+        );
+        assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
+        assert!(
+            !ready.command_decoded.is_empty(),
+            "decoded backing is retained in console-off mode"
+        );
+        assert!(
+            ready.effect_controls.is_empty(),
+            "no effect control additions"
+        );
+        assert!(
+            ready.effect_observations.is_empty(),
+            "no observation additions"
+        );
+        assert!(ready.meters.is_empty(), "no meter additions");
+        assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
+        assert_eq!(host.resources().observation_retained_bytes, 0);
+
+        let expected_bridge_metadata = projection
+            .report
+            .bridge_metadata_bytes
+            .checked_add(source_control_bytes)
+            .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge metadata arithmetic");
+        let expected_bridge_retained = projection
+            .report
+            .bridge_retained_bytes
+            .checked_add(source_control_bytes)
+            .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge retained arithmetic");
+        assert_eq!(
+            host.resources().bridge_metadata_bytes,
+            expected_bridge_metadata
+        );
+        assert_eq!(
+            host.resources().bridge_retained_bytes,
+            expected_bridge_retained
+        );
+
+        // The 1 MiB live-response capture is deliberately larger than this fixture's decoded
+        // array. Keep the largest assertion honest: it includes that independent projection and
+        // then folds the engine's own largest allocation into the named maximum.
+        let bridge_largest = projection
+            .report
+            .largest_named_allocation_bytes
+            .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
+            .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
+            .max(compiled.resource_estimate().single_allocation_bytes)
+            .max(decoded_bytes);
+        assert_eq!(
+            host.resources().largest_bridge_allocation_bytes,
+            bridge_largest
+        );
+        assert_eq!(
+            host.resources().largest_named_allocation_bytes,
+            bridge_largest.max(engine.report.largest_engine_allocation_bytes)
+        );
+    }
+}
+
+#[test]
 fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     let document = one_track_session(128);
     let source_ring_frames = 1 << 20;
-    let baseline = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
+    for options in [
         WebBootOptions {
             source_ring_frames,
             ..boot_options(128)
         },
-    )
-    .expect("baseline boot");
-    let resources = baseline.resources();
-    let exact = exact_retained_report_total(resources);
-    drop(baseline);
-    let failure = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
         WebBootOptions {
             source_ring_frames,
-            maximum_memory_bytes: exact - 1,
+            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            console_meter_blocks: 0,
+            console_observation_taps: 0,
             ..boot_options(128)
         },
-    )
-    .err()
-    .expect("one byte below exact aggregate must refuse");
-    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-    assert_eq!(
-        failure.diagnostic(),
-        format!(
-            "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
-            exact - 1
+    ] {
+        let baseline =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
+        let ready = baseline.ready.as_ref().expect("ready ownership");
+        let dense_effect_table_bytes =
+            (ready.effect_controls.len() * size_of::<Option<EffectControlProducer>>()) as u64;
+        assert_eq!(
+            size_of_val(ready.effect_controls.as_ref()) as u64,
+            dense_effect_table_bytes,
+            "the browser owns the actual dense effect table in both console modes"
+        );
+        assert_eq!(
+            ready.effect_controls.len(),
+            1,
+            "one-track fixture has one effect"
+        );
+        assert!(
+            baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
+            "console-off preparation still charges the dense replacement table"
+        );
+        let exact = exact_retained_report_total(baseline.resources());
+        drop(baseline);
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact,
+                ..options
+            },
         )
-        .as_bytes()
-    );
+        .expect("exact aggregate budget must accept");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact - 1,
+                ..options
+            },
+        )
+        .err()
+        .expect("one byte below exact aggregate must refuse");
+        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            failure.diagnostic(),
+            format!(
+                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+                exact - 1
+            )
+            .as_bytes()
+        );
+    }
 }
 
 #[test]
@@ -1615,19 +1819,10 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     step(&mut host, 5);
 
     // #140 A: an effect parameter, `channel = both`, lowering to one span per lane.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [-12.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut host, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK
     );
-    assert_eq!(host.submit_commands(1), RESULT_OK);
     assert_eq!(
         host.command_report().applied_at_sample,
         6 * u64::from(QUANTUM)
@@ -2057,6 +2252,105 @@ fn stage_command(
     for (slot, value) in values.iter().enumerate() {
         record[24 + slot * 4..28 + slot * 4].copy_from_slice(&value.to_le_bytes());
     }
+}
+
+/// Stage one EQ edit with the same control-plane target preparation and opaque companion that the
+/// browser SDK submits. The render-side producer receives only the already-designed target.
+fn stage_prepared_eq_parameter(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    rack: u8,
+    effect_index: u32,
+    parameter_id: u32,
+    value: f32,
+) {
+    stage_command(
+        host,
+        wire_index,
+        COMMAND_EFFECT_PARAM,
+        rack,
+        2,
+        track_index,
+        effect_index,
+        parameter_id,
+        0,
+        [value, 0.0, 0.0, 0.0],
+    );
+    let preparer = EqTargetPreparer::new(
+        host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ target preparer");
+    assert_eq!(
+        host.copy_eq_target_config(track_index, u32::from(rack), effect_index),
+        RESULT_OK
+    );
+    let config = host.eq_target_config().expect("EQ target config");
+    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
+    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        let offset = 32 + index * 4;
+        *seed = f32::from_bits(u32::from_le_bytes(
+            config[offset..offset + 4].try_into().expect("seed"),
+        ));
+    }
+    let mut targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, target_count) = preparer
+        .prepare(
+            48_000,
+            &seeds,
+            &[EqTargetEdit {
+                parameter_id,
+                channel: ParameterChannel::Both,
+                value,
+            }],
+            &mut targets,
+        )
+        .expect("prepared EQ target");
+    assert_eq!(target_count, 1, "one edit touches one EQ section");
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    companion[16..20].copy_from_slice(&(target_count as u32).to_le_bytes());
+    let record = &mut companion[24..104];
+    record[0..4].copy_from_slice(&track_index.to_le_bytes());
+    record[4..8].copy_from_slice(&u32::from(rack).to_le_bytes());
+    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
+    record[16..24].copy_from_slice(&base_revision.to_le_bytes());
+    record[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
+    record[28..32].copy_from_slice(&2_u32.to_le_bytes());
+    for (index, word) in targets[0].words.iter().enumerate() {
+        let offset = 32 + index * 4;
+        record[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn submit_prepared_eq_parameter(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    rack: u8,
+    effect_index: u32,
+    parameter_id: u32,
+    value: f32,
+) -> u32 {
+    stage_prepared_eq_parameter(
+        host,
+        wire_index,
+        track_index,
+        rack,
+        effect_index,
+        parameter_id,
+        value,
+    );
+    host.submit_prepared_commands(1, 104)
 }
 
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
@@ -2803,6 +3097,711 @@ fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
 }
 
+#[cfg(feature = "test-support")]
+fn bank_effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+    let document = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 2,
+        console_command_queue_records: depth,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ console boot")
+}
+
+#[test]
+fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
+    let document = include_str!("../tests/browser-v1/command-session.json");
+    let parsed = parse_host_session(document).expect("effect fixture parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("effect fixture compile");
+    let shape = compiled_session_shape(&compiled).expect("effect fixture shape");
+    let source_id_bytes = compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .map(|source| source.id.as_str().len() as u64)
+        .sum::<u64>();
+    let source_control_bytes = control_table_bytes(shape.source_count as usize)
+        .expect("source control table")
+        + source_id_arena_bytes(source_id_bytes as usize).expect("source ID arena");
+    let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
+    const SOURCE_RING_FRAMES: u32 = 1 << 20;
+
+    for (name, console_command_queue_records) in
+        [("off", 0_u64), ("on", DEFAULT_COMMAND_QUEUE_RECORDS as u64)]
+    {
+        let options = WebBootOptions {
+            source_ring_frames: SOURCE_RING_FRAMES,
+            console_command_queue_records,
+            ..boot_options(128)
+        };
+        let projection = project_buffers(
+            document.len() as u32,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            shape.maximum_source_channels,
+            shape
+                .longest_source_id_bytes
+                .max(shape.longest_track_id_bytes),
+            options,
+            (false, (0, 0)),
+        )
+        .expect("bridge projection");
+        let caps = prepare_caps(&compiled, options, SOURCE_RING_FRAMES, u64::MAX);
+        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let (engine, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+            &compiled,
+            &caps,
+            &console,
+            &[],
+        )
+        .expect("independent effect preparation");
+        let dense_table = shape
+            .effect_count
+            .checked_mul(size_of::<Option<EffectControlProducer>>() as u64)
+            .expect("dense effect table arithmetic");
+        assert_eq!(shape.effect_count, 1, "fixture has one effect");
+        let native_table =
+            (handles.effect_controls.capacity() * size_of::<EffectControlProducer>()) as u64;
+        let string_payload = handles
+            .effect_controls
+            .iter()
+            .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+            .map(|bytes| bytes as u64)
+            .sum::<u64>();
+        let string_largest = handles
+            .effect_controls
+            .iter()
+            .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
+            .map(|bytes| bytes as u64)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            engine.report.effect_control_resources.producer_table_bytes, native_table,
+            "{name}: native table uses actual Vec capacity"
+        );
+        let mut owner_payload = 0_u64;
+        let mut owner_largest = 0_u64;
+        for owner in handles
+            .effect_controls
+            .iter()
+            .filter_map(EffectControlProducer::owner)
+        {
+            let (factory_layout, _) =
+                core::alloc::Layout::new::<[core::sync::atomic::AtomicUsize; 2]>()
+                    .extend(core::alloc::Layout::for_value(owner.factory().as_ref()))
+                    .expect("factory Arc layout");
+            let allocations = [
+                core::mem::size_of_val(owner),
+                core::mem::size_of_val(owner.committed()),
+                core::mem::size_of_val(owner.candidate()),
+                core::mem::size_of_val(owner.dirty()),
+                factory_layout.pad_to_align().size(),
+            ];
+            owner_payload += allocations.iter().sum::<usize>() as u64;
+            owner_largest = owner_largest.max(*allocations.iter().max().unwrap() as u64);
+        }
+        assert_eq!(
+            engine.report.effect_control_resources.owned_payload_bytes,
+            string_payload + owner_payload,
+            "{name}: exact owner slices, owner box and once-retained factory"
+        );
+        let decoded_count =
+            command_staging_count(shape.track_count as usize).expect("decoded command count");
+        let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
+        let observation_arm_table = shape
+            .effect_count
+            .checked_mul(size_of::<Box<[u64]>>() as u64)
+            .expect("observation arm table arithmetic");
+        let effect_payload = string_payload + owner_payload;
+        let effect_largest = string_largest.max(owner_largest);
+        let effect_retained = dense_table + effect_payload;
+        let ready_metadata = source_control_bytes + session_model_bytes;
+        let expected_bridge_metadata = projection
+            .report
+            .bridge_metadata_bytes
+            .checked_add(ready_metadata)
+            .and_then(|bytes| bytes.checked_add(effect_retained))
+            .and_then(|bytes| bytes.checked_add(observation_arm_table))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge metadata arithmetic");
+        let expected_bridge_retained = projection
+            .report
+            .bridge_retained_bytes
+            .checked_add(ready_metadata)
+            .and_then(|bytes| bytes.checked_add(effect_retained))
+            .and_then(|bytes| bytes.checked_add(observation_arm_table))
+            .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .expect("bridge retained arithmetic");
+        let expected_bridge_largest = projection
+            .report
+            .largest_bridge_allocation_bytes
+            .max(control_table_bytes(shape.source_count as usize).expect("control largest"))
+            .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
+            .max(engine.report.session_largest_allocation_bytes)
+            .max(dense_table)
+            .max(string_largest)
+            .max(effect_largest)
+            .max(observation_arm_table)
+            .max(decoded_bytes);
+        let expected_named_largest =
+            expected_bridge_largest.max(engine.report.largest_engine_allocation_bytes);
+        let host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+        let ready = host.ready.as_ref().expect("ready ownership");
+        assert_eq!(
+            size_of_val(ready.effect_controls.as_ref()) as u64,
+            dense_table,
+            "{name}: browser owns the actual dense replacement table"
+        );
+        assert_eq!(
+            host.resources().bridge_metadata_bytes,
+            expected_bridge_metadata,
+            "{name}: exact bridge metadata includes dense table and payload"
+        );
+        assert_eq!(
+            host.resources().bridge_retained_bytes,
+            expected_bridge_retained,
+            "{name}: exact bridge retained bytes include dense table and payload"
+        );
+        assert_eq!(
+            host.resources().largest_bridge_allocation_bytes,
+            expected_bridge_largest,
+            "{name}: largest browser allocation excludes consumed native table"
+        );
+        assert_eq!(
+            host.resources().largest_named_allocation_bytes,
+            expected_named_largest
+        );
+
+        let exact = exact_retained_report_total(host.resources());
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact,
+                ..options
+            },
+        )
+        .expect("exact retained effect budget must admit");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact - 1,
+                ..options
+            },
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{name}: one byte below retained effect budget must refuse"));
+        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            failure.diagnostic(),
+            format!(
+                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+                exact - 1
+            )
+            .as_bytes(),
+            "{name}: one-byte refusal reaches final exact aggregate gate"
+        );
+    }
+}
+
+#[test]
+fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_mutation() {
+    let mut host = effect_console_host(128, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    let target = EffectControlRecord::PreparedTarget(PreparedEffectTarget {
+        slot: 2,
+        channel: ParameterChannel::Left,
+        words: [0x55; PREPARED_EFFECT_TARGET_WORDS],
+    });
+    let ready = host.ready.as_mut().expect("ready ownership");
+    let effect_slot = ready.effect_slot(0, 1, 0).expect("dynamic EQ slot");
+    let queue_slot = ready.tracks.len() * 3 + effect_slot;
+    let producer = ready
+        .effect_controls
+        .get(effect_slot)
+        .and_then(Option::as_ref)
+        .expect("effect producer");
+    let before_success = producer.success_count();
+    let before_full = producer.full_count();
+    let before_in_flight = ready.in_flight[queue_slot];
+
+    assert!(ready.preflight_effect(queue_slot, target).is_err());
+    assert!(
+        ready
+            .push(queue_slot, AdmittedCommand::Effect(target), 0)
+            .is_err()
+    );
+
+    let producer = ready
+        .effect_controls
+        .get(effect_slot)
+        .and_then(Option::as_ref)
+        .expect("effect producer remains");
+    assert_eq!(producer.success_count(), before_success);
+    assert_eq!(producer.full_count(), before_full);
+    assert_eq!(ready.in_flight[queue_slot], before_in_flight);
+}
+
+/// The production owner receives complete, already-designed targets on both the scalar dynamic
+/// fixture and the SIMD-bank fixture. Preparation is the only place that may invoke the EQ
+/// designer; admission and the following render are measured through the existing FFI allocator.
+#[cfg(feature = "test-support")]
+#[test]
+fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation() {
+    const QUANTUM: u32 = 128;
+
+    let mut scalar = effect_console_host(QUANTUM, 8);
+    feed_and_render(&mut scalar, 1, 0, 0.25);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut scalar, 0, 0, 1, 0, 4, -12.0);
+    assert!(
+        host_core::test_only_parametric_eq_design_call_count() > 0,
+        "off-thread EQ preparation must invoke the real designer"
+    );
+    assert_eq!(
+        scalar.submit_prepared_commands(1, 104),
+        RESULT_OK,
+        "first prepared ACK"
+    );
+
+    // A second transaction is acknowledged before the render boundary, using the owner's new
+    // committed revision and a fresh target. The measured operation contains no preparation.
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut scalar, 0, 0, 1, 0, 4, 18.0);
+    assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    let left = [0.25_f32; QUANTUM as usize];
+    let right = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        scalar.submit_source(
+            b"fixture-source",
+            1,
+            u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = scalar.submit_prepared_commands(1, 104);
+            let render = scalar.render_next();
+            (admission, render)
+        });
+    assert_eq!(admission, RESULT_OK, "second prepared ACK");
+    assert_eq!(render, RESULT_OK, "prepared render");
+    assert_eq!(allocations, 0, "prepared admission/render allocated");
+    assert_eq!(deallocations, 0, "prepared admission/render freed");
+    assert_eq!(
+        host_core::test_only_parametric_eq_design_call_count(),
+        0,
+        "admission/render must not redesign"
+    );
+    let config = {
+        assert_eq!(scalar.copy_eq_target_config(0, 1, 0), RESULT_OK);
+        scalar.eq_target_config().expect("scalar config").to_vec()
+    };
+    assert_eq!(
+        u64::from_le_bytes(config[24..32].try_into().expect("revision")),
+        2,
+        "two ACKs commit two owner revisions before/at the render boundary"
+    );
+
+    let mut bank = bank_effect_console_host(QUANTUM, 8);
+    feed_and_render_tracks(&mut bank, 0, 0.25);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut bank, 0, 0, 0, 0, 4, 12.0);
+    assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    let left = [0.25_f32; QUANTUM as usize];
+    let right = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        bank.submit_source(
+            b"fixture-source",
+            1,
+            u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = bank.submit_prepared_commands(1, 104);
+            let render = bank.render_next();
+            (admission, render)
+        });
+    assert_eq!(admission, RESULT_OK, "bank prepared render");
+    assert_eq!(render, RESULT_OK, "bank second render");
+    assert_eq!(allocations, 0, "bank render allocated");
+    assert_eq!(deallocations, 0, "bank render freed");
+    assert_eq!(
+        host_core::test_only_parametric_eq_design_call_count(),
+        0,
+        "bank render must not redesign"
+    );
+}
+
+fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
+    assert_eq!(host.copy_eq_target_config(0, 1, 0), RESULT_OK);
+    let config = host.eq_target_config().expect("EQ owner config").to_vec();
+    let revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let effect = host
+        .ready
+        .as_ref()
+        .expect("ready")
+        .effect_slot(0, 1, 0)
+        .expect("EQ slot");
+    let success = host
+        .ready
+        .as_ref()
+        .expect("ready")
+        .effect_controls
+        .get(effect)
+        .and_then(Option::as_ref)
+        .expect("EQ producer")
+        .success_count();
+    (config, revision, success)
+}
+
+/// The host's prepared-owner transaction rejects malformed, stale and late-invalid companions
+/// atomically. The final case fills an unrelated matrix queue to prove the EQ candidate rolls
+/// back when a later destination has no room, then verifies a valid retry recovers.
+#[test]
+fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
+    const QUANTUM: u32 = 128;
+
+    // A valid prepared EQ edit followed by an invalid edit names the original second wire index
+    // and leaves the first owner's candidate unpublished.
+    let mut late = effect_console_host(QUANTUM, 8);
+    stage_prepared_eq_parameter(&mut late, 0, 0, 1, 0, 4, -12.0);
+    stage_command(
+        &mut late,
+        1,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        9_999,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(
+        late.submit_prepared_commands(2, 104),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        late.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(late.command_report().rejected_index, 1);
+    assert_eq!(late.command_report().admitted, 0);
+    let (config, revision, success) = eq_owner_snapshot(&mut late);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut late, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK,
+        "valid retry after late invalid edit"
+    );
+    let (recovered, recovered_revision, recovered_success) = eq_owner_snapshot(&mut late);
+    assert_ne!(recovered, config);
+    assert_eq!(recovered_revision, 1);
+    assert_eq!(recovered_success, 1);
+
+    // A missing target record is unsafe even though the semantic edit itself is valid.
+    let mut missing = effect_console_host(QUANTUM, 8);
+    stage_command(
+        &mut missing,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    let missing_before = eq_owner_snapshot(&mut missing);
+    let generation = missing.host_generation;
+    let companion = missing
+        .prepared_companion_mut()
+        .expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    assert_eq!(
+        missing.submit_prepared_commands(1, 24),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(missing.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(missing.command_report().rejected_index, 0);
+    assert_eq!(missing.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut missing);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+
+    assert_eq!(eq_owner_snapshot(&mut missing), missing_before);
+
+    // Unsafe coefficients and invalid original edits cannot be hidden by a valid final target.
+    for invalid_edit in [false, true] {
+        let mut host = effect_console_host(QUANTUM, 8);
+        let before = eq_owner_snapshot(&mut host);
+        stage_prepared_eq_parameter(&mut host, usize::from(invalid_edit), 0, 1, 0, 4, -12.0);
+        if invalid_edit {
+            stage_command(
+                &mut host,
+                0,
+                COMMAND_EFFECT_PARAM,
+                1,
+                2,
+                0,
+                0,
+                4,
+                0,
+                [f32::NAN, 0.0, 0.0, 0.0],
+            );
+        } else {
+            host.prepared_companion_mut().unwrap()[80..84]
+                .copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        }
+        assert_ne!(
+            host.submit_prepared_commands(1 + u32::from(invalid_edit), 104),
+            RESULT_OK
+        );
+        assert_eq!(host.command_report().admitted, 0);
+        assert_eq!(host.command_report().rejected_index, 0);
+        assert_eq!(eq_owner_snapshot(&mut host), before);
+    }
+
+    // A valid target with an unrelated addressed extra record is rejected before publication.
+    let mut extra = effect_console_host(QUANTUM, 8);
+    stage_prepared_eq_parameter(&mut extra, 0, 0, 1, 0, 4, -12.0);
+    {
+        let companion = extra.prepared_companion_mut().expect("prepared companion");
+        companion.copy_within(24..104, 104);
+        companion[16..20].copy_from_slice(&2_u32.to_le_bytes());
+        companion[104..108].copy_from_slice(&99_u32.to_le_bytes());
+    }
+    assert_eq!(
+        extra.submit_prepared_commands(1, 184),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(extra.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(extra.command_report().rejected_index, 0);
+    assert_eq!(extra.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut extra);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+
+    // Both a stale owner revision and a stale host generation refuse atomically.
+    for (label, offset) in [("revision", 40_usize), ("generation", 8_usize)] {
+        let mut stale = effect_console_host(QUANTUM, 8);
+        stage_prepared_eq_parameter(&mut stale, 0, 0, 1, 0, 4, -12.0);
+        stale.prepared_companion_mut().expect("prepared companion")[offset..offset + 8]
+            .copy_from_slice(&99_u64.to_le_bytes());
+        assert_eq!(
+            stale.submit_prepared_commands(1, 104),
+            RESULT_INVALID_ARGUMENT,
+            "stale {label} result"
+        );
+        assert_eq!(stale.command_report().reason, COMMAND_REASON_MALFORMED);
+        assert_eq!(stale.command_report().rejected_index, 0);
+        assert_eq!(stale.command_report().admitted, 0);
+        let (_, revision, success) = eq_owner_snapshot(&mut stale);
+        assert_eq!(revision, 0, "stale {label} changed revision");
+        assert_eq!(success, 0, "stale {label} changed queue");
+    }
+
+    // Fill the matrix queue, then submit a valid prepared EQ edit plus a later matrix record.
+    // The unrelated full queue refuses the whole batch; after one render, the EQ edit recovers.
+    let mut full = effect_console_host(QUANTUM, 1);
+    stage_command(
+        &mut full,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(full.submit_commands(1), RESULT_OK);
+    stage_prepared_eq_parameter(&mut full, 0, 0, 1, 0, 4, -12.0);
+    stage_command(
+        &mut full,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.25, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(full.submit_prepared_commands(2, 104), RESULT_BACKPRESSURE);
+    assert_eq!(full.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(full.command_report().rejected_index, 1);
+    assert_eq!(full.command_report().admitted, 0);
+    let (_, revision, success) = eq_owner_snapshot(&mut full);
+    assert_eq!(revision, 0);
+    assert_eq!(success, 0);
+    assert_eq!(full.render_next(), RESULT_OK);
+    assert_eq!(
+        full.submit_prepared_commands(2, 104),
+        RESULT_OK,
+        "the same mixed EQ/matrix batch recovers after the unrelated queue drains"
+    );
+    assert_eq!(full.command_report().admitted, 2);
+    assert_eq!(eq_owner_snapshot(&mut full).1, 1);
+}
+
+#[test]
+fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 1, None);
+    let queue_counters = |ready: &ReadyOwnership| {
+        (
+            ready
+                .controls
+                .iter()
+                .map(|owner| {
+                    [
+                        (owner.producer.success_count(), owner.producer.full_count()),
+                        (owner.fader.success_count(), owner.fader.full_count()),
+                        (owner.input.success_count(), owner.input.full_count()),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            ready
+                .effect_controls
+                .iter()
+                .map(|owner| {
+                    owner
+                        .as_ref()
+                        .map(|owner| (owner.success_count(), owner.full_count()))
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let before_counters = queue_counters(ready);
+    let before_masks = ready.observation_armed.clone();
+    let before_arm_samples = ready.observation_arm_samples.clone();
+    let before_queues = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .in_flight
+        .to_vec();
+    let before_solo = {
+        let state = host.console_solo().expect("solo state");
+        (
+            state.solo_count(),
+            (0..state.track_count())
+                .map(|track| {
+                    (
+                        state.solo(track),
+                        [state.user_mute(track, 0), state.user_mute(track, 1)],
+                        [state.emitted_mute(track, 0), state.emitted_mute(track, 1)],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let before_armed = host.observation_armed_taps();
+
+    // The first two commands are valid and touch separate control destinations. The final
+    // original-band enabled row is immutable. Its refusal must name wire index 2 and prevent
+    // either earlier command from being published.
+    stage_solo(&mut host, 0, 0, true, 0);
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        1,
+        255,
+        0,
+        0,
+        1,
+        1,
+        [0.0; 4],
+    );
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        1,
+        0,
+        1,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(3), RESULT_UNSUPPORTED);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(host.command_report().rejected_index, 2);
+    assert_eq!(host.command_report().admitted, 0);
+
+    assert_eq!(host.observation_armed_taps(), before_armed);
+    let after_queues = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .in_flight
+        .to_vec();
+    assert_eq!(after_queues, before_queues);
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(queue_counters(ready), before_counters);
+    assert_eq!(ready.observation_armed, before_masks);
+    assert_eq!(ready.observation_arm_samples, before_arm_samples);
+
+    let after_solo = {
+        let state = host.console_solo().expect("solo state");
+        (
+            state.solo_count(),
+            (0..state.track_count())
+                .map(|track| {
+                    (
+                        state.solo(track),
+                        [state.user_mute(track, 0), state.user_mute(track, 1)],
+                        [state.emitted_mute(track, 0), state.emitted_mute(track, 1)],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(after_solo, before_solo);
+}
+
 /// #140 B / E1: a fader command's acknowledgement names the exact sample it takes effect at.
 ///
 /// The fixture is identity end to end, so a constant input renders to that same constant and a
@@ -2953,16 +3952,18 @@ fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
 }
 
 /// #140 A / E1: an effect-parameter command takes effect on the first sample of the block its
-/// acknowledgement named, and on no earlier sample.
+/// acknowledgement named, with the current coefficient used for that sample before the ramp
+/// advances. The first changed sample is therefore one sample later.
 ///
 /// The proof is a two-host comparison rather than a closed-form value: the EQ's own 64-sample
 /// coefficient ramp is its DSP, not this issue's, so what is gated here is the *boundary*. The
 /// control host receives nothing; every block before `applied_at_sample` must be bit-identical
-/// between the two, and the block at `applied_at_sample` must differ on its very first sample.
+/// between the two. At `applied_at_sample`, both channels remain bit-identical for sample 0 and
+/// differ at sample 1 as the current-then-advance ramp contract takes effect.
 ///
 /// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm
 /// below `effect.processor.process(block)` -> the first differing block is one later and the
-/// `differs at its first sample` assertion fails.
+/// sample-1 assertions fail.
 #[test]
 fn an_effect_parameter_command_names_the_exact_application_sample() {
     const QUANTUM: u32 = 128;
@@ -2979,19 +3980,10 @@ fn an_effect_parameter_command_names_the_exact_application_sample() {
         );
     }
     // Band 1's gain: parameter id 4 of `miso.parametric-eq`, dynamic rack, effect 0, both lanes.
-    stage_command(
-        &mut commanded,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [-12.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut commanded, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK
     );
-    assert_eq!(commanded.submit_commands(1), RESULT_OK);
     let report = *commanded.command_report();
     assert_eq!(report.reason, COMMAND_REASON_NONE);
     assert_eq!(
@@ -3004,15 +3996,25 @@ fn an_effect_parameter_command_names_the_exact_application_sample() {
     feed_and_render(&mut commanded, 1, 2, 0.25);
     let clean = control.output_pcm().expect("control").to_vec();
     let moved = commanded.output_pcm().expect("commanded").to_vec();
-    assert_ne!(
+    assert_eq!(
         clean[0].to_bits(),
         moved[0].to_bits(),
-        "the block at applied_at_sample differs at its first sample",
+        "the current coefficient remains in force for sample 0 on the left",
     );
-    assert_ne!(
+    assert_eq!(
         clean[QUANTUM as usize].to_bits(),
         moved[QUANTUM as usize].to_bits(),
-        "a `channel = both` command lowers to one span per lane, so the right lane moved too",
+        "the current coefficient remains in force for sample 0 on the right",
+    );
+    assert_ne!(
+        clean[1].to_bits(),
+        moved[1].to_bits(),
+        "the left coefficient changes at sample 1 after the ramp advances",
+    );
+    assert_ne!(
+        clean[QUANTUM as usize + 1].to_bits(),
+        moved[QUANTUM as usize + 1].to_bits(),
+        "a `channel = both` command lowers to one span per lane, so the right lane changes at sample 1",
     );
 }
 
@@ -3026,19 +4028,10 @@ fn an_effect_bypass_command_returns_the_dry_signal() {
     const QUANTUM: u32 = 128;
     let mut host = effect_console_host(QUANTUM, 8);
     // Move the band well off flat first, so "bypassed" and "enabled" are distinguishable.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [18.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut host, 0, 0, 1, 0, 4, 18.0),
+        RESULT_OK
     );
-    assert_eq!(host.submit_commands(1), RESULT_OK);
     for block in 0..3_u64 {
         feed_and_render(&mut host, 1, block, 0.25);
     }
@@ -6038,8 +7031,13 @@ fn a_console_that_never_solos_renders_what_it_always_did() {
 fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngineHost {
     use session::StableId;
 
-    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
-        .expect("accepted command fixture");
+    // This staging-capacity fixture deliberately uses an ordinary compressor. EQ's live path
+    // coalesces through prepared targets, while this effect keeps the historical 510-span wire
+    // bound exercised by an ordinary per-lane effect.
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("accepted compressor fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 64;
     let track = model.tracks[0].clone();
@@ -6094,7 +7092,7 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
 
     let records = MAXIMUM_COMMAND_RECORDS as usize;
     for index in 0..records - 1 {
-        // Band 1's gain on each track's EQ, addressed to both lanes: two spans per wire record.
+        // Compressor threshold on each track, addressed to both lanes: two spans per wire record.
         stage_command(
             &mut host,
             index,
@@ -6103,7 +7101,7 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
             2,
             (index % TRACKS) as u32,
             0,
-            4,
+            1,
             0,
             [-12.0, 0.0, 0.0, 0.0],
         );
@@ -6726,4 +7724,77 @@ fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
             );
         }
     }
+}
+
+#[test]
+fn prepared_companion_preserves_ordinary_batch_atomicity() {
+    let mut host = console_host(128, 0);
+    let generation = host.host_generation;
+    let workspace = host
+        .buffers
+        .as_mut()
+        .unwrap()
+        .prepared_control
+        .as_mut()
+        .unwrap();
+    workspace.companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    workspace.companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    workspace.companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    workspace.config.fill(0xa5);
+    let config_before = workspace.config;
+    assert_eq!(host.copy_eq_target_config(0, 0, 0), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.eq_target_config().unwrap(), config_before);
+    for (index, track) in [(0, 0), (1, u32::MAX)] {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_MATRIX,
+            255,
+            255,
+            track,
+            0,
+            0,
+            0,
+            [0.5, 0.0, 0.0, 1.0],
+        );
+    }
+    let before = host.ready.as_ref().unwrap().controls[0]
+        .producer
+        .success_count();
+    assert_eq!(
+        host.submit_prepared_commands(2, 24),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().rejected_index, 1);
+    assert_eq!(host.command_report().admitted, 0);
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before
+    );
+    // A malformed envelope also cannot publish the already valid ordinary command.
+    assert_eq!(
+        host.submit_prepared_commands(1, 23),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before
+    );
+    assert_eq!(host.submit_prepared_commands(1, 24), RESULT_OK);
+    assert_eq!(host.command_report().admitted, 1);
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before + 1
+    );
+
+    let mut no_console = prepared_host(128);
+    assert!(no_console.prepared_companion_mut().is_none());
+    assert_eq!(no_console.prepared_companion_capacity(), 0);
+    assert!(no_console.eq_target_config().is_none());
 }

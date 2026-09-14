@@ -3266,6 +3266,66 @@ pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
     })
 }
 
+/// Open the bounded EQ target-preparation workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_open() -> u32 {
+    crate::control_targets::open()
+}
+
+/// Return the writable EQ target request buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_request_ptr() -> u32 {
+    crate::control_targets::request_ptr()
+}
+
+/// Return the EQ target request capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_request_capacity() -> u32 {
+    crate::control_targets::request_capacity()
+}
+
+/// Prepare the staged EQ target request.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_prepare(request_bytes: u32) -> u32 {
+    crate::control_targets::prepare(request_bytes)
+}
+
+/// Return the EQ target result buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_ptr() -> u32 {
+    crate::control_targets::result_ptr()
+}
+
+/// Return the current EQ target result length.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_bytes() -> u32 {
+    crate::control_targets::result_bytes()
+}
+
+/// Return the EQ target result capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_result_capacity() -> u32 {
+    crate::control_targets::result_capacity()
+}
+
+/// Return the original edit index from the most recent refusal.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_rejected_edit_index() -> u32 {
+    crate::control_targets::rejected_edit_index()
+}
+
+/// Return the existing command reason from the most recent EQ preparation refusal.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_rejected_reason() -> u32 {
+    crate::control_targets::rejected_reason()
+}
+
+/// Close the EQ target-preparation workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
+    crate::control_targets::close()
+}
+
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
@@ -3561,6 +3621,59 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
 pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         host.submit_commands(count)
+    })
+}
+
+/// Admit one semantic command batch with its opaque prepared-target companion.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_prepared_command_submit(
+    handle: u32,
+    count: u32,
+    companion_bytes: u32,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.submit_prepared_commands(count, companion_bytes)
+    })
+}
+
+/// Return the fixed prepared companion staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_prepared_companion_ptr(handle: u32) -> u32 {
+    with_host_mut(handle, 0, |host| {
+        host.prepared_companion_mut()
+            .map_or(0, |bytes| pointer_u32(bytes.as_mut_ptr()))
+    })
+}
+
+/// Return the fixed prepared companion staging capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_prepared_companion_capacity(handle: u32) -> u32 {
+    with_host(
+        handle,
+        0,
+        AudioWorkletEngineHost::prepared_companion_capacity,
+    )
+}
+
+/// Copy one accepted EQ owner's canonical configuration into the fixed config workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_config_copy(
+    handle: u32,
+    track_index: u32,
+    rack: u32,
+    effect_index: u32,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.copy_eq_target_config(track_index, rack, effect_index)
+    })
+}
+
+/// Return the fixed addressed EQ configuration workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.eq_target_config()
+            .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
     })
 }
 
@@ -4106,7 +4219,7 @@ mod response_budget_tests {
 }
 
 #[cfg(test)]
-mod live_response_ffi_tests {
+pub(crate) mod live_response_ffi_tests {
     use super::*;
     use core::alloc::Layout;
     use core::cell::Cell;
@@ -4173,7 +4286,7 @@ mod live_response_ffi_tests {
         }
     }
 
-    fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+    pub(crate) fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
         ARMED.with(|armed| armed.set(false));
         ALLOCATIONS.with(|count| count.set(0));
         DEALLOCATIONS.with(|count| count.set(0));

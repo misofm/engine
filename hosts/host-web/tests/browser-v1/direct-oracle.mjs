@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { createPreparedControl } from "../../web/prepared-control.js";
 
-const ABI_VERSION = 0x00010000;
+const ABI_LAYOUT = JSON.parse(await readFile(
+  new URL("../../../../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url),
+));
+const ABI_VERSION = ABI_LAYOUT.abiVersion;
 const BOOT_OPTIONS_BYTES = 64;
 const QUANTUM = 128;
 const SAMPLE_RATE = 48000;
@@ -13,7 +17,7 @@ const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
 // Issue #137 D1: the live-console command path.
 const BUFFER_COMMAND = 6;
-const COMMAND_RECORD_BYTES = 48;
+const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
 const COMMAND_QUEUE_RECORDS = 4;
 const COMMAND_PAN = 1;
 const COMMAND_MATRIX = 2;
@@ -104,41 +108,111 @@ function boot(exports, document, consoleWords = [0n, 0n, 0n, 0n]) {
   return handle;
 }
 
-/// Stage one 48-byte command record and submit the batch, returning the typed report.
-function submitCommands(exports, handle, records) {
-  const pointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND);
-  assert.notEqual(pointer, 0);
-  const staging = new DataView(exports.memory.buffer, pointer, records.length * COMMAND_RECORD_BYTES);
-  for (let index = 0; index < records.length; index += 1) {
-    const record = records[index];
+const commandField = (name) => ABI_LAYOUT.commandRecord.fields
+  .find((field) => field.name === name).offset;
+const structureField = (structure, name) => ABI_LAYOUT.structures[structure].fields
+  .find((field) => field.name === name).offset;
+const resultCode = (name) => ABI_LAYOUT.constants.resultCodes.find((row) => row.name === name).value;
+const commandReason = (name) => ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name).value;
+
+/// Encode only the generated wire record. Preparation and admission stay in the shared helper.
+function encodeCommands(records) {
+  const bytes = new Uint8Array(records.length * COMMAND_RECORD_BYTES);
+  const view = new DataView(bytes.buffer);
+  for (const [index, record] of records.entries()) {
     const offset = index * COMMAND_RECORD_BYTES;
-    for (let byte = 0; byte < COMMAND_RECORD_BYTES; byte += 1) staging.setUint8(offset + byte, 0);
-    staging.setUint8(offset, record.kind);
-    staging.setUint8(offset + 1, record.rack ?? 255);
-    staging.setUint8(offset + 2, record.channel ?? 255);
-    staging.setUint32(offset + 4, record.trackIndex, true);
-    staging.setUint32(offset + 8, record.effectIndex ?? 0, true);
-    staging.setUint32(offset + 12, record.parameterId ?? 0, true);
-    staging.setUint32(offset + 16, record.smoothingSamples ?? 0, true);
+    view.setUint8(offset + commandField("kind"), record.kind);
+    view.setUint8(offset + commandField("rack"), record.rack ?? 255);
+    view.setUint8(offset + commandField("channel"), record.channel ?? 255);
+    view.setUint32(offset + commandField("trackIndex"), record.trackIndex, true);
+    view.setUint32(offset + commandField("effectIndex"), record.effectIndex ?? 0, true);
+    view.setUint32(offset + commandField("parameterId"), record.parameterId ?? 0, true);
+    view.setUint32(offset + commandField("smoothingSamples"), record.smoothingSamples ?? 0, true);
     for (let slot = 0; slot < 4; slot += 1) {
-      staging.setFloat32(offset + 24 + slot * 4, record.values[slot], true);
+      view.setFloat32(offset + commandField("values") + slot * 4, record.values[slot], true);
     }
   }
-  const result = exports.miso_engine_web_v1_command_submit(handle, records.length);
+  return bytes;
+}
+
+function commandAck(exports, handle, result, records) {
   const report = new DataView(
     exports.memory.buffer,
     exports.miso_engine_web_v1_command_report_ptr(handle),
-    48,
+    ABI_LAYOUT.structures.commandReport.bytes,
   );
-  assert.equal(report.getUint32(0, true), 48);
-  assert.equal(report.getUint32(4, true), ABI_VERSION);
-  for (const offset of [32, 40]) assert.equal(report.getBigUint64(offset, true), 0n);
+  assert.equal(report.getUint32(structureField("commandReport", "structSize"), true),
+    ABI_LAYOUT.structures.commandReport.bytes);
+  assert.equal(report.getUint32(structureField("commandReport", "abiVersion"), true), ABI_VERSION);
   return {
     result,
-    reason: report.getUint32(12, true),
-    rejectedIndex: report.getUint32(16, true),
-    admitted: report.getUint32(20, true),
-    appliedAtSample: report.getBigUint64(24, true).toString(),
+    reason: report.getUint32(structureField("commandReport", "reason"), true),
+    rejectedIndex: report.getUint32(structureField("commandReport", "rejectedIndex"), true),
+    admitted: report.getUint32(structureField("commandReport", "admitted"), true),
+    appliedAtSample: report.getBigUint64(structureField("commandReport", "appliedAtSample"), true),
+    records: records.slice(),
+  };
+}
+
+function preparedControl(exports, handle) {
+  const configBytes = ABI_LAYOUT.structures.eqTargetConfig.bytes;
+  const configCopySync = (address) => {
+    const result = exports.miso_engine_web_v1_eq_target_config_copy(
+      handle, address.trackIndex, address.rack, address.effectIndex,
+    );
+    if (result === resultCode("ok")) {
+      const pointer = exports.miso_engine_web_v1_eq_target_config_ptr(handle);
+      assert.ok(pointer > 0 && pointer + configBytes <= exports.memory.buffer.byteLength);
+      return { result, reason: commandReason("none"),
+        config: new Uint8Array(exports.memory.buffer, pointer, configBytes).slice() };
+    }
+    const reason = result === resultCode("invalidArgument")
+      ? address.trackIndex >= exports.miso_engine_web_v1_console_track_count(handle)
+        ? commandReason("unknownTrack")
+        : address.rack > 2 ? commandReason("unknownRack") : commandReason("unknownEffect")
+      : commandReason("none");
+    return { result, reason, config: new Uint8Array(0) };
+  };
+  const stageRecords = (records, count) => {
+    const pointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND);
+    const capacity = exports.miso_engine_web_v1_buffer_capacity(handle, BUFFER_COMMAND);
+    assert.equal(records.byteLength, count * COMMAND_RECORD_BYTES);
+    assert.ok(records.byteLength <= capacity);
+    new Uint8Array(exports.memory.buffer, pointer, records.byteLength).set(records);
+  };
+  const ordinarySubmitSync = (records, count) => {
+    stageRecords(records, count);
+    return commandAck(exports, handle,
+      exports.miso_engine_web_v1_command_submit(handle, count), records);
+  };
+  const preparedSubmitSync = (records, companion, count) => {
+    stageRecords(records, count);
+    const pointer = exports.miso_engine_web_v1_prepared_companion_ptr(handle);
+    const capacity = exports.miso_engine_web_v1_prepared_companion_capacity(handle);
+    assert.ok(pointer > 0 && companion.byteLength <= capacity);
+    new Uint8Array(exports.memory.buffer, pointer, companion.byteLength).set(companion);
+    return commandAck(exports, handle,
+      exports.miso_engine_web_v1_prepared_command_submit(handle, count, companion.byteLength), records);
+  };
+  const refusal = (records, _count, reason, rejectedIndex, result) => ({
+    result, reason, rejectedIndex: rejectedIndex ?? 0, admitted: 0, appliedAtSample: 0n,
+    records: records.slice(),
+  });
+  return createPreparedControl({
+    instance: exports, abiLayout: ABI_LAYOUT, sampleRateHz: SAMPLE_RATE,
+    configCopySync, ordinarySubmitSync, preparedSubmitSync, preparedRefusalSync: refusal,
+  });
+}
+
+/// Lower the generated command records through the same prepared helper used by the SDK.
+function submitCommands(control, records) {
+  const reply = control.submitSync(encodeCommands(records), records.length);
+  return {
+    result: reply.result,
+    reason: reply.reason,
+    rejectedIndex: reply.rejectedIndex,
+    admitted: reply.admitted,
+    appliedAtSample: reply.appliedAtSample.toString(),
   };
 }
 
@@ -298,6 +372,7 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
     [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n],
   );
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
+  const control = preparedControl(exports, handle);
 
   const memoryBuffer = exports.memory.buffer;
   const feed = (block) => {
@@ -342,32 +417,31 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
   };
 
   step(0);
-  reports.matrix = submitCommands(exports, handle, [matrix]);
+  reports.matrix = submitCommands(control, [matrix]);
   step(1);
-  reports.unknownTrack = submitCommands(
-    exports, handle, [{ ...matrix, trackIndex: 5 }],
-  );
+  reports.unknownTrack = submitCommands(control, [{ ...matrix, trackIndex: 5 }]);
   reports.flood = submitCommands(
-    exports, handle, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => matrix),
+    control, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => matrix),
   );
-  reports.unknownParameter = submitCommands(exports, handle, [unknownParameter]);
+  reports.unknownParameter = submitCommands(control, [unknownParameter]);
   step(2);
-  reports.pan = submitCommands(exports, handle, [pan]);
+  reports.pan = submitCommands(control, [pan]);
   step(3);
-  reports.fader = submitCommands(exports, handle, [fader]);
+  reports.fader = submitCommands(control, [fader]);
   step(4);
-  reports.mute = submitCommands(exports, handle, [muteOn]);
+  reports.mute = submitCommands(control, [muteOn]);
   step(5);
-  reports.effectParam = submitCommands(exports, handle, [bandGain]);
+  reports.effectParam = submitCommands(control, [bandGain]);
   step(6);
-  reports.effectBypass = submitCommands(exports, handle, [bypassOn]);
+  reports.effectBypass = submitCommands(control, [bypassOn]);
   step(7);
-  reports.mixedBatch = submitCommands(exports, handle, [muteOff, bypassOff]);
+  reports.mixedBatch = submitCommands(control, [muteOff, bypassOff]);
   step(8);
   step(9);
   const beforeDisposeStatus = status(exports, handle);
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
   assert.equal(exports.memory.buffer, memoryBuffer, "a command timeline never grows memory");
+  control.close();
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
   return { reports, beforeDisposeStatus, pcmF32leSha256: pcmSha256(pcm) };
 }
@@ -387,6 +461,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   const handle = boot(exports, sessionDocument, [
     BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
+  const control = preparedControl(exports, handle);
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
   const resourceReport = resources(exports, handle);
   assert.equal(
@@ -433,15 +508,15 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
 
   const reports = {};
-  reports.unknownTap = submitCommands(exports, handle, [{ ...subscribe, parameterId: 9 }]);
-  reports.subscribe = submitCommands(exports, handle, [subscribe]);
+  reports.unknownTap = submitCommands(control, [{ ...subscribe, parameterId: 9 }]);
+  reports.subscribe = submitCommands(control, [subscribe]);
   for (let block = 0; block < 8; block += 1) step(block);
   const armed = {
     trackGrDb: frame[4],
     masterGrDb: header.getUint32(44, true) === 1 ? frame[5] : null,
     windowSamples: (header.getBigUint64(24, true) - header.getBigUint64(16, true)).toString(),
   };
-  reports.unsubscribe = submitCommands(exports, handle, [unsubscribe]);
+  reports.unsubscribe = submitCommands(control, [unsubscribe]);
   for (let block = 8; block < 12; block += 1) step(block);
   const disarmed = {
     trackGrDb: frame[4],
@@ -449,6 +524,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
   assert.equal(exports.memory.buffer, memoryBuffer, "an observation timeline never grows memory");
+  control.close();
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
   return {
     observationRetainedBytesIsZero: resourceReport.observationRetainedBytes === "0",

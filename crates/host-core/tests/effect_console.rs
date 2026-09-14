@@ -1,9 +1,9 @@
-//! Issue #140 A: the automation-span feed reaches a **banked** effect, per lane.
+//! Issue #140 A: the prepared-target feed reaches a **banked** effect, per lane.
 //!
 //! `hosts/host-web` proves the boundary for a per-node dynamic-rack effect, and
 //! `rack` proves the lane partition against a mock bank. What neither of them proves
 //! is the seam between them: that a real cohort-planned homogeneous bank, bound by the graph
-//! compiler from a real session, hands lane `l` the spans of lane `l`'s own track and nothing
+//! compiler from a real session, hands lane `l` the targets of lane `l`'s own track and nothing
 //! else.
 //!
 //! The fixture is eight identical SIMD-rack chains, so the planner forms a full bank at every
@@ -12,7 +12,9 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::MeterTap;
-use effect_contract::{EffectControlRecord, ParameterChannel};
+use effect_contract::ParameterChannel;
+
+mod support;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     EffectRack, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
@@ -152,14 +154,7 @@ fn command(console: &mut Console, track_id: &str, value: f32) {
         })
         .expect("a control channel for the addressed effect");
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-        producer
-            .producer
-            .try_push(EffectControlRecord::Parameter {
-                parameter_index: BAND_GAIN_INDEX,
-                channel,
-                value,
-            })
-            .expect("room in the bounded queue");
+        support::push_eq_parameter(producer, BAND_GAIN_INDEX, channel, value);
     }
 }
 

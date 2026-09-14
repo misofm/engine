@@ -7,13 +7,14 @@ node "$repo_root/scripts/test-web-audioworklet.mjs"
 
 # Issue #393: exercise the private allocator boundary through a transformed test module. The
 # production host has no counter accessor or test hook; this copy starts at MAX_SAFE_INTEGER - 1.
-safe_host=$(mktemp "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
-mv "$safe_host" "$safe_host.mjs"
-safe_host="$safe_host.mjs"
-unchecked_host=$(mktemp "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
-mv "$unchecked_host" "$unchecked_host.mjs"
-unchecked_host="$unchecked_host.mjs"
-cleanup_safe() { rm -f -- "$safe_host" "$unchecked_host"; }
+host_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
+safe_host="$host_test_dir/safe-host.mjs"
+unchecked_host="$host_test_dir/unchecked-host.mjs"
+# The transformed host remains a real ES module and therefore keeps its sibling helper import.
+# Keep the copy beside both transformed modules so this red-path test cannot pass by accidentally
+# exercising a missing or stale prepared-control asset.
+cp "$repo_root/hosts/host-web/web/prepared-control.js" "$host_test_dir/prepared-control.js"
+cleanup_safe() { rm -rf -- "$host_test_dir"; }
 trap cleanup_safe EXIT
 sed 's/#lastRequestId = 0;/#lastRequestId = Number.MAX_SAFE_INTEGER - 1;/' \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >"$safe_host"

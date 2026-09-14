@@ -112,7 +112,5 @@ delay.observe("Gain Reduction", true);
 const eq = track.effect("simd2", 0, "miso.parametric-eq");
 // @ts-expect-error the enumeration is prepared-only, not a live console parameter
 eq.parameter("band-1-kind", "bell");
-// @ts-expect-error prepared cut controls are accepted by effect(), but absent from live edits
 eq.parameter("hpf-enabled", true);
-// @ts-expect-error prepared cut controls are accepted by effect(), but absent from live edits
 eq.parameter("lpf-enabled", false);

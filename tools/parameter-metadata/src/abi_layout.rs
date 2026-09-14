@@ -87,11 +87,13 @@ use host_web::{
     SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS,
     SPECTRUM_TARGET_TRACK_POST_MATRIX, SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES,
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebCommandReport,
+    WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection, WebResourceReport,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow, WebStatus,
+    WebMeterHeader, WebObservationResult, WebObservationSelection,
+    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -125,7 +127,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 97] = [
+pub const EXPORTS: [&str; 112] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -139,6 +141,18 @@ pub const EXPORTS: [&str; 97] = [
     "miso_engine_web_v1_console_track_id",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_eq_target_close",
+    "miso_engine_web_v1_eq_target_config_copy",
+    "miso_engine_web_v1_eq_target_config_ptr",
+    "miso_engine_web_v1_eq_target_open",
+    "miso_engine_web_v1_eq_target_prepare",
+    "miso_engine_web_v1_eq_target_rejected_edit_index",
+    "miso_engine_web_v1_eq_target_rejected_reason",
+    "miso_engine_web_v1_eq_target_request_capacity",
+    "miso_engine_web_v1_eq_target_request_ptr",
+    "miso_engine_web_v1_eq_target_result_bytes",
+    "miso_engine_web_v1_eq_target_result_capacity",
+    "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -158,6 +172,9 @@ pub const EXPORTS: [&str; 97] = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
+    "miso_engine_web_v1_prepared_command_submit",
+    "miso_engine_web_v1_prepared_companion_capacity",
+    "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_close",
@@ -1426,6 +1443,209 @@ fn live_response_result_fields() -> [Field; 22] {
     ]
 }
 
+fn eq_target_request_fields() -> [Field; 6] {
+    [
+        (
+            "structSize",
+            offset_of!(WebEqTargetRequest, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebEqTargetRequest, abi_version),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebEqTargetRequest, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "seedCount",
+            offset_of!(WebEqTargetRequest, seed_count),
+            "u32",
+        ),
+        (
+            "editCount",
+            offset_of!(WebEqTargetRequest, edit_count),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebEqTargetRequest, reserved),
+            "u32[3]",
+        ),
+    ]
+}
+fn eq_target_edit_fields() -> [Field; 3] {
+    [
+        (
+            "parameterId",
+            offset_of!(WebEqTargetEdit, parameter_id),
+            "u32",
+        ),
+        ("channel", offset_of!(WebEqTargetEdit, channel), "u32"),
+        ("value", offset_of!(WebEqTargetEdit, value), "f32"),
+    ]
+}
+fn prepared_target_fields() -> [Field; 3] {
+    [
+        ("slot", offset_of!(WebPreparedEffectTarget, slot), "u32"),
+        (
+            "channel",
+            offset_of!(WebPreparedEffectTarget, channel),
+            "u32",
+        ),
+        (
+            "words",
+            offset_of!(WebPreparedEffectTarget, words),
+            "u32[12]",
+        ),
+    ]
+}
+fn eq_target_result_fields() -> [Field; 6] {
+    [
+        (
+            "structSize",
+            offset_of!(WebEqTargetResult, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebEqTargetResult, abi_version),
+            "u32",
+        ),
+        (
+            "valueCount",
+            offset_of!(WebEqTargetResult, value_count),
+            "u32",
+        ),
+        (
+            "targetCount",
+            offset_of!(WebEqTargetResult, target_count),
+            "u32",
+        ),
+        (
+            "workspaceRetainedBytes",
+            offset_of!(WebEqTargetResult, workspace_retained_bytes),
+            "u64",
+        ),
+        (
+            "workspaceLargestAllocationBytes",
+            offset_of!(WebEqTargetResult, workspace_largest_allocation_bytes),
+            "u64",
+        ),
+    ]
+}
+fn companion_header_fields() -> [Field; 5] {
+    [
+        (
+            "structSize",
+            offset_of!(WebPreparedEffectCompanionHeader, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebPreparedEffectCompanionHeader, abi_version),
+            "u32",
+        ),
+        (
+            "hostGeneration",
+            offset_of!(WebPreparedEffectCompanionHeader, host_generation),
+            "u64",
+        ),
+        (
+            "targetCount",
+            offset_of!(WebPreparedEffectCompanionHeader, target_count),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebPreparedEffectCompanionHeader, reserved),
+            "u32",
+        ),
+    ]
+}
+fn companion_record_fields() -> [Field; 8] {
+    [
+        (
+            "trackIndex",
+            offset_of!(WebPreparedEffectCompanionRecord, track_index),
+            "u32",
+        ),
+        (
+            "rack",
+            offset_of!(WebPreparedEffectCompanionRecord, rack),
+            "u32",
+        ),
+        (
+            "effectIndex",
+            offset_of!(WebPreparedEffectCompanionRecord, effect_index),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebPreparedEffectCompanionRecord, reserved),
+            "u32",
+        ),
+        (
+            "baseRevision",
+            offset_of!(WebPreparedEffectCompanionRecord, base_revision),
+            "u64",
+        ),
+        (
+            "slot",
+            offset_of!(WebPreparedEffectCompanionRecord, slot),
+            "u32",
+        ),
+        (
+            "channel",
+            offset_of!(WebPreparedEffectCompanionRecord, channel),
+            "u32",
+        ),
+        (
+            "words",
+            offset_of!(WebPreparedEffectCompanionRecord, words),
+            "u32[12]",
+        ),
+    ]
+}
+fn eq_target_config_fields() -> [Field; 7] {
+    [
+        (
+            "structSize",
+            offset_of!(WebEqTargetConfig, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebEqTargetConfig, abi_version),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebEqTargetConfig, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "valueCount",
+            offset_of!(WebEqTargetConfig, value_count),
+            "u32",
+        ),
+        (
+            "hostGeneration",
+            offset_of!(WebEqTargetConfig, host_generation),
+            "u64",
+        ),
+        (
+            "ownerRevision",
+            offset_of!(WebEqTargetConfig, owner_revision),
+            "u64",
+        ),
+        ("values", offset_of!(WebEqTargetConfig, values), "f32[60]"),
+    ]
+}
+
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -1660,6 +1880,49 @@ pub fn render() -> String {
         "liveResponseResult",
         LIVE_RESPONSE_RESULT_BYTES,
         &live_response_result_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "eqTargetRequest",
+        32,
+        &eq_target_request_fields(),
+        true,
+    );
+    render_structure(&mut out, "eqTargetEdit", 12, &eq_target_edit_fields(), true);
+    render_structure(
+        &mut out,
+        "preparedEffectTarget",
+        56,
+        &prepared_target_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "eqTargetResult",
+        32,
+        &eq_target_result_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "preparedEffectCompanionHeader",
+        24,
+        &companion_header_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "preparedEffectCompanionRecord",
+        80,
+        &companion_record_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "eqTargetConfig",
+        272,
+        &eq_target_config_fields(),
         false,
     );
     out.push_str("  },\n");

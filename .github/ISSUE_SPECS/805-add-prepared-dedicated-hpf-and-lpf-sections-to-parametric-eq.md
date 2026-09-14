@@ -507,3 +507,7 @@ removed after verification.
 Root and Astra MEDIUM independently inspected both canonical files and verified their SHA-256 values and exact one-line diff. The test pin now reflects the six-section prepared state; separate no-delay-node, PDC, delay-resource and hostile-cap checks remain unchanged. No production source or artifact changes are needed.
 
 Luna XHIGH final correction gates: all eight graph-compiler track_delay tests PASS; formatting and diff checks PASS. Astra MEDIUM narrow correction verdict PASS after independent canonical hash/diff/arithmetic verification. Temporary baseline probe worktree was removed after restoring its clean state; artifacts remain outside it. The full workspace sweep had no additional failures beyond the corrected catalog/response and digest expectations. Required remote qualification remains pending.
+
+## Merged delivery
+
+Required qualification run 34820834881 passed for commit 22cf37131eae122947ff0e512909933baf81ac70, including the corrected complete workspace debug group and all browser/SDK/artifact gates. PR #810 merged as 80f2918b5aba5b2428c5f5cc76c24f46b4e0edde on 2026-09-14; GitHub #805 is verified CLOSED. Prepared dedicated cuts are delivered in source. Live control and package/app release remain #807/#808/#809 and parent #804.

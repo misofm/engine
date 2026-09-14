@@ -156,10 +156,11 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet-host.js \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
-  miso-engine-v1-parameter-metadata.json)
+  miso-engine-v1-parameter-metadata.json \
+  prepared-control.js)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact six frozen outputs" >&2
+  echo "artifact directory does not contain the exact seven frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -183,6 +184,18 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_console_track_id \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
+  miso_engine_web_v1_eq_target_close \
+  miso_engine_web_v1_eq_target_config_copy \
+  miso_engine_web_v1_eq_target_config_ptr \
+  miso_engine_web_v1_eq_target_open \
+  miso_engine_web_v1_eq_target_prepare \
+  miso_engine_web_v1_eq_target_rejected_edit_index \
+  miso_engine_web_v1_eq_target_rejected_reason \
+  miso_engine_web_v1_eq_target_request_capacity \
+  miso_engine_web_v1_eq_target_request_ptr \
+  miso_engine_web_v1_eq_target_result_bytes \
+  miso_engine_web_v1_eq_target_result_capacity \
+  miso_engine_web_v1_eq_target_result_ptr \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
@@ -202,6 +215,9 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_observation_tap_count \
   miso_engine_web_v1_observation_tap_id \
   miso_engine_web_v1_observation_track_index \
+  miso_engine_web_v1_prepared_command_submit \
+  miso_engine_web_v1_prepared_companion_capacity \
+  miso_engine_web_v1_prepared_companion_ptr \
   miso_engine_web_v1_render \
   miso_engine_web_v1_response_close \
   miso_engine_web_v1_response_effect_id_capacity \

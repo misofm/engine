@@ -10,11 +10,12 @@
 
 use builtins::{BUILTIN_PARAMETER_DESCRIPTORS, builtin_parameter_unit};
 use effect_compiler::launch_native_effect_registry;
-use effect_contract::ParameterUnit;
+use effect_contract::{ParameterChannel, ParameterUnit, PreparedEffectTarget};
+use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
 use host_web::{
-    AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
-    COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
-    RESULT_UNSUPPORTED, WebBootOptions,
+    ABI_VERSION, AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM,
+    COMMAND_MATRIX, COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES,
+    RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
 };
 
 fn builtin_rows(document: &str) -> Vec<&str> {
@@ -132,11 +133,11 @@ fn builtin_metadata_has_authoritative_units_and_unique_keys() {
     }
 }
 
-/// Issue #805: the six prepared cut controls are appended after the historical 24-band catalog.
+/// Issue #807: the six live cut controls are appended after the historical 24-band catalog.
 ///
 /// The old IDs and defaults are part of the prepared session compatibility surface. The cut rows
 /// are deliberately present in the catalog so the SDK can author them, but remain prepared-only:
-/// they have no live command write path and therefore must not enter the console queue.
+/// they use the same block-rate, linear-64 live path as the existing numeric rows.
 #[test]
 fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
     let document = parameter_metadata::render();
@@ -259,12 +260,12 @@ fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
         assert_eq!(raw_field(row, "maximum"), maximum);
         assert_eq!(raw_field(row, "default"), default);
         assert_eq!(quoted_field(row, "channelPolicyName"), "perLane");
-        assert_eq!(quoted_field(row, "automationRateName"), "none");
-        assert_eq!(quoted_field(row, "smoothingName"), "none");
-        assert_eq!(raw_field(row, "smoothingSamples"), "0");
+        assert_eq!(quoted_field(row, "automationRateName"), "block");
+        assert_eq!(quoted_field(row, "smoothingName"), "linear");
+        assert_eq!(raw_field(row, "smoothingSamples"), "64");
         assert_eq!(raw_field(row, "readable"), "true");
-        assert_eq!(raw_field(row, "automatable"), "false");
-        assert_eq!(raw_field(row, "liveUpdatable"), "false");
+        assert_eq!(raw_field(row, "automatable"), "true");
+        assert_eq!(raw_field(row, "liveUpdatable"), "true");
     }
 }
 
@@ -315,6 +316,72 @@ fn stage(
     record[24..28].copy_from_slice(&value.to_le_bytes());
 }
 
+/// Stage the opaque target companion for one prepared EQ command. The native metadata gate uses
+/// the same bounded preparation route as the browser SDK, so its live-parameter acknowledgement
+/// proof does not accidentally exercise the now-refused raw EQ designer path.
+fn stage_prepared_eq(
+    host: &mut AudioWorkletEngineHost,
+    preparer: &EqTargetPreparer,
+    effect_index: u32,
+    parameter_id: u32,
+    value: f32,
+) -> u32 {
+    let copy_result = host.copy_eq_target_config(0, 1, effect_index);
+    assert_eq!(copy_result, RESULT_OK);
+    let config = host.eq_target_config().expect("EQ target config");
+    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
+    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        let offset = 32 + index * 4;
+        *seed = f32::from_bits(u32::from_le_bytes(
+            config[offset..offset + 4].try_into().expect("seed"),
+        ));
+    }
+    let mut targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Both,
+        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, target_count) = preparer
+        .prepare(
+            48_000,
+            &seeds,
+            &[EqTargetEdit {
+                parameter_id,
+                channel: ParameterChannel::Both,
+                value,
+            }],
+            &mut targets,
+        )
+        .expect("prepared EQ target");
+    assert_eq!(target_count, 1, "one metadata edit touches one EQ section");
+
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&(24_u32).to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    companion[16..20].copy_from_slice(&(target_count as u32).to_le_bytes());
+    let record = &mut companion[24..104];
+    record[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
+    record[16..24].copy_from_slice(&base_revision.to_le_bytes());
+    record[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
+    let channel = match targets[0].channel {
+        ParameterChannel::Left => 0_u32,
+        ParameterChannel::Right => 1_u32,
+        ParameterChannel::Both => 2_u32,
+    };
+    record[28..32].copy_from_slice(&channel.to_le_bytes());
+    for (index, word) in targets[0].words.iter().enumerate() {
+        let offset = 32 + index * 4;
+        record[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    host.submit_prepared_commands(1, 104)
+}
+
 /// Red mutation: delete the `command.effect_index >= counts[rack]` leg in `admit_commands`
 /// -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the completeness assertion
 /// below stops distinguishing "resolved" from "did not resolve", and the negative case fails.
@@ -343,6 +410,10 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
+    let eq_preparer = EqTargetPreparer::new(
+        effect_compiler::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ target preparer");
 
     // Issue #140 A: every declared effect parameter resolves *and applies*, except the ones whose
     // own descriptor says they cannot be automated -- which are exactly the ones the metadata
@@ -360,7 +431,18 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
                 parameter.id.0,
                 parameter.default_value,
             );
-            let result = host.submit_commands(1);
+            let result = if descriptor.id.as_str() == "miso.parametric-eq" && parameter.automatable
+            {
+                stage_prepared_eq(
+                    &mut host,
+                    &eq_preparer,
+                    index,
+                    parameter.id.0,
+                    parameter.default_value,
+                )
+            } else {
+                host.submit_commands(1)
+            };
             let reason = host.command_report().reason;
             if parameter.automatable {
                 assert_eq!(

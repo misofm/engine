@@ -26,6 +26,7 @@ EXPECTED_ARTIFACTS = (
     "miso-engine-v1-audio-worklet.simd128.wasm",
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet-host.js",
+    "prepared-control.js",
     "miso-engine-v1-audio-worklet-host.d.ts",
     # Issue #137 D4: the parameter metadata ships with the module and is sealed with it.
     "miso-engine-v1-parameter-metadata.json",
@@ -39,6 +40,7 @@ SOURCE_SEAL_PATHS = (
     "hosts/host-web/Cargo.toml",
     "hosts/host-web/web/miso-engine-v1-audio-worklet.js",
     "hosts/host-web/web/miso-engine-v1-audio-worklet-host.js",
+    "hosts/host-web/web/prepared-control.js",
     "hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts",
     "scripts/build-web-audioworklet.sh",
     "scripts/check-web-audioworklet.sh",

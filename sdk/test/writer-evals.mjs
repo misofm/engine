@@ -37,7 +37,7 @@ const EQ_PARAMS = [
  *
  * The instance count matters for one test only: the ">32 both-lane batch" case needs more than
  * thirty-two DISTINCT addresses, or the writer's own coalescing would collapse the gesture before
- * the queue ever saw it. One EQ publishes sixteen live per-lane rows, so four instances give
+ * the queue ever saw it. One EQ publishes twenty-two live per-lane rows, so four instances give
  * sixty-four addresses -- comfortably past the boundary being probed.
  */
 function consoleDocument(instances = 1) {
@@ -45,6 +45,25 @@ function consoleDocument(instances = 1) {
     effects: {
       simd1: Array.from({ length: instances }, (_unused, index) =>
         effectEntry(`eq${index}`, "miso.parametric-eq", EQ_PARAMS)),
+    },
+  });
+}
+
+/** The ordinary dynamic-rack fixture for the raw queue-cost probe. */
+function compressorDocument() {
+  const compressor = CATALOG.effects.find((effect) => effect.id === "miso.compressor");
+  return sessionDocument({
+    effects: {
+      dynamic: [effectEntry(
+        "compressor",
+        compressor.id,
+        compressor.parameters.map((row) => ({
+          id: row.id,
+          unit: row.unitName,
+          value: row.default,
+          channel: "both",
+        })),
+      )],
     },
   });
 }
@@ -256,9 +275,9 @@ describe("the writer contract -- paused", () => {
       for (let index = 0; index < count; index += 1) {
         const base = index * ABI_LAYOUT.commandRecord.bytes;
         view.setUint8(base + at("kind"), kind);
-        view.setUint8(base + at("rack"), 0);
+        view.setUint8(base + at("rack"), 1);
         view.setUint8(base + at("channel"), 2);
-        view.setUint32(base + at("parameterId"), GAIN_IDS[0], true);
+        view.setUint32(base + at("parameterId"), 1, true);
         view.setFloat32(base + at("values"), -0.1 * index, true);
       }
       return records;
@@ -267,7 +286,10 @@ describe("the writer contract -- paused", () => {
     let largest = 0;
     let firstRefusal;
     for (let count = 30; count <= 34; count += 1) {
-      const engine = await pausedEngine();
+      const engine = await createOfflineEngine(compressorDocument(), {
+        asset,
+        console: { commandQueueRecords: QUEUE_RECORDS },
+      });
       try {
         const report = engine.submitCommands(rawBatch(count), count);
         if (report.ok) largest = count;
@@ -289,23 +311,25 @@ describe("the writer contract -- paused", () => {
     // The adopted ruling states this case as "a single >32 both-lane-param batch from idle". That
     // sentence comes from the app, where a strip's controls are counted across a whole track. On
     // this engine the bound is per DESTINATION QUEUE -- one per addressed effect instance -- and
-    // the largest launch effect, the parametric EQ, publishes sixteen live per-lane rows. So on a
+    // the largest launch effect, the parametric EQ, publishes twenty-two live per-lane rows. So on a
     // 64-record queue, thirty-two distinct both-lane addresses aimed at one instance do not exist:
-    // sixteen do, they cost thirty-two lane slots, and they fit. Spreading them over four
+    // twenty-two do, and the prepared route coalesces them into a bounded set of section targets.
+    // A queue of two remains deliberately smaller than that set, so the writer split is exercised.
+    // Spreading them over four
     // instances spreads them over four queues and they fit again.
     //
     // The number 32 is not the contract; being oversized is. It is pinned exactly, at queue 64, by
-    // the test above. Here the queue is set to sixteen records -- `commandQueueRecords` is a boot
+    // the test above. Here the queue is set to two records -- `commandQueueRecords` is a boot
     // option the caller chooses, and a smaller queue is a legitimate configuration -- so that one
-    // instance's sixteen both-lane rows are twice what the queue can hold, and the split behaviour
+    // instance's twenty-two both-lane rows exceed the prepared section capacity, and the split behaviour
     // has something real to do.
-    const smallQueue = 16;
+    const smallQueue = 2;
     const addresses = bothLaneAddresses(1);
-    assert.equal(addresses.length, 16, "one EQ publishes sixteen live per-lane rows");
+    assert.equal(addresses.length, 22, "one EQ publishes twenty-two live per-lane rows");
     assert.equal(
-      addresses.length * 2,
-      smallQueue * 2,
-      "sixteen both-lane records cost thirty-two lane slots: twice this queue",
+      addresses.length > smallQueue,
+      true,
+      "twenty-two semantic rows exceed the deliberately small prepared queue",
     );
 
     const engine = await createOfflineEngine(consoleDocument(1), {
@@ -318,13 +342,13 @@ describe("the writer contract -- paused", () => {
         maximumBatch: addresses.length,
       });
       for (const edit of addresses) writer.stage(edit);
-      assert.equal(writer.pending, 16, "sixteen distinct addresses do not coalesce");
+      assert.equal(writer.pending, 22, "twenty-two distinct addresses do not coalesce");
 
       const first = await writer.flush();
       assert.equal(first.refused, true, "an oversized gesture does not fit from idle");
       assert.equal(first.reason, "backpressure");
-      assert.equal(first.pending, 16, "a refusal admits nothing and drops nothing");
-      assert.ok(first.nextBatch < 16, "the writer narrows its next attempt");
+      assert.equal(first.pending, 22, "a refusal admits nothing and drops nothing");
+      assert.ok(first.nextBatch < 22, "the writer narrows its next attempt");
 
       // It splits: the following attempts admit what fits. The writer was never told the
       // boundary; it halved until the engine said yes.

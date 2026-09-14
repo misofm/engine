@@ -7,6 +7,9 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
 const COMMAND_REASON_UNSUPPORTED_KIND = 7;
+const COMMAND_REASON_UNKNOWN_TRACK = 2;
+const COMMAND_REASON_UNKNOWN_RACK = 3;
+const COMMAND_REASON_UNKNOWN_EFFECT = 4;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
@@ -78,6 +81,11 @@ const SOURCE_FIELDS = [
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
+const EQ_CONFIG_FIELDS = ["tag", "requestId", "trackIndex", "rack", "effectIndex"];
+const PREPARED_COMMAND_FIELDS = ["tag", "requestId", "count", "records", "companion"];
+const EQ_CONFIG_BYTES = 272;
+const PREPARED_COMPANION_HEADER_BYTES = 24;
+const PREPARED_COMPANION_RECORD_BYTES = 80;
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
 const SPECTRUM_FIELDS = ["tag", "requestId", "operation", "channels"];
 const SPECTRUM_STREAM_START_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
@@ -242,6 +250,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryDeadlineMisses = 0;
     this.observations = Object.freeze([]);
     this.observationSelectionView = null;
+    this.preparedCompanion = null;
     this.clock = renderClock();
     this.port.onmessage = (event) => this.receive(event.data);
     try {
@@ -534,10 +543,24 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (!u32(commandPointer) || commandPointer === 0
           || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
       this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
+      const companionPointer = this.exports.miso_engine_web_v1_prepared_companion_ptr(this.handle);
+      const companionCapacity = this.exports.miso_engine_web_v1_prepared_companion_capacity(this.handle);
+      if (!u32(companionPointer) || companionPointer === 0
+          || !u32(companionCapacity) || companionCapacity < PREPARED_COMPANION_HEADER_BYTES
+          || companionPointer + companionCapacity > this.memoryBuffer.byteLength) return false;
+      this.preparedCompanion = new Uint8Array(
+        this.memoryBuffer,
+        companionPointer,
+        companionCapacity,
+      );
     } else if (commandPointer !== 0 || commandCapacity !== 0) {
       // A released console must own no staging at all; a nonzero row here would mean the engine
       // charged for a buffer the ABI says does not exist.
       return false;
+    } else {
+      const companionPointer = this.exports.miso_engine_web_v1_prepared_companion_ptr(this.handle);
+      const companionCapacity = this.exports.miso_engine_web_v1_prepared_companion_capacity(this.handle);
+      if (companionPointer !== 0 || companionCapacity !== 0) return false;
     }
 
     this.trackCount = this.exports.miso_engine_web_v1_console_track_count(this.handle);
@@ -879,6 +902,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSeek(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
+    } else if (message?.tag === "miso.eq-target-config.v1"
+        && exactFields(message, EQ_CONFIG_FIELDS)) {
+      this.receiveEqTargetConfig(message);
+    } else if (message?.tag === "miso.prepared-command.v1"
+        && exactFields(message, PREPARED_COMMAND_FIELDS)) {
+      this.receivePreparedCommand(message);
     } else if (message?.tag === "miso.meters.v1" && exactFields(message, LEASE_FIELDS)) {
       this.receiveMeterLease(message);
     } else if (message?.tag === "miso.telemetry.v1" && exactFields(message, LEASE_FIELDS)) {
@@ -1408,6 +1437,103 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     this.commandStaging.set(message.records, 0);
     const result = this.exports.miso_engine_web_v1_command_submit(this.handle, message.count);
+    const report = this.commandReport;
+    if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
+        || report.getUint32(4, true) !== ABI_VERSION
+        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
+      this.sticky(RESULT_INTERNAL, message.requestId);
+      return;
+    }
+    this.port.postMessage({
+      tag: "miso.ack.v1",
+      requestId: message.requestId,
+      result,
+      reason: report.getUint32(12, true),
+      rejectedIndex: report.getUint32(16, true),
+      admitted: report.getUint32(20, true),
+      appliedAtSample: report.getBigUint64(24, true),
+      records: message.records,
+    }, [message.records.buffer]);
+  }
+
+  /// Copy one addressed owner configuration. This request is control-plane only; the fixed Rust
+  /// workspace performs the actual ownership/classification check and the worklet returns a
+  /// detached copy. It never runs from `process()` and never invokes the preparation designer.
+  receiveEqTargetConfig(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || !u32(message.trackIndex) || !u32(message.rack)
+        || !u32(message.effectIndex)) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    let result;
+    try {
+      result = this.exports.miso_engine_web_v1_eq_target_config_copy(
+        this.handle, message.trackIndex, message.rack, message.effectIndex,
+      );
+    } catch (_) {
+      result = RESULT_INTERNAL;
+    }
+    if (this.exports.memory.buffer !== this.memoryBuffer) {
+      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
+      return;
+    }
+    let config = new Uint8Array(0);
+    if (result === RESULT_OK) {
+      const pointer = this.exports.miso_engine_web_v1_eq_target_config_ptr(this.handle);
+      if (!u32(pointer) || pointer === 0 || pointer + EQ_CONFIG_BYTES > this.memoryBuffer.byteLength) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      config = new Uint8Array(this.memoryBuffer, pointer, EQ_CONFIG_BYTES).slice();
+    }
+    let reason = 0;
+    if (result === RESULT_INVALID_ARGUMENT) {
+      reason = message.trackIndex >= this.trackCount
+        ? COMMAND_REASON_UNKNOWN_TRACK
+        : message.rack > 2
+          ? COMMAND_REASON_UNKNOWN_RACK
+          : COMMAND_REASON_UNKNOWN_EFFECT;
+    }
+    this.port.postMessage({
+      tag: "miso.eq-target-config.v1",
+      requestId: message.requestId,
+      result,
+      reason,
+      config,
+    }, [config.buffer]);
+  }
+
+  /// Copy semantic records and the opaque companion into the fixed Rust staging buffers, then
+  /// call the real prepared admission export. The worklet performs no target preparation.
+  receivePreparedCommand(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || !u32(message.count) || message.count > MAXIMUM_COMMAND_RECORDS
+        || !(message.records instanceof Uint8Array)
+        || !(message.records.buffer instanceof ArrayBuffer)
+        || (typeof SharedArrayBuffer !== "undefined"
+          && message.records.buffer instanceof SharedArrayBuffer)
+        || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES
+        || !(message.companion instanceof Uint8Array)
+        || !(message.companion.buffer instanceof ArrayBuffer)
+        || (typeof SharedArrayBuffer !== "undefined"
+          && message.companion.buffer instanceof SharedArrayBuffer)
+        || message.companion.byteLength < PREPARED_COMPANION_HEADER_BYTES
+        || message.companion.byteLength > this.preparedCompanion?.byteLength
+        || this.preparedCompanion === null) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    this.commandStaging.set(message.records, 0);
+    this.preparedCompanion.set(message.companion, 0);
+    let result;
+    try {
+      result = this.exports.miso_engine_web_v1_prepared_command_submit(
+        this.handle, message.count, message.companion.byteLength,
+      );
+    } catch (_) {
+      result = RESULT_INTERNAL;
+    }
     const report = this.commandReport;
     if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
         || report.getUint32(4, true) !== ABI_VERSION

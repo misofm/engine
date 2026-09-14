@@ -1426,21 +1426,19 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
         .prepare(request)
         .expect("prepared effect");
     let mut twin = ParametricEqFactory.prepare(request).expect("prepared twin");
-    let automation = [support::point(3, ParameterChannel::Left, 0, -6.0)];
+    let mut target_values = configured.clone();
+    support::set_initial(&mut target_values, 3, ParameterChannel::Left, -6.0);
+    let mut changed = vec![false; target_values.len()];
+    changed[3 * 2] = true;
+    support::apply_prepared_targets(queried.as_mut(), &target_values, &changed);
+    support::apply_prepared_targets(twin.as_mut(), &target_values, &changed);
     let mut prefix_left = [0.125_f32; 16];
     let mut prefix_right = [-0.25_f32; 16];
     let mut twin_prefix_left = prefix_left;
     let mut twin_prefix_right = prefix_right;
     let queried_prefix_report = queried.process(
-        EffectProcessBlock::new(
-            &mut prefix_left,
-            &mut prefix_right,
-            None,
-            0,
-            &automation,
-            128,
-        )
-        .expect("automation prefix"),
+        EffectProcessBlock::new(&mut prefix_left, &mut prefix_right, None, 0, &[], 128)
+            .expect("automation prefix"),
     );
     assert_eq!(queried_prefix_report.nonfinite_left_blocks, 0);
     assert_eq!(queried_prefix_report.nonfinite_right_blocks, 0);
@@ -1450,7 +1448,7 @@ fn query_does_not_change_an_unfinished_ramp_or_following_audio() {
             &mut twin_prefix_right,
             None,
             0,
-            &automation,
+            &[],
             128,
         )
         .expect("twin automation prefix"),

@@ -1,5 +1,6 @@
 //! Four-band, six-section dual-mono parametric EQ, realised as a cascade of TPT state-variable
-//! sections. The dedicated HPF and LPF are prepared-only controls around the original four bands.
+//! sections. The dedicated HPF and LPF are live prepared-target controls around the original four
+//! bands.
 //!
 //! The spec transfer is the RBJ Audio EQ Cookbook's, unchanged. The *realization* is Simper's
 //! trapezoidal state-variable filter (decision D2 of the #83 master plan), designed in `f64` on the
@@ -16,7 +17,7 @@
 //!   error in the pole damping while `c1` carries about 6e-8 (master plan §4.2 amendment A1).
 //! * **The recurrence.** `lane::kernels::svf_block`, one generic body instantiated at
 //!   `WIDTH` 1, 4 and 8, so lane identity and native↔wasm identity are properties of the code.
-//! * **Smoothing.** Decision D11: an automation point starts a 64-sample linear ramp of the six
+//! * **Smoothing.** Decision D11: a prepared target starts a 64-sample linear ramp of the six
 //!   **words**, with the per-sample increment precomputed as a multiply by `2^-6` and an exact
 //!   assignment of the target on the final sample. There is no per-sample redesign and no division
 //!   anywhere on the render path.
@@ -26,21 +27,22 @@
 //!
 //! # State layout
 //!
-//! Version 1. Per physical section and lane, 19 little-endian 32-bit words (114 words, 456 bytes
-//! per channel); the common section is the shared codec's two-word header — the layout version and
-//! data word count — and nothing else, because the two channels share no state. The header makes a
-//! payload self-describing, so a stale or truncated restore is rejected on the payload's own
-//! evidence and not only on the caller's out-of-band `state_layout_version`. A stale payload is
-//! rejected with `effect.state.version`; there is no silent migration.
+//! Version 1. Per physical section and lane, 19 little-endian 32-bit words (114 words), followed
+//! by the two retained dedicated-cut enable words (116 words, 464 bytes per channel); the common
+//! section is the shared codec's two-word header — the layout version and data word count — and
+//! nothing else, because the two channels share no state. The header makes a payload
+//! self-describing, so a stale or truncated restore is rejected on the payload's own evidence and
+//! not only on the caller's out-of-band `state_layout_version`. A stale payload is rejected with
+//! `effect.state.version`; there is no silent migration.
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EnumChoice,
-    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EffectTargetError,
+    EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
     NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
     ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
     ProcessReport, QualityDescriptor, ResetKind, ResponseAnalysisError, ResponseSnapshotKind,
     ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSummary, SmoothingRule,
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
@@ -61,6 +63,7 @@ use lane::kernels::{
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
+mod control;
 mod response;
 
 pub use response::{
@@ -91,7 +94,9 @@ const STATE_LAYOUT_VERSION: u32 = 1;
 /// Words one band occupies in a lane section of the payload.
 const STATE_WORDS_PER_BAND: usize = 19;
 /// Effect-owned words in each channel section.
-const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND;
+const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND + 2;
+const STATE_HPF_ENABLE_WORD: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND;
+const STATE_LPF_ENABLE_WORD: usize = STATE_HPF_ENABLE_WORD + 1;
 /// The payload shape, stamped into the common section by the shared codec.
 ///
 /// W2-D2's rule for a crate that has to bump its layout anyway: adopt the runtime header **inside**
@@ -107,12 +112,40 @@ const STATE_LAYOUT: payload::StateLayout = payload::StateLayout {
 /// Byte lengths the descriptor advertises, derived from the layout rather than written out.
 const STATE_SIZES: payload::StatePayloadSizes = payload::expected_sizes(&STATE_LAYOUT);
 
-/// Samples an automation point takes to reach its target (`SmoothingRule::Linear`, D11).
+/// Samples a prepared target takes to reach its destination (`SmoothingRule::Linear`, D11).
 const RAMP_SAMPLES: u32 = 64;
 /// `1 / RAMP_SAMPLES` as an exact power of two: the ramp multiplies, it never divides.
 const RAMP_SCALE: f32 = 1.0 / RAMP_SAMPLES as f32;
 /// Widest bank this crate binds; sizes the small fixed per-lane scratch arrays.
 const MAX_LANES: usize = 8;
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static DESIGN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn reset_design_calls() {
+    DESIGN_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn design_call_count() -> usize {
+    DESIGN_CALLS.with(std::cell::Cell::get)
+}
+
+/// Resets the existing designer counter for host integration gates.
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_design_calls() {
+    reset_design_calls();
+}
+
+/// Reads the existing designer counter for host integration gates.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_design_call_count() -> usize {
+    design_call_count()
+}
 
 /// Frozen V1 section filter families.
 #[repr(u32)]
@@ -395,12 +428,12 @@ const fn cut_parameter(
         maximum: bounds.1,
         default_value: bounds.2,
         mapping,
-        automation_rate: AutomationRate::None,
+        automation_rate: AutomationRate::Block,
         channel_policy: ParameterChannelPolicy::PerLane,
-        smoothing: SmoothingRule::None,
-        smoothing_samples: 0,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: RAMP_SAMPLES,
         readable: true,
-        automatable: false,
+        automatable: true,
         enum_choices: &[],
         lattice: effect_contract::default_parameter_lattice(unit, domain, mapping),
     }
@@ -654,6 +687,15 @@ pub fn word_spectral_norm(words: EqSvfWords) -> f64 {
 /// Largest spectral norm accepted from a rounded word set: one `f32` rounding above contractive.
 const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 
+/// Conservative finite bound for the three output-mix words accepted at the prepared-target
+/// boundary. It is derived from the descriptor's legal gain, Q and shelf-slope domains: with
+/// `A = 10^(gain/40)`, `A < 4` and `1/A < 4`; with `Q >= 0.1` and `S >= 0.1`, the shelf damping
+/// word is below `sqrt(74) < 9`. Therefore high-shelf `|m1| < 9*3*4 = 108`, low-shelf `|m1| <
+/// 9*3 = 27`, bell `|m1| < 40`, and all remaining mix magnitudes are at most 16. The rounded
+/// boundary freezes 128, leaving room for the single f32 rounding while rejecting arbitrary huge
+/// finite payloads.
+const OUTPUT_MIX_BOUND: f32 = 128.0;
+
 /// Designs one section's six `f32` words from the frozen RBJ parameter domain.
 ///
 /// # Errors
@@ -669,6 +711,8 @@ pub fn design_svf(
     shelf_slope: f32,
     sample_rate: SampleRateHz,
 ) -> Result<EqSvfWords, EqDesignError> {
+    #[cfg(any(test, feature = "test-support"))]
+    DESIGN_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     if !is_launch_sample_rate(sample_rate)
         || !numeric_value_valid(0, frequency_hz)
         || !numeric_value_valid(1, gain_db)
@@ -693,15 +737,34 @@ pub fn design_svf(
         let rounded = value as f32;
         if rounded == 0.0 { 0.0 } else { rounded }
     }));
-    if !words.to_array().into_iter().all(f32::is_finite)
+    validate_rounded_svf(words)?;
+    Ok(words)
+}
+
+/// Validates the rounded words that the SVF kernel actually consumes.
+///
+/// This is shared by the trigonometric designer and the prepared-target decoder. The decoder
+/// calls it without redesigning a section, so this predicate proves finiteness, canonical zeros,
+/// the existing state-transition shape, the conservative output-mix bound, and the rounded
+/// spectral-norm limit. It cannot prove that arbitrary stable coefficient words implement the
+/// semantic cutoff or Q in a target header; the Rust preparer remains the coefficient authority.
+fn validate_rounded_svf(words: EqSvfWords) -> Result<(), EqDesignError> {
+    let values = words.to_array();
+    if !values.iter().all(|value| value.is_finite())
+        || values
+            .iter()
+            .any(|value| *value == 0.0 && value.to_bits() != 0)
         || !(0.0..1.0).contains(&words.c1)
         || words.a2 <= 0.0
         || words.a3 < 0.0
+        || words.m0.abs() > OUTPUT_MIX_BOUND
+        || words.m1.abs() > OUTPUT_MIX_BOUND
+        || words.m2.abs() > OUTPUT_MIX_BOUND
         || word_spectral_norm(words) > NORM_TOLERANCE
     {
         return Err(EqDesignError::Coefficients);
     }
-    Ok(words)
+    Ok(())
 }
 
 /// `true` if `value` is inside the domain of numeric field `field` (0 frequency, 1 gain, 2 Q,
@@ -712,7 +775,7 @@ fn numeric_value_valid(field: usize, value: f32) -> bool {
 
 /// The control-plane parameter state of one band of one track.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct BandTarget {
+pub(crate) struct BandTarget {
     enabled: bool,
     kind: EqBandKind,
     frequency: f32,
@@ -873,6 +936,15 @@ const IDENTITY_WORD_BITS: [u32; 6] = {
     ]
 };
 
+#[inline]
+fn words_are_identity(words: EqSvfWords) -> bool {
+    words
+        .to_array()
+        .into_iter()
+        .zip(IDENTITY_WORD_BITS)
+        .all(|(word, bits)| word.to_bits() == bits)
+}
+
 /// Reads the raw bits of one lane of a vector. Control plane only: it leaves the vector domain.
 fn lane_bits<L: Lane>(value: L, lane: usize) -> u32 {
     debug_assert!(L::WIDTH <= MAX_LANES);
@@ -949,7 +1021,7 @@ struct Channel<L: Lane, const W: usize> {
     /// Maintained only where coefficients change -- [`settle`](Self::settle),
     /// [`start_ramp`](Self::start_ramp), [`snap`](Self::snap),
     /// [`restore_track`](Self::restore_track) -- so a rendered block pays nothing to keep it. A
-    /// ramp moves `coef` per segment through `advance_words` without passing through any of those,
+    /// ramp moves `coef` per segment through the ramp kernel without passing through any of those,
     /// which would leave the flag stale; it cannot be read while that is true, because a lane with
     /// a ramp in flight makes the whole bank non-stationary and the elision this feeds is on the
     /// stationary path only. Every ramp ends in [`snap`](Self::snap), which refreshes it.
@@ -966,6 +1038,27 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         targets: [[BandTarget; EQ_SECTION_COUNT]; W],
         sample_rate: SampleRateHz,
     ) -> Result<Self, EqDesignError> {
+        let words: [[Result<EqSvfWords, EqDesignError>; EQ_SECTION_COUNT]; W] =
+            core::array::from_fn(|track| {
+                core::array::from_fn(|section| targets[track][section].words(sample_rate))
+            });
+        let mut prepared = [[EqSvfWords::IDENTITY; EQ_SECTION_COUNT]; W];
+        for track in 0..W {
+            for section in 0..EQ_SECTION_COUNT {
+                prepared[track][section] = words[track][section]?;
+            }
+        }
+        Ok(Self::from_prepared(targets, prepared))
+    }
+
+    /// Builds a settled channel from already-designed words.
+    ///
+    /// The cache is prepared off render and is reused by full resets, so this constructor has no
+    /// semantic-to-coefficient design path of its own.
+    fn from_prepared(
+        targets: [[BandTarget; EQ_SECTION_COUNT]; W],
+        words: [[EqSvfWords; EQ_SECTION_COUNT]; W],
+    ) -> Self {
         let identity = SvfCoef {
             c1: L::zero(),
             a2: L::zero(),
@@ -986,13 +1079,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             // Every `(section, track)` pair is settled below, and `settle` refreshes the flag.
             identity: [false; EQ_SECTION_COUNT],
         };
-        for (track, bands) in targets.iter().enumerate() {
-            for (section, band) in bands.iter().enumerate() {
-                let words = band.words(sample_rate)?;
-                channel.settle(section, track, words);
+        for (track, sections) in words.iter().enumerate() {
+            for (section, words) in sections.iter().enumerate() {
+                channel.settle(section, track, *words);
             }
         }
-        Ok(channel)
+        channel
     }
 
     /// Places lane `track` of `section` at `words` with no ramp in flight.
@@ -1108,6 +1200,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         self.refresh_identity(section);
     }
 
+    /// Applies a validated prepared target to one lane at a block boundary.
+    ///
+    /// All decoding and validation is completed by the caller before this method mutates the
+    /// semantic target or coefficient ramp. The target words are supplied by the off-render
+    /// preparer and are copied directly into the existing ramp state.
+    fn apply_prepared_target(
+        &mut self,
+        track: usize,
+        section: usize,
+        target: BandTarget,
+        words: EqSvfWords,
+    ) {
+        self.targets[track][section] = target;
+        self.start_ramp(section, track, words);
+    }
+
     /// The words lane `track` of `section` is heading for, read back out of the lane words.
     ///
     /// Issue #144 item 6, the re-preparation half. `BandTarget::words` is a pure function of the
@@ -1203,29 +1311,15 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         let mut position = 0;
         let mut snapped = false;
         while position < frames {
-            // A ramp that ends on every lane at once is the common case -- a console automates a
-            // band across a whole bank -- and it is the one that can skip the lane loop entirely.
-            if self.remaining[section]
-                .iter()
-                .all(|remaining| *remaining == 1)
-            {
-                self.snap_section(section);
-                snapped = true;
-            } else {
-                for track in 0..W {
-                    if self.remaining[section][track] == 1 {
-                        self.snap(section, track);
-                        snapped = true;
-                    }
-                }
-            }
             let mut length = frames - position;
             let mut ramping = false;
-            for track in 0..W {
+            let mut was_ramping = [false; W];
+            for (track, was_ramping) in was_ramping.iter_mut().enumerate() {
                 let remaining = self.remaining[section][track];
                 if remaining > 0 {
                     ramping = true;
-                    length = length.min(remaining as usize - 1);
+                    *was_ramping = true;
+                    length = length.min(remaining as usize);
                 }
             }
             debug_assert!(length > 0);
@@ -1233,14 +1327,13 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let slot = &mut self.sections[section];
             let block = &mut io[position * W..(position + length) * W];
             if ramping {
-                advance_words(&mut slot.coef, &slot.step);
                 if section == HPF_SECTION || section == LPF_SECTION {
                     svf_block_ramped_with_dry_mask::<L>(
                         block,
                         length,
                         &mut slot.coef,
                         &slot.step,
-                        length - 1,
+                        length,
                         &mut slot.state,
                         dry_mask,
                     );
@@ -1250,7 +1343,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                         length,
                         &mut slot.coef,
                         &slot.step,
-                        length - 1,
+                        length,
                         &mut slot.state,
                     );
                 }
@@ -1272,6 +1365,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             for track in 0..W {
                 let remaining = &mut self.remaining[section][track];
                 *remaining = remaining.saturating_sub(length as u32);
+            }
+            // The kernel processes current coefficients, then advances them. Snap after a segment
+            // consumes the final sample so the exact target is first used by sample A+64.
+            for (track, &was_ramping) in was_ramping.iter().enumerate() {
+                if was_ramping && self.remaining[section][track] == 0 {
+                    self.snap(section, track);
+                    snapped = true;
+                }
             }
             position += length;
         }
@@ -1694,16 +1795,6 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     }
 }
 
-/// `coefficients += step`, one exact vector addition per word.
-fn advance_words<L: Lane>(coefficients: &mut SvfCoef<L>, step: &SvfCoefStep<L>) {
-    coefficients.c1 = coefficients.c1.add(step.c1);
-    coefficients.a2 = coefficients.a2.add(step.a2);
-    coefficients.a3 = coefficients.a3.add(step.a3);
-    coefficients.m0 = coefficients.m0.add(step.m0);
-    coefficients.m1 = coefficients.m1.add(step.m1);
-    coefficients.m2 = coefficients.m2.add(step.m2);
-}
-
 /// Reads increment `index` of a step set in the pinned order.
 fn step_word<L: Lane>(step: &SvfCoefStep<L>, index: usize) -> L {
     match index {
@@ -1747,6 +1838,27 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 out[base + 15 + index] = value.to_bits();
             }
         }
+        out[STATE_HPF_ENABLE_WORD] = u32::from(self.targets[track][HPF_SECTION].enabled);
+        out[STATE_LPF_ENABLE_WORD] = u32::from(self.targets[track][LPF_SECTION].enabled);
+    }
+
+    /// Decodes the two retained dedicated-cut enable words, refusing malformed values before any
+    /// state or semantic target is written.
+    fn snapshot_cut_enables(
+        words: &[u32; STATE_LANE_WORDS],
+    ) -> Result<[bool; 2], StatePayloadError> {
+        let invalid = StatePayloadError {
+            code: "effect.state.payload",
+        };
+        let decode = |word| match word {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(invalid),
+        };
+        Ok([
+            decode(words[STATE_HPF_ENABLE_WORD])?,
+            decode(words[STATE_LPF_ENABLE_WORD])?,
+        ])
     }
 
     /// Validates lane `track`'s state words and applies them all or none.
@@ -1798,6 +1910,33 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 return Err(invalid);
             }
             let target_words = band.target.words(sample_rate).map_err(|_| invalid)?;
+            let current_words = EqSvfWords::from_array(band.coefficients);
+            let step_words = EqSvfWords::from_array(band.step);
+            if band
+                .step
+                .into_iter()
+                .any(|value| value == 0.0 && value.to_bits() != 0)
+            {
+                return Err(invalid);
+            }
+            if band.remaining > 0 {
+                // The current words are on a linear path between two validated designs. Validate
+                // every bounded future step, so a finite but unstable forged ramp cannot enter
+                // the render plane. Identity is the one valid settled endpoint with a2 == 0.
+                let mut cursor = current_words;
+                for _ in 0..band.remaining {
+                    if !words_are_identity(cursor) {
+                        validate_rounded_svf(cursor).map_err(|_| invalid)?;
+                    }
+                    cursor = EqSvfWords::from_array(core::array::from_fn(|index| {
+                        cursor.to_array()[index] + step_words.to_array()[index]
+                    }));
+                }
+            } else if band.step.iter().any(|value| value.to_bits() != 0) {
+                // A settled lane still shares a section's bank-wide ramp kernel with its peers;
+                // any nonzero step would make it drift whenever a neighbouring lane moves.
+                return Err(invalid);
+            }
             if band.remaining == 0
                 && band
                     .coefficients
@@ -1853,6 +1992,8 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     metadata: PreparedEffectMetadata,
     bank: PreparedBankMetadata,
     initial: [[[BandTarget; EQ_SECTION_COUNT]; 2]; W],
+    /// Designed words corresponding to `initial`, retained so a full reset never redesigns.
+    initial_words: [[[EqSvfWords; EQ_SECTION_COUNT]; 2]; W],
     left: Channel<L, W>,
     right: Channel<L, W>,
     /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
@@ -1880,102 +2021,44 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         SampleRateHz(self.metadata.sample_rate)
     }
 
-    /// Applies one track's automation spans to both channels.
+    /// Applies one validated prepared target to one prepared track.
     ///
-    /// The rules are unchanged from the frozen contract: a span must be a `Point` at exactly this
-    /// block's first sample with identical endpoints and an in-domain value, spans must arrive in
-    /// non-decreasing `(sample, parameter, channel)` order, and one slot may be written once. Every
-    /// malformed span is counted once and none of them discards a valid point.
-    fn automate(
+    /// Decoding is bounded and allocation-free. The target's coefficient words are copied into
+    /// the existing ramp state; no semantic redesign occurs on this path.
+    fn apply_target_lane(
         &mut self,
-        spans: &[PreparedAutomationSpan],
-        first_sample: u64,
-        track: usize,
-        invalid_spans: &mut u64,
-    ) {
-        if spans.len() > self.metadata.automation_capacity as usize {
-            *invalid_spans = invalid_spans.saturating_add(spans.len() as u64);
-            return;
+        lane: usize,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        if lane >= W || lane >= L::WIDTH {
+            return Err(EffectTargetError::Capacity);
         }
-        let mut pending = [None; EQ_BAND_COUNT * 4 * 2];
-        let mut prior_sort_key = None;
-        for span in spans {
-            let sort_key = (span.start_sample, span.parameter_index, span.channel);
-            let slot = numeric_parameter(span.parameter_index as usize)
-                .zip(lane_index(span.channel))
-                .map(|((section, field), channel)| (section * 4 + field) * 2 + channel);
-            let Some(slot) = slot else {
-                *invalid_spans = invalid_spans.saturating_add(1);
-                continue;
+        let (section, channel, band, words) = control::decode_prepared_target(target)?;
+        if section != HPF_SECTION && section != LPF_SECTION {
+            let permitted = |prepared: BandTarget| {
+                band.enabled == prepared.enabled && band.kind == prepared.kind
             };
-            if prior_sort_key.is_some_and(|prior| sort_key < prior)
-                || pending[slot].is_some()
-                || span.kind != AutomationSpanKind::Point
-                || span.start_sample != first_sample
-                || span.end_sample != first_sample
-                || span.start_value.to_bits() != span.end_value.to_bits()
-                || !numeric_value_valid(slot / 2 % 4, span.start_value)
-            {
-                *invalid_spans = invalid_spans.saturating_add(1);
-                continue;
-            }
-            // Master plan §6 / 83c decision 3: `-0.0` is a way of writing zero, not an error. It is
-            // normalised here, on the way in, so no coefficient design and no payload ever sees it.
-            pending[slot] = Some(normalize_zero(span.start_value));
-            prior_sort_key = Some(sort_key);
-        }
-        let sample_rate = self.sample_rate();
-        for section in 0..EQ_BAND_COUNT {
-            let physical_section = section + BAND_SECTION_OFFSET;
-            for channel in 0..2 {
-                let updates: [Option<f32>; 4] =
-                    core::array::from_fn(|field| pending[(section * 4 + field) * 2 + channel]);
-                if updates.iter().all(Option::is_none) {
-                    continue;
-                }
-                // The stored band is read by value, so the borrow of the channel ends here and
-                // the cached-design read below can borrow it again.
-                let stored = if channel == 0 {
-                    self.left.targets[track][physical_section]
-                } else {
-                    self.right.targets[track][physical_section]
-                };
-                let mut candidate = stored;
-                for (field, value) in updates.into_iter().enumerate() {
-                    if let Some(value) = value {
-                        candidate.set_numeric(field, value);
-                    }
-                }
-                // Issue #144 item 6: a band restated at the values it already holds designs to
-                // the words it is already heading for, so the `f64` design is read from the lane
-                // rather than recomputed. `words` is deterministic in (band, rate) and
-                // `Section::target` is what it last returned, so the two are the same bits.
-                let designed = if candidate.same_bits(&stored) {
-                    Ok(if channel == 0 {
-                        self.left.target_words(physical_section, track)
-                    } else {
-                        self.right.target_words(physical_section, track)
-                    })
-                } else {
-                    candidate.words(sample_rate)
-                };
-                match designed {
-                    Ok(words) => {
-                        if channel == 0 {
-                            self.left.targets[track][physical_section] = candidate;
-                            self.left.start_ramp(physical_section, track, words);
-                        } else {
-                            self.right.targets[track][physical_section] = candidate;
-                            self.right.start_ramp(physical_section, track, words);
-                        }
-                    }
-                    Err(_) => {
-                        // Unreachable for in-domain values; the branch keeps the validator total.
-                        *invalid_spans = invalid_spans.saturating_add(1);
-                    }
-                }
+            let left_permitted = permitted(self.initial[lane][0][section]);
+            let right_permitted = permitted(self.initial[lane][1][section]);
+            let allowed = match channel {
+                ParameterChannel::Left => left_permitted,
+                ParameterChannel::Right => right_permitted,
+                ParameterChannel::Both => left_permitted && right_permitted,
+            };
+            if !allowed {
+                return Err(EffectTargetError::Domain);
             }
         }
+        self.silent_fixed_point = false;
+        match channel {
+            ParameterChannel::Left => self.left.apply_prepared_target(lane, section, band, words),
+            ParameterChannel::Right => self.right.apply_prepared_target(lane, section, band, words),
+            ParameterChannel::Both => {
+                self.left.apply_prepared_target(lane, section, band, words);
+                self.right.apply_prepared_target(lane, section, band, words);
+            }
+        }
+        Ok(())
     }
 
     /// Runs both channels over one block and applies the master plan §4.4 boundary check.
@@ -2101,7 +2184,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// | word | why it is here |
     /// |---|---|
     /// | `sections[s].state` | the two integrators per section -- the cascade's whole cross-frame state. |
-    /// | `sections[s].coef` | the words the kernel loads. A ramp rewrites them per segment through `advance_words`, and a collapsed block advances only the left channel's. |
+    /// | `sections[s].coef` | the words the kernel loads. A ramp rewrites them per segment through the ramp kernel, and a collapsed block advances only the left channel's. |
     /// | `sections[s].step`, `sections[s].target` | the rest of the ramp: where the words are going and by how much per sample. |
     /// | `remaining[s][lane]` | the per-lane ramp countdown, which is what `no_ramp_in_flight` and the block-splitting rule read. |
     /// | `identity[s]` | the derived per-section identity flag the elision gate reads. It is a function of `coef`, so it must travel with it. |
@@ -2126,33 +2209,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 
     /// Restores every band of both channels to the parameters preparation was given.
     fn reset_to_defaults(&mut self) -> Result<(), EqDesignError> {
-        let sample_rate = self.sample_rate();
         let left = core::array::from_fn(|track| self.initial[track][0]);
         let right = core::array::from_fn(|track| self.initial[track][1]);
-        self.left = Channel::new(left, sample_rate)?;
-        self.right = Channel::new(right, sample_rate)?;
+        let left_words = core::array::from_fn(|track| self.initial_words[track][0]);
+        let right_words = core::array::from_fn(|track| self.initial_words[track][1]);
+        self.left = Channel::from_prepared(left, left_words);
+        self.right = Channel::from_prepared(right, right_words);
         Ok(())
-    }
-}
-
-/// Returns the cascade section and the automatable field index (0 frequency .. 3 shelf slope).
-fn numeric_parameter(parameter_index: usize) -> Option<(usize, usize)> {
-    let section = parameter_index / 6;
-    if section >= EQ_BAND_COUNT || parameter_index % 6 < 2 {
-        return None;
-    }
-    // General-band parameter descriptors precede the appended prepared-only cut descriptors. Keep
-    // the returned index in descriptor/general-band order; target access adds the physical HPF
-    // offset explicitly.
-    Some((section, parameter_index % 6 - 2))
-}
-
-/// Channel index of a per-lane parameter span; `Both` is not a per-lane address.
-fn lane_index(channel: ParameterChannel) -> Option<usize> {
-    match channel {
-        ParameterChannel::Left => Some(0),
-        ParameterChannel::Right => Some(1),
-        ParameterChannel::Both => None,
     }
 }
 
@@ -2192,7 +2255,7 @@ fn band_targets(
     Ok(bands)
 }
 
-/// Reads one dedicated cut's three prepared-only values. The cut is represented by the same
+/// Reads one dedicated cut's three prepared-target values. The cut is represented by the same
 /// section target used by the general bands, with fixed zero gain and unit shelf slope so the
 /// existing coefficient authority and state machinery remain shared.
 fn cut_target(
@@ -2266,9 +2329,18 @@ fn prepare_width<L: Lane, const W: usize>(
         initial[track][0] = physical_targets(request.initial_values, 0, sample_rate)?;
         initial[track][1] = physical_targets(request.initial_values, 1, sample_rate)?;
     }
-    let coefficients = |_| EffectPrepareError {
-        code: "effect.eq.coefficients",
-    };
+    let mut initial_words = [[[EqSvfWords::IDENTITY; EQ_SECTION_COUNT]; 2]; W];
+    for track in 0..W {
+        for channel in 0..2 {
+            for section in 0..EQ_SECTION_COUNT {
+                initial_words[track][channel][section] = initial[track][channel][section]
+                    .words(sample_rate)
+                    .map_err(|_| EffectPrepareError {
+                        code: "effect.eq.coefficients",
+                    })?;
+            }
+        }
+    }
     Ok(PreparedParametricEq {
         metadata,
         bank: PreparedBankMetadata {
@@ -2276,10 +2348,15 @@ fn prepare_width<L: Lane, const W: usize>(
             program_key: metadata.program_key(),
         },
         initial,
-        left: Channel::new(core::array::from_fn(|track| initial[track][0]), sample_rate)
-            .map_err(coefficients)?,
-        right: Channel::new(core::array::from_fn(|track| initial[track][1]), sample_rate)
-            .map_err(coefficients)?,
+        initial_words,
+        left: Channel::from_prepared(
+            core::array::from_fn(|track| initial[track][0]),
+            core::array::from_fn(|track| initial_words[track][0]),
+        ),
+        right: Channel::from_prepared(
+            core::array::from_fn(|track| initial[track][1]),
+            core::array::from_fn(|track| initial_words[track][1]),
+        ),
         // Nothing has been observed yet, so nothing is claimed.
         silent_fixed_point: false,
     })
@@ -2303,6 +2380,10 @@ impl NativeEffectFactory for ParametricEqFactory {
     }
 
     fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
+        Some(self)
+    }
+
+    fn target_preparation(&self) -> Option<&dyn effect_contract::NativeEffectTargetPreparation> {
         Some(self)
     }
 
@@ -2425,6 +2506,14 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             });
         }
         let (left, right) = read_payload(input)?;
+        let left_enables = Channel::<L, W>::snapshot_cut_enables(&left)?;
+        let right_enables = Channel::<L, W>::snapshot_cut_enables(&right)?;
+        let mut left_configuration = self.initial[track][0];
+        let mut right_configuration = self.initial[track][1];
+        left_configuration[HPF_SECTION].enabled = left_enables[0];
+        left_configuration[LPF_SECTION].enabled = left_enables[1];
+        right_configuration[HPF_SECTION].enabled = right_enables[0];
+        right_configuration[LPF_SECTION].enabled = right_enables[1];
         let sample_rate = self.sample_rate();
         let mut candidate_left = Channel::<L, W>::new(
             core::array::from_fn(|index| self.left.targets[index]),
@@ -2433,7 +2522,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         .map_err(|_| StatePayloadError {
             code: "effect.state.payload",
         })?;
-        candidate_left.restore_track(track, &left, &self.initial[track][0], sample_rate)?;
+        candidate_left.restore_track(track, &left, &left_configuration, sample_rate)?;
         let mut candidate_right = Channel::<L, W>::new(
             core::array::from_fn(|index| self.right.targets[index]),
             sample_rate,
@@ -2441,11 +2530,11 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         .map_err(|_| StatePayloadError {
             code: "effect.state.payload",
         })?;
-        candidate_right.restore_track(track, &right, &self.initial[track][1], sample_rate)?;
+        candidate_right.restore_track(track, &right, &right_configuration, sample_rate)?;
         self.left
-            .restore_track(track, &left, &self.initial[track][0], sample_rate)?;
+            .restore_track(track, &left, &left_configuration, sample_rate)?;
         self.right
-            .restore_track(track, &right, &self.initial[track][1], sample_rate)?;
+            .restore_track(track, &right, &right_configuration, sample_rate)?;
         Ok(())
     }
 }
@@ -2467,7 +2556,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 ///
 /// Two channels that agree on all 114 of those words produce bit-identical output from
 /// bit-identical input, and stay in agreement for as long as no per-channel write arrives:
-/// `advance_words` is the same increment applied to the same word, and `snap` assigns the same
+/// the ramp kernel applies the same increment to the same word, and `snap` assigns the same
 /// target on the same sample.
 ///
 /// Deliberately excluded, each for its own reason:
@@ -2526,6 +2615,13 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         self.designed_channel_symmetry(0)
     }
 
+    fn apply_prepared_target(
+        &mut self,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        self.apply_target_lane(0, target)
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
         // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
@@ -2543,17 +2639,13 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
-        // #163 phase 4 item 1, as in `process_bank`: automation can snap a coefficient without
-        // ever raising `remaining`, so the claim is withdrawn whenever a span arrives.
         if !block.automation.is_empty() {
             self.silent_fixed_point = false;
         }
-        self.automate(
-            block.automation,
-            block.first_sample,
-            0,
-            &mut report.invalid_spans,
-        );
+        // EQ semantic spans are control-plane input. A production owner must lower them to
+        // prepared targets before this entry point; never design coefficients on the render
+        // thread. Count every raw span while rendering the existing state unchanged.
+        report.invalid_spans = block.automation.len() as u64;
         if self.metadata.bypass {
             return report;
         }
@@ -2576,9 +2668,12 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        // #163 phase 4 item 1: see `restore_track_state_payload`.
-        self.silent_fixed_point = false;
-        self.restore_track(0, version, input)
+        // A refusal is a state-preserving no-op, including the fixed-point witness.
+        let result = self.restore_track(0, version, input);
+        if result.is_ok() {
+            self.silent_fixed_point = false;
+        }
+        result
     }
 }
 
@@ -2597,6 +2692,14 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
 
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.designed_channel_symmetry(lane)
+    }
+
+    fn apply_prepared_target_lane(
+        &mut self,
+        lane: usize,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        self.apply_target_lane(lane, target)
     }
 
     fn reset(&mut self, kind: ResetKind) {
@@ -2644,10 +2747,12 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        // #163 phase 4 item 1: a restore writes integrators and coefficients this bank never
-        // rendered, so any standing fixed-point claim is void.
-        self.silent_fixed_point = false;
-        self.restore_track(bank_track_index(track_index, W)?, version, input)
+        // A refusal is a state-preserving no-op, including the fixed-point witness.
+        let result = self.restore_track(bank_track_index(track_index, W)?, version, input);
+        if result.is_ok() {
+            self.silent_fixed_point = false;
+        }
+        result
     }
 }
 
@@ -2732,22 +2837,15 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         {
             return report;
         }
-        // #163 phase 4 item 1: an admitted span retargets a band, and a span with no smoothing
-        // snaps the coefficient words outright while leaving `remaining` at zero -- so
-        // `no_ramp_in_flight` alone would not notice it. Withdraw the claim whenever this block
-        // carries automation at all; the next silent block re-earns it.
         if !block.automation.is_empty() {
             self.silent_fixed_point = false;
         }
         for track in 0..W {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
-            self.automate(
-                &block.automation[start..end],
-                block.first_sample,
-                track,
-                &mut report.reports[track].invalid_spans,
-            );
+            // Raw semantic EQ spans are refused per addressed bank lane. The bank continues
+            // rendering its already prepared state, so no render-thread designer is reachable.
+            report.reports[track].invalid_spans = (end - start) as u64;
         }
         if self.metadata.bypass {
             return report;
@@ -2896,7 +2994,8 @@ mod interleave_identity {
     }
 
     /// Four-band ramp oracle for the one synchronized ramp used below. It mirrors the production
-    /// driver's advance, final snap, and fixed tail without reimplementing coefficient design.
+    /// driver's current-then-advance order, final snap, and fixed tail without reimplementing
+    /// coefficient design.
     fn process_original_four_ramped<L: Lane, const W: usize>(
         sections: &mut [Section<L>; EQ_BAND_COUNT],
         io: &mut [f32],
@@ -2904,14 +3003,13 @@ mod interleave_identity {
     ) {
         for (index, section) in sections.iter_mut().enumerate() {
             if index == 1 {
-                let ramp = RAMP_SAMPLES as usize - 1;
-                super::advance_words(&mut section.coef, &section.step);
+                let ramp = RAMP_SAMPLES as usize;
                 lane::kernels::svf_block_ramped::<L>(
                     &mut io[..ramp * W],
                     ramp,
                     &mut section.coef,
                     &section.step,
-                    ramp - 1,
+                    ramp,
                     &mut section.state,
                 );
                 section.coef = section.target;
@@ -4211,7 +4309,7 @@ mod elision {
     /// This is the one coefficient-change site the rest of the suite never reaches.
     /// [`start_ramp`](Channel::start_ramp) refreshes the flag while `coef` is still the identity it
     /// is leaving, so the flag reads `true`; the ramp then walks `coef` away through
-    /// `advance_words`, which refreshes nothing. That staleness is licensed only because a ramp in
+    /// the ramp kernel, which refreshes nothing. That staleness is licensed only because a ramp in
     /// flight makes the bank non-stationary, and every ramp that ends *inside*
     /// [`process_section`](Channel::process_section) refreshes on the way out.
     ///
@@ -4331,5 +4429,112 @@ mod elision {
         reset_mid_ramp_case::<f32, 1>("Scalar");
         reset_mid_ramp_case::<Simd4, 4>("Simd4");
         reset_mid_ramp_case::<Simd8, 8>("Simd8");
+    }
+}
+
+#[cfg(test)]
+mod target_application {
+    use super::*;
+    use effect_contract::{
+        AutomationSpanKind, EffectTargetRequest, NativeEffectTargetPreparation,
+        PreparedAutomationSpan,
+    };
+
+    fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
+        PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: Quality::Normal,
+            bypass: false,
+            link_mode: effect_contract::LinkMode::DualMono,
+            ports: effect_contract::PreparedPorts {
+                sidechain: effect_contract::PreparedSidechainPort::None,
+            },
+            initial_values: values,
+            limits: effect_contract::PrepareEffectLimits {
+                maximum_total_state_bytes: 1_024,
+                maximum_scratch_bytes: 1,
+                maximum_automation_spans_per_block: 48,
+            },
+        }
+    }
+
+    #[test]
+    fn prepared_apply_and_resets_do_not_design_on_render_or_reset_paths() {
+        let values: Vec<_> =
+            effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        let mut target_values = values.clone();
+        target_values[48].value = 1.0;
+        target_values[50].value = 1_000.0;
+        target_values[52].value = 1.0;
+        let mut changed = vec![false; target_values.len()];
+        changed[48] = true;
+        changed[50] = true;
+        changed[52] = true;
+        let mut targets = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; EQ_SECTION_COUNT * 2];
+        let count = <ParametricEqFactory as NativeEffectTargetPreparation>::prepare_targets(
+            &ParametricEqFactory,
+            EffectTargetRequest {
+                sample_rate: 48_000,
+                values: &target_values,
+                changed: &changed,
+            },
+            &mut targets,
+        )
+        .expect("target preparation");
+        assert_eq!(count, 1);
+
+        let mut effect = ParametricEqFactory
+            .prepare(request(&values))
+            .expect("effect preparation");
+        reset_design_calls();
+        effect
+            .apply_prepared_target(&targets[0])
+            .expect("prepared apply");
+        let mut left = [1.0_f32; 64];
+        let mut right = [0.0_f32; 64];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("render"),
+        );
+        assert_eq!(
+            design_call_count(),
+            0,
+            "prepared apply and render must not redesign"
+        );
+        effect.reset(ResetKind::FullToDefaults);
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        assert_eq!(design_call_count(), 0, "cached resets must not redesign");
+
+        let mut raw = ParametricEqFactory
+            .prepare(request(&target_values))
+            .expect("legacy effect preparation");
+        reset_design_calls();
+        let mut left = [1.0_f32; 1];
+        let mut right = [0.0_f32; 1];
+        let report = raw.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                0,
+                &[PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel: ParameterChannel::Left,
+                    parameter_index: 2,
+                    start_sample: 0,
+                    end_sample: 0,
+                    start_value: 2_000.0,
+                    end_value: 2_000.0,
+                }],
+                128,
+            )
+            .expect("legacy render"),
+        );
+        assert_eq!(report.invalid_spans, 1);
+        assert_eq!(design_call_count(), 0);
     }
 }

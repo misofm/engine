@@ -9,14 +9,14 @@
 
 use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality as Quality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
-    ProcessReport, StatePayloadOutput,
+    LinkMode, NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectTarget,
+    PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload.
-pub const LANE_BYTES: usize = 456;
+/// Bytes in each channel section of the current payload (114 section words plus two cut enables).
+pub const LANE_BYTES: usize = 464;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -217,7 +217,7 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 920 bytes; production admits megabytes (`maximum_effect_state_bytes` is
+        // The current layout is 936 bytes; production admits megabytes (`maximum_effect_state_bytes` is
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
@@ -313,6 +313,68 @@ pub fn process_zeros(
     )
     .expect("block");
     effect.process(block)
+}
+
+/// Designs and applies the final candidate through the real off-render preparation capability.
+///
+/// Direct DSP fixtures use this helper to model the production owner boundary: semantic values and
+/// the touched mask are complete before the target words reach the prepared effect, and processing
+/// receives an empty raw-span slice.
+pub fn apply_prepared_targets(
+    effect: &mut dyn PreparedNativeEffect,
+    values: &[InitialParameterValue],
+    changed: &[bool],
+) -> usize {
+    let (targets, count) = prepare_targets(effect.metadata().sample_rate, values, changed);
+    for target in &targets[..count] {
+        effect
+            .apply_prepared_target(target)
+            .expect("prepared target application");
+    }
+    count
+}
+
+/// Prepares a final semantic candidate into the fixed target array used by direct fixtures.
+pub fn prepare_targets(
+    sample_rate: u32,
+    values: &[InitialParameterValue],
+    changed: &[bool],
+) -> (
+    [PreparedEffectTarget; parametric_eq::EQ_SECTION_COUNT * 2],
+    usize,
+) {
+    let mut targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Left,
+        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+    }; parametric_eq::EQ_SECTION_COUNT * 2];
+    let count = ParametricEqFactory
+        .prepare_targets(
+            effect_contract::EffectTargetRequest {
+                sample_rate,
+                values,
+                changed,
+            },
+            &mut targets,
+        )
+        .expect("prepared target");
+    (targets, count)
+}
+
+/// Applies one prepared candidate to a selected lane of a homogeneous bank.
+pub fn apply_prepared_targets_lane(
+    bank: &mut dyn effect_contract::PreparedNativeEffectBank,
+    lane: usize,
+    sample_rate: u32,
+    values: &[InitialParameterValue],
+    changed: &[bool],
+) -> usize {
+    let (targets, count) = prepare_targets(sample_rate, values, changed);
+    for target in &targets[..count] {
+        bank.apply_prepared_target_lane(lane, target)
+            .expect("prepared bank target application");
+    }
+    count
 }
 
 /// Drives a one-second impulse through the public factory in 128-frame blocks.

@@ -73,6 +73,7 @@ assert.deepEqual(
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet.simd128.wasm",
     "miso-engine-v1-parameter-metadata.json",
+    "prepared-control.js",
   ],
   "the package manifest declares exactly the Engine artifact closure",
 );

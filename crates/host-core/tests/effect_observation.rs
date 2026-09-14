@@ -167,7 +167,6 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
     let applied_at = (session.block * QUANTUM) as u64;
     for producer in session.handles.effect_controls.iter_mut() {
         producer
-            .producer
             .try_push(EffectControlRecord::Observe {
                 tap_index: 0,
                 armed,
@@ -439,7 +438,6 @@ fn the_first_window_at_or_after_applied_at_sample_reflects_the_command() {
         .expect("a control channel");
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
         producer
-            .producer
             .try_push(EffectControlRecord::Parameter {
                 parameter_index: THRESHOLD_INDEX,
                 channel,
@@ -686,7 +684,6 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
                 .expect("a control channel");
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 producer
-                    .producer
                     .try_push(EffectControlRecord::Parameter {
                         parameter_index: THRESHOLD_INDEX,
                         channel,

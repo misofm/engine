@@ -32,14 +32,16 @@
 //! drop and no unbounded loop -- the drain is bounded by the queue capacity, which preparation
 //! refuses to make larger than the automation capacity.
 
+use core::num::NonZeroUsize;
 use engine::realtime::{
-    Consumer, ObservationPublisher, ObservationWindow, observation_slot_retained_bytes,
+    Consumer, ObservationPublisher, ObservationWindow, SpscRetainedPayload,
+    bounded_spsc_retained_payload, observation_slot_retained_bytes,
 };
 use lane::kernels::pdc_delay_block;
 
 use crate::{
     AutomationSpanKind, ChannelSymmetryWitness, ObservationDescriptor, ObservationFold,
-    ObservationSample, ParameterChannel, PreparedAutomationSpan,
+    ObservationSample, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
 };
 
 /// One admitted, still-unapplied live control event for one prepared effect instance.
@@ -66,6 +68,8 @@ pub enum EffectControlRecord {
         /// The new value, already domain-checked by the admitting host.
         value: f32,
     },
+    /// Apply one off-render prepared effect target at this block boundary.
+    PreparedTarget(PreparedEffectTarget),
     /// Arm or disarm one declared observation tap (issue #143 D3, level 2).
     ///
     /// It rides this queue rather than a queue of its own for one reason: a subscription and a
@@ -108,6 +112,13 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 /// stays with the host's control plane. A producer must be dropped before the plan that owns this.
 pub struct EffectControlLane {
     control: Consumer<EffectControlRecord>,
+    /// Optional FIFO target storage for an owner that has a prepared-target capability.
+    ///
+    /// This is deliberately lane-owned and sized from the queue's actual capacity. It is absent
+    /// for ordinary effects, so unsupported owners do not retain an EQ-specific side buffer.
+    targets: Option<Box<[PreparedEffectTarget]>>,
+    /// Number of valid entries in the retained target prefix from the last stage call.
+    staged_targets: usize,
     /// Live bypass state, retained across blocks so a rendered block always knows it.
     bypass: bool,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
@@ -129,19 +140,51 @@ pub struct EffectControlLane {
     symmetry: ChannelSymmetryWitness,
 }
 
-// REALTIME_POLICY_BEGIN
 impl EffectControlLane {
     /// Binds the consumer half of one prepared channel.
     #[must_use]
     pub fn new(control: Consumer<EffectControlRecord>, bypass: bool) -> Self {
+        Self::with_target_staging(control, bypass, false)
+    }
+
+    /// Binds a prepared-target lane and allocates its FIFO backing off the render thread.
+    ///
+    /// The backing is exactly the queue's logical capacity. Admission guarantees that every
+    /// published target has a slot, so the render path never needs a fallback allocation or a
+    /// drop policy for a valid target record.
+    #[must_use]
+    pub fn new_with_target_staging(control: Consumer<EffectControlRecord>, bypass: bool) -> Self {
+        Self::with_target_staging(control, bypass, true)
+    }
+
+    fn with_target_staging(
+        control: Consumer<EffectControlRecord>,
+        bypass: bool,
+        target_staging: bool,
+    ) -> Self {
         let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
         symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
+        let targets = target_staging.then(|| {
+            vec![
+                PreparedEffectTarget {
+                    slot: 0,
+                    channel: ParameterChannel::Both,
+                    words: [0; crate::PREPARED_EFFECT_TARGET_WORDS],
+                };
+                control.capacity()
+            ]
+            .into_boxed_slice()
+        });
         Self {
             control,
+            targets,
+            staged_targets: 0,
             bypass,
             symmetry,
         }
     }
+
+    // REALTIME_POLICY_BEGIN
 
     /// This lane's live channel-symmetry terms as of the last [`stage`](Self::stage).
     ///
@@ -163,6 +206,38 @@ impl EffectControlLane {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.control.capacity()
+    }
+
+    /// Exact queue-owned payload layout, including the sentinel slot and shared header.
+    ///
+    /// This is a control-plane accounting query; it is never called from `stage` or any other
+    /// realtime-marked method.
+    #[must_use]
+    pub fn retained_queue_payload(&self) -> Option<SpscRetainedPayload> {
+        let capacity = NonZeroUsize::new(self.control.capacity())?;
+        bounded_spsc_retained_payload::<EffectControlRecord>(capacity).ok()
+    }
+
+    /// Exact target FIFO backing bytes, or zero for an unsupported owner.
+    #[must_use]
+    pub fn target_staging_retained_bytes(&self) -> usize {
+        self.targets.as_ref().map_or(0, |targets| {
+            targets.len() * core::mem::size_of::<PreparedEffectTarget>()
+        })
+    }
+
+    /// Whether this lane owns optional prepared-target staging.
+    #[must_use]
+    pub fn has_target_staging(&self) -> bool {
+        self.targets.is_some()
+    }
+
+    /// The retained FIFO target prefix produced by the most recent [`stage`](Self::stage).
+    #[must_use]
+    pub fn prepared_targets(&self) -> &[PreparedEffectTarget] {
+        self.targets
+            .as_deref()
+            .map_or(&[], |targets| &targets[..self.staged_targets])
     }
 
     /// Drain every queued record into `staging`, in canonical span order, and return the count.
@@ -188,16 +263,39 @@ impl EffectControlLane {
         first_sample: u64,
         observation: Option<&mut ObservationLane>,
     ) -> Staged {
+        let available = self.control.available_at_entry();
         let mut staged = 0_usize;
+        self.staged_targets = 0;
+        let mut target_error = false;
         let mut dropped = 0_u32;
         let mut unbound = 0_u32;
         let mut observation = observation;
-        while let Ok(record) = self.control.try_pop() {
+        let mut remaining = available;
+        while remaining != 0 {
+            remaining -= 1;
+            let Ok(record) = self.control.try_pop() else {
+                // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
+                // drain bounded if a malformed test double violates that invariant.
+                break;
+            };
             // The one hook. `admit` takes the record by trait, not by kind, so a record type
             // added to this queue later cannot reach the render state without declaring what it
             // does to the witness (`symmetry::LiveConsoleRecord`).
             self.symmetry.admit(&record);
             let (parameter_index, channel, value) = match record {
+                EffectControlRecord::PreparedTarget(target) => {
+                    let Some(targets) = self.targets.as_mut() else {
+                        target_error = true;
+                        continue;
+                    };
+                    if self.staged_targets == targets.len() {
+                        target_error = true;
+                        continue;
+                    }
+                    targets[self.staged_targets] = target;
+                    self.staged_targets += 1;
+                    continue;
+                }
                 EffectControlRecord::Bypass(value) => {
                     self.bypass = value;
                     continue;
@@ -219,7 +317,16 @@ impl EffectControlLane {
                     parameter_index,
                     channel,
                     value,
-                } => (parameter_index, channel, value),
+                } => {
+                    if self.targets.is_some() {
+                        // A prepared-target owner must never silently fall back to render-time
+                        // semantic design. Its checked admission path supplies a companion target
+                        // for every EQ edit; a missing one is an invariant failure.
+                        target_error = true;
+                        continue;
+                    }
+                    (parameter_index, channel, value)
+                }
             };
             let key = order_key(parameter_index, channel);
             // Bounded linear placement over the already-sorted window: at most `staging.len()`
@@ -261,6 +368,8 @@ impl EffectControlLane {
         }
         Staged {
             staged,
+            staged_targets: self.staged_targets,
+            target_error,
             dropped,
             unbound,
         }
@@ -273,6 +382,12 @@ impl EffectControlLane {
 pub struct Staged {
     /// Spans written to the front of the staging window, in canonical order.
     pub staged: usize,
+    /// Prepared targets retained in the lane-owned FIFO prefix.
+    pub staged_targets: usize,
+    /// A prepared target reached an owner without target staging or exceeded its FIFO backing.
+    /// Production admission rejects this before publication; render callers must surface this as
+    /// an invariant failure rather than treating the record as a successful no-op.
+    pub target_error: bool,
     /// Records refused because the window was full of distinct targets. Zero by construction.
     pub dropped: u32,
     /// [`EffectControlRecord::Observe`] records this plan had no capacity to apply. Zero by

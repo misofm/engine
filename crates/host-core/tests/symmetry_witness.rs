@@ -39,6 +39,8 @@
 //! bug: the mono variant used by the live-term tests is the same text with the right channel
 //! remapped, mutated here rather than checked in as a second fixture so the two cannot drift.
 
+mod support;
+
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::MeterTap;
@@ -199,10 +201,18 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
                 && producer.effect_index == 0
         })
         .expect("a control channel for the addressed effect");
-    producer
-        .producer
-        .try_push(record)
-        .expect("room in the bounded queue");
+    if let EffectControlRecord::Parameter {
+        parameter_index,
+        channel,
+        value,
+    } = record
+    {
+        support::push_eq_parameter(producer, parameter_index, channel, value);
+    } else {
+        producer
+            .try_push(record)
+            .expect("room in the bounded queue");
+    }
 }
 
 fn parameter(channel: ParameterChannel, value: f32) -> EffectControlRecord {

@@ -79,6 +79,7 @@ fi
 cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
+cp "$repo_root/hosts/host-web/web/prepared-control.js" "$output_dir/"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"
 
 # Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
