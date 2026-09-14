@@ -805,7 +805,8 @@ mod tests {
                 limit: u16::MAX,
             })
             .expect("metadata");
-        assert_eq!(page.descriptors.len(), 9 * 24 * 2);
+        // #805 appends six prepared-only EQ HPF/LPF rows; each row is exposed for both lanes.
+        assert_eq!(page.descriptors.len(), 9 * 30 * 2);
         assert!(page.eof);
         let first = &page.descriptors[0];
         assert_eq!(first.handle, 1);
