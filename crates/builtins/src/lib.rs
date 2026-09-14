@@ -759,6 +759,8 @@ impl SvfSection {
     /// is the issue-036 table, enforced before preparation by
     /// [`validate_builtin_filter_cutoff`].
     fn design(rate: u32, cutoff: f32, high_pass: bool) -> Result<Self, BuiltinParameterError> {
+        #[cfg(test)]
+        FILTER_DESIGN_CALLS.with(|calls| calls.set(calls.get() + 1));
         if cutoff == 0.0 {
             return Ok(Self::IDENTITY);
         }
@@ -863,6 +865,7 @@ const MAX_BANK_LANES: usize = 8;
 
 #[cfg(test)]
 thread_local! {
+    static FILTER_DESIGN_CALLS: Cell<usize> = const { Cell::new(0) };
     static CHANNEL_SYMMETRY_PREDICATE_CALLS: Cell<usize> = const { Cell::new(0) };
     static CHANNEL_SYMMETRY_LANE_READS: Cell<usize> = const { Cell::new(usize::MAX) };
     static CHANNEL_SYMMETRY_OBSERVE_POST_RAMP: Cell<bool> = const { Cell::new(false) };

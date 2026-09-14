@@ -713,3 +713,52 @@ fn eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call() {
         true,
     );
 }
+
+#[test]
+fn prepared_filters_design_only_before_runtime_application() {
+    use super::{BuiltinInputBank, FILTER_DESIGN_CALLS, prepare_input_filter_pair};
+    use effect_contract::BankWidth;
+    use lane::Backend;
+
+    let prepare_input = || {
+        BuiltinChain::new(48_000, BuiltinParameters::default())
+            .unwrap()
+            .into_input_builtins()
+    };
+    let mut input = prepare_input();
+    let mut bank = BuiltinInputBank::new(
+        Backend::Simd4,
+        BankWidth::Four,
+        (0..3).map(|_| prepare_input()).collect(),
+    )
+    .unwrap();
+    FILTER_DESIGN_CALLS.with(|calls| calls.set(0));
+    let active = prepare_input_filter_pair(48_000, 120.0, 8_000.0).unwrap();
+    let disabled = prepare_input_filter_pair(48_000, 0.0, 0.0).unwrap();
+    assert!(FILTER_DESIGN_CALLS.with(Cell::get) > 0);
+    FILTER_DESIGN_CALLS.with(|calls| calls.set(0));
+
+    for target in active.targets {
+        input.apply_prepared_filter(target).unwrap();
+        for lane in 0..3 {
+            bank.apply_prepared_filter(lane, target).unwrap();
+        }
+    }
+    let mut left = [0.5; 17];
+    let mut right = left;
+    input.process(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+    let mut bank_left = [0.5; 17 * 4];
+    bank.process_mono(&mut bank_left, 17);
+    let asymmetric = super::PreparedInputFilterTarget {
+        lanes: BuiltinLaneSelector::Left,
+        ..disabled.targets[0]
+    };
+    bank.apply_prepared_filter(0, asymmetric).unwrap();
+    bank.desymmetrize();
+    let mut bank_right = bank_left;
+    bank.process(&mut bank_left, &mut bank_right, 17);
+    input.reset();
+    bank.reset();
+    input.reset_with_kind(BuiltinResetKind::FullToPrepared);
+    assert_eq!(FILTER_DESIGN_CALLS.with(Cell::get), 0);
+}

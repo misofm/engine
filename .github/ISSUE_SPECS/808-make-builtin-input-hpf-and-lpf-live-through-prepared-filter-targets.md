@@ -219,3 +219,9 @@ checks and strict relevant library clippy. Root maps unsupported builtin selecto
 to malformed as required by the command-shape contract. Public metadata remains
 prepared-only. Next: committed/candidate shadows and shared mixed-batch admission,
 then the existing helper/SDK integration. No release or whole-issue PASS yet.
+
+The private builtin unit designer counter records calls at SvfSection::design: real
+off-thread pair preparation is positive, while scalar/bank target application,
+rendering, mono disengagement and cached reset paths record zero. Its focused gate
+passes. This adds no production API or instrumentation feature; actual host batch
+allocation/refusal gates and the shipped callback call graph remain for closure.
