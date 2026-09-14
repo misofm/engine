@@ -79,3 +79,19 @@ Existing effect/parameter IDs, semantic names, positional APIs, canonical sessio
 #804's dedicated EQ cuts can subsequently use keys such as `hpf-enabled`, `hpf-frequency`, `hpf-q`, `lpf-enabled`, `lpf-frequency`, and `lpf-q` with explicit units and appended numeric IDs, as approved by its DSP brief. These are accepted automatically by the existing catalog-derived object type when their actual live capability becomes true. This issue neither implements those filters nor prematurely advertises them.
 
 Root owns coherent checkpoint commits, model-workflow assignment, independent verification, GitHub synchronization and final package delivery. No benchmark, expanded research corpus, DSP audit, or app migration is required to close this bounded slice.
+
+## Attempt 1 — metadata tranche checkpoint
+
+Luna XHIGH completed the eight-path metadata/unit tranche. Shared Rust unit
+lookup now feeds both lattice construction and generated builtin metadata;
+the SDK consumes generated unit names. Key uniqueness and wrong-unit mutations
+are covered by the existing validator and round-trip tests. No DSP or capability
+flags changed. Evidence: `/tmp/147-tranche1-evidence.md`.
+
+Passed: `cargo test --locked -p parameter-metadata`, metadata validator self-test
+and current-asset validation, `bash scripts/check-sdk-generated.sh`, formatting,
+and diff hygiene. The first SDK type check reported missing node_modules (exit
+2); root installed locked dependencies with `npm ci --ignore-scripts` and reran
+`bash scripts/check-sdk-types.sh`, which passed. This is a compiling checkpoint,
+not the complete attempt or adversarial PASS; object-edit tranche and its
+real-engine/package evidence follow.

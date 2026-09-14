@@ -81,6 +81,7 @@ use builtins::{
     BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterDescriptor, BuiltinParameterDomain,
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
     BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz,
+    builtin_parameter_unit,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -674,6 +675,7 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
 }
 
 fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
+    let unit = builtin_parameter_unit(parameter);
     // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz` gives one
     // per launch rate, so the row carries the exact `f32` for each rather than a number that would
     // be wrong at three of the four.
@@ -706,12 +708,14 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         BuiltinParameterUpdateRate::BlockTarget
     );
     format!(
-        "      {{ \"id\": {}, \"name\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
+        "      {{ \"id\": {}, \"name\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
 \"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": {}, \"default\": {}, \
 \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
 \"liveUpdatable\": {}, \"step\": {} }}",
         parameter.id,
         escape(parameter.name),
+        unit as u32,
+        unit_name(unit),
         match parameter.scope {
             BuiltinParameterScope::PerLane => "perLane",
             BuiltinParameterScope::MatrixShared => "matrixShared",
