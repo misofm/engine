@@ -63,6 +63,7 @@ const _: () = {
     assert!(size_of::<WebPreparedEffectCompanionRecord>() == 80);
     assert!(size_of::<WebEqTargetConfig>() == 272);
     assert!(size_of::<WebInputFilterEdit>() == INPUT_FILTER_EDIT_BYTES);
+    assert!(size_of::<WebBuiltinInputConfig>() == 48);
 };
 
 #[repr(C)]
@@ -146,6 +147,20 @@ pub struct WebEqTargetConfig {
     pub owner_revision: u64,
     pub values: [f32; EQ_VALUE_COUNT],
 }
+
+/// Shared config-copy header plus the four semantic builtin input-filter target values.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct WebBuiltinInputConfig {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub sample_rate_hz: u32,
+    pub value_count: u32,
+    pub host_generation: u64,
+    pub owner_revision: u64,
+    pub values: [f32; INPUT_FILTER_VALUE_COUNT],
+}
+
 impl Default for WebEqTargetConfig {
     fn default() -> Self {
         Self {

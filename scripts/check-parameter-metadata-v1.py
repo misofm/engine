@@ -33,7 +33,7 @@ SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",
+    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
 ]
 # The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
 # tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
@@ -59,7 +59,7 @@ BUILTIN_SCOPES = {"perLane", "matrixShared"}
 BUILTIN_MAPPINGS = {"boolean", "decibelAmplitude", "hertz", "linear"}
 BUILTIN_DOMAINS = {"booleanExact", "finiteInclusive", "disabledOrRateKeyedHertz"}
 BUILTIN_RESETS = {"restorePreparedValue", "keepTargetResetCurrent"}
-BUILTIN_SMOOTHINGS = {"none", "linearNUpdates"}
+BUILTIN_SMOOTHINGS = {"none", "linearNUpdates", "linear64CoefficientUpdates"}
 
 EFFECT_PARAMETER_KEYS = {
     "id", "name", "displayUnit", "unit", "unitName", "domain", "domainName", "minimum", "maximum",
@@ -296,9 +296,8 @@ def validate(document: dict) -> None:
     # The live set is pinned by name, not merely counted: a row that silently flipped its
     # `updateRate` would otherwise pass every other rule in this function. Issue #210 phase 3 added
     # `trim_db` and `polarity_invert` -- one coefficient, one ramp, two parameters -- and the two
-    # are named here in the same change that flipped their descriptor rows. `hpf_hz`, `lpf_hz` and
-    # `delay_samples` are deliberately absent and must stay absent until the ruling that defers
-    # them is reopened. #239 ruling 5461507633 B4 appended `pan` as an authoritative persisted
+    # are named here in the same change that flipped their descriptor rows. `delay_samples` is
+    # deliberately absent and remains prepared-only. #239 ruling 5461507633 B4 appended `pan` as an authoritative persisted
     # descriptor row; it is a block target like the matrix rows it derives coefficients for, so it
     # joins the live set in the same change that added it.
     require(
@@ -313,8 +312,10 @@ def validate(document: dict) -> None:
             "matrix_rl",
             "matrix_rr",
             "pan",
+            "hpf_hz",
+            "lpf_hz",
         },
-        "exactly the trim, polarity, fader, mute, matrix and pan parameters are live",
+        "exactly the trim, polarity, filters, fader, mute, matrix and pan parameters are live",
     )
 
     require(document["effects"], "at least one effect")
@@ -639,11 +640,9 @@ def self_test() -> int:
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),
         ),
         (
-            # Row index 2 is `hpf_hz`. It was index 1 (`trim_db`) until #210 phase 3 made that row
-            # genuinely live; the mutation has to name a row that is still prepared-only or it
-            # stops being a mutation.
+            # Row index 4 is `delay_samples`, the remaining prepared-only row.
             "a prepared-only builtin claims to be live",
-            lambda d: d["builtins"]["parameters"][2].update(liveUpdatable=True),
+            lambda d: d["builtins"]["parameters"][10].update(liveUpdatable=True),
         ),
         (
             "builtin unit name disagrees with value",
@@ -666,7 +665,7 @@ def self_test() -> int:
         # rather than decorative: without it, a row could be promoted or demoted silently.
         (
             "a deferred builtin is promoted into the live set",
-            lambda d: d["builtins"]["parameters"][2].update(
+            lambda d: d["builtins"]["parameters"][10].update(
                 updateRate="blockTarget",
                 smoothing="linearNUpdates",
                 liveUpdatable=True,

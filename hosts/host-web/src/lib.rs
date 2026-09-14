@@ -2661,7 +2661,7 @@ impl AudioWorkletEngineHost {
         };
         let output = &mut workspace.config;
         output.fill(0);
-        output[0..4].copy_from_slice(&48_u32.to_le_bytes());
+        output[0..4].copy_from_slice(&(size_of::<WebBuiltinInputConfig>() as u32).to_le_bytes());
         output[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
         output[8..12].copy_from_slice(&sample_rate.to_le_bytes());
         output[12..16].copy_from_slice(&4_u32.to_le_bytes());
@@ -6227,8 +6227,9 @@ fn record_admission_counter_clear(elements: usize) {
 
 pub mod control_targets;
 pub use control_targets::{
-    WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+    WebBuiltinInputConfig, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest,
+    WebEqTargetResult, WebInputFilterEdit, WebPreparedEffectCompanionHeader,
+    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
 };
 mod ffi;
 

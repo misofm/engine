@@ -252,3 +252,21 @@ The existing builtin atomicity test now also mutates a valid companion to remove
 section, duplicate/overlap a target, inject unsafe coefficients and set reserved
 words. All four refuse with zero admitted records, unchanged committed shadow and
 revision, and untouched queue counters. The focused host test passes.
+
+
+### Tranche3 metadata and SDK authoring checkpoint
+
+IDs3/4 now declare BlockTarget, Linear64CoefficientUpdates and
+KeepTargetResetCurrent, matching the implemented host/scalar/bank path. Session
+automation syntax accepts them while still declaring that it has no render feed.
+Command12, the two additive exports, the16-byte input edit and48-byte builtin
+config are represented in generated metadata/ABI assets. SDK TrackEdits adds
+hpfHz, lpfHz and inputFilters; the pair produces one LaneEdit and uses the generated
+builtin domains/Hz metadata. Existing numeric builtin conventions are preserved.
+
+PASS: builtin contract/filter fixtures, automation-target cross-check, SDK type
+check and generated/assets checks, command vocabulary and metadata/ABI self-tests.
+Root completed strict lib/tests clippy for builtins, session, parameter-metadata and
+host-web; session library tests6passed/two existing ignored. Runtime SDK tests were
+not run against an old artifact: shared-helper integration and a rebuilt shipped
+module remain next. No release version or artifact pin changed in this checkpoint.

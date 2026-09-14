@@ -429,7 +429,7 @@ def self_test() -> int:
             "the host JS set stops at effectBypass",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);",
             ),
         ),
@@ -437,7 +437,7 @@ def self_test() -> int:
             "the host JS set stops one kind short of the wire",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);",
             ),
         ),
@@ -445,8 +445,8 @@ def self_test() -> int:
             "the host JS set gains a kind the wire does not decode",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13]);",
             ),
         ),
         (
@@ -454,7 +454,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "COMMAND_KINDS.has(command.kind)",
-                "command.kind >= 1 && command.kind <= 11",
+                "command.kind >= 1 && command.kind <= 12",
             ),
         ),
         (
@@ -539,7 +539,7 @@ def self_test() -> int:
             "the schema gate's list stops at effectBypass",
             mutate(
                 SCHEMA_GATE,
-                '    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",'
+                '    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",'
                 "\n",
                 "",
             ),
@@ -548,7 +548,7 @@ def self_test() -> int:
             "the schema gate's list drops the render kind added last",
             mutate(
                 SCHEMA_GATE,
-                '"observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",',
+                '"observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",',
                 '"observeSubscribe", "observeUnsubscribe", "solo", "trimDb",',
             ),
         ),

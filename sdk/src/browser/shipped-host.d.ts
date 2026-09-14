@@ -17,17 +17,16 @@
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
 // every declared kind live, so the honest summary is now short: `MisoCommandKind.Pan`,
 // `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
-// `.PolarityInvert` are all **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
+// `.PolarityInvert` and `.InputFilters` are all **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
 // (issue 143), on the observation plane rather than the render one -- they move the
-// `miso.observe.v1` subscription map, not anything rendered. All eleven are in the metadata JSON's
+// `miso.observe.v1` subscription map, not anything rendered. All twelve are in the metadata JSON's
 // `commandKinds`, each with the `plane` it applies on.
 //
 // * `matrix_ll/lr/rl/rr`, `fader_db`, `mute` and -- since issue 210 phase 3 -- `trim_db` and
 //   `polarity_invert` declare `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing
-//   policy. `hpf_hz`, `lpf_hz` and `delay_samples` (issue #210 phase 2, the track's input-side
-//   time alignment) still declare `PreparedOnly` and have no command kind at all: they change
-//   through a session edit. Live filter moves are deferred, at the price of the parametric EQ's
-//   coefficient-ramp machinery; the ruling is recorded and is not an oversight.
+//   policy. `hpf_hz` and `lpf_hz` use prepared filter targets and are live through `.InputFilters`;
+//   `delay_samples` remains prepared-only (issue #210 phase 2, the track's input-side time
+//   alignment) and has no command kind.
 // * A parameter is live when its generated descriptor says `liveUpdatable`. Parametric EQ uses
 //   off-audio-thread Rust preparation for its numeric rows and dedicated cut enable/frequency/Q;
 //   this host submits the resulting opaque targets together with the original semantic batch.
@@ -178,7 +177,7 @@ export interface MisoUnsupportedBrowser {
 
 /// Frozen live-console command kinds (issue 137 D1).
 ///
-/// All eleven are one vocabulary, proved across every file that spells it -- this enum, the Rust
+/// All twelve are one vocabulary, proved across every file that spells it -- this enum, the Rust
 /// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
 /// metadata generator and the shipped `commandKinds` rows -- by
 /// `scripts/check-command-kind-vocabulary.py`. Every one of them is *applied*: nothing here is
@@ -269,6 +268,8 @@ export const enum MisoCommandKind {
   ///
   /// A flip does **not** change the lane's trim magnitude.
   PolarityInvert = 11,
+  /// Retarget a builtin input HPF/LPF pair through one prepared target transaction.
+  InputFilters = 12,
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).

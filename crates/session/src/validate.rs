@@ -475,20 +475,21 @@ pub const BUILTIN_AUTOMATION_EFFECT_ID: &str = "strip";
 ///
 /// # Why the list is exactly the block-target rows
 ///
-/// A target names something the render plane can be *told* to change. The rows that declare
-/// `BuiltinParameterUpdateRate::PreparedOnly` -- `hpf_hz` (3), `lpf_hz` (4) and `delay_samples`
-/// (11) -- have no post-preparation write path at all, so an automation span addressed at one of
-/// them could only ever be inert syntax. They are refused, and the refusal is the ruling: the
-/// deferred filter tier and the delay ruling are reopened by adding a row here, not by writing a
-/// session that quietly does nothing.
+/// A target names something the render plane can be *told* to change. The row that remains
+/// `BuiltinParameterUpdateRate::PreparedOnly` is `delay_samples` (11); it has no post-preparation
+/// write path, so an automation span addressed at it could only ever be inert syntax. The input
+/// filter rows have a prepared-target write path and are included here.
 ///
 /// `per_lane` is the descriptor's `BuiltinParameterScope`: a `PerLane` parameter may be addressed
 /// `left`, `right` or `both`, while the four matrix coefficients are one shared 2x2 and can only
 /// be addressed `both`.
-pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 9] = [
+pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 11] = [
     // `polarity_invert` and `trim_db`: live since #210 phase 3.
     (1, true),
     (2, true),
+    // `hpf_hz` and `lpf_hz`: live through the prepared input-filter owner (#808).
+    (3, true),
+    (4, true),
     // `fader_db` and `mute`: live since #140 B.
     (5, true),
     (6, true),

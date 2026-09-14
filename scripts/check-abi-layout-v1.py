@@ -76,7 +76,7 @@ BUFFER_KINDS = [
 ]
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",
+    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
 ]
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
@@ -128,6 +128,8 @@ EXPORTS = [
     "miso_engine_web_v1_eq_target_result_bytes",
     "miso_engine_web_v1_eq_target_result_capacity",
     "miso_engine_web_v1_eq_target_result_ptr",
+    "miso_engine_web_v1_input_filters_config_copy",
+    "miso_engine_web_v1_input_filters_prepare",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -249,6 +251,8 @@ STRUCTURES = {
     "preparedEffectCompanionHeader": 24,
     "preparedEffectCompanionRecord": 80,
     "eqTargetConfig": 272,
+    "inputFilterEdit": 16,
+    "builtinInputConfig": 48,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",

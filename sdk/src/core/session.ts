@@ -918,9 +918,8 @@ interface ResolvedAutomationTarget {
  * instance*: the slot must exist in that rack and the `(parameter_id, channel)` pair must already
  * appear in that instance's params, which is exactly what the engine checks. A `builtins` target
  * has no instance, so it is resolved against the builtin parameter ABI and restricted to the rows
- * that declare `blockTarget` -- `hpf_hz`, `lpf_hz` and `delay_samples` are prepared-only and a
- * span addressed at one of them could only ever be inert, so the schema refuses it and so does
- * this.
+ * that declare `blockTarget`. The prepared input-filter rows are live through the paired command
+ * path; `delay_samples` remains prepared-only and is refused here.
  */
 function resolveAutomationTarget(
   target: AutomationTarget,

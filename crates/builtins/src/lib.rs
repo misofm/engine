@@ -379,6 +379,8 @@ pub enum BuiltinSmoothingPolicy {
     None,
     /// Exact linear interpolation over the requested number of sample updates.
     LinearNUpdates,
+    /// Fixed 64-sample linear updates of the prepared SVF coefficient words.
+    Linear64CoefficientUpdates,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -540,9 +542,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
             minimum_hz: 10.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
-        reset: BuiltinParameterReset::RestorePreparedValue,
+        // Live through the prepared input-filter target path. The semantic cutoff remains a
+        // target association value; render receives only the fixed 64-update coefficient ramp.
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
@@ -556,9 +560,9 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
             minimum_hz: 10.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
-        reset: BuiltinParameterReset::RestorePreparedValue,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
@@ -956,38 +960,19 @@ pub(crate) struct InputStage<L: Lane> {
     filter_ramping: bool,
     /// Retained integrator state, indexed like [`InputChainCoef::section`].
     state: InputChainState<L>,
-    /// Which sections the render path may skip, decided from the words in [`InputStage::coef`]
-    /// and [`InputStage::state`] and re-decided by every write to either.
+    /// Cached permission to skip each section across the whole bank.
     ///
-    /// # Why a live trim cannot make this stale (issue #210 phase 3)
+    /// `section_is_identity` reads the six coefficient words and two integrators of every lane.
+    /// Trim is not part of that predicate, so trim/polarity retargets cannot invalidate it.
+    /// Filter targets arrive as prepared words; the callback never invokes the designer.
     ///
-    /// The plan is a pure function of the **six SVF coefficient words per section and the two
-    /// integrators per section** -- [`section_is_identity`] reads those eight and nothing else.
-    /// `trim` is not among them. `hpf_hz` and `lpf_hz`, which are the only parameters that design
-    /// those six words, remain `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS`, so the
-    /// coefficients are still written exactly once, here.
-    ///
-    /// `trim_db` and `polarity_invert` are live since phase 3 and write [`InputStage::coef`]'s
-    /// `trim` word after preparation -- but a section's elidability does not depend on the value
-    /// the chain multiplies its input by, only on whether the section is the arithmetic identity,
-    /// so that write cannot flip a `true` to a `false` or the reverse. The decision is therefore
-    /// still taken once, at the point the section words are written, and cannot go stale.
-    ///
-    /// **The proviso this leaves for a later phase**: if `hpf_hz` or `lpf_hz` ever become live,
-    /// the premise above fails at exactly the word list this comment names, and that liveness
-    /// requires a command-driven invalidation -- the retarget must recompute the plan the way
-    /// [`InputStage::set_lane_state_words`] and [`InputStage::reset`] already do. See
-    /// `docs/rulings/builtins-input-liveness-d2.md`.
-    ///
-    /// The state words are written by [`InputStage::reset`] and by the evidence-only
-    /// [`InputStage::set_lane_state_words`], and both re-decide the plan.
-    ///
-    /// The render path writes `state` in exactly one place -- the boundary-check recovery in
-    /// [`InputStage::process`], which is `state.andnot(bad)` -- and that write is *monotone*
-    /// toward the identity: it either leaves a word alone or replaces it with the `+0.0` the
-    /// identity pattern wants. So it can never invalidate a `true`, and it is deliberately left
-    /// bit-for-bit as it was rather than made to re-decide the plan. A section it happens to make
-    /// newly elidable simply stays unelided until the next reset, which costs correctness nothing.
+    /// `refresh_filter_plan` recomputes the predicate and forces every in-flight section false,
+    /// including an enable whose current words are still identity. Retarget, ramp completion,
+    /// disabled endpoint clearing, reset and explicit state restoration use this authority.
+    /// A settled elided section keeps its integrators untouched; boundary recovery can only move
+    /// them toward +0, so it cannot make an elidable section unsafe. The required all-identity
+    /// trim-ramp path preserves sanitization, trim timing and signed-zero normalization.
+    /// See `docs/rulings/builtins-input-liveness-d2.md`.
     plan: InputChainPlan,
     /// The live trim ramp (#210 phase 3). `ramp.current[c]` is the same value as `coef.trim[c]`
     /// between events -- there is no second copy of the coefficient -- and `ramp.target[c]` is the

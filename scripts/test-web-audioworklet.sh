@@ -286,7 +286,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
   "$kind_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$kind_dir/tools/parameter-metadata/src/"
-sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
+sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   >"$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js"
 if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \

@@ -3,18 +3,18 @@
 **Issue**: #210 (owner ruling, adopted by the coordinator 2026-08-27), implementing #178's schema
 half. **Landed**: phase 3.
 
-**#808 amendment, DSP/queue checkpoint:** #804 supplies the workload that reopens
-the HPF/LPF tier. Fixed12dB/oct Butterworth filters are the accepted slice; #191
+**#808 amendment:** #804 supplies the workload that reopens
+the HPF/LPF tier. Fixed 12 dB/oct Butterworth filters are the accepted slice; #191
 variable slopes remain separate. The native owner and existing input queues now
-apply off-render prepared targets with a fixed64-update coefficient ramp. Public
-metadata/SDK activation remains pending host admission and shipped-client closure.
-The historical phase3 tiering below describes the original decision; this amendment
+apply off-render prepared targets with a fixed 64-update coefficient ramp. Shared
+host admission validates mixed batches atomically; SDK helper and shipped-artifact
+closure remain pending. The historical phase 3 tiering below describes the original decision; this amendment
 supersedes its requirement to deliver slope changes together with liveness.
 
 `refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and
 forces in-flight sections non-elidable. Retarget, completion, reset, evidence state
-writes and integrator restoration use that authority. SampleA uses current words;
-sampleA+64 uses the exact target. Disabled completion clears only the addressed
+writes and integrator restoration use that authority. Sample A uses current words;
+sample A+64 uses the exact target. Disabled completion clears only the addressed
 integrators before the first identity sample. Settled all-disabled filters execute
 no SVF recurrences even during trim/polarity ramps; trim timing, sanitization and
 signed-zero normalization remain unchanged. Mixed banks keep the existing fallback.

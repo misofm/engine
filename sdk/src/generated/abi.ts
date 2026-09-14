@@ -56,6 +56,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_eq_target_result_bytes",
     "miso_engine_web_v1_eq_target_result_capacity",
     "miso_engine_web_v1_eq_target_result_ptr",
+    "miso_engine_web_v1_input_filters_config_copy",
+    "miso_engine_web_v1_input_filters_prepare",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -1660,6 +1662,31 @@ export const ABI_LAYOUT = deepFreeze(
         }
       ]
     },
+    "inputFilterEdit": {
+      "bytes": 16,
+      "fields": [
+        {
+          "name": "parameterId",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "channel",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "value0",
+          "offset": 8,
+          "type": "f32"
+        },
+        {
+          "name": "value1",
+          "offset": 12,
+          "type": "f32"
+        }
+      ]
+    },
     "preparedEffectTarget": {
       "bytes": 56,
       "fields": [
@@ -1827,6 +1854,46 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "values",
           "offset": 32,
           "type": "f32[60]"
+        }
+      ]
+    },
+    "builtinInputConfig": {
+      "bytes": 48,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "sampleRateHz",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "valueCount",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "hostGeneration",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "ownerRevision",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "values",
+          "offset": 32,
+          "type": "f32[4]"
         }
       ]
     }
@@ -2047,6 +2114,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "polarityInvert"
+      },
+      {
+        "value": 12,
+        "name": "inputFilters"
       }
     ],
     "commandReasons": [
