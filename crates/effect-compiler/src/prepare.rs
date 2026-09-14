@@ -1622,8 +1622,8 @@ mod owner_tests {
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use std::sync::Arc;
 
-    /// Explicit test-only opt-in wrapper. Production ParametricEqFactory keeps its capability
-    /// getter at None until cutover assignment 10.
+    /// Test-only wrapper for retained factory ownership and attachment accounting.
+    /// Production ParametricEqFactory now exposes the same prepared-target capability.
     struct OptInEqFactory;
 
     impl NativeEffectFactory for OptInEqFactory {
