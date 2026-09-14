@@ -142,6 +142,86 @@ pub(crate) fn resource_estimate(
     })
 }
 
+/// Exact retained storage for attached effect control channels.
+///
+/// Queue payload is charged from the SPSC layout helper using each lane's actual capped capacity.
+/// The lane-owned target FIFO is charged once when present. Scalar lanes retain one boxed lane;
+/// banked lanes are moved into one boxed `Option<EffectControlLane>` array per bank, so this
+/// helper does not count the pre-bank scalar boxes a bank later consumes.
+pub(crate) fn effect_control_resource(
+    effects: &[EffectPreparedEntry],
+    banks: &[GraphPreparedEffectBank],
+) -> Option<GraphScalarOwnerResourceEstimate> {
+    let mut total = 0_u64;
+    let mut largest = 0_u64;
+    let mut banked: BTreeSet<(String, EffectRack, String)> = BTreeSet::new();
+    for bank in banks {
+        for member in &bank.members {
+            let rack = match member.rack {
+                RackId::Simd1 => EffectRack::Simd1,
+                RackId::Dynamic => EffectRack::Dynamic,
+                RackId::Simd2 => EffectRack::Simd2,
+            };
+            banked.insert((
+                member.track_id.as_str().to_owned(),
+                rack,
+                member.effect_id.as_str().to_owned(),
+            ));
+        }
+    }
+    for entry in effects {
+        let Some(control) = entry.control.as_deref() else {
+            continue;
+        };
+        let queue = control.retained_queue_payload()?;
+        let queue_header = u64::try_from(queue.ring_header_bytes).ok()?;
+        let queue_slots = u64::try_from(queue.slot_payload_bytes).ok()?;
+        total = total.checked_add(queue_header)?.checked_add(queue_slots)?;
+        largest = largest.max(queue_header).max(queue_slots);
+        let target = u64::try_from(control.target_staging_retained_bytes()).ok()?;
+        total = total.checked_add(target)?;
+        largest = largest.max(target);
+        let key = (entry.track_id.clone(), entry.rack, entry.effect_id.clone());
+        if !banked.contains(&key) {
+            let lane =
+                u64::try_from(core::mem::size_of::<effect_contract::EffectControlLane>()).ok()?;
+            total = total.checked_add(lane)?;
+            largest = largest.max(lane);
+        }
+    }
+    for bank in banks {
+        let has_control = bank.members.iter().any(|member| {
+            let rack = match member.rack {
+                RackId::Simd1 => EffectRack::Simd1,
+                RackId::Dynamic => EffectRack::Dynamic,
+                RackId::Simd2 => EffectRack::Simd2,
+            };
+            effects.iter().any(|entry| {
+                entry.control.is_some()
+                    && entry.track_id == member.track_id.as_str()
+                    && entry.rack == rack
+                    && entry.effect_id == member.effect_id.as_str()
+            })
+        });
+        if has_control {
+            let lanes = u64::try_from(bank.members.len()).ok()?;
+            let bytes = lanes.checked_mul(
+                u64::try_from(core::mem::size_of::<
+                    Option<effect_contract::EffectControlLane>,
+                >())
+                .ok()?,
+            )?;
+            total = total.checked_add(bytes)?;
+            largest = largest.max(bytes);
+        }
+    }
+    Some(GraphScalarOwnerResourceEstimate {
+        total_bytes: total,
+        largest_allocation_bytes: largest,
+        split_pair_table_bytes: 0,
+    })
+}
+
 pub(crate) fn graph_metadata_bytes(
     nodes: &[GraphNode],
     edges: &[GraphEdge],

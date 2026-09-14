@@ -4767,6 +4767,26 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
+    // The decoded command array carries the enlarged internal EffectControlRecord enum. Its
+    // typed backing is a separate retained allocation from the public 48-byte wire staging row;
+    // charge the full actual array before the final aggregate budget check.
+    let decoded_count = command_staging_count(track_count)?;
+    let decoded_bytes = u64::try_from(decoded_count)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<(u32, AdmittedCommand)>() as u64))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(decoded_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(decoded_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes =
+        report.largest_bridge_allocation_bytes.max(decoded_bytes);
+    report.largest_named_allocation_bytes =
+        report.largest_named_allocation_bytes.max(decoded_bytes);
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),
@@ -4884,9 +4904,7 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
     // `TrackFaderRecord::Mute` carries one `muted` bool and a track whose user mute is
     // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
     // may carry 256 effect-parameter records *and* a solo toggle.
-    let count = (MAXIMUM_COMMAND_RECORDS as usize * 2)
-        .checked_add(track_count.checked_mul(2).ok_or_else(arithmetic)?)
-        .ok_or_else(arithmetic)?;
+    let count = command_staging_count(track_count)?;
     let empty = (
         0_u32,
         AdmittedCommand::Effect(EffectControlRecord::Bypass(false)),
@@ -4897,6 +4915,12 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     value.resize(count, empty);
     Ok(value.into_boxed_slice())
+}
+
+fn command_staging_count(track_count: usize) -> Result<usize, Vec<u8>> {
+    (MAXIMUM_COMMAND_RECORDS as usize * 2)
+        .checked_add(track_count.checked_mul(2).ok_or_else(arithmetic)?)
+        .ok_or_else(arithmetic)
 }
 
 fn arithmetic() -> Vec<u8> {

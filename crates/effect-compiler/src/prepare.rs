@@ -20,7 +20,7 @@ use effect_package::{
     validate_effect_state_replay, verify_effect_state,
 };
 use engine::realtime::{
-    ObservationReader, Producer, QueueGeneration, bounded_spsc, observation_slot,
+    ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
 };
 use session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
@@ -1217,8 +1217,68 @@ pub struct EffectControlProducer {
     /// to the `parameter_index` the render side stages, and check the value's domain, without a
     /// second copy of the registry.
     pub descriptor: &'static EffectDescriptor,
-    /// Bounded producer endpoint; `try_push` returns the record on a full queue.
-    pub producer: Producer<EffectControlRecord>,
+    /// Checked bounded producer endpoint; unsupported prepared targets are refused before queue
+    /// mutation, while ordinary records retain the queue's full-result retry semantics.
+    pub producer: EffectControlProducerHandle,
+}
+
+/// Why an effect-control publication failed.
+#[derive(Debug)]
+pub enum EffectControlPushError {
+    /// This owner has no prepared-target capability at this checkpoint. The record was not
+    /// published and is returned for the caller's refusal report.
+    Unsupported { record: EffectControlRecord },
+    /// The bounded queue was full. The underlying queue retains its generation and full counter.
+    Full(QueueFull<EffectControlRecord>),
+}
+
+/// Checked control-plane endpoint for one effect queue.
+///
+/// The underlying producer is intentionally private: callers cannot bypass target capability
+/// checks or manufacture a production prepared-target route by setting a flag. Component tests
+/// that need to exercise the target consumer construct an exclusively owned low-level queue and
+/// lane directly.
+pub struct EffectControlProducerHandle {
+    inner: Producer<EffectControlRecord>,
+    requires_prepared_targets: bool,
+}
+
+impl EffectControlProducerHandle {
+    fn new(inner: Producer<EffectControlRecord>, requires_prepared_targets: bool) -> Self {
+        Self {
+            inner,
+            requires_prepared_targets,
+        }
+    }
+
+    /// Exact usable queue capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Check delivery capability without touching the queue, counters, or record ownership.
+    ///
+    /// A prepared-capable owner will eventually require all EQ parameter records to arrive with
+    /// their companion targets. Assignment4 keeps production owners unregistered, so this path
+    /// remains fail-closed until the owner transaction is available.
+    pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
+        if matches!(record, EffectControlRecord::PreparedTarget(_))
+            || (self.requires_prepared_targets
+                && matches!(record, EffectControlRecord::Parameter { .. }))
+        {
+            return Err(EffectControlPushError::Unsupported { record });
+        }
+        Ok(())
+    }
+
+    /// Publish one record after checking whether this owner can deliver prepared targets.
+    pub fn try_push(&mut self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
+        self.preflight(record)?;
+        self.inner
+            .try_push(record)
+            .map_err(EffectControlPushError::Full)
+    }
 }
 
 /// Attach one bounded live-console control channel to every prepared effect of the session.
@@ -1274,18 +1334,20 @@ pub fn attach_effect_console(
             });
             continue;
         };
+        let target_capable = entry.factory.target_preparation().is_some();
         producers.push(EffectControlProducer {
             track_id: entry.track_id.as_str().into(),
             rack: entry.rack,
             effect_index,
             effect_id: entry.effect_id.as_str().into(),
             descriptor: entry.factory.descriptor(),
-            producer,
+            producer: EffectControlProducerHandle::new(producer, target_capable),
         });
-        entry.control = Some(Box::new(EffectControlLane::new(
-            consumer,
-            entry.bank_preparation.bypass,
-        )));
+        entry.control = Some(Box::new(if target_capable {
+            EffectControlLane::new_with_target_staging(consumer, entry.bank_preparation.bypass)
+        } else {
+            EffectControlLane::new(consumer, entry.bank_preparation.bypass)
+        }));
     }
     if diagnostics.is_empty() {
         Ok(producers)

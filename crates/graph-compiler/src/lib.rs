@@ -18,7 +18,8 @@ use engine::realtime::RenderEnvelope;
 use graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
-    GraphPreparedEffect, GraphResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
+    GraphPreparedEffect, GraphPreparedEffectBank, GraphResourceEstimate,
+    GraphScalarOwnerResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
     PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord,
     RouteTiming, RouteTransform, StableGraphId, TrackStage,
 };

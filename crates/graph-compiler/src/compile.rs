@@ -13,7 +13,7 @@ use crate::banks::{bind_rack_banks_indexed, checked_add_effect_banks, effect_ban
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
 };
-use crate::estimate::{estimate_fits_platform, resource_estimate};
+use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
     PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, failure, gid, into_effects, port, ports_for,
@@ -513,6 +513,27 @@ impl GraphCompiler {
         // the pre-bank estimate for canonical bytes while publishing and capping the exact
         // retained candidate estimate below.
         let semantic_estimate = estimate.clone();
+        let Some(control_resource) = effect_control_resource(&effects.entries, &banks) else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.effect_controls",
+                )],
+            ));
+        };
+        if estimate
+            .checked_add_scalar_owners(control_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.effect_controls",
+                )],
+            ));
+        }
         let Some(emitted_op_count) = levels.iter().try_fold(0_u64, |total, level| {
             total.checked_add(u64::try_from(level.nodes.len()).ok()?)
         }) else {

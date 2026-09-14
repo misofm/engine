@@ -132,3 +132,14 @@ Downstream delivery is now tracked in misofm/engine-web-adapter#111 and misofm/a
 Implementation is paused at the user's request for another Codex account to resume. All source checkpoints are pushed on `codex/807-live-eq`, through `e81df55b61f563fa26952608e7383d3c060cb956`. #147 and #805 are merged/closed; #807 assignments 1–3 are complete, assignments 4–10 remain. #808, #809, adapter #111 and app #222 have not entered implementation/release. No public live-cut activation, package publication or app deployment is claimed.
 
 The self-contained [resume handoff](https://github.com/misofm/engine/blob/codex/807-live-eq/docs/handoffs/804-account-switch-2026-09-14/README.md) records branches, exact commits, accepted decisions, test evidence, preserved plans, downstream requirements and the next bounded task. All agents are stopped. Before assignment 4, freeze its staging layout and amend the brief using the linked handoff's Astra XHIGH queue/accounting recommendation; no assignment-4 source has been written. #807 remains attempt 1 and still requires its final fresh Astra MEDIUM review. Keep this issue open.
+
+
+### Resumed delivery — 2026-09-14
+
+Implementation resumed from the account-switch handoff on codex/807-live-eq.
+The assignment-4 staging/accounting amendment is frozen and pushed at 388e3c4d.
+A compiling runtime-foundation recovery checkpoint follows; its new delivery/budget
+acceptance fixtures and host preflight are still pending. #807 remains attempt 1,
+with no public live-cut activation or final PASS. #808, #809, adapter #111 and app
+#222 remain subsequent delivery work. The active app/adapter worktrees remain clean
+at their preserved preparation checkpoints. Parent #804 remains open.

@@ -992,8 +992,7 @@ impl BankStage for ConsoleEffectBankStage {
     }
 
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        self.drain(first_sample);
-        Ok(())
+        self.drain(first_sample)
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1042,7 +1041,7 @@ impl BankStage for ConsoleEffectBankStage {
 impl ConsoleEffectBankStage {
     /// Step 1 of the block, hoisted out of [`Self::process_inner`] so that it runs before the
     /// chain's collapse dispatch reads the witness. See [`BankStage::begin_block`].
-    fn drain(&mut self, first_sample: u64) {
+    fn drain(&mut self, first_sample: u64) -> Result<(), RenderError> {
         let lane_count = self.width.lanes() as usize;
         let mut packed = 0_usize;
         self.offsets[0] = 0;
@@ -1054,6 +1053,9 @@ impl ConsoleEffectBankStage {
                     .and_then(|lanes| lanes.get_mut(lane))
                     .and_then(Option::as_mut);
                 let staged = channel.stage(&mut self.staging, first_sample, observation);
+                if staged.target_error {
+                    return Err(RenderError::InvalidEnvelope);
+                }
                 self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
                 self.unbound = self.unbound.saturating_add(u64::from(staged.unbound));
                 // Packed at this lane's own offset, immediately: that offset is what makes the
@@ -1065,6 +1067,7 @@ impl ConsoleEffectBankStage {
             self.offsets[lane + 1] = packed as u32;
         }
         self.staged_spans = packed;
+        Ok(())
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1079,6 +1082,20 @@ impl ConsoleEffectBankStage {
         let lane_count = self.width.lanes() as usize;
         // 1. The drain already ran, in `begin_block`, before the chain decided this block's mode.
         let packed = self.staged_spans;
+        // The chain has already performed any collapsed-to-dual state restoration before it
+        // dispatches this stage. Apply each lane's retained FIFO target prefix at that boundary;
+        // applying in `begin_block` would let desymmetrization copy the old right state over a new
+        // right-lane target.
+        for lane in 0..lane_count {
+            let Some(channel) = self.lanes[lane].as_ref() else {
+                continue;
+            };
+            for target in channel.prepared_targets() {
+                self.processor
+                    .apply_prepared_target_lane(lane, target)
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+            }
+        }
         // Issue #163 phase 4 item 4: which lanes, if any, are bypassed this block. Decided here
         // because it gates both the capture below and the restore in step 3, and because the
         // control drain in step 1 has already run — so this is the same verdict step 3 reaches,

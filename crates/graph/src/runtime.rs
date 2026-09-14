@@ -1994,6 +1994,9 @@ fn execute_op(
             // drain can never produce more distinct spans than the window holds. This is the
             // invariant, not a runtime policy: in release it costs nothing.
             debug_assert_eq!(staged.dropped, 0, "console staging window overflowed");
+            if staged.target_error {
+                return Err(RenderError::InvalidEnvelope);
+            }
             let automation = &console.spans[..staged.staged];
             let bypassed = console.control.bypassed();
             // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and
@@ -2004,6 +2007,12 @@ fn execute_op(
             // same block, so nothing crosses a block boundary and the skip moves no rendered bit.
             let capture_dry = bypassed || console.shunt.feeds_line();
             let effect = &mut console.effect;
+            for target in console.control.prepared_targets() {
+                effect
+                    .processor
+                    .apply_prepared_target(target)
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+            }
             let quantum = effect.metadata.quantum;
             match op.sidechain {
                 None => {

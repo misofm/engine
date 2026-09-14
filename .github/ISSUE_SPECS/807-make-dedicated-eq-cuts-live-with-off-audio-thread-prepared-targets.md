@@ -365,3 +365,26 @@ scalar/bank charges exactly once, exact budget acceptance and one-byte-below ref
 independent largest allocation, unsupported publication with unchanged counters/queues/
 observation state, mixed late refusal atomicity, and working ordinary semantic commands.
 Assignments 5–10, public live activation and final fresh Astra MEDIUM review remain pending.
+
+
+### Assignment 4 recovery checkpoint — runtime foundation, not acceptance
+
+Luna XHIGH added the queue variant, lane-owned FIFO backing, frozen drain, symmetry
+folding, scalar/bank target application, checked producer refusal, and graph/host-web
+storage charges. Root reviewed the source and required removal of realtime allocation/
+panic paths and correction of an interim unsupported-producer check; these corrections
+are present. Prepared lanes refuse raw semantic fallback as an explicit render error.
+Production factories remain unregistered and prepared target publication is refused.
+
+Root gates PASS: `cargo check --locked -p graph-compiler -p host-web`;
+`cargo test --locked -p effect-contract -p rack --tests` (98 tests, zero failures);
+`cargo fmt --all`; `bash scripts/check-realtime-policy.sh` (45 regions, 13 files);
+`git diff --check`. These are existing regression gates, not the new acceptance fixtures.
+The source is preserved now as a useful compiling recovery checkpoint before continuing
+this same attempt and assignment. No assignment-4 completion or whole-issue PASS.
+
+Still required in assignment 4: host original-command delivery preflight; new unsupported
+producer/counter and mixed late-refusal tests; actual EQ scalar/bank FIFO/asymmetric
+application fixtures; exact queue/lane/host staging budget and largest-allocation tests;
+focused compiler/host regressions and Wasm checks. Assignments 5–10 and final adversarial
+review remain pending. No public live-cut capability or release is claimed.

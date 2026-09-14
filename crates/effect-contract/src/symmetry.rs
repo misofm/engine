@@ -327,6 +327,13 @@ impl LiveConsoleRecord for EffectControlRecord {
                     SymmetryEvent::Preserve
                 }
             }
+            Self::PreparedTarget(target) => {
+                if target.channel.writes_one_channel() {
+                    SymmetryEvent::Desymmetrize
+                } else {
+                    SymmetryEvent::Preserve
+                }
+            }
             // A subscription changes what is *read* after the block, never what the block
             // renders, so it cannot move a designed word.
             Self::Observe { .. } => SymmetryEvent::Preserve,
