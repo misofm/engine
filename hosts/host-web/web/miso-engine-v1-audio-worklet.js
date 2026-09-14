@@ -7,6 +7,9 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
 const COMMAND_REASON_UNSUPPORTED_KIND = 7;
+const COMMAND_REASON_UNKNOWN_TRACK = 2;
+const COMMAND_REASON_UNKNOWN_RACK = 3;
+const COMMAND_REASON_UNKNOWN_EFFECT = 4;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
@@ -1458,7 +1461,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// detached copy. It never runs from `process()` and never invokes the preparation designer.
   receiveEqTargetConfig(message) {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !u32(message.trackIndex) || !u32(message.rack) || message.rack > 2
+        || !u32(message.trackIndex) || !u32(message.rack)
         || !u32(message.effectIndex)) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
       return;
@@ -1484,10 +1487,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
       config = new Uint8Array(this.memoryBuffer, pointer, EQ_CONFIG_BYTES).slice();
     }
+    let reason = 0;
+    if (result === RESULT_INVALID_ARGUMENT) {
+      reason = message.trackIndex >= this.trackCount
+        ? COMMAND_REASON_UNKNOWN_TRACK
+        : message.rack > 2
+          ? COMMAND_REASON_UNKNOWN_RACK
+          : COMMAND_REASON_UNKNOWN_EFFECT;
+    }
     this.port.postMessage({
       tag: "miso.eq-target-config.v1",
       requestId: message.requestId,
       result,
+      reason,
       config,
     }, [config.buffer]);
   }

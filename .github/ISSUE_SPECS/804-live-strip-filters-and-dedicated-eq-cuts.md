@@ -232,3 +232,29 @@ immutable error construction, synchronous existing-instance/raw-byte entry point
 post-await lifecycle guards, known-ordinary bypass of the prepared pending slot, and
 one authoritative encoded semantic snapshot. Preserve this draft and finish the same
 component; no new attempt/verdict or completion claim.
+
+
+### Assignment8 shared helper checkpoint, 2026-09-14
+
+The corrected browser component now accepts one raw semantic snapshot, shares Rust
+preparation and ACK commit logic across async and sync entry points, owns separate
+transfer/comparison bytes, and reserves the prepared pending slot before awaits.
+Known ordinary-only batches bypass that slot. Refusals preserve original indexes and
+normal ACK/report backpressure; malformed replies and lifecycle failures invalidate
+cached seeds. The selected verified module is retained; preparation instantiation is
+lazy, with no boot/render. ABI JSON is loaded once before host exposure and injected
+into the helper. The temporary source JSON symlink is removed. Production command
+routing and factory capability remain unchanged until assignment10.
+
+Root corrected remaining busy/revision exhaustion, missing-export, non-edit refusal
+and sync-error handling. A compact committed transport fixture is now part of the
+existing worklet suite: async/sync payload parity, detached transfer/ACK, next accepted
+seed/revision, indexed nonfinite refusal, known-ordinary submission while busy,
+disposal during config-copy, malformed ACK and fresh-seed recovery. This fixture is
+transport evidence, not an alternate EQ designer or actual production PCM proof.
+
+PASS: root compact helper plus existing worklet Node suite, implementer full existing
+worklet shell suite/source checks, root focused Rust control-target tests (2), ABI
+validator and ordinary generated assets/codegen. No benchmark or final artifact build.
+Proceed to assignment9 headless callbacks/types, then assignment10 production cutover
+and the consolidated real-host/audio gates. #807 remains open, attempt1.

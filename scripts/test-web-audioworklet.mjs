@@ -1,3 +1,4 @@
+import "./test-prepared-control.mjs";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const root = new URL("../", import.meta.url);
@@ -198,6 +199,7 @@ async function testMainRealm() {
   globalThis.fetch = async (url) => ({
     ok: true,
     arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
+    json: async () => ({}),
   });
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
@@ -1010,6 +1012,11 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   };
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
+  // Assignment 8's opaque prepared companion staging is present in the real worklet even while
+  // the default semantic command route remains ordinary. Keep the hermetic processor fixture's
+  // shape aligned so construction exercises the same bounded prewarm checks.
+  const preparedCompanionPointer = 23000;
+  const preparedCompanionCapacity = 24 + 2 * 256 * 80;
   const meterFramePointer = 40000;
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
@@ -1104,6 +1111,12 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
       return 0;
     },
     miso_engine_web_v1_command_report_ptr: () => reportPointer,
+    miso_engine_web_v1_prepared_companion_ptr: () => (
+      consoleAttached ? preparedCompanionPointer : 0
+    ),
+    miso_engine_web_v1_prepared_companion_capacity: () => (
+      consoleAttached ? preparedCompanionCapacity : 0
+    ),
     miso_engine_web_v1_command_submit: (_handle, count) => {
       calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 48).slice());
       report.setUint32(8, calls.commandResult, true);
@@ -1335,6 +1348,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     return {
       ok: true,
       arrayBuffer: async () => new Uint8Array([0]).buffer,
+      json: async () => ({}),
     };
   };
   WebAssembly.compile = async () => Object.freeze({ qualification: true });

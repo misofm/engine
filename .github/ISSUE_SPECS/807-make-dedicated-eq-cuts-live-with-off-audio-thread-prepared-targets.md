@@ -736,3 +736,51 @@ immutable error construction, synchronous existing-instance/raw-byte entry point
 post-await lifecycle guards, known-ordinary bypass of the prepared pending slot, and
 one authoritative encoded semantic snapshot. Preserve this draft and finish the same
 component; no new attempt/verdict or completion claim.
+
+
+### Assignment8 refusal compatibility amendment
+
+Astra read-only review of the existing browser console and writer found that expected
+preparation refusals must resolve through the existing command ACK/report contract.
+A thrown generic error would lose original indexes and writer backpressure handling.
+Root accepts one diagnostic export, `miso_engine_web_v1_eq_target_rejected_reason()`,
+using existing command reason values. Indexed parameter/domain/immutable/shape errors
+map to unknownParameter/domain/unsupportedKind/malformed; immutable returns Unsupported,
+other indexed failures InvalidArgument. Non-edit malformed requests or final-config
+failures retain the batch-level index convention and invalidate cached seeds. Success
+clears the reason; failed preparation preserves result bytes/count. The workspace's
+actual size remains the accounting authority. This adds no designer or public
+coefficient input API.
+
+The helper maps Rust edit indexes back to original command indexes and returns zero
+admitted with original semantic bytes for expected refusal; only protocol/transport
+failures reject. Private config-copy replies carry an address reason derived from
+actual host track count and the existing rack/effect address check. Only actual
+Unsupported classifies an owner as ordinary. This amendment finishes the existing
+component; no additional test framework or feature scope is authorized.
+
+
+### Assignment8 shared helper checkpoint, 2026-09-14
+
+The corrected browser component now accepts one raw semantic snapshot, shares Rust
+preparation and ACK commit logic across async and sync entry points, owns separate
+transfer/comparison bytes, and reserves the prepared pending slot before awaits.
+Known ordinary-only batches bypass that slot. Refusals preserve original indexes and
+normal ACK/report backpressure; malformed replies and lifecycle failures invalidate
+cached seeds. The selected verified module is retained; preparation instantiation is
+lazy, with no boot/render. ABI JSON is loaded once before host exposure and injected
+into the helper. The temporary source JSON symlink is removed. Production command
+routing and factory capability remain unchanged until assignment10.
+
+Root corrected remaining busy/revision exhaustion, missing-export, non-edit refusal
+and sync-error handling. A compact committed transport fixture is now part of the
+existing worklet suite: async/sync payload parity, detached transfer/ACK, next accepted
+seed/revision, indexed nonfinite refusal, known-ordinary submission while busy,
+disposal during config-copy, malformed ACK and fresh-seed recovery. This fixture is
+transport evidence, not an alternate EQ designer or actual production PCM proof.
+
+PASS: root compact helper plus existing worklet Node suite, implementer full existing
+worklet shell suite/source checks, root focused Rust control-target tests (2), ABI
+validator and ordinary generated assets/codegen. No benchmark or final artifact build.
+Proceed to assignment9 headless callbacks/types, then assignment10 production cutover
+and the consolidated real-host/audio gates. #807 remains open, attempt1.

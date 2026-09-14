@@ -476,6 +476,8 @@ class MisoAudioWorkletHost {
   #sampleRateHz;
   #quantumFrames;
   #preparedControl;
+  #preparedModule;
+  #preparedAbiLayout;
 
   constructor(
     node,
@@ -488,6 +490,7 @@ class MisoAudioWorkletHost {
     commandQueueRecords,
     consoleMeterBlocks,
     preparedModule,
+    preparedAbiLayout,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -501,15 +504,26 @@ class MisoAudioWorkletHost {
     this.#ringBlocks = ringBlocks;
     this.#commandQueueRecords = commandQueueRecords;
     this.#consoleMeterBlocks = consoleMeterBlocks;
+    // The prepared path is private and dormant until the production cutover. Keeping the
+    // verified module here lets that path instantiate one main-realm preparation workspace lazily;
+    // ordinary command() therefore has exactly its existing transport and no speculative ABI load.
     this.#preparedControl = null;
+    this.#preparedModule = preparedModule;
+    this.#preparedAbiLayout = preparedAbiLayout;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
     this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+  }
+
+  #ensurePreparedControl() {
+    if (this.#preparedControl !== null) return this.#preparedControl;
+    if (this.#preparedAbiLayout === undefined) throw webError(255);
     this.#preparedControl = createPreparedControl({
-      module: preparedModule,
-      sampleRateHz,
+      module: this.#preparedModule,
+      abiLayout: this.#preparedAbiLayout,
+      sampleRateHz: this.#sampleRateHz,
       configCopy: (address) => this.#request(
         {
           tag: "miso.eq-target-config.v1",
@@ -520,31 +534,56 @@ class MisoAudioWorkletHost {
         [],
         "eqConfig",
       ),
-      ordinarySubmit: (records, commands) => this.#submitOrdinaryRecords(records, commands),
-      preparedSubmit: (records, companion, commands) =>
-        this.#submitPreparedRecords(records, companion, commands),
+      ordinarySubmit: (records, count) => this.#submitOrdinaryRecords(records, count),
+      preparedSubmit: (records, companion, count) =>
+        this.#submitPreparedRecords(records, companion, count),
+      preparedRefusal: (records, count, reason, rejectedIndex, result) =>
+        this.#preparedRefusal(records, count, reason, rejectedIndex, result),
     });
+    return this.#preparedControl;
   }
 
-  #submitOrdinaryRecords(records, commands) {
+  #preparedRefusal(records, count, reason, rejectedIndex, result = RESULT_INVALID_ARGUMENT) {
+    const requestId = this.#allocateRequestId();
+    if (requestId === null) return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
+    return Promise.resolve(Object.freeze({
+      tag: "miso.ack.v1",
+      requestId,
+      result,
+      reason: Number.isSafeInteger(reason) ? reason : 1,
+      rejectedIndex: Number.isSafeInteger(rejectedIndex) ? rejectedIndex : 0,
+      admitted: 0,
+      appliedAtSample: 0n,
+      records,
+    }));
+  }
+
+  #submitOrdinaryRecords(records, count) {
     return this.#request(
-      { tag: "miso.command.v1", count: commands.length, records },
+      { tag: "miso.command.v1", count, records },
       [records.buffer],
       "command",
     );
   }
 
-  #submitPreparedRecords(records, companion, commands) {
+  #submitPreparedRecords(records, companion, count) {
     return this.#request(
       {
         tag: "miso.prepared-command.v1",
-        count: commands.length,
+        count,
         records,
         companion,
       },
       [records.buffer, companion.buffer],
       "preparedCommand",
     );
+  }
+
+  // Kept private until assignment 10 installs it as command()'s semantic lowering. The shared
+  // helper is still exercised by headless/browser component fixtures without changing defaults.
+  #submitPrepared(records, count) {
+    const control = this.#ensurePreparedControl();
+    return control.submit(records, count);
   }
 
   // Request IDs are strictly monotonic and the worklet handles messages in arrival order, so the
@@ -678,7 +717,7 @@ class MisoAudioWorkletHost {
             "records",
           ]
         : pending.response === "eqConfig"
-          ? ["tag", "requestId", "result", "config"]
+          ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached"]
           : pending.response === "observationMap"
@@ -734,7 +773,8 @@ class MisoAudioWorkletHost {
       && message.records.byteLength === pending.commandCount * COMMAND_RECORD_BYTES
     );
     const validConfig = pending.response !== "eqConfig"
-      || (message.config instanceof Uint8Array
+      || (validCommandReason(message.reason)
+        && message.config instanceof Uint8Array
         && message.config.buffer instanceof ArrayBuffer
         && ((message.result === RESULT_OK && message.config.byteLength === 272)
           || (message.result !== RESULT_OK && message.config.byteLength === 0)));
@@ -1367,6 +1407,12 @@ export async function createMisoAudioWorkletHost(options) {
       node.port.onmessageerror = () => finish(reject, webError(255));
       node.onprocessorerror = () => finish(reject, webError(255));
     });
+    // The generated ABI is loaded once on the control side before the host becomes visible. The
+    // prepared route then has no initialization await between its synchronous reservation and the
+    // first config-copy request; the verified Wasm module itself remains lazy until that route is used.
+    const abiResponse = await fetch(new URL("./miso-engine-v1-abi-layout.json", import.meta.url));
+    if (!abiResponse.ok) throw webError(255);
+    const preparedAbiLayout = await abiResponse.json();
     return new MisoAudioWorkletHost(
       node,
       selected.backend,
@@ -1384,6 +1430,7 @@ export async function createMisoAudioWorkletHost(options) {
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
       Number(options.options.consoleMeterBlocks),
       selected.module,
+      preparedAbiLayout,
     );
   } catch (error) {
     cleanupNode(node);

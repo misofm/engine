@@ -190,6 +190,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_eq_target_open \
   miso_engine_web_v1_eq_target_prepare \
   miso_engine_web_v1_eq_target_rejected_edit_index \
+  miso_engine_web_v1_eq_target_rejected_reason \
   miso_engine_web_v1_eq_target_request_capacity \
   miso_engine_web_v1_eq_target_request_ptr \
   miso_engine_web_v1_eq_target_result_bytes \

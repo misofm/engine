@@ -6,6 +6,7 @@ use core::{cell::RefCell, mem::size_of};
 use effect_contract::ParameterChannel;
 use host_core::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
+    EqTargetPreparerError,
 };
 
 pub const EQ_TARGET_REQUEST_HEADER_BYTES: usize = 32;
@@ -140,6 +141,7 @@ pub struct EqTargetWorkspace {
     pub result_bytes: usize,
     pub preparer: EqTargetPreparer,
     pub rejected_edit_index: u32,
+    pub rejected_reason: u32,
 }
 
 impl EqTargetWorkspace {
@@ -150,6 +152,7 @@ impl EqTargetWorkspace {
             result_bytes: 0,
             preparer,
             rejected_edit_index: u32::MAX,
+            rejected_reason: crate::COMMAND_REASON_NONE,
         }
     }
 }
@@ -255,6 +258,32 @@ fn request_header(request: &[u8]) -> Result<(u32, u32), u32> {
     Ok((rate, edits))
 }
 
+fn preparation_refusal(error: EqTargetPreparerError) -> (u32, u32) {
+    use host_core::control_preparation::EditErrorKind;
+    let reason = match error {
+        EqTargetPreparerError::Edit {
+            kind: EditErrorKind::Parameter,
+            ..
+        } => crate::COMMAND_REASON_UNKNOWN_PARAMETER,
+        EqTargetPreparerError::Edit {
+            kind: EditErrorKind::NotAutomatable,
+            ..
+        }
+        | EqTargetPreparerError::Unsupported => crate::COMMAND_REASON_UNSUPPORTED_KIND,
+        EqTargetPreparerError::Edit {
+            kind: EditErrorKind::Domain,
+            ..
+        } => crate::COMMAND_REASON_DOMAIN,
+        _ => crate::COMMAND_REASON_MALFORMED,
+    };
+    let result = if reason == crate::COMMAND_REASON_UNSUPPORTED_KIND {
+        crate::RESULT_UNSUPPORTED
+    } else {
+        crate::RESULT_INVALID_ARGUMENT
+    };
+    (result, reason)
+}
+
 pub fn prepare(request_bytes: u32) -> u32 {
     WORKSPACE.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {
@@ -264,6 +293,7 @@ pub fn prepare(request_bytes: u32) -> u32 {
             return crate::RESULT_WRONG_STATE;
         };
         workspace.rejected_edit_index = u32::MAX;
+        workspace.rejected_reason = crate::COMMAND_REASON_MALFORMED;
         let request = &workspace.request;
         if request_bytes as usize > request.len() {
             return crate::RESULT_BUFFER_TOO_SMALL;
@@ -324,7 +354,9 @@ pub fn prepare(request_bytes: u32) -> u32 {
             Ok(result) => result,
             Err(error) => {
                 workspace.rejected_edit_index = error.index();
-                return crate::RESULT_INVALID_ARGUMENT;
+                let (result, reason) = preparation_refusal(error);
+                workspace.rejected_reason = reason;
+                return result;
             }
         };
         let mut output = [0_u8; EQ_TARGET_RESULT_CAPACITY];
@@ -353,6 +385,7 @@ pub fn prepare(request_bytes: u32) -> u32 {
         }
         workspace.result[..output.len()].copy_from_slice(&output);
         workspace.result_bytes = 272 + count * EQ_TARGET_TARGET_BYTES;
+        workspace.rejected_reason = crate::COMMAND_REASON_NONE;
         crate::RESULT_OK
     })
 }
@@ -379,6 +412,14 @@ pub fn rejected_edit_index() -> u32 {
             .ok()
             .and_then(|w| w.as_ref().map(|w| w.rejected_edit_index))
             .unwrap_or(u32::MAX)
+    })
+}
+pub fn rejected_reason() -> u32 {
+    WORKSPACE.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|w| w.as_ref().map(|w| w.rejected_reason))
+            .unwrap_or(crate::COMMAND_REASON_WRONG_STATE)
     })
 }
 pub fn result_capacity() -> u32 {
@@ -449,6 +490,7 @@ mod tests {
         assert_eq!(request_ptr(), 0);
         assert_eq!(prepare(0), crate::RESULT_WRONG_STATE);
         assert_eq!(rejected_edit_index(), u32::MAX);
+        assert_eq!(rejected_reason(), crate::COMMAND_REASON_WRONG_STATE);
         assert_eq!(close(), crate::RESULT_WRONG_STATE);
     }
 }

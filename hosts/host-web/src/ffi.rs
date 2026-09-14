@@ -3314,6 +3314,12 @@ pub extern "C" fn miso_engine_web_v1_eq_target_rejected_edit_index() -> u32 {
     crate::control_targets::rejected_edit_index()
 }
 
+/// Return the existing command reason from the most recent EQ preparation refusal.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_eq_target_rejected_reason() -> u32 {
+    crate::control_targets::rejected_reason()
+}
+
 /// Close the EQ target-preparation workspace.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
