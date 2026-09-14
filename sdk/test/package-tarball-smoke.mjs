@@ -461,6 +461,11 @@ if (process.env.MISO_ENGINE_SDK_BROWSER_TOOLS) {
   ]);
   const browserRoot = resolve(consumerRoot, "browser");
   await mkdir(browserRoot);
+  const meterModel = JSON.parse(builtDocument);
+  // Preserve independent lanes: the shared default centered pan mixes them.
+  delete meterModel.tracks[0].pan;
+  meterModel.tracks[0].matrix = { ll: 1, lr: 0, rl: 0, rr: 1, smoothing_samples: 0 };
+  const meterDocument = JSON.stringify(meterModel);
   const seekModel = JSON.parse(builtDocument);
   seekModel.sources[0].frames = "480000";
   const seekDocument = JSON.stringify(seekModel);
@@ -492,6 +497,7 @@ registerProcessor('capture-first-quantum', Capture);
 import { createEngine, createDefaultHost, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from '@misofm/engine/browser';
 import { BUNDLED_ENGINE_ASSETS } from '@misofm/engine/assets';
 const sessionDocument = ${JSON.stringify(builtDocument)};
+const meterDocument = ${JSON.stringify(meterDocument)};
 window.proof = [];
 for (const id of ['default', 'forward']) document.querySelector('#' + id).onclick = async () => {
   try {
@@ -565,7 +571,7 @@ document.querySelector('#meter').onclick = async () => {
       stop = undefined;
       window.resolveMeter = resolve;
     });
-    engine = await createEngine({ document: sessionDocument, policy: { console: { commandQueueRecords: 8, meterBlocks: 1 } } });
+    engine = await createEngine({ document: meterDocument, policy: { console: { commandQueueRecords: 8, meterBlocks: 1 } } });
     stop = await engine.subscribeMeters(update => {
       if (window.meterCandidate) return;
       const track = update.tracks.get('track');
@@ -654,7 +660,7 @@ document.querySelector('#meter').onclick = async () => {
     assert.equal(seekProof.counters.submittedGenerationTag, 2);
     assert.deepEqual(faults, []);
     assert.equal(network.some(response => response.status >= 400), false);
-    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, seekProof, network })}`);
+    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, meterProof, seekProof, network })}`);
   } finally {
     await browser?.close();
     await new Promise(accept => server.close(accept));
