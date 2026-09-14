@@ -204,3 +204,11 @@ generated additive ABI. Focused real-EQ and malformed-header checks, native/Wasm
 Clippy and generated ABI gates pass. The next step connects prepared targets to
 atomic host admission, then the shared browser/headless helper. Production activation
 and all releases/deployment remain pending.
+
+
+#807 host admission and accepted-shadow copy are implemented with fixed storage and
+original command indexes. The corrected checkpoint passes 98 host tests (2 existing
+ignored), native/Wasm, Clippy and ABI generation gates. Shared browser/headless helper
+wiring follows. Opted-in transaction integration gates are consolidated into the real
+production cutover rather than an intermediate fake registry setup; they remain
+required before release. No public activation, package release or deployment yet.

@@ -683,3 +683,36 @@ publication is a terminal invariant failure. Config-copy uses a checked monotoni
 u64 host generation. Owner failures use their first semantic wire index, queue
 capacity failures the first contributing wire index, and malformed/stale/orphan
 batch envelopes index0. No extra owner list, target cache or admission framework.
+
+
+### Assignment 7 implementation checkpoint — host admission and config-copy
+
+Luna XHIGH implemented the common ordinary/prepared admission pass, addressed
+accepted-shadow copy, checked host-generation tokens, fixed companion/config storage
+and five implemented ABI exports. Root corrected optional console-only storage and
+its metadata charge, original indexes after solo coalescing and malformed owner
+payloads, typed owner refusals and combined queue-capacity reporting, checked ledger
+arithmetic, and terminal failure command reports. The dedicated companion exports
+suffice; no redundant general buffer-kind identity was added.
+
+Root's compact actual-host test admits an ordinary command through a valid empty
+companion envelope, proves a late invalid original command and a truncated envelope
+publish nothing, preserves config bytes on failed copy, and proves console-off hosts
+retain no companion workspace. Existing ordinary, solo, observation and exact-budget
+regressions remain green. Production EQ is still not opted in.
+
+Gates PASS: root host-web lib (98 passed, 2 existing ignored), affected all-target
+Clippy with host-core/control-provider, Wasm host-web check, parameter-metadata ABI
+tests (7), ABI validator/self-test (17 existing mutations), generated SDK check,
+fmt/diff. A full artifact build was started by the implementer and interrupted before
+completion; it supplies no artifact evidence and no pin was changed. The final
+artifact build belongs to assignment10.
+
+To honor the user's instruction to reach the working feature without extra test
+scaffolding, root consolidates opted-in-host success/rollback/config-copy/allocation
+proof into assignment10's real production route instead of creating an intermediate
+fake registry framework. These checks are deferred, not waived: mixed owner/bypass/
+fader batches, missing/extra/unsafe/stale targets, full unrelated queues, invalid
+before valid overwrites, successive transactions before render, original indexes,
+config preservation and zero allocations/designer calls must pass before release.
+Assignment8's shared browser preparation helper is next; issue remains open, attempt1.

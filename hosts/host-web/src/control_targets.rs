@@ -20,6 +20,24 @@ pub const EQ_TARGET_RESULT_CAPACITY: usize = EQ_TARGET_RESULT_HEADER_BYTES
 pub const PREPARED_EFFECT_COMPANION_CAPACITY: usize = size_of::<WebPreparedEffectCompanionHeader>()
     + 2 * crate::MAXIMUM_COMMAND_RECORDS as usize * size_of::<WebPreparedEffectCompanionRecord>();
 
+/// One fixed host-side workspace for the opaque prepared-control companion and addressed EQ
+/// configuration copy.  It is allocated once with the host and reused for every between-block
+/// submission; no target list or per-owner cache is retained here.
+#[repr(C)]
+pub struct PreparedControlWorkspace {
+    pub companion: [u8; PREPARED_EFFECT_COMPANION_CAPACITY],
+    pub config: [u8; size_of::<WebEqTargetConfig>()],
+}
+
+impl PreparedControlWorkspace {
+    pub fn zeroed() -> Box<Self> {
+        Box::new(Self {
+            companion: [0; PREPARED_EFFECT_COMPANION_CAPACITY],
+            config: [0; size_of::<WebEqTargetConfig>()],
+        })
+    }
+}
+
 const _: () = {
     assert!(size_of::<WebEqTargetRequest>() == 32);
     assert!(size_of::<WebEqTargetEdit>() == 12);

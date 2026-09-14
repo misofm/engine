@@ -16,6 +16,7 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeMap;
 
 use builtins::{
@@ -46,6 +47,8 @@ use host_core::{
     SpectrumTarget, SpectrumWindow,
 };
 use session::CompileCaps;
+
+use control_targets::{PREPARED_EFFECT_COMPANION_CAPACITY, PreparedControlWorkspace};
 
 pub use host_core::EffectRack;
 
@@ -1190,6 +1193,8 @@ struct PreparedBuffers {
     /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-console staging (issue #137 D1).
     command: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
+    /// One fixed workspace for the trusted prepared-control companion and addressed EQ config.
+    prepared_control: Option<Box<PreparedControlWorkspace>>,
 }
 
 type FfiSourceStaging<'a> = (
@@ -1319,7 +1324,7 @@ struct ReadyOwnership {
     /// Decoded submission staging. Two entries per staged record, because one wire record
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * track_count` for the coalesced solo emission (issue #210 phase 1).
-    command_decoded: Box<[(u32, AdmittedCommand)]>,
+    command_decoded: Box<[StagedCommand]>,
     /// Issue #210 phase 1: the console's solo bits and its mirrors of user mute and of what the
     /// render plane was last told. Solo composes into the *existing* mute records at admission and
     /// adds nothing below it, so this is the whole of solo-in-place on the host side.
@@ -1503,7 +1508,7 @@ impl ReadyOwnership {
     /// The input band was **appended** to the per-track prefix rather than inserted, so the two
     /// existing bands keep their indices and the only arithmetic that moved is the effect base's
     /// `2 * tracks` -> `3 * tracks`. Every site that spells that constant is below and in
-    /// [`Self::queue_capacity`], [`Self::push`] and the `queue_count` allocation; there is no
+    /// [`Self::queue_available`], [`Self::push`] and the `queue_count` allocation; there is no
     /// fourth spelling.
     fn effect_slot(&self, track: usize, rack: u8, effect_index: u32) -> Option<usize> {
         let base = *self.effect_base.get(track)? as usize;
@@ -1521,23 +1526,26 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
-    /// Free room in one destination queue, or `None` when the queue does not exist.
-    fn queue_capacity(&self, slot: usize) -> Option<u32> {
+    fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.tracks.len();
         if slot < tracks {
-            let producer = self.controls.get(slot)?;
-            return u32::try_from(producer.producer.capacity()).ok();
+            return u32::try_from(self.controls.get(slot)?.producer.available_capacity()).ok();
         }
         if slot < tracks * 2 {
-            let producer = self.controls.get(slot - tracks)?;
-            return u32::try_from(producer.fader.capacity()).ok();
+            return u32::try_from(self.controls.get(slot - tracks)?.fader.available_capacity())
+                .ok();
         }
         if slot < tracks * 3 {
-            let producer = self.controls.get(slot - tracks * 2)?;
-            return u32::try_from(producer.input.capacity()).ok();
+            return u32::try_from(
+                self.controls
+                    .get(slot - tracks * 2)?
+                    .input
+                    .available_capacity(),
+            )
+            .ok();
         }
         let producer = self.effect_controls.get(slot - tracks * 3)?.as_ref()?;
-        u32::try_from(producer.capacity()).ok()
+        u32::try_from(producer.producer().available_capacity()).ok()
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
@@ -1566,6 +1574,13 @@ impl ReadyOwnership {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
+                let producer = self
+                    .effect_controls
+                    .get_mut(effect)
+                    .ok_or(())?
+                    .as_mut()
+                    .ok_or(())?;
+                producer.try_push(record).map_err(|_| ())?;
                 if let EffectControlRecord::Observe {
                     tap_index, armed, ..
                 } = record
@@ -1580,13 +1595,7 @@ impl ReadyOwnership {
                         *sample = applied_at_sample;
                     }
                 }
-                let producer = self
-                    .effect_controls
-                    .get_mut(effect)
-                    .ok_or(())?
-                    .as_mut()
-                    .ok_or(())?;
-                producer.try_push(record).map_err(|_| ())
+                Ok(())
             }
         }
     }
@@ -1623,6 +1632,27 @@ enum AdmittedCommand {
     Effect(EffectControlRecord),
 }
 
+#[derive(Clone, Copy)]
+struct PreparedOwner {
+    queue_slot: u32,
+    base_revision: u64,
+    first_wire_index: u32,
+    target_count: u32,
+}
+
+#[derive(Clone, Copy)]
+enum StagedCommandKind {
+    Command(AdmittedCommand),
+    PreparedOwner(PreparedOwner),
+}
+
+#[derive(Clone, Copy)]
+struct StagedCommand {
+    queue_slot: u32,
+    original_wire_index: u32,
+    kind: StagedCommandKind,
+}
+
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
 ///
 /// The strict JSON declares one channel count and full-source frame count; sample rate is solely a
@@ -1648,9 +1678,22 @@ pub struct AudioWorkletEngineHost {
     meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
+    /// Checked host-scoped generation for prepared companion ownership. This token is distinct
+    /// from the wrapping Wasm handle and changes on every successfully published host.
+    host_generation: u64,
     /// Host-scoped monotonic token for completed spectrum windows.
     spectrum_token: u64,
     diagnostic_len: usize,
+}
+
+static NEXT_HOST_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_host_generation() -> Option<u64> {
+    NEXT_HOST_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .ok()
 }
 
 impl AudioWorkletEngineHost {
@@ -1783,6 +1826,8 @@ impl AudioWorkletEngineHost {
             ));
         }
         let buffers = allocate_buffers(projection)?;
+        let host_generation = next_host_generation()
+            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.host.generation"))?;
         let backend = selected_backend();
         Ok(Self {
             options,
@@ -1805,6 +1850,7 @@ impl AudioWorkletEngineHost {
             meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
+            host_generation,
             spectrum_token: 0,
             diagnostic_len: 0,
         })
@@ -2471,6 +2517,92 @@ impl AudioWorkletEngineHost {
             .map_or(0, |value| value.command.len() as u64)
     }
 
+    /// Mutable opaque prepared-control companion staging. The caller must provide the exact
+    /// little-endian frame before [`Self::submit_prepared_commands`].
+    pub fn prepared_companion_mut(&mut self) -> Option<&mut [u8]> {
+        self.buffers
+            .as_mut()
+            .and_then(|buffers| buffers.prepared_control.as_mut())
+            .map(|workspace| &mut workspace.companion[..])
+    }
+
+    /// Exact fixed companion capacity in bytes.
+    #[must_use]
+    pub fn prepared_companion_capacity(&self) -> u32 {
+        self.buffers
+            .as_ref()
+            .and_then(|buffers| buffers.prepared_control.as_ref())
+            .map_or(0, |_| PREPARED_EFFECT_COMPANION_CAPACITY as u32)
+    }
+
+    /// Read-only addressed EQ configuration copy, or `None` when this host has no prepared owner
+    /// for the requested effect. The output is retained in the one fixed workspace until the
+    /// next successful copy.
+    pub fn copy_eq_target_config(&mut self, track_index: u32, rack: u32, effect_index: u32) -> u32 {
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        if rack > 2 {
+            return self.record(RESULT_INVALID_ARGUMENT);
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let Some(effect) = ready.effect_slot(track_index as usize, rack as u8, effect_index) else {
+            return self.record(RESULT_INVALID_ARGUMENT);
+        };
+        let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
+            return self.record(RESULT_UNSUPPORTED);
+        };
+        if producer.effect_id.as_ref() != "miso.parametric-eq" {
+            return self.record(RESULT_UNSUPPORTED);
+        }
+        let Some(owner) = producer.owner() else {
+            return self.record(RESULT_UNSUPPORTED);
+        };
+        if owner.committed().len() != host_core::EQ_VALUE_COUNT {
+            return self.record(RESULT_UNSUPPORTED);
+        }
+        let sample_rate = owner.sample_rate();
+        let owner_revision = owner.committed_revision();
+        let values = owner.committed();
+        let Some(buffers) = self.buffers.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
+        };
+        let Some(workspace) = buffers.prepared_control.as_mut() else {
+            return self.record(RESULT_UNSUPPORTED);
+        };
+        let output = &mut workspace.config;
+        output.fill(0);
+        output[0..4].copy_from_slice(&(size_of::<WebEqTargetConfig>() as u32).to_le_bytes());
+        output[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+        output[8..12].copy_from_slice(&sample_rate.to_le_bytes());
+        output[12..16].copy_from_slice(&(host_core::EQ_VALUE_COUNT as u32).to_le_bytes());
+        output[16..24].copy_from_slice(&self.host_generation.to_le_bytes());
+        output[24..32].copy_from_slice(&owner_revision.to_le_bytes());
+        for (index, value) in values.iter().enumerate() {
+            let offset = 32 + index * 4;
+            output[offset..offset + 4].copy_from_slice(&value.value.to_bits().to_le_bytes());
+        }
+        self.record(RESULT_OK)
+    }
+
+    /// Fixed address of the most recent addressed EQ configuration copy.
+    #[must_use]
+    pub fn eq_target_config(&self) -> Option<&[u8]> {
+        self.buffers
+            .as_ref()
+            .and_then(|buffers| buffers.prepared_control.as_ref())
+            .map(|workspace| workspace.config.as_slice())
+    }
+
+    /// Submit a prepared companion alongside the existing semantic command staging. This private
+    /// trusted-host route shares the ordinary lowering and report, but requires every touched
+    /// prepared owner to publish its supplied target prefix before any shadow or solo commit.
+    pub fn submit_prepared_commands(&mut self, count: u32, companion_bytes: u32) -> u32 {
+        self.submit_commands_inner(count, Some(companion_bytes))
+    }
+
     /// Whether preparation attached a live-console control channel (issue #137 D1).
     #[must_use]
     pub fn console_attached(&self) -> bool {
@@ -2730,6 +2862,10 @@ impl AudioWorkletEngineHost {
     /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues. The block that
     /// follows drains them.
     pub fn submit_commands(&mut self, count: u32) -> u32 {
+        self.submit_commands_inner(count, None)
+    }
+
+    fn submit_commands_inner(&mut self, count: u32, companion_bytes: Option<u32>) -> u32 {
         self.command_report = empty_command_report();
         if self.status.state != STATE_READY {
             return self.finish_commands(RESULT_WRONG_STATE, COMMAND_REASON_WRONG_STATE, 0, 0);
@@ -2755,10 +2891,52 @@ impl AudioWorkletEngineHost {
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
-        match admit_commands(ready, bytes, count as usize, applied_at_sample) {
+        let (prepared, companion) = match companion_bytes {
+            None => (false, None),
+            Some(bytes_len) => {
+                let Ok(bytes_len) = usize::try_from(bytes_len) else {
+                    return self.finish_commands(
+                        RESULT_INVALID_ARGUMENT,
+                        COMMAND_REASON_MALFORMED,
+                        0,
+                        0,
+                    );
+                };
+                let Some(companion) = buffers
+                    .prepared_control
+                    .as_ref()
+                    .and_then(|workspace| workspace.companion.get(..bytes_len))
+                else {
+                    return self.finish_commands(
+                        RESULT_INVALID_ARGUMENT,
+                        COMMAND_REASON_MALFORMED,
+                        0,
+                        0,
+                    );
+                };
+                (true, Some(companion))
+            }
+        };
+        match admit_commands(
+            ready,
+            bytes,
+            count as usize,
+            applied_at_sample,
+            self.host_generation,
+            prepared,
+            companion,
+        ) {
             Ok(()) => {
                 self.command_report.applied_at_sample = applied_at_sample;
                 self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
+            }
+            Err(CommandRejection {
+                result,
+                reason,
+                index,
+            }) if result == RESULT_INTERNAL => {
+                self.finish_commands(RESULT_INTERNAL, reason, index, 0);
+                self.fail(RESULT_INTERNAL, b"web.internal.command\t$\n")
             }
             Err(CommandRejection {
                 result,
@@ -3201,6 +3379,162 @@ struct CommandRejection {
     index: u32,
 }
 
+fn owner_command_reason(error: host_core::EffectControlOwnerError) -> u32 {
+    use host_core::EffectControlOwnerError;
+    match error {
+        EffectControlOwnerError::Capacity => COMMAND_REASON_BACKPRESSURE,
+        EffectControlOwnerError::Domain => COMMAND_REASON_DOMAIN,
+        EffectControlOwnerError::Parameter => COMMAND_REASON_UNKNOWN_PARAMETER,
+        EffectControlOwnerError::Unsupported | EffectControlOwnerError::NotAutomatable => {
+            COMMAND_REASON_UNSUPPORTED_KIND
+        }
+        EffectControlOwnerError::Revision | EffectControlOwnerError::Invariant => {
+            COMMAND_REASON_WRONG_STATE
+        }
+        EffectControlOwnerError::Rate
+        | EffectControlOwnerError::Shape
+        | EffectControlOwnerError::Target(_) => COMMAND_REASON_MALFORMED,
+    }
+}
+
+struct PreparedCompanion<'a> {
+    bytes: &'a [u8],
+    target_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CompanionTarget {
+    track_index: u32,
+    rack: u8,
+    effect_index: u32,
+    base_revision: u64,
+    target: effect_contract::PreparedEffectTarget,
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(offset..offset + 8)?.try_into().ok()?,
+    ))
+}
+
+fn parse_prepared_companion<'a>(
+    bytes: &'a [u8],
+    host_generation: u64,
+) -> Result<PreparedCompanion<'a>, ()> {
+    let header = size_of::<WebPreparedEffectCompanionHeader>();
+    if bytes.len() < header {
+        return Err(());
+    }
+    let struct_size = read_u32_le(bytes, 0).ok_or(())?;
+    let abi_version = read_u32_le(bytes, 4).ok_or(())?;
+    let generation = read_u64_le(bytes, 8).ok_or(())?;
+    let target_count = usize::try_from(read_u32_le(bytes, 16).ok_or(())?).map_err(|_| ())?;
+    let reserved = read_u32_le(bytes, 20).ok_or(())?;
+    if struct_size as usize != header
+        || abi_version != ABI_VERSION
+        || generation != host_generation
+        || reserved != 0
+        || target_count > 2 * MAXIMUM_COMMAND_RECORDS as usize
+    {
+        return Err(());
+    }
+    let expected = header
+        .checked_add(
+            target_count
+                .checked_mul(size_of::<WebPreparedEffectCompanionRecord>())
+                .ok_or(())?,
+        )
+        .ok_or(())?;
+    if bytes.len() != expected {
+        return Err(());
+    }
+    Ok(PreparedCompanion {
+        bytes,
+        target_count,
+    })
+}
+
+fn companion_wire_index(
+    ready: &ReadyOwnership,
+    lowered: usize,
+    companion: &PreparedCompanion<'_>,
+    index: usize,
+) -> usize {
+    let start = size_of::<WebPreparedEffectCompanionHeader>()
+        + index * size_of::<WebPreparedEffectCompanionRecord>();
+    let address = (|| {
+        let track = read_u32_le(companion.bytes, start)? as usize;
+        let rack = u8::try_from(read_u32_le(companion.bytes, start + 4)?).ok()?;
+        let effect = read_u32_le(companion.bytes, start + 8)?;
+        ready.effect_slot(track, rack, effect)
+    })();
+    let Some(effect) = address else { return 0 };
+    ready.command_decoded[..lowered]
+        .iter()
+        .find_map(|entry| match entry.kind {
+            StagedCommandKind::PreparedOwner(owner)
+                if owner.queue_slot as usize == ready.tracks.len() * 3 + effect =>
+            {
+                Some(owner.first_wire_index as usize)
+            }
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn companion_target(
+    companion: &PreparedCompanion<'_>,
+    index: usize,
+) -> Result<CompanionTarget, ()> {
+    let start = size_of::<WebPreparedEffectCompanionHeader>()
+        .checked_add(
+            index
+                .checked_mul(size_of::<WebPreparedEffectCompanionRecord>())
+                .ok_or(())?,
+        )
+        .ok_or(())?;
+    let bytes = companion
+        .bytes
+        .get(start..start + size_of::<WebPreparedEffectCompanionRecord>())
+        .ok_or(())?;
+    let track_index = read_u32_le(bytes, 0).ok_or(())?;
+    let rack = u8::try_from(read_u32_le(bytes, 4).ok_or(())?).map_err(|_| ())?;
+    let effect_index = read_u32_le(bytes, 8).ok_or(())?;
+    if read_u32_le(bytes, 12).ok_or(())? != 0 {
+        return Err(());
+    }
+    let base_revision = read_u64_le(bytes, 16).ok_or(())?;
+    let slot = read_u32_le(bytes, 24).ok_or(())?;
+    let channel_raw = read_u32_le(bytes, 28).ok_or(())?;
+    let channel = match channel_raw {
+        0 => effect_contract::ParameterChannel::Left,
+        1 => effect_contract::ParameterChannel::Right,
+        2 => effect_contract::ParameterChannel::Both,
+        _ => return Err(()),
+    };
+    let mut words = [0_u32; effect_contract::PREPARED_EFFECT_TARGET_WORDS];
+    for (word, value) in words.iter_mut().enumerate() {
+        *value = read_u32_le(bytes, 32 + word * 4).ok_or(())?;
+    }
+    Ok(CompanionTarget {
+        track_index,
+        rack,
+        effect_index,
+        base_revision,
+        target: effect_contract::PreparedEffectTarget {
+            slot,
+            channel,
+            words,
+        },
+    })
+}
+
 /// One decoded, still-unapplied `miso.command.v1` record (issue #137 D1).
 ///
 /// # The frozen 48-byte little-endian layout
@@ -3584,14 +3918,30 @@ fn admit_commands(
     bytes: &[u8],
     count: usize,
     applied_at_sample: u64,
+    host_generation: u64,
+    prepared_submission: bool,
+    companion: Option<&[u8]>,
 ) -> Result<(), CommandRejection> {
-    match admit_commands_staged(ready, bytes, count, applied_at_sample) {
+    match admit_commands_staged(
+        ready,
+        bytes,
+        count,
+        applied_at_sample,
+        host_generation,
+        prepared_submission,
+        companion,
+    ) {
         Ok(()) => {
             ready.solo.commit();
             Ok(())
         }
         Err(rejection) => {
             ready.solo.rollback();
+            if rejection.result != RESULT_INTERNAL {
+                for producer in ready.effect_controls.iter_mut().flatten() {
+                    let _ = producer.discard_owner();
+                }
+            }
             Err(rejection)
         }
     }
@@ -3603,9 +3953,25 @@ fn admit_commands_staged(
     bytes: &[u8],
     count: usize,
     applied_at_sample: u64,
+    host_generation: u64,
+    prepared_submission: bool,
+    companion: Option<&[u8]>,
 ) -> Result<(), CommandRejection> {
     let record_bytes = COMMAND_RECORD_BYTES as usize;
     let track_count = ready.tracks.len();
+    let companion = match companion {
+        Some(bytes) => match parse_prepared_companion(bytes, host_generation) {
+            Ok(companion) => Some(companion),
+            Err(()) => {
+                return Err(CommandRejection {
+                    result: RESULT_INVALID_ARGUMENT,
+                    reason: COMMAND_REASON_MALFORMED,
+                    index: 0,
+                });
+            }
+        },
+        None => None,
+    };
     ready.command_wanted.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
         result: match reason {
@@ -3624,6 +3990,7 @@ fn admit_commands_staged(
     // Issue #210 phase 1: solo state changes are applied as they are read, but the mute records
     // they compose to are staged once, after the whole batch, by the coalescing pass below.
     let mut solo_seen = false;
+    let mut solo_first_wire_index = 0_u32;
     let mut solo_smoothing = 0_u32;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
@@ -3699,6 +4066,9 @@ fn admit_commands_staged(
                 if !ready.solo.set_solo(track, engaged) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
+                if !solo_seen {
+                    solo_first_wire_index = index as u32;
+                }
                 solo_seen = true;
                 solo_smoothing = command.smoothing_samples;
                 (track_count + track, 0)
@@ -3720,9 +4090,16 @@ fn admit_commands_staged(
                 else {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
                 };
-                let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref)
-                else {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                let (descriptor, is_eq, has_owner) = {
+                    let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref)
+                    else {
+                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                    };
+                    (
+                        producer.descriptor,
+                        producer.effect_id.as_ref() == "miso.parametric-eq",
+                        producer.has_owner(),
+                    )
                 };
                 let produced = if matches!(
                     command.kind,
@@ -3733,14 +4110,84 @@ fn admit_commands_staged(
                         .get(effect)
                         .is_some_and(Option::is_some);
                     staged[0] = command
-                        .into_observe_record(producer.descriptor, observed)
+                        .into_observe_record(descriptor, observed)
                         .map_err(|reason| refuse(reason, index))?;
                     1
                 } else {
                     command
-                        .into_effect_records(producer.descriptor, &mut staged)
+                        .into_effect_records(descriptor, &mut staged)
                         .map_err(|reason| refuse(reason, index))?
                 };
+                let mut produced = produced;
+                if is_eq
+                    && has_owner
+                    && matches!(command.kind, COMMAND_EFFECT_PARAM)
+                    && !prepared_submission
+                {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                if prepared_submission && matches!(command.kind, COMMAND_EFFECT_PARAM) && is_eq {
+                    if !has_owner {
+                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                    }
+                    let owner_seen = ready.command_decoded[..lowered].iter().any(|entry| {
+                        matches!(
+                            entry.kind,
+                            StagedCommandKind::PreparedOwner(owner)
+                                if owner.queue_slot as usize == track_count * 3 + effect
+                        )
+                    });
+                    if !owner_seen {
+                        let base_revision = ready
+                            .effect_controls
+                            .get(effect)
+                            .and_then(Option::as_ref)
+                            .and_then(|producer| {
+                                producer.owner().map(|owner| owner.committed_revision())
+                            })
+                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?;
+                        ready
+                            .effect_controls
+                            .get_mut(effect)
+                            .and_then(Option::as_mut)
+                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?
+                            .begin_owner(base_revision)
+                            .map_err(|error| refuse(owner_command_reason(error), index))?;
+                        let marker = PreparedOwner {
+                            queue_slot: (track_count * 3 + effect) as u32,
+                            base_revision,
+                            first_wire_index: index as u32,
+                            target_count: 0,
+                        };
+                        let Some(entry) = ready.command_decoded.get_mut(lowered) else {
+                            return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                        };
+                        *entry = StagedCommand {
+                            queue_slot: marker.queue_slot,
+                            original_wire_index: index as u32,
+                            kind: StagedCommandKind::PreparedOwner(marker),
+                        };
+                        lowered += 1;
+                    }
+                    for record in staged.iter().copied().take(produced) {
+                        let AdmittedCommand::Effect(EffectControlRecord::Parameter {
+                            parameter_index,
+                            channel,
+                            value,
+                        }) = record
+                        else {
+                            return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                        };
+                        ready
+                            .effect_controls
+                            .get_mut(effect)
+                            .and_then(Option::as_mut)
+                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?
+                            .edit_owner(parameter_index, channel, value)
+                            .map_err(|error| refuse(owner_command_reason(error), index))?;
+                    }
+                    produced = 0;
+                }
                 // Every original effect command is checked before the publication pass can
                 // mutate a queue or the observation mirror.  Keep this tied to `index`: a
                 // per-lane lowering may produce two records, but a refusal still names the
@@ -3766,7 +4213,11 @@ fn admit_commands_staged(
             let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                 return Err(refuse(COMMAND_REASON_MALFORMED, index));
             };
-            *entry = (slot as u32, record);
+            *entry = StagedCommand {
+                queue_slot: slot as u32,
+                original_wire_index: index as u32,
+                kind: StagedCommandKind::Command(record),
+            };
             lowered += 1;
         }
     }
@@ -3795,41 +4246,263 @@ fn admit_commands_staged(
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
-                *entry = (
-                    slot as u32,
-                    AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                        lanes,
-                        muted,
-                        smoothing_samples: solo_smoothing,
-                    }),
-                );
+                *entry = StagedCommand {
+                    queue_slot: slot as u32,
+                    original_wire_index: solo_first_wire_index,
+                    kind: StagedCommandKind::Command(AdmittedCommand::Fader(
+                        TrackFaderRecord::Mute {
+                            lanes,
+                            muted,
+                            smoothing_samples: solo_smoothing,
+                        },
+                    )),
+                };
                 lowered += 1;
                 ready.solo.record_emitted(track, lanes, muted);
             }
         }
     }
+    // Decode and validate every companion record before any target publication. An address with
+    // no first semantic marker is an orphan, while a prepared-capable owner with no companion
+    // records is rejected by its exact target validator below.
+    if let Some(companion) = companion.as_ref() {
+        for index in 0..companion.target_count {
+            let target = companion_target(companion, index).map_err(|_| {
+                refuse(
+                    COMMAND_REASON_MALFORMED,
+                    companion_wire_index(ready, lowered, companion, index),
+                )
+            })?;
+            let Some(effect) = ready.effect_slot(
+                target.track_index as usize,
+                target.rack,
+                target.effect_index,
+            ) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
+            };
+            let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
+            };
+            if !producer.has_owner() {
+                return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, 0));
+            }
+        }
+    }
+    // Gather each owner's <=12 supplied targets on the stack and run its exact candidate
+    // validator. This performs no coefficient design and retains no target cache.
     for entry in 0..lowered {
-        let slot = ready.command_decoded[entry].0 as usize;
-        let Some(capacity) = ready.queue_capacity(slot) else {
-            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, entry));
+        let StagedCommandKind::PreparedOwner(mut marker) = ready.command_decoded[entry].kind else {
+            continue;
         };
-        let needed = ready.command_wanted[slot];
-        if ready.in_flight[slot].saturating_add(needed) > capacity {
-            return Err(refuse(COMMAND_REASON_BACKPRESSURE, entry));
+        let mut targets = [effect_contract::PreparedEffectTarget {
+            slot: 0,
+            channel: effect_contract::ParameterChannel::Both,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; host_core::EQ_TARGET_CAPACITY];
+        let mut target_count = 0_usize;
+        if let Some(companion) = companion.as_ref() {
+            for index in 0..companion.target_count {
+                let target = companion_target(companion, index).map_err(|_| {
+                    refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize)
+                })?;
+                let Some(effect) = ready.effect_slot(
+                    target.track_index as usize,
+                    target.rack,
+                    target.effect_index,
+                ) else {
+                    return Err(refuse(COMMAND_REASON_MALFORMED, 0));
+                };
+                if effect + track_count * 3 != marker.queue_slot as usize {
+                    continue;
+                }
+                if target.base_revision != marker.base_revision || target_count == targets.len() {
+                    return Err(refuse(
+                        COMMAND_REASON_MALFORMED,
+                        marker.first_wire_index as usize,
+                    ));
+                }
+                targets[target_count] = target.target;
+                target_count += 1;
+            }
+        }
+        let effect = marker
+            .queue_slot
+            .checked_sub((track_count * 3) as u32)
+            .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?
+            as usize;
+        let producer = ready
+            .effect_controls
+            .get_mut(effect)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| {
+                refuse(
+                    COMMAND_REASON_UNSUPPORTED_KIND,
+                    marker.first_wire_index as usize,
+                )
+            })?;
+        if let Err(error) =
+            producer.preflight_candidate_targets(marker.base_revision, &targets[..target_count])
+        {
+            // Combined capacity is checked below, including earlier ordinary records on this
+            // queue. That pass must report the first contributing original command's index.
+            if error != host_core::EffectControlOwnerError::Capacity {
+                return Err(refuse(
+                    owner_command_reason(error),
+                    marker.first_wire_index as usize,
+                ));
+            }
+        }
+        marker.target_count = target_count as u32;
+        ready.command_wanted[marker.queue_slot as usize] = ready.command_wanted
+            [marker.queue_slot as usize]
+            .checked_add(marker.target_count)
+            .ok_or_else(|| {
+                refuse(
+                    COMMAND_REASON_BACKPRESSURE,
+                    marker.first_wire_index as usize,
+                )
+            })?;
+        if let Some(staged) = ready.command_decoded.get_mut(entry) {
+            staged.kind = StagedCommandKind::PreparedOwner(marker);
+        }
+    }
+    if let Some(companion) = companion.as_ref() {
+        for index in 0..companion.target_count {
+            let target = companion_target(companion, index).map_err(|_| {
+                refuse(
+                    COMMAND_REASON_MALFORMED,
+                    companion_wire_index(ready, lowered, companion, index),
+                )
+            })?;
+            let Some(effect) = ready.effect_slot(
+                target.track_index as usize,
+                target.rack,
+                target.effect_index,
+            ) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
+            };
+            let queue_slot = effect + track_count * 3;
+            let matched = ready.command_decoded[..lowered].iter().any(|entry| {
+                matches!(entry.kind, StagedCommandKind::PreparedOwner(marker)
+                    if marker.queue_slot as usize == queue_slot
+                        && marker.base_revision == target.base_revision)
+            });
+            if !matched {
+                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
+            }
         }
     }
     for entry in 0..lowered {
-        let (slot, record) = ready.command_decoded[entry];
-        let slot = slot as usize;
-        if ready.push(slot, record, applied_at_sample).is_err() {
+        let staged = ready.command_decoded[entry];
+        let slot = staged.queue_slot as usize;
+        let needed = ready.command_wanted[slot];
+        let Some(available) = ready.queue_available(slot) else {
+            return Err(refuse(
+                COMMAND_REASON_UNSUPPORTED_KIND,
+                staged.original_wire_index as usize,
+            ));
+        };
+        if needed > available || ready.in_flight[slot].checked_add(needed).is_none() {
+            return Err(refuse(
+                COMMAND_REASON_BACKPRESSURE,
+                staged.original_wire_index as usize,
+            ));
+        }
+    }
+    for entry in 0..lowered {
+        let staged = ready.command_decoded[entry];
+        let slot = staged.queue_slot as usize;
+        match staged.kind {
+            StagedCommandKind::Command(record) => {
+                if ready.push(slot, record, applied_at_sample).is_err() {
+                    return Err(CommandRejection {
+                        result: RESULT_INTERNAL,
+                        reason: COMMAND_REASON_BACKPRESSURE,
+                        index: staged.original_wire_index,
+                    });
+                }
+                ready.in_flight[slot] += 1;
+                ready.has_in_flight_commands = true;
+            }
+            StagedCommandKind::PreparedOwner(marker) => {
+                let effect = slot.checked_sub(track_count * 3).ok_or(CommandRejection {
+                    result: RESULT_INTERNAL,
+                    reason: COMMAND_REASON_MALFORMED,
+                    index: staged.original_wire_index,
+                })?;
+                let mut targets = [effect_contract::PreparedEffectTarget {
+                    slot: 0,
+                    channel: effect_contract::ParameterChannel::Both,
+                    words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                }; host_core::EQ_TARGET_CAPACITY];
+                let mut target_count = 0_usize;
+                if let Some(companion) = companion.as_ref() {
+                    for index in 0..companion.target_count {
+                        let target =
+                            companion_target(companion, index).map_err(|_| CommandRejection {
+                                result: RESULT_INTERNAL,
+                                reason: COMMAND_REASON_MALFORMED,
+                                index: staged.original_wire_index,
+                            })?;
+                        let addressed = ready
+                            .effect_slot(
+                                target.track_index as usize,
+                                target.rack,
+                                target.effect_index,
+                            )
+                            .is_some_and(|addressed| addressed + track_count * 3 == slot);
+                        if addressed {
+                            targets[target_count] = target.target;
+                            target_count += 1;
+                        }
+                    }
+                }
+                let producer = ready
+                    .effect_controls
+                    .get_mut(effect)
+                    .and_then(Option::as_mut)
+                    .ok_or(CommandRejection {
+                        result: RESULT_INTERNAL,
+                        reason: COMMAND_REASON_UNSUPPORTED_KIND,
+                        index: staged.original_wire_index,
+                    })?;
+                if producer
+                    .publish_candidate_targets(marker.base_revision, &targets[..target_count])
+                    .is_err()
+                {
+                    return Err(CommandRejection {
+                        result: RESULT_INTERNAL,
+                        reason: COMMAND_REASON_BACKPRESSURE,
+                        index: staged.original_wire_index,
+                    });
+                }
+                ready.in_flight[slot] += marker.target_count;
+                ready.has_in_flight_commands = true;
+            }
+        }
+    }
+    for entry in 0..lowered {
+        let staged = ready.command_decoded[entry];
+        let StagedCommandKind::PreparedOwner(marker) = staged.kind else {
+            continue;
+        };
+        let effect = marker.queue_slot as usize - track_count * 3;
+        let producer = ready
+            .effect_controls
+            .get_mut(effect)
+            .and_then(Option::as_mut)
+            .ok_or(CommandRejection {
+                result: RESULT_INTERNAL,
+                reason: COMMAND_REASON_UNSUPPORTED_KIND,
+                index: staged.original_wire_index,
+            })?;
+        if producer.commit_owner().is_err() {
             return Err(CommandRejection {
                 result: RESULT_INTERNAL,
-                reason: COMMAND_REASON_BACKPRESSURE,
-                index: entry as u32,
+                reason: COMMAND_REASON_MALFORMED,
+                index: staged.original_wire_index,
             });
         }
-        ready.in_flight[slot] += 1;
-        ready.has_in_flight_commands = true;
     }
     Ok(())
 }
@@ -4242,13 +4915,19 @@ fn project_buffers(
     let plane_reference_bytes = u64::from(maximum_source_channels)
         .checked_mul(size_of::<&[f32]>() as u64)
         .ok_or_else(arithmetic)?;
+    let prepared_control_bytes = if command_records == 0 {
+        0
+    } else {
+        u64::try_from(size_of::<PreparedControlWorkspace>()).map_err(|_| arithmetic())?
+    };
     let host_shell_bytes =
         u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| arithmetic())?;
     let fixed_metadata = host_shell_bytes
         .checked_sub(u64::from(BOOT_OPTIONS_BYTES) + u64::from(STATUS_BYTES))
         .ok_or_else(arithmetic)?;
     let bridge_metadata = fixed_metadata
-        .checked_add(plane_reference_bytes)
+        .checked_add(prepared_control_bytes)
+        .and_then(|bytes| bytes.checked_add(plane_reference_bytes))
         .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .and_then(|bytes| bytes.checked_add(crate::ffi::live_response_staging_retained_bytes()))
         .and_then(|bytes| {
@@ -4288,6 +4967,7 @@ fn project_buffers(
         .unwrap_or(0)
         .max(host_shell_bytes)
         .max(plane_reference_bytes)
+        .max(prepared_control_bytes)
         .max(crate::ffi::observation_staging_largest_allocation_bytes())
         .max(crate::ffi::live_response_staging_largest_allocation_bytes())
         .max(crate::ffi::spectrum_staging_largest_allocation_bytes(
@@ -4336,6 +5016,7 @@ fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuff
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
         )
         .map_err(allocation)?,
+        prepared_control: (projection.command_records != 0).then(PreparedControlWorkspace::zeroed),
     })
 }
 
@@ -4834,7 +5515,7 @@ fn compile_ready(
     let decoded_count = command_staging_count(track_count)?;
     let decoded_bytes = u64::try_from(decoded_count)
         .ok()
-        .and_then(|count| count.checked_mul(size_of::<(u32, AdmittedCommand)>() as u64))
+        .and_then(|count| count.checked_mul(size_of::<StagedCommand>() as u64))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -4955,7 +5636,7 @@ fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedCommand)]>, Vec<u8>> {
+fn boxed_command_staging(track_count: usize) -> Result<Box<[StagedCommand]>, Vec<u8>> {
     // Two entries per staged wire record: one `channel = both` command on a per-lane effect
     // parameter lowers to one record per lane (#140 C).
     //
@@ -4966,10 +5647,13 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
     // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
     // may carry 256 effect-parameter records *and* a solo toggle.
     let count = command_staging_count(track_count)?;
-    let empty = (
-        0_u32,
-        AdmittedCommand::Effect(EffectControlRecord::Bypass(false)),
-    );
+    let empty = StagedCommand {
+        queue_slot: 0,
+        original_wire_index: 0,
+        kind: StagedCommandKind::Command(AdmittedCommand::Effect(EffectControlRecord::Bypass(
+            false,
+        ))),
+    };
     let mut value = Vec::new();
     value
         .try_reserve_exact(count)

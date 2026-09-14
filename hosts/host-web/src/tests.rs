@@ -841,7 +841,7 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
     let expected_decoded_count = (2 * MAXIMUM_COMMAND_RECORDS as usize)
         .checked_add(2 * shape.track_count as usize)
         .expect("decoded record count");
-    let decoded_bytes = (expected_decoded_count * size_of::<(u32, AdmittedCommand)>()) as u64;
+    let decoded_bytes = (expected_decoded_count * size_of::<StagedCommand>()) as u64;
 
     for (name, options, expected_wire_bytes) in [
         ("off", boot_options(128), 0_u64),
@@ -3094,7 +3094,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         );
         let decoded_count =
             command_staging_count(shape.track_count as usize).expect("decoded command count");
-        let decoded_bytes = (decoded_count * size_of::<(u32, AdmittedCommand)>()) as u64;
+        let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
         let observation_arm_table = shape
             .effect_count
             .checked_mul(size_of::<Box<[u64]>>() as u64)
@@ -7284,4 +7284,77 @@ fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
             );
         }
     }
+}
+
+#[test]
+fn prepared_companion_preserves_ordinary_batch_atomicity() {
+    let mut host = console_host(128, 0);
+    let generation = host.host_generation;
+    let workspace = host
+        .buffers
+        .as_mut()
+        .unwrap()
+        .prepared_control
+        .as_mut()
+        .unwrap();
+    workspace.companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    workspace.companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    workspace.companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    workspace.config.fill(0xa5);
+    let config_before = workspace.config;
+    assert_eq!(host.copy_eq_target_config(0, 0, 0), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.eq_target_config().unwrap(), config_before);
+    for (index, track) in [(0, 0), (1, u32::MAX)] {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_MATRIX,
+            255,
+            255,
+            track,
+            0,
+            0,
+            0,
+            [0.5, 0.0, 0.0, 1.0],
+        );
+    }
+    let before = host.ready.as_ref().unwrap().controls[0]
+        .producer
+        .success_count();
+    assert_eq!(
+        host.submit_prepared_commands(2, 24),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().rejected_index, 1);
+    assert_eq!(host.command_report().admitted, 0);
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before
+    );
+    // A malformed envelope also cannot publish the already valid ordinary command.
+    assert_eq!(
+        host.submit_prepared_commands(1, 23),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before
+    );
+    assert_eq!(host.submit_prepared_commands(1, 24), RESULT_OK);
+    assert_eq!(host.command_report().admitted, 1);
+    assert_eq!(
+        host.ready.as_ref().unwrap().controls[0]
+            .producer
+            .success_count(),
+        before + 1
+    );
+
+    let mut no_console = prepared_host(128);
+    assert!(no_console.prepared_companion_mut().is_none());
+    assert_eq!(no_console.prepared_companion_capacity(), 0);
+    assert!(no_console.eq_target_config().is_none());
 }

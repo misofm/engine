@@ -166,8 +166,8 @@ pub use spectrum::{
 /// Re-exported here so a host does not have to depend on `effect-compiler` -- the
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
 pub use effect_compiler::{
-    EffectControlProducer, EffectControlResources, EffectObservationHandle, EffectRack,
-    parametric_eq_target_preparation_factory,
+    EffectControlOwnerError, EffectControlProducer, EffectControlResources,
+    EffectObservationHandle, EffectRack, parametric_eq_target_preparation_factory,
 };
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
