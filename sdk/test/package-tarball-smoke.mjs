@@ -113,8 +113,15 @@ import type {
   BrowserEngine,
   MasterMeter,
   MeterUpdate,
+  ObservationSubscription,
+  ObservationSubscriptionRequest,
   PcmSourceChunk,
+  SpectrumCollection,
+  SpectrumSubscription,
+  SpectrumSubscriptionRequest,
   TelemetryUpdate,
+  TrackResponseSubscription,
+  TrackResponseSubscriptionRequest,
   TrackMeter,
 } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
@@ -173,6 +180,15 @@ async function defaultBrowserContext() {
 }
 void defaultBrowserContext;
 declare const browser: BrowserEngine;
+declare const collection: SpectrumCollection;
+declare const observationRequest: ObservationSubscriptionRequest;
+declare const responseRequest: TrackResponseSubscriptionRequest;
+declare const spectrumRequest: SpectrumSubscriptionRequest;
+const collectedEngine: ReturnType<typeof createEngine> = createEngine({ document: "opaque", spectrumCollection: collection });
+const observations: Promise<ObservationSubscription> = browser.subscribeObservations(observationRequest);
+const responses: Promise<TrackResponseSubscription> = browser.subscribeTrackResponse(responseRequest);
+const spectra: Promise<SpectrumSubscription> = browser.subscribeSpectrum(spectrumRequest);
+void [collectedEngine, observations, responses, spectra];
 const host = browser.host;
 void browser.subscribeMeters((update: MeterUpdate) => update.master.gainReductionDb);
 void browser.subscribeTelemetry((update: TelemetryUpdate) => update.cpuPercent);

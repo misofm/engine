@@ -82,3 +82,19 @@ metadata and bounded CI corrections into the main baseline above. Those facts
 remain evidence for their exact source; fresh misofm/engine#796 package bytes
 must qualify again. Root retains existing linked CI/review evidence when applying
 this amendment. This brief does not claim new execution/publication results.
+
+
+## Fresh release preparation and source verification
+
+Luna XHIGH audited current 0.2.5 metadata and found no version/pin changes
+necessary: registry 0.2.5 is unused, all exact guards agree, and accepted Wasm
+SHA-256 is `c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
+Fresh Astra MEDIUM independently records source/package-readiness PASS after
+a narrow packed strict-consumer correction adding accepted collection and
+managed-observation/response/spectrum type references alongside new measurement
+types. Updated packed smoke and existing publish-mode fixtures pass; no runtime
+change or Wasm rebuild. Review `/tmp/miso-796-audit/verify-794.md`, packed proof
+`verify-794-packed.log`. The local preparation archive SHA-256
+`f920ab50c69a04e24c9ad7474c80c021251e3d49b87fab43774549fb2f8f12e4` is not the
+registry release archive. Final merged source/required CI, exact workflow qualify
+then publish, and independent registry/archive/provenance verdict remain pending.
