@@ -56,7 +56,8 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
-    SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_cascade_interleaved,
+    SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
+    svf_cascade_interleaved_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -1033,6 +1034,30 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         })
     }
 
+    /// Builds the per-lane dry-output mask for a dedicated cut at the current segment boundary.
+    ///
+    /// The decision is deliberately made from the coefficient *bits*, not `Lane::eq`: ordered
+    /// floating equality treats `-0.0` as equal to `+0.0`, while the identity contract is exact.
+    /// The fixed 0/1 decision vector is loaded and compared only to manufacture the backend's
+    /// canonical mask representation. Original sections never select dry, even when disabled.
+    #[inline(always)]
+    fn dry_mask(&self, section: usize) -> L::Mask {
+        let dedicated = section == HPF_SECTION || section == LPF_SECTION;
+        let mut decisions = [0.0_f32; MAX_LANES];
+        if dedicated {
+            let slot = &self.sections[section];
+            for (track, decision) in decisions.iter_mut().enumerate().take(W) {
+                let exact_identity = (0..EQ_COEFFICIENT_WORDS).all(|index| {
+                    lane_bits(coef_word(&slot.coef, index), track) == IDENTITY_WORD_BITS[index]
+                });
+                if exact_identity && self.remaining[section][track] == 0 {
+                    *decision = 1.0;
+                }
+            }
+        }
+        L::load(&decisions[..L::WIDTH]).eq(L::splat(1.0))
+    }
+
     /// Starts a [`RAMP_SAMPLES`]-sample word ramp on lane `track` of `section` (D11).
     ///
     /// The increment is one multiply by an exact power of two, computed once here; a ramp that is
@@ -1204,20 +1229,45 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 }
             }
             debug_assert!(length > 0);
+            let dry_mask = self.dry_mask(section);
             let slot = &mut self.sections[section];
             let block = &mut io[position * W..(position + length) * W];
             if ramping {
                 advance_words(&mut slot.coef, &slot.step);
-                svf_block_ramped::<L>(
-                    block,
-                    length,
-                    &mut slot.coef,
-                    &slot.step,
-                    length - 1,
-                    &mut slot.state,
-                );
+                if section == HPF_SECTION || section == LPF_SECTION {
+                    svf_block_ramped_with_dry_mask::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        length - 1,
+                        &mut slot.state,
+                        dry_mask,
+                    );
+                } else {
+                    svf_block_ramped::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        length - 1,
+                        &mut slot.state,
+                    );
+                }
             } else {
-                svf_block::<L>(block, length, &slot.coef, &mut slot.state);
+                if section == HPF_SECTION || section == LPF_SECTION {
+                    svf_block_ramped_with_dry_mask::<L>(
+                        block,
+                        length,
+                        &mut slot.coef,
+                        &slot.step,
+                        0,
+                        &mut slot.state,
+                        dry_mask,
+                    );
+                } else {
+                    svf_block::<L>(block, length, &slot.coef, &mut slot.state);
+                }
             }
             for track in 0..W {
                 let remaining = &mut self.remaining[section][track];
@@ -1430,7 +1480,14 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
             [core::array::from_fn(|k| channel.sections[at[k]].coef)];
         let mut state: [[SvfState<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].state)];
-        svf_cascade_interleaved::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
+        let dry_masks: [[L::Mask; DEPTH]; 1] = [core::array::from_fn(|k| channel.dry_mask(at[k]))];
+        svf_cascade_interleaved_with_dry_masks::<L, 1, DEPTH>(
+            [&mut *io],
+            frames,
+            &coefficients,
+            &mut state,
+            &dry_masks,
+        );
         let [only] = state;
         for (k, word) in only.into_iter().enumerate() {
             channel.sections[at[k]].state = word;
@@ -1616,11 +1673,16 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             core::array::from_fn(|k| channels.0.sections[at[k]].state),
             core::array::from_fn(|k| channels.1.sections[at[k]].state),
         ];
-        svf_cascade_interleaved::<L, 2, DEPTH>(
+        let dry_masks: [[L::Mask; DEPTH]; 2] = [
+            core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+            core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+        ];
+        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
             [&mut *left, &mut *right],
             frames,
             &coefficients,
             &mut state,
+            &dry_masks,
         );
         let [left_state, right_state] = state;
         for (k, word) in left_state.into_iter().enumerate() {
