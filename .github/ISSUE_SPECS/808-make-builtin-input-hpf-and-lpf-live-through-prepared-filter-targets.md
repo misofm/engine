@@ -300,3 +300,23 @@ workspace targets passed in the completed no-fail-fast run. The existing browser
 comparison now submits an eight-command mixed batch including a Left builtin pair,
 requires both hosts to acknowledge all original commands, and preserves the existing
 post-ramp PCM and captured-target-response comparisons. Browser execution follows.
+
+### Attempt1 verdict and bounded attempt2
+
+Fresh Astra MEDIUM adversarial review at `9bf53e96`: **FAIL**. Three source defects
+and one fixture gap remain: trim-only symmetry refresh omits retained filter
+state; the combined prefix always runs64frames even when a disable countdown
+ends earlier; invalid raw pair selectors return unknown-parameter instead of
+malformed; the new identity-trim comparison lacks adverse samples and mono.
+No failing review is superseded by the passing pre-review package tests.
+
+Root approves attempt2 limited to these corrections and existing fixtures.
+Every applicable symmetry refresh must include filter target/step/countdown,
+preserving bounded per-word extraction. The combined prefix ends at the maximum
+actual remaining filter countdown across processed lanes/sections, bounded by64,
+so a settled disabled suffix immediately uses the existing identity path. Add the
+Left-then-Both filter/trim symmetry regression; disable63+128 with concurrent trim
+and mechanism evidence; signed zero, negative, NaN/Inf, polarity/output recovery
+and mono reference comparisons; and malformed raw-selector refusal. No new test
+framework, benchmark or unrelated optimization. Rebuild once after focused gates,
+then run final packed browser/headless/artifact gates and a fresh review verdict.
