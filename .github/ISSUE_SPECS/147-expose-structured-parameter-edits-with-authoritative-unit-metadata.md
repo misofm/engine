@@ -114,3 +114,21 @@ The normal builder correctly refused the stale pin. Root will refresh the
 current artifact pin, regenerate assets and run matching-artifact package and
 headless gates before independent Astra MEDIUM review. Published 0.2.6 bytes
 and its historical release evidence remain immutable.
+
+## Attempt 1 — matching artifact and complete SDK gates
+
+Object source checkpoint: `d860b6fb`; metadata checkpoint: `8f5e66b5`, both
+upstream. The ordinary artifact builder now passes against the refreshed
+`86ae6b94bbd0c7624bdcc0654c5517288741424b2c69f6d0c23fe191e8529dca` pin.
+Normal asset/code generation produced no additional drift.
+
+- `bash scripts/build-web-audioworklet.sh /tmp/804-147-artifacts`: PASS.
+- `bash scripts/check-sdk-headless.sh /tmp/804-147-artifacts`: PASS, 252 tests,
+  zero failures/skips (`/tmp/147-headless-final.log`).
+- `bash scripts/sdk-package.sh check /tmp/804-147-artifacts`: PASS, CLI 11 tests
+  and actual publishable tarball smoke (`/tmp/147-package-final.log`).
+
+Historical published 0.2.6 release guards/evidence remain frozen; the #804
+release child will freeze a new version and matching workflow pin before
+qualification/publication. This source/package acceptance does not claim a
+new registry release. Fresh Astra MEDIUM attempt-1 review is in progress.
