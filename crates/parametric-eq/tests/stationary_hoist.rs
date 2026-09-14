@@ -16,11 +16,13 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan, StatePayloadOutput, StatePayloadSizes,
+    PrepareEffectBankRequest, StatePayloadOutput, StatePayloadSizes,
 };
 use lane::Backend;
 use parametric_eq::ParametricEqFactory;
-use support::{COMMON_BYTES, LANE_BYTES, point, request, set_initial, values, word};
+use support::{
+    COMMON_BYTES, LANE_BYTES, apply_prepared_targets_lane, request, set_initial, values, word,
+};
 
 const FRAMES: usize = 128;
 const BLOCKS: usize = 4;
@@ -63,8 +65,8 @@ fn native_bank() -> Option<(BankWidth, Backend)> {
     BankWidth::for_backend(backend).map(|width| (width, backend))
 }
 
-/// Renders `BLOCKS` blocks, delivering `spans` on the first block only, and returns output bits.
-fn render(spans: &[PreparedAutomationSpan], offsets: &[u32], lanes: usize) -> Vec<u32> {
+/// Renders `BLOCKS` blocks after preparing either a redundant or one-ULP target set.
+fn render(restate: bool, moved: bool, lanes: usize) -> Vec<u32> {
     let (width, backend) = native_bank().expect("a native bank width");
     let factory = ParametricEqFactory;
     let prepared: Vec<_> = (0..lanes).map(configured).collect();
@@ -90,11 +92,23 @@ fn render(spans: &[PreparedAutomationSpan], offsets: &[u32], lanes: usize) -> Ve
 
     let mut bits = Vec::with_capacity(FRAMES * lanes * 2 * BLOCKS);
     for block in 0..BLOCKS {
-        let (block_spans, block_offsets): (&[PreparedAutomationSpan], &[u32]) = if block == 0 {
-            (spans, offsets)
-        } else {
-            (&[], &empty_offsets)
-        };
+        if restate || (moved && block == 0) {
+            for track in 0..lanes {
+                let mut target_values = configured(track);
+                if moved {
+                    let held = band0_left_gain(track);
+                    set_initial(
+                        &mut target_values,
+                        3,
+                        ParameterChannel::Left,
+                        f32::from_bits(held.to_bits() + 1),
+                    );
+                }
+                let mut changed = vec![false; target_values.len()];
+                changed[3 * 2] = true;
+                apply_prepared_targets_lane(&mut *bank, track, 48_000, &target_values, &changed);
+            }
+        }
         bank.process_bank(
             EffectBankProcessBlock::new(
                 &mut left,
@@ -103,8 +117,8 @@ fn render(spans: &[PreparedAutomationSpan], offsets: &[u32], lanes: usize) -> Ve
                 FRAMES as u32,
                 width,
                 (block * FRAMES) as u64,
-                block_spans,
-                block_offsets,
+                &[],
+                &empty_offsets,
                 128,
             )
             .expect("bank block"),
@@ -122,15 +136,8 @@ fn a_redundant_automation_point_renders_exactly_the_unautomated_bank() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let empty_offsets = vec![0_u32; lanes + 1];
-
-    let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
-        .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
-        .collect();
-    let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
-
-    let quiet = render(&[], &empty_offsets, lanes);
-    let restated = render(&redundant, &offsets, lanes);
+    let quiet = render(false, false, lanes);
+    let restated = render(true, false, lanes);
 
     assert_eq!(
         quiet.len(),
@@ -150,24 +157,8 @@ fn a_real_automation_point_still_ramps() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let empty_offsets = vec![0_u32; lanes + 1];
-
-    // One ULP away from the prepared value: the smallest move the bit compare must still respect.
-    let moved: Vec<PreparedAutomationSpan> = (0..lanes)
-        .map(|track| {
-            let held = band0_left_gain(track);
-            point(
-                3,
-                ParameterChannel::Left,
-                0,
-                f32::from_bits(held.to_bits() + 1),
-            )
-        })
-        .collect();
-    let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
-
-    let quiet = render(&[], &empty_offsets, lanes);
-    let nudged = render(&moved, &offsets, lanes);
+    let quiet = render(false, false, lanes);
+    let nudged = render(false, true, lanes);
 
     assert_ne!(
         quiet, nudged,
@@ -188,17 +179,11 @@ fn a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let empty_offsets = vec![0_u32; lanes + 1];
-    let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
-        .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
-        .collect();
-    let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
-
     // Delivered on the first block only (the render helper's contract), but the comparison runs
     // for BLOCKS blocks so a cached word that had drifted would have time to show.
     assert_eq!(
-        render(&[], &empty_offsets, lanes),
-        render(&redundant, &offsets, lanes),
+        render(false, false, lanes),
+        render(true, false, lanes),
         "a restated band diverged from an unautomated one"
     );
 }
@@ -252,22 +237,29 @@ fn a_band_restated_mid_flight_still_settles_at_the_designed_words() {
         let mut left = source.clone();
         let mut right: Vec<f32> = source.iter().map(|value| -value).collect();
         let empty_offsets = vec![0_u32; lanes + 1];
-        let span_offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
 
         for block in 0..SHORT_BLOCKS {
             let first_sample = (block * SHORT_FRAMES) as u64;
-            let spans: Vec<PreparedAutomationSpan> = if block == 0 || (block == 1 && restate) {
-                (0..lanes)
-                    .map(|track| point(3, ParameterChannel::Left, first_sample, retargeted(track)))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let offsets = if spans.is_empty() {
-                &empty_offsets
-            } else {
-                &span_offsets
-            };
+            if block == 0 || (block == 1 && restate) {
+                for track in 0..lanes {
+                    let mut target_values = configured(track);
+                    set_initial(
+                        &mut target_values,
+                        3,
+                        ParameterChannel::Left,
+                        retargeted(track),
+                    );
+                    let mut changed = vec![false; target_values.len()];
+                    changed[3 * 2] = true;
+                    apply_prepared_targets_lane(
+                        &mut *bank,
+                        track,
+                        48_000,
+                        &target_values,
+                        &changed,
+                    );
+                }
+            }
             bank.process_bank(
                 EffectBankProcessBlock::new(
                     &mut left,
@@ -276,8 +268,8 @@ fn a_band_restated_mid_flight_still_settles_at_the_designed_words() {
                     SHORT_FRAMES as u32,
                     width,
                     first_sample,
-                    &spans,
-                    offsets,
+                    &[],
+                    &empty_offsets,
                     128,
                 )
                 .expect("bank block"),

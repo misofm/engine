@@ -122,9 +122,9 @@ use console_workload::{
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
+    BankWidth, EffectBankProcessBlock, EffectQuality, EffectTargetRequest, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPorts,
+    PrepareEffectRequest, PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts,
     PreparedSidechainPort,
 };
 use engine::realtime::audit;
@@ -486,10 +486,9 @@ struct HoistArm {
     banks: Vec<Box<dyn PreparedNativeEffectBank>>,
     left: Vec<f32>,
     right: Vec<f32>,
-    spans: Vec<PreparedAutomationSpan>,
+    targets: Vec<([PreparedEffectTarget; 12], usize)>,
+    alternate_targets: Vec<([PreparedEffectTarget; 12], usize)>,
     offsets: Vec<u32>,
-    alternate_spans: Vec<PreparedAutomationSpan>,
-    alternate_offsets: Vec<u32>,
     /// One frozen input block, copied in before every observation.
     ///
     /// The bank renders in place, so without this the arm would be filtering its own output a
@@ -527,31 +526,44 @@ impl HoistArm {
             })
             .collect();
 
-        // Both span sets are built once, before any timing, and selected by block parity inside
-        // the render call. The timed region allocates nothing.
+        // Both target sets are prepared once, before any timing, and selected by block parity
+        // inside the render call. The timed region only copies fixed-size words into prepared
+        // lanes; it never invokes the EQ designer or allocates.
         let build = |offset_db: f32| {
-            let mut spans = Vec::new();
-            let mut offsets = vec![0_u32];
-            for track in 0..lanes {
-                if arm != Arm::Quiet {
-                    let value = eq_band0_gain(track) + offset_db;
-                    spans.push(PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
+            let mut targets = Vec::with_capacity(banks * lanes);
+            let capability = eq
+                .target_preparation()
+                .expect("the launch EQ exposes target preparation");
+            for _bank in 0..banks {
+                for track in 0..lanes {
+                    let mut candidate = eq_values[track].clone();
+                    let mut changed = vec![false; candidate.len()];
+                    if arm != Arm::Quiet {
+                        candidate[3 * 2].value = eq_band0_gain(track) + offset_db;
+                        changed[3 * 2] = true;
+                    }
+                    let mut prepared = [PreparedEffectTarget {
+                        slot: 0,
                         channel: ParameterChannel::Left,
-                        // Index 3 is band 1's gain: the parameter the arms restate or move.
-                        parameter_index: 3,
-                        start_sample: 0,
-                        end_sample: 0,
-                        start_value: value,
-                        end_value: value,
-                    });
+                        words: [0; 12],
+                    }; 12];
+                    let count = capability
+                        .prepare_targets(
+                            EffectTargetRequest {
+                                sample_rate: SAMPLE_RATE_HZ,
+                                values: &candidate,
+                                changed: &changed,
+                            },
+                            &mut prepared,
+                        )
+                        .expect("EQ target preparation");
+                    targets.push((prepared, count));
                 }
-                offsets.push(spans.len() as u32);
             }
-            (spans, offsets)
+            targets
         };
-        let (spans, offsets) = build(0.0);
-        let (alternate_spans, alternate_offsets) = match arm {
+        let targets = build(0.0);
+        let alternate_targets = match arm {
             Arm::Moving => build(MOVING_STEP_DB),
             _ => build(0.0),
         };
@@ -561,10 +573,9 @@ impl HoistArm {
             banks: prepared_banks,
             left: vec![0.0; QUANTUM * lanes * banks],
             right: vec![0.0; QUANTUM * lanes * banks],
-            spans,
-            offsets,
-            alternate_spans,
-            alternate_offsets,
+            targets,
+            alternate_targets,
+            offsets: vec![0; lanes + 1],
             source_left: (0..QUANTUM * lanes * banks)
                 .map(|index| ((index as f32) * 0.017).sin() * 0.4)
                 .collect(),
@@ -591,22 +602,21 @@ impl HoistArm {
 
     fn render(&mut self, observation: u64) {
         let first_sample = observation * QUANTUM as u64;
-        // A point span is only admitted when it lands on the block's first sample, so the sample
-        // stamp is refreshed in place each block. In place, because this runs inside the timed
-        // region and the region must not allocate.
-        let (spans, offsets) = if observation.is_multiple_of(2) {
-            (&mut self.spans, &self.offsets)
+        let targets = if observation.is_multiple_of(2) {
+            &self.targets
         } else {
-            (&mut self.alternate_spans, &self.alternate_offsets)
+            &self.alternate_targets
         };
-        for span in spans.iter_mut() {
-            span.start_sample = first_sample;
-            span.end_sample = first_sample;
-        }
-        let spans = &*spans;
         let stride = QUANTUM * self.lanes;
         for (index, bank) in self.banks.iter_mut().enumerate() {
             let range = index * stride..(index + 1) * stride;
+            for lane in 0..self.lanes {
+                let (prepared, count) = targets[index * self.lanes + lane];
+                for target in &prepared[..count] {
+                    bank.apply_prepared_target_lane(lane, target)
+                        .expect("prepared EQ target application");
+                }
+            }
             bank.process_bank(
                 EffectBankProcessBlock::new(
                     &mut self.left[range.clone()],
@@ -615,8 +625,8 @@ impl HoistArm {
                     QUANTUM as u32,
                     self.width,
                     first_sample,
-                    spans,
-                    offsets,
+                    &[],
+                    &self.offsets,
                     128,
                 )
                 .expect("console hoist block"),

@@ -68,9 +68,28 @@ async function buildSdkBundle(sdkRoot) {
   const esbuildPath = pathToFileURL(path.join(sdkRoot, "node_modules", "esbuild", "lib", "main.js")).href;
   const { build } = await import(esbuildPath);
   const bundle = await mkdtemp(path.join(os.tmpdir(), "miso-sdk-response-bundle-"));
+  // A selected built distribution (including an unpacked npm archive) supplies every SDK runtime
+  // import. The existing source-only CI mode remains available before package assembly.
+  const sourceRoot = path.resolve(HERE, "../../../sdk/src");
+  const distribution = path.join(sdkRoot, "dist");
+  const useDistribution = await readdir(distribution).then((entries) => entries.includes("core"), () => false);
+  if (!useDistribution && sdkRoot !== path.dirname(sourceRoot)) {
+    throw new Error("selected SDK package has no built distribution");
+  }
+  const shippedSdk = {
+    name: "shipped-sdk",
+    setup(builder) {
+      builder.onResolve({ filter: /\.ts$/ }, (args) => {
+        const resolved = path.resolve(args.resolveDir, args.path);
+        if (!resolved.startsWith(`${sourceRoot}${path.sep}`)) return undefined;
+        return { path: path.join(distribution, path.relative(sourceRoot, resolved).replace(/\.ts$/, ".js")) };
+      });
+    },
+  };
   try {
     await build({
       entryPoints: [path.join(HERE, "sdk-response-entry.ts")],
+      plugins: useDistribution ? [shippedSdk] : [],
       outfile: path.join(bundle, "sdk-response-client.js"),
       bundle: true,
       format: "esm",
@@ -79,7 +98,9 @@ async function buildSdkBundle(sdkRoot) {
       legalComments: "inline",
     });
     await build({
-      entryPoints: [path.join(sdkRoot, "src", "browser", "response-worker.ts")],
+      entryPoints: [useDistribution
+        ? path.join(distribution, "browser", "response-worker.js")
+        : path.join(sourceRoot, "browser", "response-worker.ts")],
       outfile: path.join(bundle, "response-worker.js"),
       bundle: true,
       format: "esm",
@@ -308,6 +329,12 @@ function validateSdkResponse(browserName, response) {
     && finiteArray(managedAfterRender?.left)
     && finiteArray(managedAfterRender?.right),
   "managed track-response subscription did not suppress unchanged captures or publish the captured edit");
+  gate(browserName, "sdk-live-eq-cuts", managedResponse?.liveEq !== undefined
+    && BigInt(managedResponse.liveEq.capturedSample) > BigInt(managedResponse.liveEq.appliedAtSample)
+    && managedResponse.liveEq.postRampComparedFrames >= 128
+    && Number.isFinite(managedResponse.liveEq.postRampMaximumDifference)
+    && managedResponse.liveEq.postRampMaximumDifference <= 1e-6,
+  "packed browser EQ cuts did not produce fresh target response and settled headless PCM parity");
   gate(browserName, "sdk-track-response-subscription", managedResponse?.workerInitializations === 1
     && managedResponse.workerQueries === 4
     && managedResponse.unchangedPollSuppressed === true
@@ -561,7 +588,7 @@ async function artifactSetProofs(artifacts) {
   const refusesSet = (directory, mutation) => assert.rejects(
     () => exactArtifacts(directory),
     (error) => error instanceof Error
-      && error.message === "artifact directory must contain the exact shipped six-file set",
+      && error.message === "artifact directory must contain the exact shipped artifact set",
     `artifact-set: ${mutation}: red mutation escaped the artifact pin`,
   );
   try {
@@ -586,7 +613,7 @@ async function artifactSetProofs(artifacts) {
     await cp(shipped, stray, { recursive: true });
     await writeFile(path.join(stray, STRAY), "");
     await refusesSet(stray, "one stray file added");
-    // Substitution keeps the *count* at six, so only the name test can catch it. Without this row
+    // Substitution keeps the file count unchanged, so only the name test can catch it. Without this row
     // the name test could be deleted and every other row would stay green.
     for (const name of names) {
       const substituted = path.join(root, `substituted-${name}`);

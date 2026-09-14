@@ -2554,7 +2554,7 @@ impl AudioWorkletEngineHost {
         let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
             return self.record(RESULT_UNSUPPORTED);
         };
-        if producer.effect_id.as_ref() != "miso.parametric-eq" {
+        if producer.descriptor.id.as_str() != "miso.parametric-eq" {
             return self.record(RESULT_UNSUPPORTED);
         }
         let Some(owner) = producer.owner() else {
@@ -4097,7 +4097,7 @@ fn admit_commands_staged(
                     };
                     (
                         producer.descriptor,
-                        producer.effect_id.as_ref() == "miso.parametric-eq",
+                        producer.descriptor.id.as_str() == "miso.parametric-eq",
                         producer.has_owner(),
                     )
                 };

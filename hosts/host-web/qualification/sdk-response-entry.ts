@@ -1,3 +1,6 @@
+import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
+import { EngineConsole } from "../../../sdk/src/core/console.ts";
+import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
@@ -897,6 +900,16 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
 async function runTrackResponseSubscriptionQualification(reference: TrackResponseResult): Promise<Record<string, unknown>> {
   const stats = { queries: 0, initializations: 0 };
   const browser = await createTrackResponseSubscriptionBrowser(stats);
+  const document = new Uint8Array(await (await fetch("/qualification/observation-session.json")).arrayBuffer());
+  const asset = await MisoEngineAsset.load(await (await fetch(
+    "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+  )).arrayBuffer());
+  const headless = await WasmBoundary.boot(asset, document, {
+    sourceRingFrames: OBSERVATION_FRAMES,
+    console: { commandQueueRecords: 64, observationTaps: 4 },
+  });
+  const headlessConsole = new EngineConsole(headless.sessionMap(), (edits) =>
+    headless.submitCommands(encodeLaneEdits(edits), edits.length));
   const request = {
     trackId: "track",
     grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
@@ -929,10 +942,18 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     if (initial === undefined) throw new Error("track response subscription returned no initial result");
     const initialQueries = stats.queries;
     const console = await browser.console();
-    const command = await console.submit(
-      console.edit.track("track").effect("simd1", 0, "miso.parametric-eq")
-        .parameter("band-1-gain", -3),
-    );
+    const edits = (owner: EngineConsole) => {
+      const eq = owner.edit.track("track").effect("simd1", 0, "miso.parametric-eq");
+      return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
+        eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
+        eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
+        eq.parameter("lpf-enabled", true)];
+    };
+    const command = await console.submit(...edits(console));
+    const headlessCommand = await headlessConsole.submit(...edits(headlessConsole));
+    if (!headlessCommand.ok || command.appliedAtSample !== headlessCommand.appliedAtSample) {
+      throw new Error("browser/headless live EQ acknowledgements disagree");
+    }
     if (!command.ok) throw new Error("queued response subscription control edit was refused");
     const beforeRender = subscription.readLatest();
     const unchangedBeforeRender = beforeRender !== undefined
@@ -942,6 +963,10 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
 
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const planes = observationPlanes(block);
+      const headlessSource = headless.submitSource({ sourceId: "console-source", generation: 1n,
+        startFrame: BigInt(block * 128), planes,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1 });
+      if (!headlessSource.ok) throw new Error("headless live EQ source refused");
       const acknowledgement = await browser.host.submitSource({
         sourceId: "console-source",
         generation: 1n,
@@ -953,7 +978,23 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
       });
       if (acknowledgement.result !== 0) throw new Error("SDK response subscription source submission refused");
     }
-    await browser.context.startRendering();
+    const rendered = await browser.context.startRendering();
+    let postRampMaximumDifference = 0;
+    let postRampComparedFrames = 0;
+    const settledAt = Number(command.appliedAtSample) + 64;
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const expected = headless.render(128);
+      for (let frame = 0; frame < 128; frame += 1) {
+        const absolute = block * 128 + frame;
+        if (absolute < settledAt) continue;
+        postRampComparedFrames += 1;
+        for (const [channel, plane] of [expected.left, expected.right].entries()) {
+          const difference = Math.abs(rendered.getChannelData(channel)[absolute]! - plane[frame]!);
+          if (!Number.isFinite(difference)) throw new Error("live EQ produced nonfinite PCM");
+          postRampMaximumDifference = Math.max(postRampMaximumDifference, difference);
+        }
+      }
+    }
     const timerDelivered = await Promise.race([
       callbackDelivered.then(() => true),
       new Promise<boolean>((resolve) => globalThis.setTimeout(() => resolve(false), 500)),
@@ -1032,6 +1073,12 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
       staleReadRefused = true;
     }
     return {
+      liveEq: {
+        appliedAtSample: command.appliedAtSample.toString(),
+        capturedSample: afterRender.capturedSample.toString(),
+        postRampComparedFrames,
+        postRampMaximumDifference,
+      },
       initial: serializeTrackResponse(initial),
       afterRender: serializeTrackResponse(afterRender),
       updated: updated === undefined ? null : serializeTrackResponse(updated),
@@ -1069,6 +1116,7 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
       bounds: subscription.bounds,
     };
   } finally {
+    headless.dispose();
     await browser.close();
   }
 }

@@ -579,9 +579,10 @@ class MisoAudioWorkletHost {
     );
   }
 
-  // Kept private until assignment 10 installs it as command()'s semantic lowering. The shared
-  // helper is still exercised by headless/browser component fixtures without changing defaults.
+  // Refuse lifecycle failures before a new preparation workspace can be allocated.
   #submitPrepared(records, count) {
+    if (this.#disposed) return Promise.reject(webError(3));
+    if (this.#stickyError !== null) return Promise.reject(this.#stickyError);
     const control = this.#ensurePreparedControl();
     return control.submit(records, count);
   }
@@ -1025,12 +1026,7 @@ class MisoAudioWorkletHost {
         || !request.commands.every(validCommand)) {
       return Promise.reject(webError(1));
     }
-    const records = encodeCommands(request.commands);
-    return this.#request(
-      { tag: "miso.command.v1", count: request.commands.length, records },
-      [records.buffer],
-      "command",
-    );
+    return this.#submitPrepared(encodeCommands(request.commands), request.commands.length);
   }
 
   /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).

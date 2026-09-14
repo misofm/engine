@@ -800,3 +800,36 @@ PASS: TypeScript noEmit (including root's ordinary-path factoring), canonical sh
 helper fixture, generated code check and diff check. No benchmark or artifact build.
 Assignment10 now owns the factory/callsite/metadata switch plus actual production
 admission, DSP and packed browser/headless qualification. #807 is open, attempt1.
+
+
+### Assignment10 source cutover checkpoint — qualification pending
+
+The real EQ factory now advertises prepared targets, the six cut rows are live with
+fixed64-sample linear coefficient smoothing, and browser/headless public commands
+call their shared prepared lowering. Raw scalar/bank EQ spans are counted/refused;
+coefficient design was removed from processing. Direct EQ fixtures and the existing
+console-workload/bench callers prepare targets off render; no benchmark was run.
+Production host classification now uses the native descriptor ID, correcting a
+previous comparison against the session effect-slot ID.
+
+PASS: all parametric-eq tests, console-workload/bench compilation, metadata roundtrip,
+production preparation-workspace test, TypeScript and source browser bundle. The
+full host run recorded93 passes/5 failures/2 existing ignored; root then corrected
+the exact-budget owner accounting fixture and its focused test passes. Four old
+raw-EQ callers remain to migrate: native command-timeline parity, effect parameter
+application sample, bypass setup, and the maximum decoded-staging fixture (use an
+ordinary effect there so coalescing does not weaken its capacity assertion).
+
+The existing browser response episode now prepares all six cut rows plus old numeric
+EQ, checks fresh target capture after ACK A and compares post-A+64 PCM with the same
+SDK headless boundary. It has not yet run against a new artifact. Qualification can
+resolve runtime imports from an unpacked SDK distribution; existing source-only CI
+remains supported. The helper is included in exact artifact sets and has one source
+symlink for native Node type-stripping/source bundling, with no duplicated algorithm.
+
+This is a recoverable compiling checkpoint, NOT #807 PASS or release readiness.
+Remaining: migrate the four host callers/direct JS oracle, close actual production
+transaction/diagnostic/allocation/designer proofs, adapt affected hermetic host
+stubs, then build/repin the artifact and run proportional SDK/packed browser gates.
+Fresh Astra MEDIUM adversarial review and merged/GitHub delivery remain required.
+Keep issue open, attempt1; do not treat pending qualification as completed evidence.

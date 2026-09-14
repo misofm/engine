@@ -21,8 +21,8 @@ use parametric_eq::{
     ParametricEqFactory, design_svf,
 };
 use support::{
-    COMMON_BYTES, LANE_BYTES, SECTIONS, WORDS_PER_BAND, band_word, point, process_zeros, request,
-    set_initial, single_section_values, snapshot, values, word,
+    COMMON_BYTES, LANE_BYTES, SECTIONS, WORDS_PER_BAND, apply_prepared_targets, band_word, point,
+    process_zeros, request, set_initial, single_section_values, snapshot, values, word,
 };
 
 /// The frozen public surface: identifiers, domains, smoothing and the current state size.
@@ -148,10 +148,10 @@ fn descriptor_is_frozen() {
         assert_eq!(parameter.minimum, minimum);
         assert_eq!(parameter.maximum, maximum);
         assert_eq!(parameter.default_value, default_value);
-        assert_eq!(parameter.automation_rate, AutomationRate::None);
-        assert_eq!(parameter.smoothing, SmoothingRule::None);
-        assert_eq!(parameter.smoothing_samples, 0);
-        assert!(!parameter.automatable);
+        assert_eq!(parameter.automation_rate, AutomationRate::Block);
+        assert_eq!(parameter.smoothing, SmoothingRule::Linear);
+        assert_eq!(parameter.smoothing_samples, 64);
+        assert!(parameter.automatable);
         assert!(parameter.readable);
     }
     assert_eq!(SECTIONS, EQ_SECTION_COUNT);
@@ -249,12 +249,15 @@ fn automation_starts_a_64_sample_word_ramp() {
         );
     }
 
-    let report = process_zeros(
-        effect.as_mut(),
-        0,
-        1,
-        &[point(3, ParameterChannel::Left, 0, 12.0)],
+    let mut target_values = values.clone();
+    set_initial(&mut target_values, 3, ParameterChannel::Left, 12.0);
+    let mut changed = vec![false; target_values.len()];
+    changed[3 * 2] = true;
+    assert_eq!(
+        apply_prepared_targets(effect.as_mut(), &target_values, &changed),
+        1
     );
+    let report = process_zeros(effect.as_mut(), 0, 1, &[]);
     assert_eq!(report.invalid_spans, 0);
     let (_, left, _) = snapshot(effect.as_ref());
     assert_eq!(band_word(&left, 0, 14), 63, "one frame consumed");
@@ -304,14 +307,14 @@ fn malformed_automation_rejects_each_span_without_losing_valid_targets() {
         mismatched_point,
     ];
     let report = process_zeros(effect.as_mut(), 0, 1, &automation);
-    assert_eq!(report.invalid_spans, 6);
+    assert_eq!(report.invalid_spans, 8);
     let (_, left, right) = snapshot(effect.as_ref());
     assert_eq!(
         f32::from_bits(band_word(&left, 0, 16)),
-        6.0,
-        "first gain wins"
+        0.0,
+        "raw spans cannot mutate the prepared target"
     );
-    assert_eq!(f32::from_bits(band_word(&left, 0, 17)), 1.0, "Q accepted");
+    assert_eq!(band_word(&left, 0, 14), 0, "raw spans cannot start a ramp");
     assert_eq!(
         f32::from_bits(band_word(&right, 0, 16)),
         0.0,
@@ -352,10 +355,20 @@ fn automation_is_partition_invariant() {
         let mut split = ParametricEqFactory
             .prepare(request(&values, false))
             .expect("split prepare");
-        let automation = [
-            point(2, ParameterChannel::Left, 0, 3_000.0),
-            point(3, ParameterChannel::Left, 0, -9.0),
-        ];
+        let mut target_values = values.clone();
+        set_initial(&mut target_values, 2, ParameterChannel::Left, 3_000.0);
+        set_initial(&mut target_values, 3, ParameterChannel::Left, -9.0);
+        let mut changed = vec![false; target_values.len()];
+        changed[2 * 2] = true;
+        changed[3 * 2] = true;
+        assert_eq!(
+            apply_prepared_targets(whole.as_mut(), &target_values, &changed),
+            1
+        );
+        assert_eq!(
+            apply_prepared_targets(split.as_mut(), &target_values, &changed),
+            1
+        );
         let mut whole_left: Vec<f32> = (0..192).map(|index| (index as f32).sin() * 0.5).collect();
         let mut whole_right: Vec<f32> = whole_left.iter().map(|value| -value).collect();
         let mut split_left = whole_left.clone();
@@ -367,7 +380,7 @@ fn automation_is_partition_invariant() {
                 &mut whole_right[..128],
                 None,
                 0,
-                &automation,
+                &[],
                 128,
             )
             .expect("whole block"),
@@ -386,14 +399,13 @@ fn automation_is_partition_invariant() {
 
         let mut first = 0_usize;
         for (index, frames) in partition.iter().copied().enumerate() {
-            let spans: &[_] = if index == 0 { &automation } else { &[] };
             split.process(
                 EffectProcessBlock::new(
                     &mut split_left[first..first + frames],
                     &mut split_right[first..first + frames],
                     None,
                     first as u64,
-                    spans,
+                    &[],
                     128,
                 )
                 .expect("split block"),
@@ -918,12 +930,12 @@ fn resets_restore_defaults_or_only_clear_history() {
         .prepare(request(&values, false))
         .expect("prepare");
     let fresh = snapshot(effect.as_ref());
-    process_zeros(
-        effect.as_mut(),
-        0,
-        8,
-        &[point(2, ParameterChannel::Left, 0, 5_000.0)],
-    );
+    let mut target_values = values.clone();
+    set_initial(&mut target_values, 2, ParameterChannel::Left, 5_000.0);
+    let mut changed = vec![false; target_values.len()];
+    changed[2 * 2] = true;
+    apply_prepared_targets(effect.as_mut(), &target_values, &changed);
+    process_zeros(effect.as_mut(), 0, 8, &[]);
     let mut left = [0.5_f32; 8];
     let mut right = [0.5_f32; 8];
     effect
@@ -973,11 +985,7 @@ fn prepare_refuses_an_unknown_family() {
     );
 }
 
-/// `-0.0` is a way of writing zero, and is normalised on the way in (83c decision 3).
-///
-/// Five of the eight effect crates rejected it outright before wave 2. The lenient rule wins: a
-/// control message that writes zero the other way is not an error, while a `-0.0` reaching a
-/// coefficient design or a payload is a value nothing downstream expects.
+/// Raw `-0.0` automation is refused without reaching the coefficient designer or renderer.
 #[test]
 fn a_negative_zero_automation_value_is_accepted_as_zero() {
     let mut values = bell_values();
@@ -991,21 +999,28 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
         1,
         &[point(3, ParameterChannel::Left, 0, -0.0)],
     );
-    assert_eq!(report.invalid_spans, 0);
+    assert_eq!(report.invalid_spans, 1);
     let (_, left, _) = snapshot(effect.as_ref());
-    assert_eq!(band_word(&left, 0, 16), 0.0_f32.to_bits(), "target is +0.0");
-    assert_eq!(band_word(&left, 0, 14), 64 - 1, "a ramp started");
+    assert_eq!(
+        band_word(&left, 0, 16),
+        6.0_f32.to_bits(),
+        "raw span leaves target unchanged"
+    );
+    assert_eq!(band_word(&left, 0, 14), 0, "raw spans cannot start a ramp");
 
-    // And a payload that carries `-0.0` restores as `+0.0` rather than being rejected.
+    // A payload that carries `-0.0` remains malformed and state-preserving.
     let (common, mut stored, right) = snapshot(effect.as_ref());
     stored[(19 + 16) * 4..(19 + 16) * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
-    effect
-        .restore_state_payload(
+    let before = snapshot(effect.as_ref());
+    assert_eq!(
+        effect.restore_state_payload(
             1,
             StatePayloadInput::new(&common, &stored, &right, effect.metadata().state_sizes)
                 .expect("input"),
-        )
-        .expect("a negative zero parameter is a legal payload");
-    let (_, left, _) = snapshot(effect.as_ref());
-    assert_eq!(band_word(&left, 0, 16), 0.0_f32.to_bits());
+        ),
+        Err(StatePayloadError {
+            code: "effect.state.payload"
+        })
+    );
+    assert_eq!(snapshot(effect.as_ref()), before);
 }

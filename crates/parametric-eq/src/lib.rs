@@ -35,17 +35,17 @@
 //! `effect.state.version`; there is no silent migration.
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
-    EffectTargetError, EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet,
-    NativeEffectFactory, NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedEffectTarget,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, QualityDescriptor, ResetKind,
-    ResponseAnalysisError, ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSummary, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EffectTargetError,
+    EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
+    NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, QualityDescriptor, ResetKind, ResponseAnalysisError, ResponseSnapshotKind,
+    ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSummary, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     BLOCK_LIMIT, block_is_positive_zero, check_block, lane_is_positive_zero, nonfinite_lane_mask,
@@ -414,12 +414,12 @@ const fn cut_parameter(
         maximum: bounds.1,
         default_value: bounds.2,
         mapping,
-        automation_rate: AutomationRate::None,
+        automation_rate: AutomationRate::Block,
         channel_policy: ParameterChannelPolicy::PerLane,
-        smoothing: SmoothingRule::None,
-        smoothing_samples: 0,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: RAMP_SAMPLES,
         readable: true,
-        automatable: false,
+        automatable: true,
         enum_choices: &[],
         lattice: effect_contract::default_parameter_lattice(unit, domain, mapping),
     }
@@ -2047,104 +2047,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         Ok(())
     }
 
-    /// Applies one track's automation spans to both channels.
-    ///
-    /// The rules are unchanged from the frozen contract: a span must be a `Point` at exactly this
-    /// block's first sample with identical endpoints and an in-domain value, spans must arrive in
-    /// non-decreasing `(sample, parameter, channel)` order, and one slot may be written once. Every
-    /// malformed span is counted once and none of them discards a valid point.
-    fn automate(
-        &mut self,
-        spans: &[PreparedAutomationSpan],
-        first_sample: u64,
-        track: usize,
-        invalid_spans: &mut u64,
-    ) {
-        if spans.len() > self.metadata.automation_capacity as usize {
-            *invalid_spans = invalid_spans.saturating_add(spans.len() as u64);
-            return;
-        }
-        let mut pending = [None; EQ_BAND_COUNT * 4 * 2];
-        let mut prior_sort_key = None;
-        for span in spans {
-            let sort_key = (span.start_sample, span.parameter_index, span.channel);
-            let slot = numeric_parameter(span.parameter_index as usize)
-                .zip(lane_index(span.channel))
-                .map(|((section, field), channel)| (section * 4 + field) * 2 + channel);
-            let Some(slot) = slot else {
-                *invalid_spans = invalid_spans.saturating_add(1);
-                continue;
-            };
-            if prior_sort_key.is_some_and(|prior| sort_key < prior)
-                || pending[slot].is_some()
-                || span.kind != AutomationSpanKind::Point
-                || span.start_sample != first_sample
-                || span.end_sample != first_sample
-                || span.start_value.to_bits() != span.end_value.to_bits()
-                || !numeric_value_valid(slot / 2 % 4, span.start_value)
-            {
-                *invalid_spans = invalid_spans.saturating_add(1);
-                continue;
-            }
-            // Master plan §6 / 83c decision 3: `-0.0` is a way of writing zero, not an error. It is
-            // normalised here, on the way in, so no coefficient design and no payload ever sees it.
-            pending[slot] = Some(normalize_zero(span.start_value));
-            prior_sort_key = Some(sort_key);
-        }
-        let sample_rate = self.sample_rate();
-        for section in 0..EQ_BAND_COUNT {
-            let physical_section = section + BAND_SECTION_OFFSET;
-            for channel in 0..2 {
-                let updates: [Option<f32>; 4] =
-                    core::array::from_fn(|field| pending[(section * 4 + field) * 2 + channel]);
-                if updates.iter().all(Option::is_none) {
-                    continue;
-                }
-                // The stored band is read by value, so the borrow of the channel ends here and
-                // the cached-design read below can borrow it again.
-                let stored = if channel == 0 {
-                    self.left.targets[track][physical_section]
-                } else {
-                    self.right.targets[track][physical_section]
-                };
-                let mut candidate = stored;
-                for (field, value) in updates.into_iter().enumerate() {
-                    if let Some(value) = value {
-                        candidate.set_numeric(field, value);
-                    }
-                }
-                // Issue #144 item 6: a band restated at the values it already holds designs to
-                // the words it is already heading for, so the `f64` design is read from the lane
-                // rather than recomputed. `words` is deterministic in (band, rate) and
-                // `Section::target` is what it last returned, so the two are the same bits.
-                let designed = if candidate.same_bits(&stored) {
-                    Ok(if channel == 0 {
-                        self.left.target_words(physical_section, track)
-                    } else {
-                        self.right.target_words(physical_section, track)
-                    })
-                } else {
-                    candidate.words(sample_rate)
-                };
-                match designed {
-                    Ok(words) => {
-                        if channel == 0 {
-                            self.left.targets[track][physical_section] = candidate;
-                            self.left.start_ramp(physical_section, track, words);
-                        } else {
-                            self.right.targets[track][physical_section] = candidate;
-                            self.right.start_ramp(physical_section, track, words);
-                        }
-                    }
-                    Err(_) => {
-                        // Unreachable for in-domain values; the branch keeps the validator total.
-                        *invalid_spans = invalid_spans.saturating_add(1);
-                    }
-                }
-            }
-        }
-    }
-
     /// Runs both channels over one block and applies the master plan §4.4 boundary check.
     ///
     /// The check is one vector scan per channel per block, from `effect-runtime`. A
@@ -2300,27 +2202,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         self.left = Channel::from_prepared(left, left_words);
         self.right = Channel::from_prepared(right, right_words);
         Ok(())
-    }
-}
-
-/// Returns the cascade section and the automatable field index (0 frequency .. 3 shelf slope).
-fn numeric_parameter(parameter_index: usize) -> Option<(usize, usize)> {
-    let section = parameter_index / 6;
-    if section >= EQ_BAND_COUNT || parameter_index % 6 < 2 {
-        return None;
-    }
-    // General-band parameter descriptors precede the appended prepared-only cut descriptors. Keep
-    // the returned index in descriptor/general-band order; target access adds the physical HPF
-    // offset explicitly.
-    Some((section, parameter_index % 6 - 2))
-}
-
-/// Channel index of a per-lane parameter span; `Both` is not a per-lane address.
-fn lane_index(channel: ParameterChannel) -> Option<usize> {
-    match channel {
-        ParameterChannel::Left => Some(0),
-        ParameterChannel::Right => Some(1),
-        ParameterChannel::Both => None,
     }
 }
 
@@ -2485,6 +2366,10 @@ impl NativeEffectFactory for ParametricEqFactory {
     }
 
     fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
+        Some(self)
+    }
+
+    fn target_preparation(&self) -> Option<&dyn effect_contract::NativeEffectTargetPreparation> {
         Some(self)
     }
 
@@ -2740,17 +2625,13 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
-        // #163 phase 4 item 1, as in `process_bank`: automation can snap a coefficient without
-        // ever raising `remaining`, so the claim is withdrawn whenever a span arrives.
         if !block.automation.is_empty() {
             self.silent_fixed_point = false;
         }
-        self.automate(
-            block.automation,
-            block.first_sample,
-            0,
-            &mut report.invalid_spans,
-        );
+        // EQ semantic spans are control-plane input. A production owner must lower them to
+        // prepared targets before this entry point; never design coefficients on the render
+        // thread. Count every raw span while rendering the existing state unchanged.
+        report.invalid_spans = block.automation.len() as u64;
         if self.metadata.bypass {
             return report;
         }
@@ -2942,22 +2823,15 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         {
             return report;
         }
-        // #163 phase 4 item 1: an admitted span retargets a band, and a span with no smoothing
-        // snaps the coefficient words outright while leaving `remaining` at zero -- so
-        // `no_ramp_in_flight` alone would not notice it. Withdraw the claim whenever this block
-        // carries automation at all; the next silent block re-earns it.
         if !block.automation.is_empty() {
             self.silent_fixed_point = false;
         }
         for track in 0..W {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
-            self.automate(
-                &block.automation[start..end],
-                block.first_sample,
-                track,
-                &mut report.reports[track].invalid_spans,
-            );
+            // Raw semantic EQ spans are refused per addressed bank lane. The bank continues
+            // rendering its already prepared state, so no render-thread designer is reachable.
+            report.reports[track].invalid_spans = (end - start) as u64;
         }
         if self.metadata.bypass {
             return report;
@@ -4547,7 +4421,10 @@ mod elision {
 #[cfg(test)]
 mod target_application {
     use super::*;
-    use effect_contract::{EffectTargetRequest, NativeEffectTargetPreparation};
+    use effect_contract::{
+        AutomationSpanKind, EffectTargetRequest, NativeEffectTargetPreparation,
+        PreparedAutomationSpan,
+    };
 
     fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
         PrepareEffectRequest {
@@ -4618,35 +4495,32 @@ mod target_application {
         effect.reset(ResetKind::DiscontinuityKeepParameters);
         assert_eq!(design_call_count(), 0, "cached resets must not redesign");
 
-        let mut legacy_values = values;
-        for lane in 0..2 {
-            legacy_values[lane].value = 1.0;
-            legacy_values[4 + lane].value = 1_000.0;
-            legacy_values[8 + lane].value = 1.0;
-            legacy_values[10 + lane].value = 1.0;
-        }
-        let mut legacy = ParametricEqFactory
-            .prepare(request(&legacy_values))
+        let mut raw = ParametricEqFactory
+            .prepare(request(&target_values))
             .expect("legacy effect preparation");
         reset_design_calls();
-        let span = [PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
-            channel: ParameterChannel::Left,
-            parameter_index: 2,
-            start_sample: 0,
-            end_sample: 0,
-            start_value: 2_000.0,
-            end_value: 2_000.0,
-        }];
         let mut left = [1.0_f32; 1];
         let mut right = [0.0_f32; 1];
-        legacy.process(
-            EffectProcessBlock::new(&mut left, &mut right, None, 0, &span, 128)
-                .expect("legacy render"),
+        let report = raw.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                0,
+                &[PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel: ParameterChannel::Left,
+                    parameter_index: 2,
+                    start_sample: 0,
+                    end_sample: 0,
+                    start_value: 2_000.0,
+                    end_value: 2_000.0,
+                }],
+                128,
+            )
+            .expect("legacy render"),
         );
-        assert!(
-            design_call_count() > 0,
-            "legacy numeric automate remains the designing route"
-        );
+        assert_eq!(report.invalid_spans, 1);
+        assert_eq!(design_call_count(), 0);
     }
 }

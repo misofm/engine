@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn production_capability_is_still_unsupported_and_layouts_are_fixed() {
+    fn production_capability_opens_and_prepares_a_live_cut() {
         assert_eq!(size_of::<WebEqTargetRequest>(), 32);
         assert_eq!(size_of::<WebEqTargetEdit>(), 12);
         assert_eq!(size_of::<WebPreparedEffectTarget>(), 56);
@@ -486,11 +486,42 @@ mod tests {
         assert_eq!(size_of::<WebPreparedEffectCompanionHeader>(), 24);
         assert_eq!(size_of::<WebPreparedEffectCompanionRecord>(), 80);
         assert_eq!(size_of::<WebEqTargetConfig>(), 272);
-        assert_eq!(open(), crate::RESULT_UNSUPPORTED);
-        assert_eq!(request_ptr(), 0);
-        assert_eq!(prepare(0), crate::RESULT_WRONG_STATE);
+        assert_eq!(open(), crate::RESULT_OK);
+        assert_eq!(request_capacity(), EQ_TARGET_REQUEST_CAPACITY as u32);
+        WORKSPACE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let workspace = slot.as_deref_mut().expect("opened workspace");
+            workspace.request.fill(0);
+            put_u32(
+                &mut workspace.request,
+                0,
+                EQ_TARGET_REQUEST_HEADER_BYTES as u32,
+            );
+            put_u32(&mut workspace.request, 4, crate::ABI_VERSION);
+            put_u32(&mut workspace.request, 8, 48_000);
+            put_u32(&mut workspace.request, 12, EQ_VALUE_COUNT as u32);
+            put_u32(&mut workspace.request, 16, 1);
+            let factory =
+                host_core::parametric_eq_target_preparation_factory().expect("EQ capability");
+            for (index, value) in
+                effect_contract::default_initial_values(factory.descriptor()).enumerate()
+            {
+                put_u32(
+                    &mut workspace.request,
+                    32 + index * 4,
+                    value.value.to_bits(),
+                );
+            }
+            put_u32(&mut workspace.request, 272, 65);
+            put_u32(&mut workspace.request, 276, 2);
+            put_u32(&mut workspace.request, 280, 1.0_f32.to_bits());
+        });
+        assert_eq!(prepare(284), crate::RESULT_OK);
+        assert_eq!(result_bytes(), 328);
         assert_eq!(rejected_edit_index(), u32::MAX);
-        assert_eq!(rejected_reason(), crate::COMMAND_REASON_WRONG_STATE);
+        assert_eq!(rejected_reason(), crate::COMMAND_REASON_NONE);
+        assert_eq!(close(), crate::RESULT_OK);
+        assert_eq!(request_ptr(), 0);
         assert_eq!(close(), crate::RESULT_WRONG_STATE);
     }
 }

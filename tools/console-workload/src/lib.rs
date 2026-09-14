@@ -49,7 +49,9 @@ use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
-use effect_contract::{ChannelSymmetryWitness, EffectControlRecord, ParameterChannel};
+use effect_contract::{
+    ChannelSymmetryWitness, EffectControlRecord, ParameterChannel, PreparedEffectTarget,
+};
 use engine::realtime::{
     PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
 };
@@ -1048,6 +1050,43 @@ impl SessionRuntime {
         parameter_channel: ParameterChannel,
         value: f32,
     ) -> bool {
+        if self.controls[channel].has_owner() {
+            let result = (|| {
+                let base_revision = self.controls[channel]
+                    .owner()
+                    .ok_or(())?
+                    .committed_revision();
+                self.controls[channel]
+                    .begin_owner(base_revision)
+                    .map_err(|_| ())?;
+                self.controls[channel]
+                    .edit_owner(parameter_index, parameter_channel, value)
+                    .map_err(|_| ())?;
+                let mut targets = [PreparedEffectTarget {
+                    slot: 0,
+                    channel: ParameterChannel::Left,
+                    words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                }; 12];
+                let count = self.controls[channel]
+                    .owner()
+                    .ok_or(())?
+                    .prepare_targets_into(&mut targets)
+                    .map_err(|_| ())?;
+                self.controls[channel]
+                    .preflight_candidate_targets(base_revision, &targets[..count])
+                    .map_err(|_| ())?;
+                self.controls[channel]
+                    .publish_candidate_targets(base_revision, &targets[..count])
+                    .map_err(|_| ())?;
+                self.controls[channel].commit_owner().map_err(|_| ())?;
+                Ok::<(), ()>(())
+            })();
+            if result.is_err() {
+                let _ = self.controls[channel].discard_owner();
+                return false;
+            }
+            return true;
+        }
         self.controls[channel]
             .try_push(EffectControlRecord::Parameter {
                 parameter_index,

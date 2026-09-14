@@ -27,11 +27,13 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan, StatePayloadOutput, StatePayloadSizes,
+    PrepareEffectBankRequest, StatePayloadOutput, StatePayloadSizes,
 };
 use lane::Backend;
 use parametric_eq::ParametricEqFactory;
-use support::{COMMON_BYTES, LANE_BYTES, point, request, set_initial, values};
+use support::{
+    COMMON_BYTES, LANE_BYTES, apply_prepared_targets_lane, request, set_initial, values,
+};
 
 const FRAMES: usize = 128;
 /// Long enough that every integrator reaches its silent fixed point with room to spare, so the
@@ -106,10 +108,6 @@ fn render(lanes: usize, restate: bool) -> Vec<u32> {
         .expect("valid bank request")
         .expect("the native width must bind");
 
-    let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
-        .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
-        .collect();
-    let full_offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
     let empty_offsets = vec![0_u32; lanes + 1];
 
     let total = SILENT_BLOCKS + 2;
@@ -118,20 +116,14 @@ fn render(lanes: usize, restate: bool) -> Vec<u32> {
         let silent = block > 0 && block < total - 1;
         let mut left = plane(block, lanes, silent, false);
         let mut right = plane(block, lanes, silent, true);
-        let (spans, offsets): (&[PreparedAutomationSpan], &[u32]) = if restate {
-            (&redundant, &full_offsets)
-        } else {
-            (&[], &empty_offsets)
-        };
-        // A redundant point must be restated at *this* block's first sample to be admitted.
-        let restated: Vec<PreparedAutomationSpan> = spans
-            .iter()
-            .map(|span| PreparedAutomationSpan {
-                start_sample: (block * FRAMES) as u64,
-                end_sample: (block * FRAMES) as u64,
-                ..*span
-            })
-            .collect();
+        if restate {
+            for track in 0..lanes {
+                let target_values = configured(track);
+                let mut changed = vec![false; target_values.len()];
+                changed[3 * 2] = true;
+                apply_prepared_targets_lane(&mut *bank, track, 48_000, &target_values, &changed);
+            }
+        }
         bank.process_bank(
             EffectBankProcessBlock::new(
                 &mut left,
@@ -140,8 +132,8 @@ fn render(lanes: usize, restate: bool) -> Vec<u32> {
                 FRAMES as u32,
                 width,
                 (block * FRAMES) as u64,
-                &restated,
-                offsets,
+                &[],
+                &empty_offsets,
                 128,
             )
             .expect("bank block"),
@@ -252,10 +244,6 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
             })
             .expect("valid bank request")
             .expect("the native width must bind");
-        let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
-            .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
-            .collect();
-        let full_offsets: Vec<u32> = (0..=lanes).map(|t| t as u32).collect();
         let empty_offsets = vec![0_u32; lanes + 1];
 
         // 40 blocks of exact `+0.0` earn the claim, then exactly one block of all `-0.0`, then
@@ -268,23 +256,20 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
             let mut left = vec![fill; FRAMES * lanes];
             let mut right = vec![fill; FRAMES * lanes];
             let first_sample = (block * FRAMES) as u64;
-            let restated: Vec<PreparedAutomationSpan> = if restate {
-                redundant
-                    .iter()
-                    .map(|span| PreparedAutomationSpan {
-                        start_sample: first_sample,
-                        end_sample: first_sample,
-                        ..*span
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let offsets: &[u32] = if restate {
-                &full_offsets
-            } else {
-                &empty_offsets
-            };
+            if restate {
+                for track in 0..lanes {
+                    let target_values = configured(track);
+                    let mut changed = vec![false; target_values.len()];
+                    changed[3 * 2] = true;
+                    apply_prepared_targets_lane(
+                        &mut *bank,
+                        track,
+                        48_000,
+                        &target_values,
+                        &changed,
+                    );
+                }
+            }
             bank.process_bank(
                 EffectBankProcessBlock::new(
                     &mut left,
@@ -293,8 +278,8 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
                     FRAMES as u32,
                     width,
                     first_sample,
-                    &restated,
-                    offsets,
+                    &[],
+                    &empty_offsets,
                     128,
                 )
                 .expect("bank block"),

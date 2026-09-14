@@ -3088,9 +3088,31 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             engine.report.effect_control_resources.producer_table_bytes, native_table,
             "{name}: native table uses actual Vec capacity"
         );
+        let mut owner_payload = 0_u64;
+        let mut owner_largest = 0_u64;
+        for owner in handles
+            .effect_controls
+            .iter()
+            .filter_map(EffectControlProducer::owner)
+        {
+            let (factory_layout, _) =
+                core::alloc::Layout::new::<[core::sync::atomic::AtomicUsize; 2]>()
+                    .extend(core::alloc::Layout::for_value(owner.factory().as_ref()))
+                    .expect("factory Arc layout");
+            let allocations = [
+                core::mem::size_of_val(owner),
+                core::mem::size_of_val(owner.committed()),
+                core::mem::size_of_val(owner.candidate()),
+                core::mem::size_of_val(owner.dirty()),
+                factory_layout.pad_to_align().size(),
+            ];
+            owner_payload += allocations.iter().sum::<usize>() as u64;
+            owner_largest = owner_largest.max(*allocations.iter().max().unwrap() as u64);
+        }
         assert_eq!(
-            engine.report.effect_control_resources.owned_payload_bytes, string_payload,
-            "{name}: launch EQ has no owner payload before assignment 10"
+            engine.report.effect_control_resources.owned_payload_bytes,
+            string_payload + owner_payload,
+            "{name}: exact owner slices, owner box and once-retained factory"
         );
         let decoded_count =
             command_staging_count(shape.track_count as usize).expect("decoded command count");
@@ -3099,7 +3121,9 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .effect_count
             .checked_mul(size_of::<Box<[u64]>>() as u64)
             .expect("observation arm table arithmetic");
-        let effect_retained = dense_table + string_payload;
+        let effect_payload = string_payload + owner_payload;
+        let effect_largest = string_largest.max(owner_largest);
+        let effect_retained = dense_table + effect_payload;
         let ready_metadata = source_control_bytes + session_model_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -3125,6 +3149,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .max(engine.report.session_largest_allocation_bytes)
             .max(dense_table)
             .max(string_largest)
+            .max(effect_largest)
             .max(observation_arm_table)
             .max(decoded_bytes);
         let expected_named_largest =

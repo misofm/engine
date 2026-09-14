@@ -1030,7 +1030,7 @@ export class WasmBoundary {
 
   /** Stage `count` already-encoded 48-byte command records and submit them as one transaction. */
   submitCommands(records: Uint8Array, count: number): CommandReport {
-    return this.#submitOrdinaryCommands(records, count);
+    return this.#submitPreparedCommands(records, count);
   }
 
   #submitOrdinaryCommands(records: Uint8Array, count: number): CommandReport {
@@ -1057,7 +1057,7 @@ export class WasmBoundary {
     return this.#readCommandReport(handle, result);
   }
 
-  /** Assignment 9's private prepared lowering; command() remains on the ordinary route until 10. */
+  /** Lower semantic EQ edits through the shared off-render preparation owner. */
   #submitPreparedCommands(records: Uint8Array, count: number): CommandReport {
     const control = this.#preparedControl ??= createPreparedControl({
       instance: this.#exports,

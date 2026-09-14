@@ -14,11 +14,11 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan, PreparedNativeEffectBank,
+    PrepareEffectBankRequest, PreparedNativeEffectBank,
 };
 use lane::Backend;
 use parametric_eq::ParametricEqFactory;
-use support::{point, request, set_initial, values};
+use support::{apply_prepared_targets_lane, request, set_initial, values};
 
 const BLOCKS: usize = 24;
 const FRAMES: usize = 128;
@@ -83,35 +83,30 @@ fn block(base: usize, lanes: usize) -> Vec<f32> {
         .collect()
 }
 
-/// A band-gain retarget on both channels, at this block's first sample, for every lane.
-///
-/// This is what puts a ramp in flight. Both channels are addressed with the same value, so the
-/// dual bank's two channels stay bit-equal -- the point is not asymmetry, it is that `remaining`,
-/// `coef`, `step` and `target` are all *moving* when the collapse disengages.
-fn automation(step: usize, lanes: usize) -> (Vec<PreparedAutomationSpan>, Vec<u32>) {
-    let first = (step * FRAMES) as u64;
-    let gain = -6.0 + (step % 4) as f32 * 4.0;
-    let mut spans = Vec::new();
-    let mut offsets = vec![0_u32; lanes + 1];
-    for lane in 0..lanes {
-        spans.push(point(3, ParameterChannel::Left, first, gain));
-        spans.push(point(3, ParameterChannel::Right, first, gain));
-        offsets[lane + 1] = spans.len() as u32;
-    }
-    (spans, offsets)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn run_block(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],
     right: &mut [f32],
     width: BankWidth,
     first_sample: u64,
-    spans: &[PreparedAutomationSpan],
-    offsets: &[u32],
+    step: usize,
+    retarget: bool,
     mono: bool,
 ) {
+    let lanes = width.lanes() as usize;
+    if retarget {
+        let gain = -6.0 + (step % 4) as f32 * 4.0;
+        for lane in 0..lanes {
+            let mut target_values = configured(lane);
+            set_initial(&mut target_values, 3, ParameterChannel::Left, gain);
+            set_initial(&mut target_values, 3, ParameterChannel::Right, gain);
+            let mut changed = vec![false; target_values.len()];
+            changed[3 * 2] = true;
+            changed[3 * 2 + 1] = true;
+            apply_prepared_targets_lane(bank, lane, 48_000, &target_values, &changed);
+        }
+    }
+    let offsets = vec![0_u32; lanes + 1];
     let block = EffectBankProcessBlock::new(
         left,
         right,
@@ -119,8 +114,8 @@ fn run_block(
         FRAMES as u32,
         width,
         first_sample,
-        spans,
-        offsets,
+        &[],
+        &offsets,
         FRAMES as u32,
     )
     .expect("bounded bank block");
@@ -173,8 +168,6 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
     for ramping in [true, false] {
         let mut dual = bind(width, backend, lanes);
         let mut collapsed = bind(width, backend, lanes);
-        let idle = vec![0_u32; lanes + 1];
-
         for step in 0..BLOCKS {
             let mut dual_left = block(step * FRAMES, lanes);
             let mut dual_right = dual_left.clone();
@@ -183,20 +176,14 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
             // produce so that a body which reads it is visibly wrong rather than plausibly so.
             let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
             let first = (step * FRAMES) as u64;
-            let (spans, packed) = automation(step, lanes);
-            let (spans, packed): (&[PreparedAutomationSpan], &[u32]) = if ramping {
-                (&spans, &packed)
-            } else {
-                (&[], &idle)
-            };
             run_block(
                 dual.as_mut(),
                 &mut dual_left,
                 &mut dual_right,
                 width,
                 first,
-                spans,
-                packed,
+                step,
+                ramping,
                 false,
             );
             run_block(
@@ -205,8 +192,8 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
                 &mut stale,
                 width,
                 first,
-                spans,
-                packed,
+                step,
+                ramping,
                 true,
             );
             for (word, (collapsed_word, dual_word)) in
@@ -237,7 +224,6 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     let lanes = width.lanes() as usize;
     let mut mixed = bind(width, backend, lanes);
     let mut never = bind(width, backend, lanes);
-    let idle = vec![0_u32; lanes + 1];
 
     for step in 0..BLOCKS {
         let collapsed_half = step < BLOCKS / 2;
@@ -253,19 +239,14 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             never_left.clone()
         };
         let first = (step * FRAMES) as u64;
-        let (spans, packed) = if step == 2 {
-            automation(step, lanes)
-        } else {
-            (Vec::new(), idle.clone())
-        };
         run_block(
             never.as_mut(),
             &mut never_left,
             &mut never_right,
             width,
             first,
-            &spans,
-            &packed,
+            step,
+            step == 2,
             false,
         );
         run_block(
@@ -274,8 +255,8 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             &mut mixed_right,
             width,
             first,
-            &spans,
-            &packed,
+            step,
+            step == 2,
             collapsed_half,
         );
         for (word, (mixed_word, never_word)) in mixed_left.iter().zip(never_left.iter()).enumerate()
@@ -309,7 +290,6 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
     let lanes = width.lanes() as usize;
     let mut dual = bind_lpf(width, backend, lanes);
     let mut collapsed = bind_lpf(width, backend, lanes);
-    let idle = vec![0_u32; lanes + 1];
     let mut dual_left = vec![0.0_f32; FRAMES * lanes];
     let mut dual_right = vec![0.0_f32; FRAMES * lanes];
     for lane in 0..lanes {
@@ -325,8 +305,8 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
         &mut dual_right,
         width,
         0,
-        &[],
-        &idle,
+        0,
+        false,
         false,
     );
     run_block(
@@ -335,8 +315,8 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
         &mut stale_right,
         width,
         0,
-        &[],
-        &idle,
+        0,
+        false,
         true,
     );
     for (word, (collapsed_word, dual_word)) in

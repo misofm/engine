@@ -11,12 +11,15 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan, PreparedEffectTarget,
-    PreparedNativeEffectBank, StatePayloadInput, StatePayloadOutput, TailSamples,
+    PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffectBank, StatePayloadInput,
+    StatePayloadOutput, TailSamples,
 };
 use lane::Backend;
 use parametric_eq::{EqBandKind, ParametricEqFactory, design_svf};
-use support::{COMMON_BYTES, LANE_BYTES, Payload, point, request, set_initial, snapshot, values};
+use support::{
+    COMMON_BYTES, LANE_BYTES, Payload, apply_prepared_targets, apply_prepared_targets_lane,
+    request, set_initial, snapshot, values,
+};
 
 /// The bank width and backend this build actually executes, or `None` on a scalar-only target.
 fn native_bank() -> Option<(BankWidth, Backend)> {
@@ -153,19 +156,6 @@ fn configured_values(track: usize) -> Vec<effect_contract::InitialParameterValue
     values
 }
 
-/// Automation for one track: a gain point on the left and a Q point on the right.
-fn track_automation(track: usize, sample: u64) -> [PreparedAutomationSpan; 2] {
-    [
-        point(3, ParameterChannel::Left, sample, -4.0 + track as f32 * 0.5),
-        point(
-            4,
-            ParameterChannel::Right,
-            sample,
-            0.8 + track as f32 * 0.01,
-        ),
-    ]
-}
-
 fn snapshot_bank(bank: &dyn PreparedNativeEffectBank, track: u32) -> Payload {
     let mut common = [0_u8; COMMON_BYTES];
     let mut left = [0_u8; LANE_BYTES];
@@ -213,28 +203,36 @@ fn every_width_matches_the_scalar_instantiation() {
         })
         .collect();
 
-    // Blocks of 16, 128, 64 and 128 frames, with an automation event in the first and third block
-    // for different tracks, so ramps of different ages coexist inside one bank block.
+    // Blocks of 16, 128, 64 and 128 frames, with prepared edits in the first and third block for
+    // different tracks, so ramps of different ages coexist inside one bank block.
     let mut position = 0_u64;
     for (index, frames) in [16_usize, 128, 64, 128].into_iter().enumerate() {
-        let automation_by_track: Vec<Vec<PreparedAutomationSpan>> = (0..lanes)
-            .map(|track| {
-                if (index == 0 && track % 2 == 0) || (index == 2 && track % 2 == 1) {
-                    track_automation(track, position).to_vec()
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect();
-        let mut automation = Vec::new();
-        let mut offsets = vec![0_u32];
-        for spans in &automation_by_track {
-            automation.extend_from_slice(spans);
-            offsets.push(automation.len() as u32);
+        for track in 0..lanes {
+            if (index == 0 && track % 2 == 0) || (index == 2 && track % 2 == 1) {
+                let mut target_values = values_by_track[track].clone();
+                set_initial(
+                    &mut target_values,
+                    3,
+                    ParameterChannel::Left,
+                    -4.0 + track as f32 * 0.5,
+                );
+                set_initial(
+                    &mut target_values,
+                    4,
+                    ParameterChannel::Right,
+                    0.8 + track as f32 * 0.01,
+                );
+                let mut changed = vec![false; target_values.len()];
+                changed[3 * 2] = true;
+                changed[4 * 2 + 1] = true;
+                apply_prepared_targets(scalar[track].as_mut(), &target_values, &changed);
+                apply_prepared_targets_lane(&mut *bank, track, 48_000, &target_values, &changed);
+            }
         }
 
         let mut bank_left = vec![0.0_f32; frames * lanes];
         let mut bank_right = vec![0.0_f32; frames * lanes];
+        let empty_offsets = vec![0_u32; lanes + 1];
         let mut scalar_left = vec![vec![0.0_f32; frames]; lanes];
         let mut scalar_right = vec![vec![0.0_f32; frames]; lanes];
         for frame in 0..frames {
@@ -257,7 +255,7 @@ fn every_width_matches_the_scalar_instantiation() {
                         &mut scalar_right[track],
                         None,
                         position,
-                        &automation_by_track[track],
+                        &[],
                         128,
                     )
                     .expect("scalar block"),
@@ -272,8 +270,8 @@ fn every_width_matches_the_scalar_instantiation() {
                 frames as u32,
                 width,
                 position,
-                &automation,
-                &offsets,
+                &[],
+                &empty_offsets,
                 128,
             )
             .expect("bank block"),
@@ -352,11 +350,27 @@ fn bank_rendering_is_partition_invariant() {
     let mut split_left = whole_left.clone();
     let mut split_right = whole_right.clone();
 
-    let automation: Vec<PreparedAutomationSpan> = (0..lanes)
-        .flat_map(|track| track_automation(track, 0))
-        .collect();
-    let offsets: Vec<u32> = (0..=lanes).map(|track| (track * 2) as u32).collect();
     let empty_offsets = vec![0_u32; lanes + 1];
+    for track in 0..lanes {
+        let mut target_values = values_by_track[track].clone();
+        set_initial(
+            &mut target_values,
+            3,
+            ParameterChannel::Left,
+            -4.0 + track as f32 * 0.5,
+        );
+        set_initial(
+            &mut target_values,
+            4,
+            ParameterChannel::Right,
+            0.8 + track as f32 * 0.01,
+        );
+        let mut changed = vec![false; target_values.len()];
+        changed[3 * 2] = true;
+        changed[4 * 2 + 1] = true;
+        apply_prepared_targets_lane(&mut *whole, track, 48_000, &target_values, &changed);
+        apply_prepared_targets_lane(&mut *split, track, 48_000, &target_values, &changed);
+    }
 
     whole.process_bank(
         EffectBankProcessBlock::new(
@@ -366,17 +380,15 @@ fn bank_rendering_is_partition_invariant() {
             frames as u32,
             width,
             0,
-            &automation,
-            &offsets,
+            &[],
+            &empty_offsets,
             128,
         )
         .expect("whole block"),
     );
 
     let mut first = 0_usize;
-    for (index, chunk) in [1_usize, 7, 64, 56].into_iter().enumerate() {
-        let spans: &[PreparedAutomationSpan] = if index == 0 { &automation } else { &[] };
-        let chunk_offsets: &[u32] = if index == 0 { &offsets } else { &empty_offsets };
+    for chunk in [1_usize, 7, 64, 56] {
         split.process_bank(
             EffectBankProcessBlock::new(
                 &mut split_left[first * lanes..(first + chunk) * lanes],
@@ -385,8 +397,8 @@ fn bank_rendering_is_partition_invariant() {
                 chunk as u32,
                 width,
                 first as u64,
-                spans,
-                chunk_offsets,
+                &[],
+                &empty_offsets,
                 128,
             )
             .expect("split block"),
