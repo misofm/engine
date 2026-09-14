@@ -6,6 +6,7 @@ import vm from "node:vm";
 import {
   MSB1_CONTROL,
   MSB1_CONTROL_BYTES,
+  MSB1_CONTROL_I64_OFFSET,
   MSB1_HEADER_OFFSET,
   MSB1_ID_CAPACITY,
   MSB1_ID_OFFSET,
@@ -16,7 +17,13 @@ import {
   Msb1RingObserver,
   MSB1_WRAP,
 } from "../src/browser/pcm-ring.ts";
-import { attachEngineFeed, PcmFeedError, prepareEngineFeed } from "../src/browser/pcm-feed.ts";
+import {
+  attachEngineFeed,
+  PcmFeedError,
+  PcmRunwayError,
+  prepareEngineFeed,
+  waitForPcmRunway,
+} from "../src/browser/pcm-feed.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
@@ -600,6 +607,137 @@ function observedFixture(channels = 2, capacity = 4, frameCapacity = 4) {
     writer.commit({ startFrame: BigInt(startFrame), frames, generation, endOfRegion: frames < frameCapacity });
   } };
 }
+
+function runwayFixture(sourceId, { frames = 32n, capacity = 4, frameCapacity = 4 } = {}) {
+  const ring = createMsb1Ring({ sourceId, channels: 1, capacity, frameCapacity });
+  const writer = new Msb1RingWriter(ring);
+  writer.engage(1n);
+  return { sourceId, frames: BigInt(frames), ring, writer };
+}
+
+function runwayWrite(fixture, startFrame, frames = fixture.writer.frameCapacity, generation = 1n, endOfRegion = false) {
+  const planes = fixture.writer.reserve(frames);
+  assert.ok(planes);
+  planes[0].fill(Number(startFrame));
+  fixture.writer.commit({ generation, startFrame: BigInt(startFrame), frames, endOfRegion });
+}
+
+function runwayOptions(fixture, overrides = {}) {
+  return {
+    sources: [{ sourceId: fixture.sourceId, frames: fixture.frames, ring: fixture.ring }],
+    targetFrame: 0n,
+    generation: 1n,
+    timeoutMs: 100,
+    ...overrides,
+  };
+}
+
+// Provenance for these moved proof cases: engine-web-adapter
+// f833303f146de7cbe1705fe88ae68a6d6e0d4e45, src/session.ts::waitForRunway and the
+// `initial readiness waits for every source's full runway` / `seek runway clips to the exact
+// source tail` cases in tests/session.test.ts. Adapter lifecycle remains out of this SDK test.
+test("PCM runway proves default and explicit bounded readiness without consuming rings", async () => {
+  const full = runwayFixture("full", { frames: 16n, capacity: 4, frameCapacity: 4 });
+  for (let start = 0; start < 16; start += 4) runwayWrite(full, start);
+  const before = {
+    read: controls(full.ring)[MSB1_CONTROL.READ_INDEX],
+    seekEpoch: controls(full.ring)[MSB1_CONTROL.SEEK_EPOCH],
+    generation: [...new BigInt64Array(full.ring, MSB1_CONTROL_I64_OFFSET, 2)],
+    writerState: controls(full.ring)[MSB1_CONTROL.WRITER_STATE],
+  };
+  await waitForPcmRunway(runwayOptions(full));
+  assert.equal(controls(full.ring)[MSB1_CONTROL.READ_INDEX], before.read);
+  assert.equal(controls(full.ring)[MSB1_CONTROL.SEEK_EPOCH], before.seekEpoch);
+  assert.deepEqual([...new BigInt64Array(full.ring, MSB1_CONTROL_I64_OFFSET, 2)], before.generation);
+  assert.equal(controls(full.ring)[MSB1_CONTROL.WRITER_STATE], before.writerState);
+
+  const small = runwayFixture("small", { frames: 20n, capacity: 4, frameCapacity: 4 });
+  runwayWrite(small, 0);
+  await waitForPcmRunway(runwayOptions(small, { minimumFrames: 3n }));
+  assert.equal(small.writer.occupancy, 1, "an explicit minimum must not require the whole ring");
+
+  const short = runwayFixture("short", { frames: 6n, capacity: 4, frameCapacity: 4 });
+  runwayWrite(short, 0, 4);
+  runwayWrite(short, 4, 2, 1n, true);
+  await waitForPcmRunway(runwayOptions(short));
+  const past = runwayFixture("past", { frames: 0n });
+  await waitForPcmRunway(runwayOptions(past));
+});
+
+test("PCM runway waits for every source and snapshots source options", async () => {
+  const first = runwayFixture("first", { frames: 8n });
+  const second = runwayFixture("second", { frames: 8n });
+  runwayWrite(first, 0);
+  const sourceList = [
+    { sourceId: first.sourceId, frames: first.frames, ring: first.ring },
+    { sourceId: second.sourceId, frames: second.frames, ring: second.ring },
+  ];
+  const pending = waitForPcmRunway({ sources: sourceList, targetFrame: 0n, generation: 1n, timeoutMs: 200, minimumFrames: 4n });
+  sourceList.length = 0;
+  runwayWrite(second, 0);
+  await pending;
+});
+
+test("PCM runway reports full-generation, contiguity and source-bound mismatches", async () => {
+  const wrongGeneration = runwayFixture("wrong-generation", { frames: 4n });
+  wrongGeneration.writer.engage(0x1_0000_0001n); // Low tag 1, full generation differs from the request.
+  runwayWrite(wrongGeneration, 0, 4, 1n);
+  await assert.rejects(
+    waitForPcmRunway(runwayOptions(wrongGeneration, { generation: 0x1_0000_0001n })),
+    (error) => error instanceof PcmRunwayError && error.reason === "mismatch" && error.sourceId === "wrong-generation",
+  );
+
+  const noncontiguous = runwayFixture("noncontiguous", { frames: 8n });
+  runwayWrite(noncontiguous, 4);
+  await assert.rejects(
+    waitForPcmRunway(runwayOptions(noncontiguous)),
+    (error) => error instanceof PcmRunwayError && error.reason === "mismatch" && error.sourceId === "noncontiguous",
+  );
+
+  const outOfRange = runwayFixture("out-of-range", { frames: 3n });
+  runwayWrite(outOfRange, 0, 4);
+  await assert.rejects(
+    waitForPcmRunway(runwayOptions(outOfRange)),
+    (error) => error instanceof PcmRunwayError && error.reason === "mismatch" && error.sourceId === "out-of-range",
+  );
+});
+
+test("PCM runway timeout and abort release observers, preserving cancellation reason", async () => {
+  const timed = runwayFixture("timed", { frames: 8n });
+  await assert.rejects(
+    waitForPcmRunway(runwayOptions(timed, { timeoutMs: 2 })),
+    (error) => error instanceof PcmRunwayError && error.reason === "timeout" && error.sourceId === undefined,
+  );
+
+  const cancelled = runwayFixture("cancelled", { frames: 4n });
+  const controller = new AbortController();
+  const reason = new Error("caller cancelled");
+  const readBefore = controls(cancelled.ring)[MSB1_CONTROL.READ_INDEX];
+  const wait = waitForPcmRunway(runwayOptions(cancelled, { timeoutMs: 1_000, signal: controller.signal }));
+  controller.abort(reason);
+  await assert.rejects(wait, (error) => error === reason);
+  assert.equal(controls(cancelled.ring)[MSB1_CONTROL.READ_INDEX], readBefore);
+  runwayWrite(cancelled, 0);
+  await waitForPcmRunway(runwayOptions(cancelled));
+});
+
+test("PCM runway refuses invalid requests before waiting", async () => {
+  const fixture = runwayFixture("valid", { frames: 8n, capacity: 2, frameCapacity: 4 });
+  const valid = runwayOptions(fixture);
+  const invalid = [
+    { ...valid, sources: [{ ...valid.sources[0], sourceId: "" }] },
+    { ...valid, sources: [valid.sources[0], valid.sources[0]] },
+    { ...valid, targetFrame: -1n },
+    { ...valid, generation: 0n },
+    { ...valid, minimumFrames: 0n },
+    { ...valid, minimumFrames: 9n },
+    { ...valid, timeoutMs: 0 },
+    { ...valid, timeoutMs: Infinity },
+    { ...valid, sources: [{ ...valid.sources[0], frames: -1n }] },
+    { ...valid, sources: [{ ...valid.sources[0], ring: new ArrayBuffer(128) }] },
+  ];
+  for (const options of invalid) await assert.rejects(waitForPcmRunway(options), (error) => error?.name === "MisoUsageError");
+});
 
 test("observer borrows reusable mono/stereo scratch without altering any shared byte", (t) => {
   for (const channels of [1, 2]) {

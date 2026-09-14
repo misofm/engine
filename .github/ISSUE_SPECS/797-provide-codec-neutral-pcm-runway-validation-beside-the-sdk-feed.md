@@ -85,3 +85,17 @@ and source closure must not be reported as registry availability. No codec,
 storage, float/source-policy expansion or optimization is included.
 
 Decision record: scoped only; no fresh execution evidence yet.
+
+
+## Implementation checkpoint
+
+Luna XHIGH implemented the bounded SDK helper, typed mismatch/timeout errors,
+request validation, full-generation contiguous readiness checks and observer
+cleanup in the existing PCM feed module. Existing browser exports expose its
+public types/function. README records producer choreography and adapter source
+provenance. Focused PCM suite 18/18, locked dependency install, SDK type/generated
+checks, artifact-backed package/import smoke and `git diff --check` pass. Logs
+are preserved at `/tmp/miso-796-audit/797-*`. Root checkpoints the exact helper,
+existing test and README paths before independent fresh Astra MEDIUM review.
+This is attempt 1, not source acceptance or registry availability. It runs in
+an isolated worktree during #796 review/CI and cannot delay the plotting release.
