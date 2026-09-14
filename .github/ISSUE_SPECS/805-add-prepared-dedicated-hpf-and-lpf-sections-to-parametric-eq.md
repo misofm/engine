@@ -91,3 +91,20 @@ prove old-four-section bit identity. Tranche2 must add that direct oracle,
 complete response/catalog/prepared-SDK coverage and confirm resident accounting
 before the coherent attempt receives its fresh Astra MEDIUM verdict. No live
 cut capability or completed #805 claim is made by this checkpoint.
+
+## Attempt 1 — response evidence and retained failing compatibility regression
+
+The test-only response tranche verifies public/physical section mapping, retained
+and requested response totals, cut/Q/domain boundaries at all four launch rates,
+and final-LPF mono collapse. Response: 18 passed; mono collapse: 3 passed.
+Clippy and Wasm check passed. The independent old-four-section oracle exposed a
+real compatibility failure, retained as a permanent nonignored regression:
+`disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle`.
+With disabled dedicated cuts, four original HighPass bands at 1 kHz/Q1, 44.1 kHz,
+mono cold positive-zero state and negative-zero input, the new path emits
+`0x00000000` while the original four-section kernel emits `0x80000000`.
+The focused compatibility suite is deliberately red (6 pass, 1 fail). This is a
+buildable evidence checkpoint, not a compatibility PASS or completed attempt.
+No production arithmetic changes accompany it. Astra XHIGH is specifying the
+bounded correction; the hard bit-identity gate remains unchanged. The source
+checkpoint that previously passed lacked this adversarial case.

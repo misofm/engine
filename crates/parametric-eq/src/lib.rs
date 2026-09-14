@@ -2758,9 +2758,12 @@ pub mod corpus;
 #[cfg(test)]
 mod interleave_identity {
     use super::{
-        BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_SECTION_COUNT, EqBandKind, HPF_SECTION,
-        LPF_SECTION, MAX_LANES, corpus, process_channels, section_state_is_positive_zero,
+        BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
+        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, SampleRateHz, Section,
+        cascade_sections, cascade_sections_mono, corpus, process_channels, process_channels_mono,
+        section_state_is_positive_zero,
     };
+    use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
 
     /// Frames per case: the corpus length, several blocks' worth of settling.
@@ -2806,6 +2809,273 @@ mod interleave_identity {
     /// Raw bits of a block.
     fn bits(samples: &[f32]) -> Vec<u32> {
         samples.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// The four-section oracle that represents the pre-cut prepared cascade.
+    ///
+    /// This intentionally owns only the four original sections and calls the existing
+    /// per-section [`svf_block`] kernel. It is therefore an independent schedule/shape oracle for
+    /// the compatibility claim; a second six-section path would only prove that two new paths
+    /// agree. The physical six-section channel supplies the same settled coefficient/state words
+    /// for sections 1..4, so no filter arithmetic is reimplemented here.
+    fn original_four<L: Lane, const W: usize>(offset: usize) -> [Section<L>; EQ_BAND_COUNT] {
+        let six = channel::<L, W>(offset);
+        core::array::from_fn(|band| six.sections[BAND_SECTION_OFFSET + band])
+    }
+
+    fn process_original_four<L: Lane>(
+        sections: &mut [Section<L>; EQ_BAND_COUNT],
+        io: &mut [f32],
+        frames: usize,
+    ) {
+        for section in sections {
+            svf_block::<L>(io, frames, &section.coef, &mut section.state);
+        }
+    }
+
+    /// The exact signed-zero boundary that a disabled cut must preserve for the old four-band
+    /// schedule. This is intentionally a permanent red regression until the prepared path keeps
+    /// the old four-section bits in this configuration.
+    fn all_high_pass_channel<L: Lane, const W: usize>() -> Channel<L, W> {
+        let disabled = BandTarget {
+            enabled: false,
+            kind: EqBandKind::HighPass,
+            frequency: 1_000.0,
+            gain: 0.0,
+            q: 1.0,
+            slope: 1.0,
+        };
+        let live = BandTarget {
+            enabled: true,
+            ..disabled
+        };
+        let mut targets = [disabled; EQ_SECTION_COUNT];
+        for target in targets
+            .iter_mut()
+            .skip(BAND_SECTION_OFFSET)
+            .take(EQ_BAND_COUNT)
+        {
+            *target = live;
+        }
+        Channel::new([targets; W], SampleRateHz(44_100)).expect("legal all-HighPass design")
+    }
+
+    fn original_state_bits<L: Lane>(sections: &[Section<L>; EQ_BAND_COUNT]) -> Vec<u32> {
+        let mut words = [0_u32; EQ_BAND_COUNT * 2 * MAX_LANES];
+        for (index, section) in sections.iter().enumerate() {
+            let base = index * 2 * L::WIDTH;
+            section
+                .state
+                .ic1
+                .store_bits(&mut words[base..base + L::WIDTH]);
+            section
+                .state
+                .ic2
+                .store_bits(&mut words[base + L::WIDTH..base + 2 * L::WIDTH]);
+        }
+        words.to_vec()
+    }
+
+    /// Compares the six-section prepared renderer with the direct pre-cut four-section oracle.
+    ///
+    /// With both dedicated cuts disabled and an admissible finite input, the elision list contains
+    /// exactly the original four physical sections. The output and original-band integrator words
+    /// must remain bit-identical for dual and collapsed mono execution at every launch width,
+    /// including a non-cold state.
+    fn compare_disabled_cuts_to_original_four<L: Lane, const W: usize>(
+        width: &str,
+        case: usize,
+        seeded: bool,
+        mono: bool,
+        refusal_state: bool,
+        negative_zero: bool,
+    ) {
+        let mut six_left = channel::<L, W>(0);
+        let mut six_right = channel::<L, W>(3);
+        let mut four_left = original_four::<L, W>(0);
+        let mut four_right = original_four::<L, W>(3);
+        if seeded {
+            for section in 0..EQ_BAND_COUNT {
+                six_left.sections[BAND_SECTION_OFFSET + section].state.ic1 = L::splat(1.0e-40);
+                six_left.sections[BAND_SECTION_OFFSET + section].state.ic2 = L::splat(-1.0e-41);
+                four_left[section].state.ic1 = L::splat(1.0e-40);
+                four_left[section].state.ic2 = L::splat(-1.0e-41);
+                six_right.sections[BAND_SECTION_OFFSET + section].state.ic1 = L::splat(-3.5e-7);
+                six_right.sections[BAND_SECTION_OFFSET + section].state.ic2 = L::splat(9.0e-8);
+                four_right[section].state.ic1 = L::splat(-3.5e-7);
+                four_right[section].state.ic2 = L::splat(9.0e-8);
+            }
+        }
+        if refusal_state {
+            // A restored negative-zero integrator in a live original band refuses elision. The
+            // direct four-section oracle carries the same state, so this still checks old-band
+            // output/state bits while exercising the full six-section fallback.
+            six_left.sections[BAND_SECTION_OFFSET].state.ic1 = L::splat(-0.0);
+            four_left[0].state.ic1 = L::splat(-0.0);
+        }
+        let mut six_left_io = block::<W>(case, 0);
+        let mut six_right_io = block::<W>(case, 3);
+        let mut four_left_io = six_left_io.clone();
+        let mut four_right_io = six_right_io.clone();
+        if negative_zero {
+            six_left_io[0] = -0.0;
+            four_left_io[0] = -0.0;
+        }
+        let kept = if mono {
+            cascade_sections_mono(&six_left, &six_left_io, FRAMES).1
+        } else {
+            cascade_sections(&six_left, &six_right, &six_left_io, &six_right_io, FRAMES).1
+        };
+        if negative_zero || refusal_state {
+            assert_eq!(
+                kept,
+                EQ_SECTION_COUNT,
+                "{width} {mode}: compatibility oracle refusal must retain all six sections",
+                mode = if mono { "mono" } else { "dual" }
+            );
+        }
+        if mono {
+            process_channels_mono(&mut six_left, &mut six_left_io, FRAMES, true);
+            process_original_four(&mut four_left, &mut four_left_io, FRAMES);
+            assert_eq!(
+                bits(&six_left_io),
+                bits(&four_left_io),
+                "{width} mono output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_left.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_left),
+                "{width} mono original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+        } else {
+            process_channels(
+                (&mut six_left, &mut six_right),
+                &mut six_left_io,
+                &mut six_right_io,
+                FRAMES,
+                true,
+            );
+            process_original_four(&mut four_left, &mut four_left_io, FRAMES);
+            process_original_four(&mut four_right, &mut four_right_io, FRAMES);
+            assert_eq!(
+                bits(&six_left_io),
+                bits(&four_left_io),
+                "{width} dual left output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                bits(&six_right_io),
+                bits(&four_right_io),
+                "{width} dual right output differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_left.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_left),
+                "{width} dual left original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+            assert_eq!(
+                original_state_bits(&core::array::from_fn(|band| {
+                    six_right.sections[BAND_SECTION_OFFSET + band]
+                })),
+                original_state_bits(&four_right),
+                "{width} dual right original-band state differs from the direct four-band oracle, case={case}, seeded={seeded}"
+            );
+        }
+    }
+
+    /// A signed-zero input refuses elision and therefore follows the established full six-section
+    /// per-section path. The direct four-section oracle cannot be used for this case: an identity
+    /// cut deliberately rewrites `-0.0` to `+0.0`, so the refusal is what preserves the old
+    /// six-section bit behavior. Compare the stationary refusal with the nonstationary reference
+    /// at every width and for both dual and collapsed mono entry points.
+    fn compare_signed_zero_refusal<L: Lane, const W: usize>(width: &str, mono: bool, plane: usize) {
+        let mut left = block::<W>(0, 0);
+        let mut right = block::<W>(0, 3);
+        if plane == 0 {
+            left[0] = -0.0;
+        } else {
+            right[0] = -0.0;
+        }
+        let kept = if mono {
+            let channel = channel::<L, W>(0);
+            cascade_sections_mono(&channel, &left, FRAMES).1
+        } else {
+            let left_channel = channel::<L, W>(0);
+            let right_channel = channel::<L, W>(3);
+            cascade_sections(&left_channel, &right_channel, &left, &right, FRAMES).1
+        };
+        assert_eq!(
+            kept,
+            EQ_SECTION_COUNT,
+            "{width} {mode} plane={plane}: -0.0 must refuse the shortened cascade",
+            mode = if mono { "mono" } else { "dual" }
+        );
+
+        let mut stationary_left_channel = channel::<L, W>(0);
+        let mut stationary_right_channel = channel::<L, W>(3);
+        let mut reference_left_channel = channel::<L, W>(0);
+        let mut reference_right_channel = channel::<L, W>(3);
+        let mut stationary_left = left.clone();
+        let mut stationary_right = right.clone();
+        let mut reference_left = left;
+        let mut reference_right = right;
+        if mono {
+            process_channels_mono(
+                &mut stationary_left_channel,
+                &mut stationary_left,
+                FRAMES,
+                true,
+            );
+            process_channels_mono(
+                &mut reference_left_channel,
+                &mut reference_left,
+                FRAMES,
+                false,
+            );
+            assert_eq!(
+                bits(&stationary_left),
+                bits(&reference_left),
+                "{width} mono signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                integrators(&stationary_left_channel, &stationary_right_channel),
+                integrators(&reference_left_channel, &reference_right_channel),
+                "{width} mono signed-zero refusal changed state"
+            );
+        } else {
+            process_channels(
+                (&mut stationary_left_channel, &mut stationary_right_channel),
+                &mut stationary_left,
+                &mut stationary_right,
+                FRAMES,
+                true,
+            );
+            process_channels(
+                (&mut reference_left_channel, &mut reference_right_channel),
+                &mut reference_left,
+                &mut reference_right,
+                FRAMES,
+                false,
+            );
+            assert_eq!(
+                bits(&stationary_left),
+                bits(&reference_left),
+                "{width} dual left signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                bits(&stationary_right),
+                bits(&reference_right),
+                "{width} dual right signed-zero refusal changed audio"
+            );
+            assert_eq!(
+                integrators(&stationary_left_channel, &stationary_right_channel),
+                integrators(&reference_left_channel, &reference_right_channel),
+                "{width} dual signed-zero refusal changed state"
+            );
+        }
     }
 
     /// Runs one corpus case at one width down both arms and asserts they are the same bits.
@@ -2942,12 +3212,88 @@ mod interleave_identity {
     }
 
     #[test]
-    fn disabled_cuts_preserve_original_band_bits() {
+    fn disabled_cuts_match_the_full_six_section_reference() {
         for width in [1_usize, 4, 8] {
             match width {
                 1 => compare::<f32, 1>("Scalar-disabled-cuts", 0, false),
                 4 => compare::<Simd4, 4>("Simd4-disabled-cuts", 0, false),
                 _ => compare::<Simd8, 8>("Simd8-disabled-cuts", 0, false),
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_cuts_preserve_original_band_bits_against_a_direct_four_section_oracle() {
+        for seeded in [false, true] {
+            for refusal_state in [false, true] {
+                for negative_zero in [false, true] {
+                    for case in [0_usize, 2] {
+                        for mono in [false, true] {
+                            compare_disabled_cuts_to_original_four::<f32, 1>(
+                                "Scalar",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                            compare_disabled_cuts_to_original_four::<Simd4, 4>(
+                                "Simd4",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                            compare_disabled_cuts_to_original_four::<Simd8, 8>(
+                                "Simd8",
+                                case,
+                                seeded,
+                                mono,
+                                refusal_state,
+                                negative_zero,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle() {
+        let mut prepared = all_high_pass_channel::<f32, 1>();
+        let mut oracle = core::array::from_fn(|band| prepared.sections[BAND_SECTION_OFFSET + band]);
+        let mut prepared_io = vec![-0.0_f32];
+        let mut oracle_io = prepared_io.clone();
+
+        assert_eq!(
+            cascade_sections_mono(&prepared, &prepared_io, 1).1,
+            EQ_SECTION_COUNT,
+            "signed-zero input must retain the full prepared schedule while testing the oracle"
+        );
+        process_channels_mono(&mut prepared, &mut prepared_io, 1, true);
+        process_original_four(&mut oracle, &mut oracle_io, 1);
+
+        assert_eq!(
+            prepared_io[0].to_bits(),
+            oracle_io[0].to_bits(),
+            "all-HighPass signed-zero compatibility mismatch: prepared={:#010x}, four={:#010x}",
+            prepared_io[0].to_bits(),
+            oracle_io[0].to_bits()
+        );
+    }
+
+    #[test]
+    fn signed_zero_refusal_preserves_the_full_six_section_bits() {
+        for mono in [false, true] {
+            for plane in [0_usize, 1] {
+                if mono && plane == 1 {
+                    continue;
+                }
+                compare_signed_zero_refusal::<f32, 1>("Scalar", mono, plane);
+                compare_signed_zero_refusal::<Simd4, 4>("Simd4", mono, plane);
+                compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
             }
         }
     }

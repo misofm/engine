@@ -134,6 +134,163 @@ fn configured_four_sections(rate: u32) -> Vec<effect_contract::InitialParameterV
     configured
 }
 
+/// Sets one of the prepared-only dedicated cut triples. The public IDs are 65..67 and 81..83,
+/// while this fixture addresses the ordinary descriptor indices 24..29.
+fn set_cut(
+    configured: &mut [effect_contract::InitialParameterValue],
+    channel: ParameterChannel,
+    hpf: bool,
+    frequency: f32,
+    q: f32,
+) {
+    let base = if hpf { 24 } else { 27 };
+    set_initial(configured, base, channel, 1.0);
+    set_initial(configured, base + 1, channel, frequency);
+    set_initial(configured, base + 2, channel, q);
+}
+
+fn response_grid(rate: u32, first_cutoff: f32, second_cutoff: f32) -> Vec<f32> {
+    let mut grid = vec![
+        0.0,
+        10.0,
+        first_cutoff,
+        second_cutoff,
+        80.0,
+        1_000.0,
+        18_000.0,
+        20_000.0,
+        rate as f32 * 0.5,
+    ];
+    grid.sort_by(|left, right| left.partial_cmp(right).expect("finite response grid"));
+    grid.dedup_by(|left, right| *left == *right);
+    grid
+}
+
+fn floored(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(FLOOR_DB)
+    } else {
+        FLOOR_DB
+    }
+}
+
+fn raw_cascade_db(
+    rate: u32,
+    probe: f32,
+    original: &[(EqBandKind, f32, f32, f32, f32)],
+    hpf: Option<(f32, f32)>,
+    lpf: Option<(f32, f32)>,
+) -> f64 {
+    let mut total = 0.0_f64;
+    for &(kind, frequency, gain, q, slope) in original {
+        total += oracle_db(kind, rate, frequency, gain, q, slope, probe);
+    }
+    if let Some((frequency, q)) = hpf {
+        total += oracle_db(EqBandKind::HighPass, rate, frequency, 0.0, q, 1.0, probe);
+    }
+    if let Some((frequency, q)) = lpf {
+        total += oracle_db(EqBandKind::LowPass, rate, frequency, 0.0, q, 1.0, probe);
+    }
+    total
+}
+
+fn assert_snapshot_db(actual: f64, expected: f64, label: &str) {
+    if expected.is_finite() {
+        let actual_db = if actual == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * actual.log10()
+        };
+        // At exact DC/Nyquist, the two independent state-space evaluations can differ only in
+        // whether an analytic zero is represented as a tiny residual or +0.0. Both are below the
+        // public -120 dB response floor and are equivalent for the retained, unfloored magnitude
+        // path's endpoint evidence.
+        if expected <= FLOOR_DB {
+            assert!(
+                actual_db <= FLOOR_DB,
+                "{label}: retained magnitude={actual_db} dB must remain below the public floor"
+            );
+            return;
+        }
+        assert!(
+            (actual_db - expected).abs() <= 1.0e-9,
+            "{label}: retained magnitude={actual_db} dB expected={expected} dB"
+        );
+    } else {
+        let actual_db = if actual == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * actual.log10()
+        };
+        assert!(
+            actual_db <= FLOOR_DB,
+            "{label}: retained zero/residual={actual_db} dB must remain below the public floor"
+        );
+    }
+}
+
+const ORIGINAL_RESPONSE_ROWS: [(EqBandKind, f32, f32, f32, f32); 4] = [
+    (EqBandKind::Bell, 120.0, 6.0, 0.7, 1.0),
+    (EqBandKind::LowShelf, 500.0, -4.0, 1.0, 0.5),
+    (EqBandKind::HighPass, 1_800.0, 0.0, 0.9, 1.0),
+    (EqBandKind::Notch, 8_000.0, 0.0, 2.0, 1.0),
+];
+
+#[derive(Clone, Copy)]
+struct CutResponseCase {
+    name: &'static str,
+    hpf: Option<(f32, f32)>,
+    lpf: Option<(f32, f32)>,
+}
+
+const CUT_RESPONSE_CASES: [CutResponseCase; 9] = [
+    CutResponseCase {
+        name: "HPF-low",
+        hpf: Some((10.0, 0.1)),
+        lpf: None,
+    },
+    CutResponseCase {
+        name: "HPF-default",
+        hpf: Some((80.0, core::f32::consts::FRAC_1_SQRT_2)),
+        lpf: None,
+    },
+    CutResponseCase {
+        name: "HPF-high",
+        hpf: Some((20_000.0, 18.0)),
+        lpf: None,
+    },
+    CutResponseCase {
+        name: "LPF-low",
+        hpf: None,
+        lpf: Some((10.0, 0.1)),
+    },
+    CutResponseCase {
+        name: "LPF-default",
+        hpf: None,
+        lpf: Some((18_000.0, core::f32::consts::FRAC_1_SQRT_2)),
+    },
+    CutResponseCase {
+        name: "LPF-high",
+        hpf: None,
+        lpf: Some((20_000.0, 18.0)),
+    },
+    CutResponseCase {
+        name: "both-low-high",
+        hpf: Some((10.0, 0.1)),
+        lpf: Some((20_000.0, 18.0)),
+    },
+    CutResponseCase {
+        name: "both-default",
+        hpf: Some((80.0, core::f32::consts::FRAC_1_SQRT_2)),
+        lpf: Some((18_000.0, core::f32::consts::FRAC_1_SQRT_2)),
+    },
+    CutResponseCase {
+        name: "both-overlap",
+        hpf: Some((20_000.0, 18.0)),
+        lpf: Some((10.0, 0.1)),
+    },
+];
+
 fn values_for_frozen_row(row: GridRow) -> Vec<effect_contract::InitialParameterValue> {
     let mut configured = values();
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
@@ -461,6 +618,444 @@ fn asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity() {
     assert_eq!(right_only_left, total_left);
     assert_eq!(right_only_right, total_right);
     assert_eq!(right_only_sections, sections_right);
+}
+
+#[test]
+fn dedicated_response_keeps_public_band_order_and_retained_target_totals() {
+    let expected_kinds = [
+        EqBandKind::Bell,
+        EqBandKind::LowShelf,
+        EqBandKind::HighPass,
+        EqBandKind::Notch,
+        EqBandKind::HighPass,
+        EqBandKind::LowPass,
+    ];
+    let left_hpf = (80.0_f32, 0.7_f32);
+    let left_lpf = (18_000.0_f32, 1.2_f32);
+    let right_hpf = (20_000.0_f32, 18.0_f32);
+    let right_lpf = (10.0_f32, 0.1_f32);
+
+    for rate in LAUNCH_RATES {
+        let mut configured = configured_four_sections(rate);
+        // Give the last original band a different right-channel target so the four public band
+        // rows are checked as independent channels while the cuts are also asymmetric.
+        set_initial(&mut configured, 21, ParameterChannel::Right, -6.0);
+        set_cut(
+            &mut configured,
+            ParameterChannel::Left,
+            true,
+            left_hpf.0,
+            left_hpf.1,
+        );
+        set_cut(
+            &mut configured,
+            ParameterChannel::Left,
+            false,
+            left_lpf.0,
+            left_lpf.1,
+        );
+        set_cut(
+            &mut configured,
+            ParameterChannel::Right,
+            true,
+            right_hpf.0,
+            right_hpf.1,
+        );
+        set_cut(
+            &mut configured,
+            ParameterChannel::Right,
+            false,
+            right_lpf.0,
+            right_lpf.1,
+        );
+        let configuration = prepared(&configured, false, rate);
+        let frequencies = response_grid(rate, left_hpf.0, right_hpf.0);
+        let points = frequencies.len();
+        let mut total_left = vec![f32::NAN; points];
+        let mut total_right = vec![f32::NAN; points];
+        let mut sections_left = vec![f32::NAN; EQ_SECTION_COUNT * points];
+        let mut sections_right = vec![f32::NAN; EQ_SECTION_COUNT * points];
+        let summary = query_response_into(
+            EqResponseRequest {
+                configuration_id: u64::from(rate),
+                configuration: &configuration,
+                frequencies_hz: &frequencies,
+                maximum_points: points,
+            },
+            EqResponseOutput {
+                total_left_db: &mut total_left,
+                total_right_db: &mut total_right,
+                sections_left_db: Some(&mut sections_left),
+                sections_right_db: Some(&mut sections_right),
+            },
+        )
+        .expect("dedicated requested response");
+        assert_eq!(summary.enabled_left, [true; EQ_SECTION_COUNT]);
+        assert_eq!(summary.enabled_right, [true; EQ_SECTION_COUNT]);
+
+        for (point, &frequency) in frequencies.iter().enumerate() {
+            for (section, &(kind, cutoff, gain, q, slope)) in
+                ORIGINAL_RESPONSE_ROWS.iter().enumerate()
+            {
+                let expected = floored(oracle_db(kind, rate, cutoff, gain, q, slope, frequency));
+                assert!(
+                    (f64::from(sections_left[section * points + point]) - expected).abs()
+                        <= TOLERANCE_DB,
+                    "Fs={rate} public band {} left f={frequency}: got={} expected={expected}",
+                    section + 1,
+                    sections_left[section * points + point]
+                );
+                let right_gain = if section == 3 { -6.0 } else { gain };
+                let expected = floored(oracle_db(
+                    kind, rate, cutoff, right_gain, q, slope, frequency,
+                ));
+                assert!(
+                    (f64::from(sections_right[section * points + point]) - expected).abs()
+                        <= TOLERANCE_DB,
+                    "Fs={rate} public band {} right f={frequency}: got={} expected={expected}",
+                    section + 1,
+                    sections_right[section * points + point]
+                );
+            }
+            let expected_left = floored(raw_cascade_db(
+                rate,
+                frequency,
+                &ORIGINAL_RESPONSE_ROWS,
+                Some(left_hpf),
+                Some(left_lpf),
+            ));
+            let right_rows = [
+                ORIGINAL_RESPONSE_ROWS[0],
+                ORIGINAL_RESPONSE_ROWS[1],
+                ORIGINAL_RESPONSE_ROWS[2],
+                (EqBandKind::Notch, 8_000.0, -6.0, 2.0, 1.0),
+            ];
+            let expected_right = floored(raw_cascade_db(
+                rate,
+                frequency,
+                &right_rows,
+                Some(right_hpf),
+                Some(right_lpf),
+            ));
+            assert!((f64::from(total_left[point]) - expected_left).abs() <= TOLERANCE_DB);
+            assert!((f64::from(total_right[point]) - expected_right).abs() <= TOLERANCE_DB);
+            let expected_hpf_left = floored(oracle_db(
+                EqBandKind::HighPass,
+                rate,
+                left_hpf.0,
+                0.0,
+                left_hpf.1,
+                1.0,
+                frequency,
+            ));
+            let expected_lpf_left = floored(oracle_db(
+                EqBandKind::LowPass,
+                rate,
+                left_lpf.0,
+                0.0,
+                left_lpf.1,
+                1.0,
+                frequency,
+            ));
+            assert!(
+                (f64::from(sections_left[4 * points + point]) - expected_hpf_left).abs()
+                    <= TOLERANCE_DB
+            );
+            assert!(
+                (f64::from(sections_left[5 * points + point]) - expected_lpf_left).abs()
+                    <= TOLERANCE_DB
+            );
+            let expected_hpf_right = floored(oracle_db(
+                EqBandKind::HighPass,
+                rate,
+                right_hpf.0,
+                0.0,
+                right_hpf.1,
+                1.0,
+                frequency,
+            ));
+            let expected_lpf_right = floored(oracle_db(
+                EqBandKind::LowPass,
+                rate,
+                right_lpf.0,
+                0.0,
+                right_lpf.1,
+                1.0,
+                frequency,
+            ));
+            assert!(
+                (f64::from(sections_right[4 * points + point]) - expected_hpf_right).abs()
+                    <= TOLERANCE_DB
+            );
+            assert!(
+                (f64::from(sections_right[5 * points + point]) - expected_lpf_right).abs()
+                    <= TOLERANCE_DB
+            );
+        }
+
+        let effect = ParametricEqFactory
+            .prepare(request_at_rate(&configured, false, rate))
+            .expect("prepared dedicated effect");
+        let sentinel = snapshot_sentinel();
+        let mut retained_left = [sentinel; EQ_SECTION_COUNT];
+        let mut retained_right = [sentinel; EQ_SECTION_COUNT];
+        let retained_summary = effect
+            .copy_response_snapshot(ResponseSnapshotRequest {
+                bypassed: false,
+                left: &mut retained_left,
+                right: &mut retained_right,
+            })
+            .expect("retained dedicated targets");
+        assert_eq!(retained_summary.sections, EQ_SECTION_COUNT as u32);
+        for (section, kind) in expected_kinds.into_iter().enumerate() {
+            assert_eq!(retained_left[section].id, section as u32 + 1);
+            assert_eq!(retained_right[section].id, section as u32 + 1);
+            assert_eq!(retained_left[section].kind, kind as u32);
+            assert_eq!(retained_right[section].kind, kind as u32);
+            assert_eq!(retained_left[section].word_count, 6);
+            assert_eq!(retained_right[section].word_count, 6);
+            assert!(retained_left[section].enabled && retained_right[section].enabled);
+        }
+        let expected_hpf_words = design_svf(
+            EqBandKind::HighPass,
+            left_hpf.0,
+            0.0,
+            left_hpf.1,
+            1.0,
+            engine::SampleRateHz(rate),
+        )
+        .expect("HPF words")
+        .to_array()
+        .map(f32::to_bits);
+        let expected_lpf_words = design_svf(
+            EqBandKind::LowPass,
+            left_lpf.0,
+            0.0,
+            left_lpf.1,
+            1.0,
+            engine::SampleRateHz(rate),
+        )
+        .expect("LPF words")
+        .to_array()
+        .map(f32::to_bits);
+        assert_eq!(&retained_left[4].words[..6], &expected_hpf_words);
+        assert_eq!(&retained_left[5].words[..6], &expected_lpf_words);
+
+        let mut retained_total_left = vec![f64::NAN; points];
+        let mut retained_total_right = vec![f64::NAN; points];
+        query_snapshot_magnitudes_into(
+            rate,
+            false,
+            &retained_left,
+            &retained_right,
+            &frequencies,
+            points,
+            &mut retained_total_left,
+            &mut retained_total_right,
+        )
+        .expect("retained target response");
+        for (point, &frequency) in frequencies.iter().enumerate() {
+            assert_snapshot_db(
+                retained_total_left[point],
+                raw_cascade_db(
+                    rate,
+                    frequency,
+                    &ORIGINAL_RESPONSE_ROWS,
+                    Some(left_hpf),
+                    Some(left_lpf),
+                ),
+                &format!("Fs={rate} retained left f={frequency}"),
+            );
+            let right_rows = [
+                ORIGINAL_RESPONSE_ROWS[0],
+                ORIGINAL_RESPONSE_ROWS[1],
+                ORIGINAL_RESPONSE_ROWS[2],
+                (EqBandKind::Notch, 8_000.0, -6.0, 2.0, 1.0),
+            ];
+            assert_snapshot_db(
+                retained_total_right[point],
+                raw_cascade_db(
+                    rate,
+                    frequency,
+                    &right_rows,
+                    Some(right_hpf),
+                    Some(right_lpf),
+                ),
+                &format!("Fs={rate} retained right f={frequency}"),
+            );
+        }
+
+        // Bypass is effect-wide: the requested cut curves stay observable, while both totals are
+        // exact +0 dB for every probe.
+        let bypass = prepared(&configured, true, rate);
+        let mut bypass_left = vec![f32::NAN; points];
+        let mut bypass_right = vec![f32::NAN; points];
+        let mut bypass_sections_left = vec![f32::NAN; EQ_SECTION_COUNT * points];
+        let mut bypass_sections_right = vec![f32::NAN; EQ_SECTION_COUNT * points];
+        query_response_into(
+            EqResponseRequest {
+                configuration_id: u64::MAX,
+                configuration: &bypass,
+                frequencies_hz: &frequencies,
+                maximum_points: points,
+            },
+            EqResponseOutput {
+                total_left_db: &mut bypass_left,
+                total_right_db: &mut bypass_right,
+                sections_left_db: Some(&mut bypass_sections_left),
+                sections_right_db: Some(&mut bypass_sections_right),
+            },
+        )
+        .expect("bypassed dedicated response");
+        assert!(bypass_left.iter().all(|value| value.to_bits() == 0));
+        assert!(bypass_right.iter().all(|value| value.to_bits() == 0));
+        assert_bits_equal(&bypass_sections_left, &sections_left);
+        assert_bits_equal(&bypass_sections_right, &sections_right);
+    }
+}
+
+#[test]
+fn dedicated_cut_response_covers_modes_q_and_cutoff_boundaries_at_all_launch_rates() {
+    for rate in LAUNCH_RATES {
+        for case in CUT_RESPONSE_CASES {
+            let mut configured = values();
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                if let Some((frequency, q)) = case.hpf {
+                    set_cut(&mut configured, channel, true, frequency, q);
+                }
+                if let Some((frequency, q)) = case.lpf {
+                    set_cut(&mut configured, channel, false, frequency, q);
+                }
+            }
+            let configuration = prepared(&configured, false, rate);
+            let (first_cutoff, second_cutoff) = match (case.hpf, case.lpf) {
+                (Some((first, _)), Some((second, _))) => (first, second),
+                (Some((first, _)), None) => (first, 20_000.0),
+                (None, Some((second, _))) => (10.0, second),
+                (None, None) => (10.0, 20_000.0),
+            };
+            let frequencies = response_grid(rate, first_cutoff, second_cutoff);
+            let points = frequencies.len();
+            let mut total_left = vec![f32::NAN; points];
+            let mut total_right = vec![f32::NAN; points];
+            let mut sections_left = vec![f32::NAN; EQ_SECTION_COUNT * points];
+            let mut sections_right = vec![f32::NAN; EQ_SECTION_COUNT * points];
+            let summary = query_response_into(
+                EqResponseRequest {
+                    configuration_id: u64::from(rate),
+                    configuration: &configuration,
+                    frequencies_hz: &frequencies,
+                    maximum_points: points,
+                },
+                EqResponseOutput {
+                    total_left_db: &mut total_left,
+                    total_right_db: &mut total_right,
+                    sections_left_db: Some(&mut sections_left),
+                    sections_right_db: Some(&mut sections_right),
+                },
+            )
+            .expect("dedicated boundary response");
+            assert_eq!(summary.enabled_left[0..4], [false; 4]);
+            assert_eq!(summary.enabled_right[0..4], [false; 4]);
+            assert_eq!(summary.enabled_left[4], case.hpf.is_some());
+            assert_eq!(summary.enabled_left[5], case.lpf.is_some());
+            for (point, &frequency) in frequencies.iter().enumerate() {
+                let hpf_db = case
+                    .hpf
+                    .map(|(cutoff, q)| {
+                        floored(oracle_db(
+                            EqBandKind::HighPass,
+                            rate,
+                            cutoff,
+                            0.0,
+                            q,
+                            1.0,
+                            frequency,
+                        ))
+                    })
+                    .unwrap_or(0.0);
+                let lpf_db = case
+                    .lpf
+                    .map(|(cutoff, q)| {
+                        floored(oracle_db(
+                            EqBandKind::LowPass,
+                            rate,
+                            cutoff,
+                            0.0,
+                            q,
+                            1.0,
+                            frequency,
+                        ))
+                    })
+                    .unwrap_or(0.0);
+                for section in 0..4 {
+                    assert_eq!(sections_left[section * points + point].to_bits(), 0);
+                    assert_eq!(sections_right[section * points + point].to_bits(), 0);
+                }
+                assert!(
+                    (f64::from(sections_left[4 * points + point]) - hpf_db).abs() <= TOLERANCE_DB
+                );
+                assert!(
+                    (f64::from(sections_left[5 * points + point]) - lpf_db).abs() <= TOLERANCE_DB
+                );
+                assert!(
+                    (f64::from(sections_right[4 * points + point]) - hpf_db).abs() <= TOLERANCE_DB
+                );
+                assert!(
+                    (f64::from(sections_right[5 * points + point]) - lpf_db).abs() <= TOLERANCE_DB
+                );
+                let expected_total =
+                    floored(raw_cascade_db(rate, frequency, &[], case.hpf, case.lpf));
+                assert!((f64::from(total_left[point]) - expected_total).abs() <= TOLERANCE_DB);
+                assert!((f64::from(total_right[point]) - expected_total).abs() <= TOLERANCE_DB);
+            }
+
+            // The retained target path must carry the same prepared-only controls and total curve.
+            let effect = ParametricEqFactory
+                .prepare(request_at_rate(&configured, false, rate))
+                .expect("prepared boundary effect");
+            let sentinel = snapshot_sentinel();
+            let mut retained_left = [sentinel; EQ_SECTION_COUNT];
+            let mut retained_right = [sentinel; EQ_SECTION_COUNT];
+            effect
+                .copy_response_snapshot(ResponseSnapshotRequest {
+                    bypassed: false,
+                    left: &mut retained_left,
+                    right: &mut retained_right,
+                })
+                .expect("boundary target snapshot");
+            assert_eq!(retained_left[4].enabled, case.hpf.is_some());
+            assert_eq!(retained_left[5].enabled, case.lpf.is_some());
+            assert_eq!(retained_right[4].enabled, case.hpf.is_some());
+            assert_eq!(retained_right[5].enabled, case.lpf.is_some());
+            let mut retained_left_total = vec![f64::NAN; points];
+            let mut retained_right_total = vec![f64::NAN; points];
+            query_snapshot_magnitudes_into(
+                rate,
+                false,
+                &retained_left,
+                &retained_right,
+                &frequencies,
+                points,
+                &mut retained_left_total,
+                &mut retained_right_total,
+            )
+            .expect("boundary retained response");
+            for (point, &frequency) in frequencies.iter().enumerate() {
+                let expected = raw_cascade_db(rate, frequency, &[], case.hpf, case.lpf);
+                assert_snapshot_db(
+                    retained_left_total[point],
+                    expected,
+                    &format!("{} Fs={rate} left f={frequency}", case.name),
+                );
+                assert_snapshot_db(
+                    retained_right_total[point],
+                    expected,
+                    &format!("{} Fs={rate} right f={frequency}", case.name),
+                );
+            }
+        }
+    }
 }
 
 #[test]
