@@ -224,6 +224,27 @@ The SDK PCM feed accepts at most two fresh submissions per source per render cal
 at most that source ring's capacity. Shared source runways remain available while internal queues
 fill gradually, avoiding a first-callback burst proportional to every queued source quantum.
 
+`waitForPcmRunway()` proves that caller supplied PCM is contiguous at a full acknowledged source
+generation and frame, without consuming the feed rings:
+
+```ts
+import { waitForPcmRunway } from "@misofm/engine/browser";
+
+await waitForPcmRunway({
+  sources: [{ sourceId: "vocals", frames: 480_000n, ring }],
+  targetFrame: 0n,
+  generation: 1n,
+  timeoutMs: 2_000,
+  // Omit minimumFrames for the ring's full capacity; a positive smaller value is also allowed.
+});
+```
+
+The helper observes existing MSB1 rings with bounded polling and closes its temporary observers on
+success, timeout, mismatch, or cancellation. It does not seek a producer, attach a feed, wait for
+network or resume an audio context; the caller completes those steps and their acknowledgements
+before asking for a runway proof. `PcmRunwayError.reason` is `"mismatch"` or `"timeout"`, while an
+abort signal's reason is passed through unchanged.
+
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
 Set `policy.console.commandQueueRecords` to a positive capacity when calling `createEngine` to
 attach controls. Omitting it, passing an empty console policy, or setting it to zero keeps audio-only
