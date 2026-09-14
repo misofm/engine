@@ -968,7 +968,9 @@ export class ObservationSubscriptionOwner {
       ...[...this.#responseHandles.values()].map((state) => state.configuration.cadenceMs),
       ...(this.#spectrumJob === undefined ? [] : [this.#spectrumJob.captureCadenceMs]),
     ];
-    const cadence = Math.max(1, Math.round(Math.min(...cadences)));
+    // Native spectrum hops can be fractional milliseconds. Round the shared timer up so a
+    // cadence tick never arrives before the native deadline and shifts every read by one tick.
+    const cadence = Math.max(1, Math.ceil(Math.min(...cadences)));
     if (this.#timer !== undefined && this.#timerCadence === cadence) return;
     this.#stopTimer();
     this.#timerCadence = cadence;
@@ -1574,9 +1576,12 @@ export class ObservationSubscriptionOwner {
     const spectrumRead = this.#transport.spectrumRead;
     if (job === undefined || job.refs === 0 || spectrumRead === undefined) return;
     if (Date.now() < job.nextCaptureAt) return;
+    // Reserve the next capture before awaiting the asynchronous transport. The shared timer may
+    // fire again while the read is in flight; anchoring the deadline at dispatch keeps transport
+    // completion latency from shifting every subsequent capture past its native cadence.
+    job.nextCaptureAt = Date.now() + job.captureCadenceMs;
     const read = await spectrumRead(job.query);
     this.#assertEpoch(epoch);
-    job.nextCaptureAt = Date.now() + job.captureCadenceMs;
     const metadata = cloneSpectrumStreamMetadata(read.metadata);
     const stamp = spectrumPublicationStamp(metadata);
     if (read.result !== undefined) {

@@ -244,6 +244,176 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
   }
 });
 
+test("managed spectrum anchors asynchronous reads to native cadence", async (t) => {
+  const target = { kind: "output", outputId: "out" };
+  const query = queryFor(target);
+  const scenarios = [
+    { sampleRateHz: 44_100, sharedTimer: false },
+    { sampleRateHz: 48_000, sharedTimer: true },
+    { sampleRateHz: 88_200, sharedTimer: false },
+    { sampleRateHz: 96_000, sharedTimer: false },
+  ];
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+
+  for (const scenario of scenarios) {
+    const { sampleRateHz, sharedTimer } = scenario;
+    let timer;
+    let reads = 0;
+    let observationArmed = false;
+    const readReleases = [];
+    const notifications = [];
+    const observationSelection = {
+      trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
+    };
+    const observationMap = {
+      bindings: [{
+        trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+        nativeEffectId: "miso.compressor", tapIds: [1],
+      }],
+    };
+    const observationDescriptor = {
+      id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true,
+    };
+    const nativeCadenceMs = WINDOW_FRAMES * 1_000 / sampleRateHz;
+    const timerCadenceMs = sharedTimer ? 1 : Math.ceil(nativeCadenceMs);
+    const metadata = (status, sequence = 0n) => Object.freeze({
+      result: 0,
+      status,
+      target,
+      channels: CHANNELS,
+      sampleRateHz,
+      quantumFrames: 128,
+      hopFrames: WINDOW_FRAMES,
+      sourceUnderrun: false,
+      captureEpoch: 1n,
+      sequence,
+      droppedCaptures: 0n,
+      windows: sequence,
+      capturedSample: sequence * BigInt(WINDOW_FRAMES),
+      endSample: (sequence + 1n) * BigInt(WINDOW_FRAMES),
+      analysisEpoch: 1n,
+      historyStartSample: 0n,
+      smoothingMs: 0,
+    });
+    const result = (sequence) => ({
+      target,
+      channels: CHANNELS,
+      sampleRateHz,
+      windowFrames: WINDOW_FRAMES,
+      binCount: 1,
+      floorDb: -120,
+      frequenciesHz: new Float32Array([0]),
+      leftDb: new Float32Array([0]),
+      rightDb: new Float32Array([0]),
+      capturedSample: sequence * BigInt(WINDOW_FRAMES),
+      endSample: (sequence + 1n) * BigInt(WINDOW_FRAMES),
+      snapshotToken: sequence,
+      graphSourceUnderrun: false,
+      resultBytes: 37n,
+    });
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => observationMap,
+      readObservations: (selections) => selections.map((selection) => ({
+        ...selection,
+        nativeEffectId: "miso.compressor",
+        descriptor: observationDescriptor,
+        sampleRateHz,
+        status: observationArmed ? "ready" : "unarmed",
+        ...(observationArmed ? {
+          left: 1, right: 1,
+          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
+        } : {}),
+      })),
+      console: () => ({
+        edit: {
+          track: () => ({
+            effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
+          }),
+        },
+        async submit(...edits) {
+          observationArmed = edits.at(-1)?.kind === "observeSubscribe";
+          return {
+            ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
+            admitted: edits.length, appliedAtSample: 0n,
+          };
+        },
+      }),
+      spectrumPrepared: () => query,
+      spectrumStart: async () => ({
+        ok: true, result: 0, code: "ok", metadata: metadata("warming"),
+      }),
+      spectrumRead: async () => {
+        reads += 1;
+        await new Promise((resolve) => readReleases.push(resolve));
+        const sequence = BigInt(reads);
+        return { metadata: metadata("ready", sequence), result: result(sequence) };
+      },
+      spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
+      scheduler: {
+        setInterval: (callback, milliseconds) => {
+          timer = callback;
+          assert.equal(milliseconds, timerCadenceMs);
+          return 1;
+        },
+        clearInterval: () => { timer = undefined; },
+      },
+    }, undefined, undefined, { maximumDeliveredBytesPerSecond: 64 * 1024 * 1024 });
+    const observation = sharedTimer ? (await owner.subscribe({
+      selections: [observationSelection], windowBlocks: 1, cadenceMs: 1,
+    })).handle : undefined;
+    const spectrum = (await owner.subscribeSpectrum({
+      ...query,
+      cadenceMs: 1,
+      onUpdate: (notification) => notifications.push(notification),
+    })).handle;
+    try {
+      const firstTimerTick = timerCadenceMs;
+      now = firstTimerTick;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, `${sampleRateHz} Hz starts one bounded read`);
+
+      now = firstTimerTick + 1;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, "a second shared-timer tick cannot overlap the read");
+
+      now = firstTimerTick + 5;
+      readReleases.shift()();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].available, true);
+      assert.equal(notifications[0].nativeMissedWindows, 0n);
+      assert.equal(notifications[0].skippedPublications, 0n);
+
+      const firstDueTick = sharedTimer
+        ? Math.ceil(firstTimerTick + nativeCadenceMs)
+        : firstTimerTick * 2;
+      now = firstDueTick - 1;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, "polling remains bounded until the native cadence deadline");
+      now = firstDueTick;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 2, `${sampleRateHz} Hz does not lose the next fractional-cadence read`);
+
+      now += 5;
+      readReleases.shift()();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(notifications.length, 2);
+      assert.equal(notifications[1].available, true);
+      assert.equal(notifications[1].nativeMissedWindows, 0n);
+      assert.equal(notifications[1].skippedPublications, 0n);
+      assert.ok(spectrum.readLatest());
+    } finally {
+      await spectrum.close();
+      await observation?.close();
+    }
+  }
+});
+
 test("managed spectrum collection updates target and smoothing atomically", async () => {
   const firstQuery = queryFor({ kind: "trackPostMatrix", trackId: "t" });
   const secondQuery = queryFor({ kind: "output", outputId: "out" });
