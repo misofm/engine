@@ -307,3 +307,22 @@ transaction/diagnostic/allocation/designer proofs, adapt affected hermetic host
 stubs, then build/repin the artifact and run proportional SDK/packed browser gates.
 Fresh Astra MEDIUM adversarial review and merged/GitHub delivery remain required.
 Keep issue open, attempt1; do not treat pending qualification as completed evidence.
+
+
+### Assignment10 caller and realtime checkpoint, 2026-09-14
+
+The four stale host callers now use actual prepared admission; the staging-capacity
+fixture uses an ordinary compressor and retains its 510-span assertion. The shared
+JS direct oracle is migrated, and ordinary worklet fakes provide a real minimal
+Unsupported preparation export without weakening missing-export handling.
+
+PASS: full native host library suite (98 passed, two existing ignored), existing
+worklet shell suite, and the production scalar/bank test-support episode. Root also
+ran that feature-enabled episode: off-thread preparation calls the real designer;
+prepared admission/render make zero designer calls, allocations or frees. Successive
+scalar ACKs advance owner revisions before rendering. Existing contract declarations
+now describe prepared EQ targets and exact A/A+64 timing.
+
+Still pending: production mixed-owner refusal variants and the built artifact,
+SDK/packed browser qualification, then fresh adversarial review and merged delivery.
+These are source checkpoints; #807 remains open, attempt1. No benchmark was run.

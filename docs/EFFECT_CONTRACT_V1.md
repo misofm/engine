@@ -139,6 +139,19 @@ control plane and for the conformance reference mock — whose sample-accurate r
 is a later protocol capability. Malformed render spans are ignored, counted once, and do not
 change the last valid target.
 
+Effects may opt into `NativeEffectTargetPreparation` (#807). Their control owner validates
+all original semantic edits against its accepted configuration and prepares fixed targets off
+render. Whole-batch admission checks targets, revisions and every destination's capacity before
+publishing; only successful admission commits the candidate. Parametric EQ uses this route for
+its existing numeric controls and dedicated HPF/LPF enable, frequency and Q. Its scalar and bank
+processors refuse raw semantic spans and apply only prepared targets. Other effects retain their
+existing point-span route.
+
+For EQ, acknowledgement sample A starts the transition from the current coefficients. Sample A
+uses the old current words; the exact target is used at A+64. A response captured after A describes
+the accepted target, not the instantaneous coefficients during that transition. Reset and mono
+transitions use cached words and do not invoke the coefficient designer.
+
 ## State and lane isolation
 
 State is three exact caller buffers: common, left, and right. Snapshot is deterministic and

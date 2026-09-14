@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 control-provider = ["dep:protocol"]
+test-support = ["effect-compiler/test-support"]
 
 [dependencies]
 builtins.workspace = true

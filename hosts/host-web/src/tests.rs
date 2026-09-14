@@ -1,6 +1,7 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
+use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -1818,19 +1819,10 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     step(&mut host, 5);
 
     // #140 A: an effect parameter, `channel = both`, lowering to one span per lane.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [-12.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut host, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK
     );
-    assert_eq!(host.submit_commands(1), RESULT_OK);
     assert_eq!(
         host.command_report().applied_at_sample,
         6 * u64::from(QUANTUM)
@@ -2260,6 +2252,105 @@ fn stage_command(
     for (slot, value) in values.iter().enumerate() {
         record[24 + slot * 4..28 + slot * 4].copy_from_slice(&value.to_le_bytes());
     }
+}
+
+/// Stage one EQ edit with the same control-plane target preparation and opaque companion that the
+/// browser SDK submits. The render-side producer receives only the already-designed target.
+fn stage_prepared_eq_parameter(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    rack: u8,
+    effect_index: u32,
+    parameter_id: u32,
+    value: f32,
+) {
+    stage_command(
+        host,
+        wire_index,
+        COMMAND_EFFECT_PARAM,
+        rack,
+        2,
+        track_index,
+        effect_index,
+        parameter_id,
+        0,
+        [value, 0.0, 0.0, 0.0],
+    );
+    let preparer = EqTargetPreparer::new(
+        host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ target preparer");
+    assert_eq!(
+        host.copy_eq_target_config(track_index, u32::from(rack), effect_index),
+        RESULT_OK
+    );
+    let config = host.eq_target_config().expect("EQ target config");
+    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
+    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        let offset = 32 + index * 4;
+        *seed = f32::from_bits(u32::from_le_bytes(
+            config[offset..offset + 4].try_into().expect("seed"),
+        ));
+    }
+    let mut targets = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, target_count) = preparer
+        .prepare(
+            48_000,
+            &seeds,
+            &[EqTargetEdit {
+                parameter_id,
+                channel: ParameterChannel::Both,
+                value,
+            }],
+            &mut targets,
+        )
+        .expect("prepared EQ target");
+    assert_eq!(target_count, 1, "one edit touches one EQ section");
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    companion[16..20].copy_from_slice(&(target_count as u32).to_le_bytes());
+    let record = &mut companion[24..104];
+    record[0..4].copy_from_slice(&track_index.to_le_bytes());
+    record[4..8].copy_from_slice(&u32::from(rack).to_le_bytes());
+    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
+    record[16..24].copy_from_slice(&base_revision.to_le_bytes());
+    record[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
+    record[28..32].copy_from_slice(&2_u32.to_le_bytes());
+    for (index, word) in targets[0].words.iter().enumerate() {
+        let offset = 32 + index * 4;
+        record[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn submit_prepared_eq_parameter(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    rack: u8,
+    effect_index: u32,
+    parameter_id: u32,
+    value: f32,
+) -> u32 {
+    stage_prepared_eq_parameter(
+        host,
+        wire_index,
+        track_index,
+        rack,
+        effect_index,
+        parameter_id,
+        value,
+    );
+    host.submit_prepared_commands(1, 104)
 }
 
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
@@ -3006,6 +3097,17 @@ fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
 }
 
+#[cfg(feature = "test-support")]
+fn bank_effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+    let document = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 2,
+        console_command_queue_records: depth,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ console boot")
+}
+
 #[test]
 fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
     let document = include_str!("../tests/browser-v1/command-session.json");
@@ -3250,6 +3352,112 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
     assert_eq!(producer.success_count(), before_success);
     assert_eq!(producer.full_count(), before_full);
     assert_eq!(ready.in_flight[queue_slot], before_in_flight);
+}
+
+/// The production owner receives complete, already-designed targets on both the scalar dynamic
+/// fixture and the SIMD-bank fixture. Preparation is the only place that may invoke the EQ
+/// designer; admission and the following render are measured through the existing FFI allocator.
+#[cfg(feature = "test-support")]
+#[test]
+fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation() {
+    const QUANTUM: u32 = 128;
+
+    let mut scalar = effect_console_host(QUANTUM, 8);
+    feed_and_render(&mut scalar, 1, 0, 0.25);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut scalar, 0, 0, 1, 0, 4, -12.0);
+    assert!(
+        host_core::test_only_parametric_eq_design_call_count() > 0,
+        "off-thread EQ preparation must invoke the real designer"
+    );
+    assert_eq!(
+        scalar.submit_prepared_commands(1, 104),
+        RESULT_OK,
+        "first prepared ACK"
+    );
+
+    // A second transaction is acknowledged before the render boundary, using the owner's new
+    // committed revision and a fresh target. The measured operation contains no preparation.
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut scalar, 0, 0, 1, 0, 4, 18.0);
+    assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    let left = [0.25_f32; QUANTUM as usize];
+    let right = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        scalar.submit_source(
+            b"fixture-source",
+            1,
+            u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = scalar.submit_prepared_commands(1, 104);
+            let render = scalar.render_next();
+            (admission, render)
+        });
+    assert_eq!(admission, RESULT_OK, "second prepared ACK");
+    assert_eq!(render, RESULT_OK, "prepared render");
+    assert_eq!(allocations, 0, "prepared admission/render allocated");
+    assert_eq!(deallocations, 0, "prepared admission/render freed");
+    assert_eq!(
+        host_core::test_only_parametric_eq_design_call_count(),
+        0,
+        "admission/render must not redesign"
+    );
+    let config = {
+        assert_eq!(scalar.copy_eq_target_config(0, 1, 0), RESULT_OK);
+        scalar.eq_target_config().expect("scalar config").to_vec()
+    };
+    assert_eq!(
+        u64::from_le_bytes(config[24..32].try_into().expect("revision")),
+        2,
+        "two ACKs commit two owner revisions before/at the render boundary"
+    );
+
+    let mut bank = bank_effect_console_host(QUANTUM, 8);
+    feed_and_render_tracks(&mut bank, 0, 0.25);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    stage_prepared_eq_parameter(&mut bank, 0, 0, 0, 0, 4, 12.0);
+    assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
+    host_core::test_only_reset_parametric_eq_design_calls();
+    let left = [0.25_f32; QUANTUM as usize];
+    let right = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        bank.submit_source(
+            b"fixture-source",
+            1,
+            u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = bank.submit_prepared_commands(1, 104);
+            let render = bank.render_next();
+            (admission, render)
+        });
+    assert_eq!(admission, RESULT_OK, "bank prepared render");
+    assert_eq!(render, RESULT_OK, "bank second render");
+    assert_eq!(allocations, 0, "bank render allocated");
+    assert_eq!(deallocations, 0, "bank render freed");
+    assert_eq!(
+        host_core::test_only_parametric_eq_design_call_count(),
+        0,
+        "bank render must not redesign"
+    );
 }
 
 #[test]
@@ -3552,19 +3760,10 @@ fn an_effect_parameter_command_names_the_exact_application_sample() {
         );
     }
     // Band 1's gain: parameter id 4 of `miso.parametric-eq`, dynamic rack, effect 0, both lanes.
-    stage_command(
-        &mut commanded,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [-12.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut commanded, 0, 0, 1, 0, 4, -12.0),
+        RESULT_OK
     );
-    assert_eq!(commanded.submit_commands(1), RESULT_OK);
     let report = *commanded.command_report();
     assert_eq!(report.reason, COMMAND_REASON_NONE);
     assert_eq!(
@@ -3609,19 +3808,10 @@ fn an_effect_bypass_command_returns_the_dry_signal() {
     const QUANTUM: u32 = 128;
     let mut host = effect_console_host(QUANTUM, 8);
     // Move the band well off flat first, so "bypassed" and "enabled" are distinguishable.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_EFFECT_PARAM,
-        1,
-        2,
-        0,
-        0,
-        4,
-        0,
-        [18.0, 0.0, 0.0, 0.0],
+    assert_eq!(
+        submit_prepared_eq_parameter(&mut host, 0, 0, 1, 0, 4, 18.0),
+        RESULT_OK
     );
-    assert_eq!(host.submit_commands(1), RESULT_OK);
     for block in 0..3_u64 {
         feed_and_render(&mut host, 1, block, 0.25);
     }
@@ -6621,8 +6811,13 @@ fn a_console_that_never_solos_renders_what_it_always_did() {
 fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngineHost {
     use session::StableId;
 
-    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
-        .expect("accepted command fixture");
+    // This staging-capacity fixture deliberately uses an ordinary compressor. EQ's live path
+    // coalesces through prepared targets, while this effect keeps the historical 510-span wire
+    // bound exercised by an ordinary per-lane effect.
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("accepted compressor fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 64;
     let track = model.tracks[0].clone();
@@ -6677,7 +6872,7 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
 
     let records = MAXIMUM_COMMAND_RECORDS as usize;
     for index in 0..records - 1 {
-        // Band 1's gain on each track's EQ, addressed to both lanes: two spans per wire record.
+        // Compressor threshold on each track, addressed to both lanes: two spans per wire record.
         stage_command(
             &mut host,
             index,
@@ -6686,7 +6881,7 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
             2,
             (index % TRACKS) as u32,
             0,
-            4,
+            1,
             0,
             [-12.0, 0.0, 0.0, 0.0],
         );

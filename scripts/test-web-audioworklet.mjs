@@ -1,7 +1,21 @@
 import "./test-prepared-control.mjs";
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const root = new URL("../", import.meta.url);
+const preparedAbiLayout = JSON.parse(await readFile(
+  new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
+));
+const unsupportedPreparationModuleBytes = Uint8Array.from([
+  0, 97, 115, 109, 1, 0, 0, 0,
+  1, 5, 1, 96, 0, 1, 127,
+  3, 2, 1, 0,
+  5, 3, 1, 0, 1,
+  7, 46, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0,
+  33, 109, 105, 115, 111, 95, 101, 110, 103, 105, 110, 101, 95, 119, 101, 98,
+  95, 118, 49, 95, 101, 113, 95, 116, 97, 114, 103, 101, 116, 95, 111, 112, 101, 110, 0, 0,
+  10, 6, 1, 4, 0, 65, 7, 11,
+]);
 // Issue #151: the host module is overridable for exactly the reason the worklet module already is
 // -- so a red mutation of the shipped host runs this same suite and is required to fail it.
 const hostUrl = process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE === undefined
@@ -199,12 +213,13 @@ async function testMainRealm() {
   globalThis.fetch = async (url) => ({
     ok: true,
     arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-    json: async () => ({}),
+    json: async () => preparedAbiLayout,
   });
+  const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
     events.push(["compile", url]);
-    return Object.freeze({ url });
+    return unsupportedPreparationModule;
   };
   const context = {
     state: "suspended",
@@ -1348,7 +1363,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     return {
       ok: true,
       arrayBuffer: async () => new Uint8Array([0]).buffer,
-      json: async () => ({}),
+      json: async () => preparedAbiLayout,
     };
   };
   WebAssembly.compile = async () => Object.freeze({ qualification: true });

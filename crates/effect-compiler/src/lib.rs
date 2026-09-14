@@ -15,6 +15,11 @@ pub use migration::*;
 pub use parametric_eq::{
     EqResponseError, query_snapshot_magnitudes_into as query_parametric_eq_snapshot_magnitudes_into,
 };
+#[cfg(feature = "test-support")]
+pub use parametric_eq::{
+    test_only_design_call_count as test_only_parametric_eq_design_call_count,
+    test_only_reset_design_calls as test_only_reset_parametric_eq_design_calls,
+};
 pub use prepare::*;
 
 /// Returns the native EQ factory only when its prepared-target capability is actually enabled.

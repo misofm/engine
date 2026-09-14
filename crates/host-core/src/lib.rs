@@ -169,6 +169,10 @@ pub use effect_compiler::{
     EffectControlOwnerError, EffectControlProducer, EffectControlResources,
     EffectObservationHandle, EffectRack, parametric_eq_target_preparation_factory,
 };
+#[cfg(feature = "test-support")]
+pub use effect_compiler::{
+    test_only_parametric_eq_design_call_count, test_only_reset_parametric_eq_design_calls,
+};
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
 ///

@@ -4219,7 +4219,7 @@ mod response_budget_tests {
 }
 
 #[cfg(test)]
-mod live_response_ffi_tests {
+pub(crate) mod live_response_ffi_tests {
     use super::*;
     use core::alloc::Layout;
     use core::cell::Cell;
@@ -4286,7 +4286,7 @@ mod live_response_ffi_tests {
         }
     }
 
-    fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+    pub(crate) fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
         ARMED.with(|armed| armed.set(false));
         ALLOCATIONS.with(|count| count.set(0));
         DEALLOCATIONS.with(|count| count.set(0));

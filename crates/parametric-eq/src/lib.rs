@@ -1,5 +1,6 @@
 //! Four-band, six-section dual-mono parametric EQ, realised as a cascade of TPT state-variable
-//! sections. The dedicated HPF and LPF are prepared-only controls around the original four bands.
+//! sections. The dedicated HPF and LPF are live prepared-target controls around the original four
+//! bands.
 //!
 //! The spec transfer is the RBJ Audio EQ Cookbook's, unchanged. The *realization* is Simper's
 //! trapezoidal state-variable filter (decision D2 of the #83 master plan), designed in `f64` on the
@@ -16,7 +17,7 @@
 //!   error in the pole damping while `c1` carries about 6e-8 (master plan §4.2 amendment A1).
 //! * **The recurrence.** `lane::kernels::svf_block`, one generic body instantiated at
 //!   `WIDTH` 1, 4 and 8, so lane identity and native↔wasm identity are properties of the code.
-//! * **Smoothing.** Decision D11: an automation point starts a 64-sample linear ramp of the six
+//! * **Smoothing.** Decision D11: a prepared target starts a 64-sample linear ramp of the six
 //!   **words**, with the per-sample increment precomputed as a multiply by `2^-6` and an exact
 //!   assignment of the target on the final sample. There is no per-sample redesign and no division
 //!   anywhere on the render path.
@@ -111,26 +112,39 @@ const STATE_LAYOUT: payload::StateLayout = payload::StateLayout {
 /// Byte lengths the descriptor advertises, derived from the layout rather than written out.
 const STATE_SIZES: payload::StatePayloadSizes = payload::expected_sizes(&STATE_LAYOUT);
 
-/// Samples an automation point takes to reach its target (`SmoothingRule::Linear`, D11).
+/// Samples a prepared target takes to reach its destination (`SmoothingRule::Linear`, D11).
 const RAMP_SAMPLES: u32 = 64;
 /// `1 / RAMP_SAMPLES` as an exact power of two: the ramp multiplies, it never divides.
 const RAMP_SCALE: f32 = 1.0 / RAMP_SAMPLES as f32;
 /// Widest bank this crate binds; sizes the small fixed per-lane scratch arrays.
 const MAX_LANES: usize = 8;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static DESIGN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn reset_design_calls() {
     DESIGN_CALLS.with(|calls| calls.set(0));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn design_call_count() -> usize {
     DESIGN_CALLS.with(std::cell::Cell::get)
+}
+
+/// Resets the existing designer counter for host integration gates.
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_design_calls() {
+    reset_design_calls();
+}
+
+/// Reads the existing designer counter for host integration gates.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_design_call_count() -> usize {
+    design_call_count()
 }
 
 /// Frozen V1 section filter families.
@@ -697,7 +711,7 @@ pub fn design_svf(
     shelf_slope: f32,
     sample_rate: SampleRateHz,
 ) -> Result<EqSvfWords, EqDesignError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     DESIGN_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     if !is_launch_sample_rate(sample_rate)
         || !numeric_value_valid(0, frequency_hz)
@@ -2241,7 +2255,7 @@ fn band_targets(
     Ok(bands)
 }
 
-/// Reads one dedicated cut's three prepared-only values. The cut is represented by the same
+/// Reads one dedicated cut's three prepared-target values. The cut is represented by the same
 /// section target used by the general bands, with fixed zero gain and unit shelf slope so the
 /// existing coefficient authority and state machinery remain shared.
 fn cut_target(

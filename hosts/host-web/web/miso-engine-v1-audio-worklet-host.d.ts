@@ -28,11 +28,11 @@
 //   time alignment) still declare `PreparedOnly` and have no command kind at all: they change
 //   through a session edit. Live filter moves are deferred, at the price of the parametric EQ's
 //   coefficient-ramp machinery; the ruling is recorded and is not an oversight.
-// * An effect parameter is delivered to the running plan as a `PreparedAutomationSpan` -- the
-//   route the effect contract always had and that #137 found nothing was feeding. A parameter is
-//   movable exactly when its own descriptor declares it automatable; the build-time
-//   parameter-metadata JSON carries that as `liveUpdatable`, so an app never has to discover it
-//   at runtime.
+// * A parameter is live when its generated descriptor says `liveUpdatable`. Parametric EQ uses
+//   off-audio-thread Rust preparation for its numeric rows and dedicated cut enable/frequency/Q;
+//   this host submits the resulting opaque targets together with the original semantic batch.
+//   Other effects retain their `PreparedAutomationSpan` route. Callers provide semantic values,
+//   never coefficients, and a refused batch commits none of its edits.
 // * `.EffectBypass` is applied *outside* the effect, by a latency-preserving shunt: the wet path
 //   keeps running, so state stays continuous and un-bypassing does not click, and the dry signal
 //   is delayed by exactly the effect's declared latency, so every compiled PDC route timing stays
@@ -64,8 +64,9 @@
 //
 // Every console stage -- matrix/pan, fader/mute, and each driven effect -- drains its control
 // queue at the top of the block, before it touches a sample. `appliedAtSample` on the
-// acknowledgement is therefore the first sample of the next rendered block, and every sample of
-// that block carries the change. It is an exact statement, not an estimate.
+// acknowledgement is the first sample of the next rendered block, when the target is applied.
+// Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
+// target at A+64; a response captured after A reports the accepted target, not an in-ramp curve.
 //
 // A batch may address several kinds at once. It is still one transaction: the free-room check is
 // per destination queue, and one full queue refuses the whole batch, including the records bound
