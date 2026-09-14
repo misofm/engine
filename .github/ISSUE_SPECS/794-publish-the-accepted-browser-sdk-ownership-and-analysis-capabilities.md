@@ -112,3 +112,26 @@ Logs: `/tmp/miso-796-audit/combined-types.log`, `combined-sdk.log`,
 `combined-package.log`. The 0.2.5 release input set is accepted #789/#791/#793
 plus #796 and #797; no further sibling work is needed for this cut. Required
 PR/merged-main CI and #794 immutable registry publication remain pending.
+
+
+## Published delivery — CLOSED
+
+Fresh independent Astra MEDIUM final release verdict: **PASS**. Public
+`@misofm/engine@0.2.5` and `latest` identify the exact qualified archive.
+Source is merged main `1646a6a1bd0011cc2b5480283bf498b27be460e5` (PR #798);
+required main CI 34792194652 PASS. Included capabilities are #789/#791/#793,
+#796 measurement ownership and #797 PCM readiness. Qualification run
+34792550685 PASS. OIDC publication 34792751578 signed/accepted the archive but
+registry processing exceeded its verification window; **no second publication**
+was attempted. Verify-only recovery 34792987814 PASS after propagation.
+
+Archive SHA-256: `c26208470b5409ad789085d251d94bdf1117b32dcd3b5e544f8696dffffe3d4d`.
+Registry SHA-1: `234bdf5885aeeaf04d20ed8ab3306cd4fa3edf21`.
+Integrity: `sha512-cNMuslg9t7NAkBrYFMl8jcd1fOy5/fN+FEeDE+WdiMj+8+DkWTkvbWvMo1UMWgC+MrnX4BKhYz2QrKmAstIWwQ==`.
+Wasm SHA-256 remains `c1191d67052806984441eca262d6678583f36f88eaec9f7495a3580d4d81c7b4`.
+Fresh registry imports/CLI, public access and cryptographically verified SLSA
+provenance bind exact package bytes, trusted npm-publish workflow/main ref and
+the source SHA. Independent record `/tmp/miso-796-audit/verify-794.md`; exact
+qualified archive/evidence `/tmp/miso-796-audit/release025-qualification`;
+independent registry/attestation evidence `/tmp/miso-796-audit/verify794-registry`.
+Downstream #95/#101 and app #210 may now use this verified registry identity.
