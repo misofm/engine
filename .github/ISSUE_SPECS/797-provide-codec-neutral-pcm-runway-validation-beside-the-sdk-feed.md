@@ -99,3 +99,23 @@ are preserved at `/tmp/miso-796-audit/797-*`. Root checkpoints the exact helper,
 existing test and README paths before independent fresh Astra MEDIUM review.
 This is attempt 1, not source acceptance or registry availability. It runs in
 an isolated worktree during #796 review/CI and cannot delay the plotting release.
+
+## Independent verification — attempt 1
+
+Fresh Astra MEDIUM records **PASS** after correcting one concrete bug: an
+explicit `AbortController.abort(null)` reason was replaced by the nullish fallback.
+Checkpoint `7e08e956` preserves it exactly; the existing cancellation case proves
+in-flight and pre-aborted null identity and subsequent successful reuse. No
+scope expansion or further implementation correction was needed.
+
+Independent gates pass: focused PCM 18/18 (including feed attach/prepareSeek),
+SDK types/host mirror, artifact-backed package check with generated surface and
+package smoke, browser runway exports, and diff whitespace check. Reused
+`/tmp/issue793-candidate1-artifact`; no Wasm rebuild or benchmark. Reviewed bigint
+domains, full-generation equality, bounded contiguous/EOF proof, all-source
+readiness, observer/finally and abort-listener cleanup, and unchanged consumer/seek
+state. Full verdict and logs: `/tmp/miso-796-audit/verify-797-attempt1.md` and
+`verify-797-{pcm,types,package,import}.log`.
+
+Source integration, required CI and GitHub synchronization remain root delivery
+steps. This PASS does not assert registry availability and does not delay #794.
