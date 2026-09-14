@@ -214,9 +214,12 @@ function validateSdkResponse(browserName, response) {
   ) === true, "SDK did not expose the generated input-filter capability");
   gate(browserName, "sdk-response", response?.eq?.configurationId === "9007199254740993"
     && response.eq.mode === "requestedConfiguration"
-    && response.eq.points === 32 && response.eq.sections === 4
+    && response.eq.points === 32 && response.eq.sections === 6
     && response.eq.left.length === 32 && response.eq.right.length === 32
     && response.eq.frequencies.length === 32
+    && response.eq.enabledLeft.length === 6 && response.eq.enabledRight.length === 6
+    && response.eq.enabledLeft.slice(4).every((enabled) => enabled === false)
+    && response.eq.enabledRight.slice(4).every((enabled) => enabled === false)
     && response.eq.enabledLeft.filter(Boolean).length === 1
     && response.eq.enabledRight.filter(Boolean).length === 1,
   "SDK EQ Worker result did not preserve the explicit configuration and sections");

@@ -429,3 +429,10 @@ normal all-feature configuration resolved that. Root fixed one new test-only
 manual-char-comparison lint with the equivalent array pattern, no suppression.
 Final clippy log /tmp/805-response-clippy-all-features-final.log.
 Actual browser matrix qualification and final Astra verdict remain next.
+
+The first browser run stopped in Chromium on the qualification runner's old
+sections===4 expectation; actual Worker response reported6. Astra independently
+confirmed this remaining fixture mismatch. Root changed the expectation to6
+and explicitly checks both new cuts defaultdisabled in both six-entry masks,
+preserving existing original-band assertions. Prior log retained at
+/tmp/805-browser-initial-four-section-expectation.log; actualall3run follows.
