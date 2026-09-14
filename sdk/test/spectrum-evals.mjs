@@ -244,6 +244,176 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
   }
 });
 
+test("managed spectrum anchors asynchronous reads to native cadence", async (t) => {
+  const target = { kind: "output", outputId: "out" };
+  const query = queryFor(target);
+  const scenarios = [
+    { sampleRateHz: 44_100, sharedTimer: false },
+    { sampleRateHz: 48_000, sharedTimer: true },
+    { sampleRateHz: 88_200, sharedTimer: false },
+    { sampleRateHz: 96_000, sharedTimer: false },
+  ];
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+
+  for (const scenario of scenarios) {
+    const { sampleRateHz, sharedTimer } = scenario;
+    let timer;
+    let reads = 0;
+    let observationArmed = false;
+    const readReleases = [];
+    const notifications = [];
+    const observationSelection = {
+      trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
+    };
+    const observationMap = {
+      bindings: [{
+        trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+        nativeEffectId: "miso.compressor", tapIds: [1],
+      }],
+    };
+    const observationDescriptor = {
+      id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true,
+    };
+    const nativeCadenceMs = WINDOW_FRAMES * 1_000 / sampleRateHz;
+    const timerCadenceMs = sharedTimer ? 1 : Math.ceil(nativeCadenceMs);
+    const metadata = (status, sequence = 0n) => Object.freeze({
+      result: 0,
+      status,
+      target,
+      channels: CHANNELS,
+      sampleRateHz,
+      quantumFrames: 128,
+      hopFrames: WINDOW_FRAMES,
+      sourceUnderrun: false,
+      captureEpoch: 1n,
+      sequence,
+      droppedCaptures: 0n,
+      windows: sequence,
+      capturedSample: sequence * BigInt(WINDOW_FRAMES),
+      endSample: (sequence + 1n) * BigInt(WINDOW_FRAMES),
+      analysisEpoch: 1n,
+      historyStartSample: 0n,
+      smoothingMs: 0,
+    });
+    const result = (sequence) => ({
+      target,
+      channels: CHANNELS,
+      sampleRateHz,
+      windowFrames: WINDOW_FRAMES,
+      binCount: 1,
+      floorDb: -120,
+      frequenciesHz: new Float32Array([0]),
+      leftDb: new Float32Array([0]),
+      rightDb: new Float32Array([0]),
+      capturedSample: sequence * BigInt(WINDOW_FRAMES),
+      endSample: (sequence + 1n) * BigInt(WINDOW_FRAMES),
+      snapshotToken: sequence,
+      graphSourceUnderrun: false,
+      resultBytes: 37n,
+    });
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => observationMap,
+      readObservations: (selections) => selections.map((selection) => ({
+        ...selection,
+        nativeEffectId: "miso.compressor",
+        descriptor: observationDescriptor,
+        sampleRateHz,
+        status: observationArmed ? "ready" : "unarmed",
+        ...(observationArmed ? {
+          left: 1, right: 1,
+          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
+        } : {}),
+      })),
+      console: () => ({
+        edit: {
+          track: () => ({
+            effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
+          }),
+        },
+        async submit(...edits) {
+          observationArmed = edits.at(-1)?.kind === "observeSubscribe";
+          return {
+            ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
+            admitted: edits.length, appliedAtSample: 0n,
+          };
+        },
+      }),
+      spectrumPrepared: () => query,
+      spectrumStart: async () => ({
+        ok: true, result: 0, code: "ok", metadata: metadata("warming"),
+      }),
+      spectrumRead: async () => {
+        reads += 1;
+        await new Promise((resolve) => readReleases.push(resolve));
+        const sequence = BigInt(reads);
+        return { metadata: metadata("ready", sequence), result: result(sequence) };
+      },
+      spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
+      scheduler: {
+        setInterval: (callback, milliseconds) => {
+          timer = callback;
+          assert.equal(milliseconds, timerCadenceMs);
+          return 1;
+        },
+        clearInterval: () => { timer = undefined; },
+      },
+    }, undefined, undefined, { maximumDeliveredBytesPerSecond: 64 * 1024 * 1024 });
+    const observation = sharedTimer ? (await owner.subscribe({
+      selections: [observationSelection], windowBlocks: 1, cadenceMs: 1,
+    })).handle : undefined;
+    const spectrum = (await owner.subscribeSpectrum({
+      ...query,
+      cadenceMs: 1,
+      onUpdate: (notification) => notifications.push(notification),
+    })).handle;
+    try {
+      const firstTimerTick = timerCadenceMs;
+      now = firstTimerTick;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, `${sampleRateHz} Hz starts one bounded read`);
+
+      now = firstTimerTick + 1;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, "a second shared-timer tick cannot overlap the read");
+
+      now = firstTimerTick + 5;
+      readReleases.shift()();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].available, true);
+      assert.equal(notifications[0].nativeMissedWindows, 0n);
+      assert.equal(notifications[0].skippedPublications, 0n);
+
+      const firstDueTick = sharedTimer
+        ? Math.ceil(firstTimerTick + nativeCadenceMs)
+        : firstTimerTick * 2;
+      now = firstDueTick - 1;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 1, "polling remains bounded until the native cadence deadline");
+      now = firstDueTick;
+      timer();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reads, 2, `${sampleRateHz} Hz does not lose the next fractional-cadence read`);
+
+      now += 5;
+      readReleases.shift()();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(notifications.length, 2);
+      assert.equal(notifications[1].available, true);
+      assert.equal(notifications[1].nativeMissedWindows, 0n);
+      assert.equal(notifications[1].skippedPublications, 0n);
+      assert.ok(spectrum.readLatest());
+    } finally {
+      await spectrum.close();
+      await observation?.close();
+    }
+  }
+});
+
 test("managed spectrum collection updates target and smoothing atomically", async () => {
   const firstQuery = queryFor({ kind: "trackPostMatrix", trackId: "t" });
   const secondQuery = queryFor({ kind: "output", outputId: "out" });
@@ -447,6 +617,82 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   assert.equal((await subscription.pump()).nativeMissedWindows, 0n);
   assert.equal((await subscription.pump()).nativeMissedWindows, 1n);
   await subscription.close();
+});
+
+test("automatic spectrum drains once after a gap and preserves coalesced losses", async (t) => {
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (status, sequence, droppedCaptures, captureEpoch = 1n) => ({
+    result: 0, status, target: prepared.target, channels: "both", sampleRateHz: 48_000,
+    quantumFrames: 128, hopFrames: 2_048, sourceUnderrun: false, captureEpoch,
+    sequence: BigInt(sequence), droppedCaptures, windows: BigInt(sequence),
+    capturedSample: BigInt(sequence * 2_048), endSample: BigInt((sequence + 1) * 2_048),
+    analysisEpoch: 1n, historyStartSample: 0n, smoothingMs: 0,
+  });
+  const read = (status, sequence, drops, epoch = 1n) => ({
+    metadata: metadata(status, sequence, drops, epoch),
+    ...(status === "ready" ? { result: {
+      target: prepared.target, channels: "both", sampleRateHz: 48_000,
+      windowFrames: 2_048, binCount: 1, floorDb: -120,
+      frequenciesHz: new Float32Array([0]), leftDb: new Float32Array([0]), rightDb: new Float32Array([0]),
+      capturedSample: BigInt(sequence * 2_048), endSample: BigInt((sequence + 1) * 2_048),
+      snapshotToken: BigInt(sequence), graphSourceUnderrun: false, resultBytes: 37n,
+    } } : {}),
+  });
+  const queued = [];
+  const fast = [];
+  const slow = [];
+  let timer;
+  let calls = 0;
+  let stopped = false;
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }), readObservations: () => [],
+    console: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
+    spectrumRead: async () => { calls++; return await queued.shift(); },
+    spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
+    scheduler: { setInterval: (callback) => { timer = callback; return 1; }, clearInterval: () => {} },
+  });
+  const fastHandle = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 1, onUpdate: (n) => fast.push(n) })).handle;
+  const slowHandle = (await owner.subscribeSpectrum({ ...prepared, cadenceMs: 100, onUpdate: (n) => slow.push(n) })).handle;
+  const tick = async (time) => { now = time; timer(); await new Promise((resolve) => setImmediate(resolve)); };
+  queued.push(read("ready", 1, 0n));
+  await tick(43);
+  assert.equal(slow.length, 1);
+  // Native gap reporting leaves its full queue intact; the second read must pop its older window.
+  queued.push(read("gap", 1, 3n), read("ready", 2, 0n));
+  await tick(86);
+  assert.equal(calls, 3);
+  assert.equal(fast.at(-1).status, "gap");
+  assert.equal(fast.at(-1).nativeMissedWindows, 3n);
+  assert.equal(slow.length, 1, "recovery must respect the slower delivery cadence");
+  assert.ok(fastHandle.readLatest(), "the immediate drain recovers an owned window");
+  queued.push(read("pending", 2, 0n));
+  await tick(150);
+  assert.equal(slow.at(-1).nativeMissedWindows, 3n, "older queued metadata cannot erase coalesced loss");
+  assert.equal(slow.at(-1).skippedPublications, 1n);
+  // A second gap in the recovery slot is published, but never recursively drained.
+  queued.push(read("gap", 2, 4n), read("gap", 2, 5n));
+  await tick(193);
+  assert.equal(calls, 6, "one timer poll performs at most two sequential reads");
+  queued.push(read("failed", 0, 0n, 2n));
+  await tick(260);
+  assert.equal(slow.at(-1).nativeMissedWindows, 0n, "a new capture epoch resets undelivered loss");
+  await slowHandle.close();
+  // The owner retains its one-in-flight guard, including while the recovery read is pending.
+  let release;
+  queued.push(read("gap", 0, 1n, 2n), new Promise((resolve) => { release = resolve; }));
+  await tick(303);
+  const pendingCalls = calls;
+  await tick(346);
+  assert.equal(calls, pendingCalls);
+  const closing = fastHandle.close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, "close must await the recovery read");
+  release(read("ready", 1, 0n, 2n));
+  await closing;
+  assert.equal(stopped, true);
 });
 
 test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {

@@ -135,3 +135,28 @@ the source SHA. Independent record `/tmp/miso-796-audit/verify-794.md`; exact
 qualified archive/evidence `/tmp/miso-796-audit/release025-qualification`;
 independent registry/attestation evidence `/tmp/miso-796-audit/verify794-registry`.
 Downstream #95/#101 and app #210 may now use this verified registry identity.
+
+## Confirmed downstream live-capture correction release
+
+Reopened for the narrowly scoped engine#801 defect discovered by the required
+app#210 real-browser gate. The published0.2.5 provenance above remains valid,
+but live managed spectrum yielded73gap notifications/218drops/windows0 without
+source underruns. A new immutable SDK patch is required after #801 source PASS
+and required merged-main CI. Re-audit unused version (candidate0.2.6), update
+existing exact guards only, and reuse the same qualify/publish/verify workflow.
+No DSP/Wasm changes or expanded acceptance matrix. Preserve prior archive/run
+identities and record new source/archive/registry/provenance identities separately.
+Then adapter#95 cuts its exact-dependency patch before app#210 final adoption and
+deployment. This is the existing authorized release scope's defect correction;
+publication is not yet complete for the corrected bytes.
+
+Final correction metadata checkpoint `e45323a6` prepares unused SDK 0.2.6.
+Fresh Astra MEDIUM independently verified exactly four metadata/fixture paths,
+publish-mode security gates, and a packed 0.2.6 archive. All 96 non-package.json
+files are byte-identical to the browser-accepted `a0949481` candidate; the sole
+package.json change is version 0.2.5 to 0.2.6. Candidate SHA256:
+`8219178d591c76d820d7ad2e2f7b894fe7f39185f89667f59c675fad603b81eb`.
+No source/codegen/Wasm changes. Existing exact-main/SHA, qualified archive,
+immutable-version refusal, OIDC-only publish, SLSA PURL/SHA512/workflow/gitCommit
+checks remain intact. Evidence under `/tmp/miso-801-verifier/release026-*`.
+Required main CI and actual qualify/publish/verify are still pending.
