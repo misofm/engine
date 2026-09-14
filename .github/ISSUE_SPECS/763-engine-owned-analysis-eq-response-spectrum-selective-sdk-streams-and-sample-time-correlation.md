@@ -136,10 +136,31 @@ Delivered native owner queries: #764/#766 via PR #765; #767/#768/#771 via PR #76
 
 **Delivered continuous managed spectrum:** #789 and bounded accounting successor #791 via PR #792, merged main b34b39f256d5a264c43363b3aeb8ee502ce4c546. Required qualification 34764358890 PASS; 227 SDK tests, actual three-browser meter/EQ/spectrum alignment, realtime/resource and package gates pass. Native sample-clock hops, Rust power smoothing, reusable transfer credit and shared managed lifecycle are delivered for one prepared target. Both issues are CLOSED and verified.
 
-**Active:** #793 prepares multiple explicitly bounded targets and atomically switches one active managed stream without interrupting audio, enabling the app focused EQ panel. Astra xhigh briefs, Luna max implements, Astra medium verifies bugs only. Simultaneous jobs, SAB and all remaining parent requirements stay attached.
+**Delivered prepared-target switching:** #793 via PR #795, merged main `69c268f240bf30b2a43b43dd521120cd89dcc0b9`. Independent Astra medium PASS; exact-head PR qualification `34773328154` and merged-main qualification `34788089349` PASS, including actual Chromium, Firefox and WebKit gates. The focused stream supports atomic selection without restarting audio. SDK release #794 remains OPEN; registry latest is still 0.2.4, so this is main-source delivery rather than publication. Simultaneous jobs, SAB and all remaining parent requirements stay attached.
 
 **Paused:** #774 catalog source remains preserved at pushed `4083eb68` in its worktree. It is not a prerequisite and is not claimed complete.
 
 **Still required before this parent closes:** common selective lifecycle, sharing, complete identities and loss accounting; engine-tapped spectrum with portable worker DSP and bounded SAB/qualified transfer fallback; packed remote vectors; bounded sample joins; integrated documentation/examples/resource evidence and one descriptive benchmark. No required feature is moved outside the parent. Optimization follows working functionality.
 
 Astra xhigh clarified #781 as the first usable explicit spectrum query with zero or one preparation-selected target per engine, selectable from any of the three required taps. Multiple prepared targets, selective updates and shared capture remain required in this parent’s selective-service work; they are not deferred outside #763. All numerical, lifecycle, realtime, ownership and actual SDK/browser gates remain required for #781.
+
+## SDK and source-adapter boundary correction
+
+Accepted #793/PR #795 prepared-target switching is delivered; its accepted
+source/CI evidence remains intact. New #796 owns canonical browser meter/render
+telemetry subscriptions and integrates them with the existing SDK engine/console
+lifetime. #794 publishes that accepted SDK closure; adapter
+misofm/engine-web-adapter#95 exposes the same engine and removes duplicate
+measurement/console ownership; app misofm/app#210 consumes it directly for
+controls, meters, response and focused rendered spectrum.
+
+Independent #797 extracts codec-neutral feed-runway validation;
+misofm/engine-web-adapter#101 consumes it. Adapter
+misofm/engine-web-adapter#102 limits OPFS/Web Locks gating to
+the selected storage path. Those siblings do not delay plotting delivery.
+
+This amendment changes ownership/dependencies, not accepted DSP/FFT/transport
+contracts. No new codec/backend/framework is required. #763 remains OPEN for its
+previously specified simultaneous jobs/multi-target batches, remaining discovery,
+identity/join fields and transport/qualification scope. Closing these small
+children does not silently close or reduce that parent commitment.

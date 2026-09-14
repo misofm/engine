@@ -224,6 +224,27 @@ The SDK PCM feed accepts at most two fresh submissions per source per render cal
 at most that source ring's capacity. Shared source runways remain available while internal queues
 fill gradually, avoiding a first-callback burst proportional to every queued source quantum.
 
+`waitForPcmRunway()` proves that caller supplied PCM is contiguous at a full acknowledged source
+generation and frame, without consuming the feed rings:
+
+```ts
+import { waitForPcmRunway } from "@misofm/engine/browser";
+
+await waitForPcmRunway({
+  sources: [{ sourceId: "vocals", frames: 480_000n, ring }],
+  targetFrame: 0n,
+  generation: 1n,
+  timeoutMs: 2_000,
+  // Omit minimumFrames for the ring's full capacity; a positive smaller value is also allowed.
+});
+```
+
+The helper observes existing MSB1 rings with bounded polling and closes its temporary observers on
+success, timeout, mismatch, or cancellation. It does not seek a producer, attach a feed, wait for
+network or resume an audio context; the caller completes those steps and their acknowledgements
+before asking for a runway proof. `PcmRunwayError.reason` is `"mismatch"` or `"timeout"`, while an
+abort signal's reason is passed through unchanged.
+
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
 Set `policy.console.commandQueueRecords` to a positive capacity when calling `createEngine` to
 attach controls. Omitting it, passing an empty console policy, or setting it to zero keeps audio-only
@@ -237,6 +258,34 @@ check the boot console capacity before interpreting it as an unrecognized comman
 All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;
 the browser and headless acknowledgements carry the same generated result/reason names and exact
 `appliedAtSample`.
+
+With the same console policy, the browser engine owns the shared meter and render-telemetry leases:
+
+```ts
+const stopMeters = await engine.subscribeMeters((update) => {
+  const vocal = update.tracks.get("vocal");
+  if (vocal) drawMeter(vocal.peakLeft, vocal.peakRight);
+});
+const stopTelemetry = await engine.subscribeTelemetry((update) => drawCpu(update.cpuPercent));
+// Each returned function is idempotent.
+stopMeters();
+stopTelemetry();
+```
+
+`TrackMeter` and `MasterMeter` expose left and right peak amplitudes as linear magnitudes and gain
+reduction as a non-negative dB value. `MasterMeter.gainReductionDb` stays `null` when the host has
+no measured master reduction; master `0` is a measured zero. `MeterUpdate.generation` changes
+on each real host lease transition or detected producer reset, starting a new delivery epoch.
+Its `validity` bits are complete (`1`), master aligned (`2`), loss (`4`), and gain reduction (`8`).
+`lossCount` is the saturating count of dropped or rejected meter windows observed before the
+frame; `windows` counts the complete windows folded into the frame, normally one.
+`[firstSample, endSample)` timestamps the peak window only. Within a generation, a gap between
+one frame's end and the next frame's start, or the loss bit/count, indicates omitted or rejected
+windows rather than contiguous measurement. A track's positional gain reduction still conflates
+an unobserved effect with zero and may fold independently aged effects; the SDK does not claim
+an exact peak/GR join or per-effect GR timing. `TelemetryUpdate` carries CPU utilization in percent,
+block/deadline-miss counts, peak/mean block duration, budget and clock resolution in milliseconds,
+and the host's below-resolution flag, without inventing a generation or sample span.
 
 Call `await engine.close()` when the browser session is finished. It disposes the worklet host
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the

@@ -109,7 +109,21 @@ await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from "@misofm/engine/browser";
-import type { BrowserEngine, PcmSourceChunk } from "@misofm/engine/browser";
+import type {
+  BrowserEngine,
+  MasterMeter,
+  MeterUpdate,
+  ObservationSubscription,
+  ObservationSubscriptionRequest,
+  PcmSourceChunk,
+  SpectrumCollection,
+  SpectrumSubscription,
+  SpectrumSubscriptionRequest,
+  TelemetryUpdate,
+  TrackResponseSubscription,
+  TrackResponseSubscriptionRequest,
+  TrackMeter,
+} from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
 // @ts-expect-error arbitrary-model canonical serialization is intentionally not public
 import { canonicalSessionJson } from "@misofm/engine";
@@ -139,6 +153,12 @@ packedObserver.pull((chunk: PcmSourceChunk) => {
 }, 1);
 const observedCounters: number[] = [packedObserver.counters().underruns, packedObserver.counters().drainBlocks, packedObserver.counters().depth];
 void observedCounters;
+declare const meterUpdate: MeterUpdate;
+declare const telemetryUpdate: TelemetryUpdate;
+declare const trackMeter: TrackMeter;
+declare const masterMeter: MasterMeter;
+void [meterUpdate.generation, meterUpdate.validity, meterUpdate.lossCount, telemetryUpdate.belowResolution,
+  trackMeter.peakLeft, masterMeter.gainReductionDb];
 packedObserver.close();
 void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
 async function defaultBrowserContext() {
@@ -160,7 +180,18 @@ async function defaultBrowserContext() {
 }
 void defaultBrowserContext;
 declare const browser: BrowserEngine;
+declare const collection: SpectrumCollection;
+declare const observationRequest: ObservationSubscriptionRequest;
+declare const responseRequest: TrackResponseSubscriptionRequest;
+declare const spectrumRequest: SpectrumSubscriptionRequest;
+const collectedEngine: ReturnType<typeof createEngine> = createEngine({ document: "opaque", spectrumCollection: collection });
+const observations: Promise<ObservationSubscription> = browser.subscribeObservations(observationRequest);
+const responses: Promise<TrackResponseSubscription> = browser.subscribeTrackResponse(responseRequest);
+const spectra: Promise<SpectrumSubscription> = browser.subscribeSpectrum(spectrumRequest);
+void [collectedEngine, observations, responses, spectra];
 const host = browser.host;
+void browser.subscribeMeters((update: MeterUpdate) => update.master.gainReductionDb);
+void browser.subscribeTelemetry((update: TelemetryUpdate) => update.cpuPercent);
 void host.command({ commands: [] });
 void host.observe({ subscriptions: [] });
 void host.submitSource({
@@ -446,6 +477,11 @@ if (process.env.MISO_ENGINE_SDK_BROWSER_TOOLS) {
   ]);
   const browserRoot = resolve(consumerRoot, "browser");
   await mkdir(browserRoot);
+  const meterModel = JSON.parse(builtDocument);
+  // Preserve independent lanes: the shared default centered pan mixes them.
+  delete meterModel.tracks[0].pan;
+  meterModel.tracks[0].matrix = { ll: 1, lr: 0, rl: 0, rr: 1, smoothing_samples: 0 };
+  const meterDocument = JSON.stringify(meterModel);
   const seekModel = JSON.parse(builtDocument);
   seekModel.sources[0].frames = "480000";
   const seekDocument = JSON.stringify(seekModel);
@@ -472,11 +508,12 @@ class Capture extends AudioWorkletProcessor {
 }
 registerProcessor('capture-first-quantum', Capture);
 `);
-  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><button id="seek">Paused seek</button><script type="module" src="/main.js"></script>');
+  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><button id="meter">SDK meter</button><button id="seek">Paused seek</button><script type="module" src="/main.js"></script>');
   await writeFile(resolve(browserRoot, "main.js"), `
 import { createEngine, createDefaultHost, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from '@misofm/engine/browser';
 import { BUNDLED_ENGINE_ASSETS } from '@misofm/engine/assets';
 const sessionDocument = ${JSON.stringify(builtDocument)};
+const meterDocument = ${JSON.stringify(meterDocument)};
 window.proof = [];
 for (const id of ['default', 'forward']) document.querySelector('#' + id).onclick = async () => {
   try {
@@ -543,6 +580,40 @@ document.querySelector('#seek').onclick = async () => {
   } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
   finally { feed?.close(); await engine?.close(); }
 };
+document.querySelector('#meter').onclick = async () => {
+  let engine, stop;
+  try {
+    const frame = new Promise(resolve => {
+      stop = undefined;
+      window.resolveMeter = resolve;
+    });
+    engine = await createEngine({ document: meterDocument, policy: { console: { commandQueueRecords: 8, meterBlocks: 1 } } });
+    stop = await engine.subscribeMeters(update => {
+      if (window.meterCandidate) return;
+      const track = update.tracks.get('track');
+      if (!track || Math.abs(track.peakLeft - .25) > 1e-5 || Math.abs(track.peakRight - .5) > 1e-5) return;
+      window.meterCandidate = {
+        sequence: update.sequence.toString(), generation: update.generation.toString(),
+        validity: update.validity, lossCount: update.lossCount, windows: update.windows,
+        firstSample: update.firstSample.toString(), endSample: update.endSample.toString(),
+        tracks: [...update.tracks].map(([id, meter]) => ({ id, ...meter })),
+        master: { ...update.master, gainReductionDb: update.master.gainReductionDb === null ? null : update.master.gainReductionDb },
+      };
+      window.resolveMeter?.(window.meterCandidate);
+    });
+    engine.host.node.connect(engine.context.destination);
+    // Queue sample-zero PCM while suspended so browser scheduling cannot advance past it.
+    const admitted = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: 0n,
+      sampleRateHz: 48000, frames: 128,
+      planes: [new Float32Array(128).fill(.25), new Float32Array(128).fill(-.5)], endOfRegion: false });
+    if (admitted.result !== 0) throw new Error('meter fixture PCM admission failed: ' + admitted.result);
+    await engine.context.resume();
+    await frame;
+    stop();
+    await engine.close();
+    window.meterProof = { ...window.meterCandidate, closed: true };
+  } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); stop?.(); await engine?.close(); }
+};
 `);
   await build({ root: browserRoot, configFile: false, logLevel: "warn" });
   const network = [];
@@ -579,6 +650,21 @@ document.querySelector('#seek').onclick = async () => {
     assert.equal(results[1].calls.length, 1);
     assert.equal(results[1].calls[0].url, results[1].calls[0].expected);
     assert.equal(results[1].calls[0].type, "module");
+    await page.locator('#meter').click();
+    await page.waitForFunction(() => window.meterProof || window.bootError, undefined, { timeout: 20000 });
+    assert.equal(await page.evaluate(() => window.bootError), undefined);
+    const meterProof = await page.evaluate(() => window.meterProof);
+    assert.equal(meterProof.closed, true);
+    assert.equal(meterProof.sequence, "1");
+    assert.equal(typeof meterProof.generation, "string");
+    assert.equal(typeof meterProof.validity, "number");
+    assert.equal(typeof meterProof.lossCount, "number");
+    assert.equal(meterProof.tracks.length, 1);
+    assert.equal(meterProof.tracks[0].id, "track");
+    assert.ok(Math.abs(meterProof.tracks[0].peakLeft - .25) < 1e-5);
+    assert.ok(Math.abs(meterProof.tracks[0].peakRight - .5) < 1e-5);
+    assert.equal(typeof meterProof.tracks[0].gainReductionDb, "number");
+    assert.equal(meterProof.master.gainReductionDb, null);
     await page.locator('#seek').click();
     await page.waitForFunction(() => window.seekProof || window.bootError, undefined, { timeout: 20000 });
     assert.equal(await page.evaluate(() => window.bootError), undefined);
@@ -590,7 +676,7 @@ document.querySelector('#seek').onclick = async () => {
     assert.equal(seekProof.counters.submittedGenerationTag, 2);
     assert.deepEqual(faults, []);
     assert.equal(network.some(response => response.status >= 400), false);
-    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, seekProof, network })}`);
+    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, meterProof, seekProof, network })}`);
   } finally {
     await browser?.close();
     await new Promise(accept => server.close(accept));
