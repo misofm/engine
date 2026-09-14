@@ -1,5 +1,11 @@
 # Repair SDK publication verification and close the 0.1.0 release
 
+> **Disposition — 2026-09-14: superseded; close as not planned once this record is upstream.**
+> Owner-authorized age review retires this historical roadmap/attempt. It does not
+> claim all historical gates passed. See
+> [the issue review](../../docs/audits/issue-triage-2026-09-14.md)
+> for current evidence and surviving ownership. The original record below is preserved.
+
 ## Objective
 
 Repair the fail-closed but non-completing publication workflow preserved by

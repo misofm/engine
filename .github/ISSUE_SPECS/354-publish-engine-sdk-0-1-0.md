@@ -1,5 +1,11 @@
 # Publish `@misofm/engine` 0.1.0 from one provenance-attested tarball
 
+> **Disposition — 2026-09-14: superseded; close as not planned once this record is upstream.**
+> Owner-authorized age review retires this historical roadmap/attempt. It does not
+> claim all historical gates passed. See
+> [the issue review](../../docs/audits/issue-triage-2026-09-14.md)
+> for current evidence and surviving ownership. The original record below is preserved.
+
 > **Superseded release authority (2026-09-04).** This issue exhausted its
 > three attempts and handed off to #355, which also exhausted its bounded
 > repair attempts. Issue #356 then removed the unreleased FLAC delivery stack.
