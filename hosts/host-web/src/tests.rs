@@ -1,7 +1,9 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
-use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
+use host_core::{
+    EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, InputFilterPreparer,
+};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -843,7 +845,6 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
         .checked_add(2 * shape.track_count as usize)
         .expect("decoded record count");
     let decoded_bytes = (expected_decoded_count * size_of::<StagedCommand>()) as u64;
-
     for (name, options, expected_wire_bytes) in [
         ("off", boot_options(128), 0_u64),
         (
@@ -927,12 +928,18 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
         assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
         assert_eq!(host.resources().observation_retained_bytes, 0);
 
+        let input_shadow_bytes = if options.console_command_queue_records == 0 {
+            0
+        } else {
+            (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
+        };
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
@@ -940,6 +947,7 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge retained arithmetic");
         assert_eq!(
             host.resources().bridge_metadata_bytes,
@@ -959,7 +967,8 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
             .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
             .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
             .max(compiled.resource_estimate().single_allocation_bytes)
-            .max(decoded_bytes);
+            .max(decoded_bytes)
+            .max(input_shadow_bytes);
         assert_eq!(
             host.resources().largest_bridge_allocation_bytes,
             bridge_largest
@@ -2353,6 +2362,161 @@ fn submit_prepared_eq_parameter(
     host.submit_prepared_commands(1, 104)
 }
 
+fn input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 4))
+        .expect("accepted identity fixture");
+    let builtins = &mut model.tracks[0].builtins;
+    builtins.left.hpf_hz = 100.0;
+    builtins.left.lpf_hz = 1_000.0;
+    builtins.right.hpf_hz = 100.0;
+    builtins.right.lpf_hz = 1_000.0;
+    let document = canonical_session_json(&model).expect("canonical input filter fixture");
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: quantum,
+            console_command_queue_records: queue_depth,
+            ..boot_options(quantum)
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "input filter boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+fn effect_input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+        .expect("accepted command fixture");
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 4;
+    let builtins = &mut model.tracks[0].builtins;
+    builtins.left.hpf_hz = 100.0;
+    builtins.left.lpf_hz = 1_000.0;
+    builtins.right.hpf_hz = 100.0;
+    builtins.right.lpf_hz = 1_000.0;
+    let document = canonical_session_json(&model).expect("canonical mixed fixture");
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: quantum,
+            console_command_queue_records: queue_depth,
+            ..boot_options(quantum)
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "mixed input/EQ boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+fn stage_prepared_input_filter(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    hpf_hz: f32,
+    lpf_hz: f32,
+) -> u32 {
+    stage_command(
+        host,
+        wire_index,
+        COMMAND_INPUT_FILTERS,
+        255,
+        2,
+        track_index,
+        0,
+        0,
+        0,
+        [hpf_hz, lpf_hz, 0.0, 0.0],
+    );
+    assert_eq!(host.copy_input_filter_config(track_index), RESULT_OK);
+    let config = host.eq_target_config().expect("input filter config");
+    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
+    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let sample_rate = u32::from_le_bytes(config[8..12].try_into().expect("sample rate"));
+    let mut seeds = [0.0_f32; 4];
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        let offset = 32 + index * 4;
+        *seed = f32::from_bits(u32::from_le_bytes(
+            config[offset..offset + 4].try_into().expect("seed"),
+        ));
+    }
+    let mut targets = [PreparedInputFilterTarget {
+        lanes: BuiltinLaneSelector::Both,
+        section: 0,
+        pair: [0.0; 2],
+        coefficients: [0.0; 6],
+    }; 4];
+    let (_, target_count) = InputFilterPreparer
+        .prepare(
+            sample_rate,
+            &seeds,
+            &[InputFilterEdit {
+                parameter_id: 0,
+                channel: ParameterChannel::Both,
+                value0: hpf_hz,
+                value1: lpf_hz,
+            }],
+            &mut targets,
+        )
+        .expect("prepared input filter target");
+    assert_eq!(target_count, 2, "whole pair touches both sections");
+    let companion_bytes = 24 + target_count * 80;
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    companion[16..20].copy_from_slice(&(target_count as u32).to_le_bytes());
+    for (index, target) in targets[..target_count].iter().enumerate() {
+        let record = &mut companion[24 + index * 80..104 + index * 80];
+        record[0..4].copy_from_slice(&track_index.to_le_bytes());
+        record[4..8].copy_from_slice(&255_u32.to_le_bytes());
+        record[8..12].copy_from_slice(&0_u32.to_le_bytes());
+        record[16..24].copy_from_slice(&base_revision.to_le_bytes());
+        record[24..28].copy_from_slice(&target.section.to_le_bytes());
+        record[28..32].copy_from_slice(
+            &match target.lanes {
+                BuiltinLaneSelector::Left => 0_u32,
+                BuiltinLaneSelector::Right => 1,
+                BuiltinLaneSelector::Both => 2,
+            }
+            .to_le_bytes(),
+        );
+        record[32..36].copy_from_slice(&target.pair[0].to_bits().to_le_bytes());
+        record[36..40].copy_from_slice(&target.pair[1].to_bits().to_le_bytes());
+        for (word, value) in target.coefficients.iter().copied().enumerate() {
+            record[56 + word * 4..60 + word * 4].copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+    companion_bytes as u32
+}
+
+/// Build one companion for the existing EQ owner and the builtin input owner. Each helper is
+/// called separately so both targets are prepared from their own committed revision, then the
+/// already designed records are coalesced into the shared companion wire image.
+fn stage_mixed_prepared_eq_and_input_filter(host: &mut AudioWorkletEngineHost) -> u32 {
+    stage_prepared_eq_parameter(host, 0, 0, 1, 0, 4, -12.0);
+    let eq_companion = host.prepared_companion_mut().expect("prepared companion")[..104].to_vec();
+
+    let input_bytes = stage_prepared_input_filter(host, 1, 0, 300.0, 2_000.0) as usize;
+    let input_companion =
+        host.prepared_companion_mut().expect("prepared companion")[..input_bytes].to_vec();
+    let input_target_bytes = input_bytes.checked_sub(24).expect("input companion header");
+    let total_bytes = 24 + 80 + input_target_bytes;
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[..24].copy_from_slice(&eq_companion[..24]);
+    companion[16..20].copy_from_slice(&3_u32.to_le_bytes());
+    companion[24..104].copy_from_slice(&eq_companion[24..104]);
+    companion[104..total_bytes].copy_from_slice(&input_companion[24..input_bytes]);
+    total_bytes as u32
+}
+
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
     console_host_at_rate(48_000, quantum, meter_blocks)
@@ -3219,6 +3383,11 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let decoded_count =
             command_staging_count(shape.track_count as usize).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
+        let input_shadow_bytes = if console_command_queue_records == 0 {
+            0
+        } else {
+            (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
+        };
         let observation_arm_table = shape
             .effect_count
             .checked_mul(size_of::<Box<[u64]>>() as u64)
@@ -3234,6 +3403,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .and_then(|bytes| bytes.checked_add(effect_retained))
             .and_then(|bytes| bytes.checked_add(observation_arm_table))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
@@ -3242,6 +3412,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .and_then(|bytes| bytes.checked_add(effect_retained))
             .and_then(|bytes| bytes.checked_add(observation_arm_table))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
+            .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge retained arithmetic");
         let expected_bridge_largest = projection
             .report
@@ -3253,7 +3424,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .max(string_largest)
             .max(effect_largest)
             .max(observation_arm_table)
-            .max(decoded_bytes);
+            .max(decoded_bytes)
+            .max(input_shadow_bytes);
         let expected_named_largest =
             expected_bridge_largest.max(engine.report.largest_engine_allocation_bytes);
         let host =
@@ -3480,6 +3652,235 @@ fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
         .expect("EQ producer")
         .success_count();
     (config, revision, success)
+}
+
+#[test]
+fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
+    const QUANTUM: u32 = 128;
+
+    let mut host = input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_prepared_input_filter(&mut host, 0, 0, 300.0, 2_000.0);
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        host.submit_prepared_commands(2, companion_bytes),
+        RESULT_OK,
+        "builtin and fader records share one admission"
+    );
+    let input_slot = 2;
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(ready.input_filter_shadows[0].revision, 1);
+    assert_eq!(
+        ready.input_filter_shadows[0].committed,
+        [300.0, 2_000.0, 300.0, 2_000.0]
+    );
+    assert_eq!(
+        ready.in_flight[input_slot], 2,
+        "both prepared sections reached input queue"
+    );
+    assert_eq!(
+        ready.in_flight[1], 1,
+        "mixed fader record reached its own queue"
+    );
+
+    assert_eq!(host.copy_input_filter_config(0), RESULT_OK);
+    let config = host.eq_target_config().expect("shared config workspace");
+    assert_eq!(u32::from_le_bytes(config[0..4].try_into().unwrap()), 48);
+    assert_eq!(u32::from_le_bytes(config[12..16].try_into().unwrap()), 4);
+    assert_eq!(u64::from_le_bytes(config[24..32].try_into().unwrap()), 1);
+    assert_eq!(
+        [0, 1, 2, 3].map(|index| {
+            f32::from_bits(u32::from_le_bytes(
+                config[32 + index * 4..36 + index * 4].try_into().unwrap(),
+            ))
+        }),
+        [300.0, 2_000.0, 300.0, 2_000.0]
+    );
+    feed_and_render(&mut host, 1, 0, 0.25);
+    assert_eq!(host.ready.as_ref().unwrap().in_flight[input_slot], 0);
+
+    // A later invalid original transition rolls back the candidate before either target is
+    // published, even though the first command in the batch is valid.
+    let mut late = input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_prepared_input_filter(&mut late, 0, 0, 300.0, 2_000.0);
+    stage_command(
+        &mut late,
+        1,
+        COMMAND_INPUT_FILTERS,
+        255,
+        0,
+        0,
+        0,
+        3,
+        0,
+        [3_000.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        late.submit_prepared_commands(2, companion_bytes),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(late.command_report().rejected_index, 1);
+    assert_eq!(late.command_report().reason, COMMAND_REASON_DOMAIN);
+    let late_ready = late.ready.as_ref().unwrap();
+    assert_eq!(late_ready.input_filter_shadows[0].revision, 0);
+    assert_eq!(
+        late_ready.input_filter_shadows[0].committed,
+        [100.0, 1_000.0, 100.0, 1_000.0]
+    );
+    assert_eq!(late_ready.in_flight[input_slot], 0);
+
+    // A stale base revision is rejected by the same companion address path.
+    let mut stale = input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_prepared_input_filter(&mut stale, 0, 0, 300.0, 2_000.0);
+    stale.prepared_companion_mut().unwrap()[40..48].copy_from_slice(&1_u64.to_le_bytes());
+    assert_eq!(
+        stale.submit_prepared_commands(1, companion_bytes),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(stale.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(stale.command_report().rejected_index, 0);
+    assert_eq!(
+        stale.ready.as_ref().unwrap().input_filter_shadows[0].revision,
+        0
+    );
+
+    // A full unrelated matrix queue refuses the mixed transaction while leaving the builtin
+    // shadow at its committed seed.
+    let mut full = input_filter_console_host(QUANTUM, 2);
+    for index in 0..2 {
+        stage_command(
+            &mut full,
+            index,
+            COMMAND_MATRIX,
+            255,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 1.0],
+        );
+    }
+    assert_eq!(full.submit_commands(2), RESULT_OK);
+    let companion_bytes = stage_prepared_input_filter(&mut full, 0, 0, 300.0, 2_000.0);
+    stage_command(
+        &mut full,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(
+        full.submit_prepared_commands(2, companion_bytes),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(full.command_report().rejected_index, 1);
+    assert_eq!(
+        full.ready.as_ref().unwrap().input_filter_shadows[0].revision,
+        0
+    );
+    assert_eq!(full.ready.as_ref().unwrap().in_flight[input_slot], 0);
+}
+
+/// A single prepared admission can commit the existing EQ owner, the builtin input owner and a
+/// fader together. A late semantic refusal rolls both prepared owners back before publication;
+/// the successful admission/render path stays allocation-free under the existing FFI counter.
+#[cfg(feature = "test-support")]
+#[test]
+fn prepared_mixed_eq_builtin_fader_commits_and_refuses_atomically() {
+    const QUANTUM: u32 = 128;
+
+    let mut host = effect_input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_mixed_prepared_eq_and_input_filter(&mut host);
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    feed_and_render(&mut host, 1, 0, 0.25);
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = host.submit_prepared_commands(3, companion_bytes);
+            let render = host.render_next();
+            (admission, render)
+        });
+    assert_eq!(admission, RESULT_OK, "mixed prepared ACK");
+    assert_eq!(render, RESULT_OK, "mixed prepared render");
+    assert_eq!(allocations, 0, "mixed prepared admission/render allocated");
+    assert_eq!(deallocations, 0, "mixed prepared admission/render freed");
+    assert_eq!(eq_owner_snapshot(&mut host).1, 1, "EQ owner committed");
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(ready.input_filter_shadows[0].revision, 1);
+    assert_eq!(ready.in_flight[1], 0, "fader drained at render boundary");
+    assert_eq!(
+        ready.in_flight[2], 0,
+        "builtin targets drained at render boundary"
+    );
+
+    let mut refused = effect_input_filter_console_host(QUANTUM, 8);
+    let companion_bytes = stage_mixed_prepared_eq_and_input_filter(&mut refused);
+    stage_command(
+        &mut refused,
+        2,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut refused,
+        3,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        9_999,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(
+        refused.submit_prepared_commands(4, companion_bytes),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(refused.command_report().rejected_index, 3);
+    assert_eq!(
+        refused.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER
+    );
+    assert_eq!(eq_owner_snapshot(&mut refused).1, 0, "EQ rollback");
+    let ready = refused.ready.as_ref().expect("ready ownership");
+    assert_eq!(
+        ready.input_filter_shadows[0].revision, 0,
+        "builtin rollback"
+    );
+    assert!(ready.in_flight.iter().all(|count| *count == 0));
 }
 
 /// The host's prepared-owner transaction rejects malformed, stale and late-invalid companions

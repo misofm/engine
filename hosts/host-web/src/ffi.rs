@@ -3683,6 +3683,17 @@ pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
     })
 }
 
+/// Copy one accepted builtin input-filter configuration into the shared config workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
+    handle: u32,
+    track_index: u32,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.copy_input_filter_config(track_index)
+    })
+}
+
 /// Return the stable live-console command-report address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {

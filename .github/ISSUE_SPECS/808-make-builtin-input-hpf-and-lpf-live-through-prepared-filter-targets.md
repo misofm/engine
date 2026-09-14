@@ -225,3 +225,25 @@ off-thread pair preparation is positive, while scalar/bank target application,
 rendering, mono disengagement and cached reset paths record zero. Its focused gate
 passes. This adds no production API or instrumentation feature; actual host batch
 allocation/refusal gates and the shipped callback call graph remain for closure.
+
+
+### Tranche2 host admission checkpoint
+
+Command12 and the builtin `(track,255,0)` owner now use the existing shared
+transaction. Four-value committed/candidate shadows are seeded from normalized
+track builtins and charged in the host report. Every original transition is
+validated without design; final targets must match generation/revision, complete
+pair, touched sections and numerical safety before all destination capacities are
+checked. Publication precedes all shadow commits and the original-count/sample ACK.
+The new input_filters_config_copy export writes48bytes into the existing272-byte
+config scratch and reuses its existing pointer. No additional workspace lifecycle.
+
+PASS: host-web feature tests104passed/two existing ignored, including mixed
+EQ+builtin+fader success/refusal, builtin late-invalid/stale/unrelated-full-queue
+rollback, actual zero-allocation admission/render and actual shadow accounting.
+Wasm check passed. Root fixed two iterator-style clippy findings; strict host-web
+lib/tests clippy and six focused prepared-owner tests pass afterward.
+
+Public metadata, shared helper adapter, SDK methods and shipped-artifact parity
+remain. Final closure must also exercise malformed builtin companion coverage and
+the generated/shipped command vocabulary. This is not a whole-issue PASS or release.
