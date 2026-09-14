@@ -170,3 +170,11 @@ The compiler-owned candidate/publication transaction is the next bounded assignm
 its separate resource-report and checked publication design is frozen in #807.
 #807 remains open, attempt 1, with assignments 5–10 and final review pending. No
 live-cut activation, SDK release or app deployment has occurred.
+
+
+#807 assignment5 now has a checked owner/publication component: exact candidate
+validation and complete-prefix queue room precede publication, and commit follows
+publication once. Root strengthened real-EQ refusal/state tests; native focused gates,
+strict Clippy, Wasm and realtime policy pass. Actual owner resource propagation and
+remaining transaction fixtures are still pending before assignment5 acceptance.
+Production live-cut activation and downstream releases remain unperformed.

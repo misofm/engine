@@ -323,6 +323,24 @@ impl<T: Send + 'static> Producer<T> {
     pub const fn overflow_count(&self) -> u64 {
         self.full
     }
+    /// Snapshots the number of queue slots that can accept a complete producer prefix.
+    ///
+    /// The consumer cursor is loaded exactly once with `Acquire`; this observation does not
+    /// mutate the producer cache, cursors, counters, or queue contents. Since the consumer is the
+    /// sole owner that advances its cursor, a later consumer pop can only increase the returned
+    /// capacity. Callers that need all-or-nothing publication can therefore check a complete
+    /// prefix before issuing its individual pushes.
+    #[must_use]
+    pub fn available_capacity(&self) -> usize {
+        let consumer = self.ring.consumer.0.load(Ordering::Acquire);
+        let producer = self.local;
+        let occupied = if producer >= consumer {
+            producer - consumer
+        } else {
+            self.ring.slots_len - consumer + producer
+        };
+        self.ring.logical_capacity - occupied
+    }
     /// Whether `next` is the consumer's cursor, reloading the shared line only if it looks so.
     ///
     /// See [`Producer::cached_consumer`] for why one reload settles it.
@@ -658,5 +676,34 @@ mod tests {
 
         assert_eq!(frozen, 1);
         assert_eq!(consumer.available_at_entry(), 3);
+    }
+
+    #[test]
+    fn producer_available_capacity_is_acquired_once_and_wrap_safe() {
+        let (mut producer, mut consumer) =
+            bounded_spsc(NonZeroUsize::new(3).expect("capacity"), QueueGeneration(13))
+                .expect("queue");
+        assert_eq!(producer.available_capacity(), 3);
+        producer.try_push(1).expect("first");
+        producer.try_push(2).expect("second");
+        assert_eq!(producer.available_capacity(), 1);
+        let successes = producer.success_count();
+        let full = producer.full_count();
+        assert_eq!(producer.available_capacity(), 1);
+        assert_eq!(
+            (producer.success_count(), producer.full_count()),
+            (successes, full)
+        );
+        assert_eq!(consumer.try_pop(), Ok(1));
+        assert_eq!(producer.available_capacity(), 2);
+        producer.try_push(3).expect("wrapped slot");
+        producer.try_push(4).expect("wrapped slot");
+        assert_eq!(producer.available_capacity(), 0);
+        let refused = producer.try_push(5).expect_err("full");
+        assert_eq!(refused.value, 5);
+        assert_eq!(producer.available_capacity(), 0);
+        assert_eq!(producer.full_count(), full + 1);
+        assert_eq!(consumer.try_pop(), Ok(2));
+        assert_eq!(producer.available_capacity(), 1);
     }
 }

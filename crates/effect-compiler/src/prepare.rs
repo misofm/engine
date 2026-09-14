@@ -29,6 +29,7 @@ use session::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::control::{EffectControlOwner, EffectControlOwnerError};
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
 use lane::Backend;
 
@@ -1219,7 +1220,12 @@ pub struct EffectControlProducer {
     pub descriptor: &'static EffectDescriptor,
     /// Checked bounded producer endpoint; unsupported prepared targets are refused before queue
     /// mutation, while ordinary records retain the queue's full-result retry semantics.
-    pub producer: EffectControlProducerHandle,
+    producer: EffectControlProducerHandle,
+    /// Optional off-audio-thread owner for a factory's prepared-target capability.
+    ///
+    /// The box is private so callers must use the checked transaction methods below; no raw
+    /// producer or reusable "validated" flag can bypass candidate/revision admission.
+    owner: Option<Box<EffectControlOwner>>,
 }
 
 /// Why an effect-control publication failed.
@@ -1257,6 +1263,12 @@ impl EffectControlProducerHandle {
         self.inner.capacity()
     }
 
+    /// Producer-side capacity snapshot used for complete target-prefix admission.
+    #[must_use]
+    pub fn available_capacity(&self) -> usize {
+        self.inner.available_capacity()
+    }
+
     /// Producer-local successful publication count.
     #[must_use]
     pub const fn success_count(&self) -> u64 {
@@ -1290,6 +1302,124 @@ impl EffectControlProducerHandle {
         self.inner
             .try_push(record)
             .map_err(EffectControlPushError::Full)
+    }
+
+    pub(crate) fn try_push_prepared(
+        &mut self,
+        target: effect_contract::PreparedEffectTarget,
+    ) -> Result<(), EffectControlPushError> {
+        self.inner
+            .try_push(EffectControlRecord::PreparedTarget(target))
+            .map_err(EffectControlPushError::Full)
+    }
+}
+
+impl EffectControlProducer {
+    /// Read-only checked endpoint for capacity and accounting inspection.
+    #[must_use]
+    pub fn producer(&self) -> &EffectControlProducerHandle {
+        &self.producer
+    }
+
+    /// Publishes one ordinary semantic/observation record through the checked endpoint.
+    pub fn try_push(&mut self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
+        self.producer.try_push(record)
+    }
+
+    /// Checks one ordinary record without queue mutation.
+    pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
+        self.producer.preflight(record)
+    }
+
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.producer.capacity()
+    }
+
+    #[must_use]
+    pub const fn success_count(&self) -> u64 {
+        self.producer.success_count()
+    }
+
+    #[must_use]
+    pub const fn full_count(&self) -> u64 {
+        self.producer.full_count()
+    }
+
+    /// Whether this effect has an opted-in prepared-target owner.
+    #[must_use]
+    pub fn has_owner(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    /// Borrows the checked owner for inspection of its committed state.
+    #[must_use]
+    pub fn owner(&self) -> Option<&EffectControlOwner> {
+        self.owner.as_deref()
+    }
+
+    /// Starts the owner transaction at a checked committed revision.
+    pub fn begin_owner(&mut self, base_revision: u64) -> Result<(), EffectControlOwnerError> {
+        self.owner
+            .as_deref_mut()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .begin(base_revision)
+    }
+
+    /// Applies one checked semantic edit to the owner candidate.
+    pub fn edit_owner(
+        &mut self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) -> Result<(), EffectControlOwnerError> {
+        self.owner
+            .as_deref_mut()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .edit(parameter_index, channel, value)
+    }
+
+    /// Publishes a validated target prefix and marks the owner ready for its one commit.
+    pub fn publish_candidate_targets(
+        &mut self,
+        base_revision: u64,
+        targets: &[effect_contract::PreparedEffectTarget],
+    ) -> Result<(), EffectControlOwnerError> {
+        let owner = self
+            .owner
+            .as_deref_mut()
+            .ok_or(EffectControlOwnerError::Unsupported)?;
+        owner.publish(&mut self.producer, base_revision, targets)
+    }
+
+    /// Preflights this owner's exact target prefix, including revision and complete queue room.
+    /// The queue, candidate and owner phase remain unchanged.
+    pub fn preflight_candidate_targets(
+        &self,
+        base_revision: u64,
+        targets: &[effect_contract::PreparedEffectTarget],
+    ) -> Result<(), EffectControlOwnerError> {
+        let owner = self
+            .owner
+            .as_deref()
+            .ok_or(EffectControlOwnerError::Unsupported)?;
+        owner.preflight_publication(&self.producer, base_revision, targets)
+    }
+
+    /// Commits the candidate after successful complete publication.
+    pub fn commit_owner(&mut self) -> Result<u64, EffectControlOwnerError> {
+        self.owner
+            .as_deref_mut()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .commit()
+    }
+
+    /// Discards an open or poisoned candidate.
+    pub fn discard_owner(&mut self) -> Result<(), EffectControlOwnerError> {
+        self.owner
+            .as_deref_mut()
+            .ok_or(EffectControlOwnerError::Unsupported)?
+            .discard()
     }
 }
 
@@ -1382,6 +1512,218 @@ mod control_producer_tests {
     }
 }
 
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::EffectControlOwnerPhase;
+    use core::num::NonZeroUsize;
+    use effect_contract::{
+        EffectControlRecord, EffectPrepareError, NativeEffectFactory, ParameterChannel,
+        PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffect,
+        default_initial_values,
+    };
+    use engine::realtime::{QueueGeneration, bounded_spsc};
+    use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
+    use std::sync::Arc;
+
+    /// Explicit test-only opt-in wrapper. Production ParametricEqFactory keeps its capability
+    /// getter at None until cutover assignment 10.
+    struct OptInEqFactory;
+
+    impl NativeEffectFactory for OptInEqFactory {
+        fn descriptor(&self) -> &'static EffectDescriptor {
+            &PARAMETRIC_EQ_DESCRIPTOR
+        }
+
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            ParametricEqFactory.prepare(request)
+        }
+
+        fn target_preparation(
+            &self,
+        ) -> Option<&dyn effect_contract::NativeEffectTargetPreparation> {
+            Some(&ParametricEqFactory)
+        }
+
+        fn bind_homogeneous_bank(
+            &self,
+            request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            ParametricEqFactory.bind_homogeneous_bank(request)
+        }
+    }
+
+    fn preparation() -> EffectBankPreparation {
+        EffectBankPreparation {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            initial_values: default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect(),
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_scratch_bytes: u64::MAX,
+                maximum_automation_spans_per_block: 64,
+            },
+        }
+    }
+
+    fn owner_and_queue() -> (
+        EffectControlOwner,
+        EffectControlProducerHandle,
+        engine::realtime::Consumer<EffectControlRecord>,
+    ) {
+        let preparation = preparation();
+        let factory: Arc<dyn NativeEffectFactory> = Arc::new(OptInEqFactory);
+        let owner = EffectControlOwner::new(factory, &preparation).expect("valid EQ owner");
+        let (producer, consumer) = bounded_spsc(
+            NonZeroUsize::new(12).expect("capacity"),
+            QueueGeneration(31),
+        )
+        .expect("queue");
+        (
+            owner,
+            EffectControlProducerHandle::new(producer, true),
+            consumer,
+        )
+    }
+
+    #[test]
+    fn opted_in_eq_owner_prepares_both_and_commits_once() {
+        let (mut owner, mut producer, mut consumer) = owner_and_queue();
+        let initial = owner.committed().to_vec();
+        owner.begin(0).expect("base revision");
+        owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("numeric Both edit");
+        let mut targets = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12];
+        let count = owner
+            .prepare_targets_into(&mut targets)
+            .expect("off-audio preparation");
+        assert_eq!(count, 1, "equal Both lanes coalesce");
+        assert_eq!(targets[0].channel, ParameterChannel::Both);
+        assert_eq!(
+            owner.committed(),
+            initial,
+            "preparation leaves committed rows unchanged"
+        );
+        let final_rows = owner.candidate().to_vec();
+        let changed: Vec<_> = final_rows
+            .iter()
+            .filter(|row| row.parameter_index == 2)
+            .collect();
+        assert_eq!(changed.len(), 2);
+        assert!(changed.iter().all(|row| row.value == 100.0));
+        owner
+            .publish(&mut producer, 0, &targets[..count])
+            .expect("complete prefix publication");
+        assert_eq!(
+            owner.committed(),
+            initial,
+            "publication precedes shadow commit"
+        );
+        assert!(owner.edit(2, ParameterChannel::Both, 200.0).is_err());
+        assert!(owner.discard().is_err());
+        assert_eq!(owner.commit().expect("one commit"), 1);
+        assert_eq!(owner.committed(), final_rows);
+        assert!(owner.commit().is_err(), "repeat commit refused");
+        assert_eq!(
+            consumer.try_pop(),
+            Ok(EffectControlRecord::PreparedTarget(targets[0]))
+        );
+    }
+
+    #[test]
+    fn invalid_edit_poison_survives_valid_overwrite_until_discard() {
+        let (mut owner, _producer, _consumer) = owner_and_queue();
+        owner.begin(0).expect("base revision");
+        assert!(owner.edit(2, ParameterChannel::Left, f32::NAN).is_err());
+        assert!(owner.edit(2, ParameterChannel::Left, 100.0).is_err());
+        assert!(owner.prepare_targets_into(&mut []).is_err());
+        owner.discard().expect("discard poisoned candidate");
+        owner.begin(0).expect("restart at unchanged revision");
+    }
+
+    #[test]
+    fn full_prefix_refusal_preserves_queue_and_candidate() {
+        let (mut owner, mut producer, mut consumer) = owner_and_queue();
+        for slot in 0..11 {
+            producer
+                .try_push(EffectControlRecord::Bypass(slot % 2 == 0))
+                .expect("fill queue");
+        }
+        let initial = owner.committed().to_vec();
+        owner.begin(0).expect("base revision");
+        owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("numeric edit");
+        owner
+            .edit(2, ParameterChannel::Right, 200.0)
+            .expect("asymmetric target");
+        let candidate = owner.candidate().to_vec();
+        let mut targets = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12];
+        let count = owner.prepare_targets_into(&mut targets).expect("prepare");
+        assert_eq!(count, 2);
+        assert_eq!(producer.available_capacity(), 1);
+        let successes = producer.success_count();
+        let full = producer.full_count();
+        assert_eq!(
+            owner.publish(&mut producer, 0, &targets[..count]),
+            Err(EffectControlOwnerError::Capacity)
+        );
+        assert_eq!(owner.committed(), initial);
+        assert_eq!(owner.candidate(), candidate);
+        assert_eq!(owner.committed_revision(), 0);
+        assert_eq!(consumer.available_at_entry(), 11);
+        assert_eq!(
+            (producer.success_count(), producer.full_count()),
+            (successes, full)
+        );
+        assert_eq!(owner.phase(), EffectControlOwnerPhase::Open);
+        for slot in 0..11 {
+            assert_eq!(
+                consumer.try_pop(),
+                Ok(EffectControlRecord::Bypass(slot % 2 == 0))
+            );
+        }
+        assert_eq!(consumer.available_at_entry(), 0);
+    }
+
+    #[test]
+    fn stale_base_and_commit_before_publish_are_refused() {
+        let (mut owner, mut producer, _consumer) = owner_and_queue();
+        assert!(owner.begin(1).is_err(), "stale base");
+        owner.begin(0).expect("current base");
+        assert!(owner.commit().is_err(), "commit before publication");
+        owner.edit(2, ParameterChannel::Both, 100.0).expect("edit");
+        let mut targets = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12];
+        let count = owner.prepare_targets_into(&mut targets).expect("prepare");
+        owner
+            .publish(&mut producer, 1, &targets[..count])
+            .expect_err("stale publication");
+        assert_eq!(owner.phase(), EffectControlOwnerPhase::Open);
+    }
+}
+
 /// Attach one bounded live-console control channel to every prepared effect of the session.
 ///
 /// # The capacity rule that makes the render-side drain exact
@@ -1436,13 +1778,31 @@ pub fn attach_effect_console(
             continue;
         };
         let target_capable = entry.factory.target_preparation().is_some();
+        let owner = if target_capable {
+            match EffectControlOwner::new(Arc::clone(&entry.factory), &entry.bank_preparation) {
+                Ok(owner) => Some(Box::new(owner)),
+                Err(_) => {
+                    diagnostics.push(EffectDiagnostic {
+                        code: "effect.control.owner",
+                        path: format!(
+                            "$.tracks[id={}].effects[id={}]",
+                            entry.track_id, entry.effect_id
+                        ),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         producers.push(EffectControlProducer {
             track_id: entry.track_id.as_str().into(),
             rack: entry.rack,
             effect_index,
             effect_id: entry.effect_id.as_str().into(),
             descriptor: entry.factory.descriptor(),
-            producer: EffectControlProducerHandle::new(producer, target_capable),
+            producer: EffectControlProducerHandle::new(producer, owner.is_some()),
+            owner,
         });
         entry.control = Some(Box::new(if target_capable {
             EffectControlLane::new_with_target_staging(consumer, entry.bank_preparation.bypass)

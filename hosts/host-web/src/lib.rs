@@ -1537,7 +1537,7 @@ impl ReadyOwnership {
             return u32::try_from(producer.input.capacity()).ok();
         }
         let producer = self.effect_controls.get(slot - tracks * 3)?.as_ref()?;
-        u32::try_from(producer.producer.capacity()).ok()
+        u32::try_from(producer.capacity()).ok()
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
@@ -1586,7 +1586,7 @@ impl ReadyOwnership {
                     .ok_or(())?
                     .as_mut()
                     .ok_or(())?;
-                producer.producer.try_push(record).map_err(|_| ())
+                producer.try_push(record).map_err(|_| ())
             }
         }
     }
@@ -1606,7 +1606,7 @@ impl ReadyOwnership {
             .get(effect)
             .and_then(Option::as_ref)
             .ok_or(())?;
-        producer.producer.preflight(record).map_err(|_| ())
+        producer.preflight(record).map_err(|_| ())
     }
 }
 

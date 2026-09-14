@@ -536,3 +536,46 @@ staging/application, fail-closed producer/host preflight, real EQ scalar/bank PC
 collapse/asymmetric retarget, and independent queue/lane/host resource boundaries.
 Assignment 5 uses the frozen refinement above. Assignments 5–10, actual production
 activation, final artifact and fresh Astra MEDIUM issue review remain pending.
+
+
+### Assignment 5 component checkpoint — bound owner and publication
+
+Luna XHIGH implemented the optional compiler owner and producer capacity snapshot.
+The owner validates canonical accepted rows, holds committed/candidate values and
+touched flags, normalizes edit zero, expands Both, poisons invalid candidates, and
+checks revision/target validity/full-prefix room before publication. A completed
+publication enables one commit; unexpected publication failure faults the owner.
+Production EQ capability remains None. Direct component fixtures explicitly opt in
+the real EQ companion; they are not production registration evidence.
+
+Root required overflow refusal before mutation/publication, checked saved revision
+for commit, and private queue ownership: a mutable public endpoint or owner reference
+could be swapped independently of its authoritative partner. Read-only views and
+checked forwarding methods replace that exposure. Exact effect-control caller glue
+is confined to graph tests, host-web and console-workload; other track endpoints retain
+their path. Root removed redundant request/validation aliases and duplicate validation,
+and reused the constructor's dirty backing rather than allocating a second copy.
+
+Root strengthened the real-EQ component tests to compare committed rows before and
+after publication/commit and verify the exact queued target. The capacity fixture now
+leaves one slot free but needs two targets, then proves no prefix was published and
+all 11 existing records/counters and committed/candidate values remain unchanged.
+Other focused tests cover poisoned overwrite/discard, stale base and commit-before-
+publication refusal. These are a useful compiling checkpoint, not all assignment-5
+acceptance evidence.
+
+Root gates PASS: effect-compiler owner_tests (4); engine producer_available_capacity
+(1); strict all-target Clippy for effect-compiler, graph-compiler, host-web and
+console-workload; Wasm effect-compiler/host-web checks; realtime policy (45 marked
+regions/13 files); formatting and diff checks. Luna also reports workspace and focused
+regression checks passing. No benchmark.
+
+Still assignment5: independent actual attachment/sparse/default/asymmetric seed proof,
+successive transactions before render, revision overflow and malformed/missing/extra
+payload fixtures, unsupported/no-owner and prewarmed allocation checks, exact native
+and web retained-owner/table/factory accounting and cap gates. Resource reporting is
+explicitly unfinished at this component checkpoint. The accepted assignment6 ABI
+layout refinement is preserved in docs/handoffs/804-account-switch-2026-09-14/
+807-assignment-6-layout-amendment.md; it includes exact mechanical gate paths and
+forward caller/index findings, without activating the bridge. #807 remains attempt1
+with assignments5–10 and final fresh Astra MEDIUM verdict pending.

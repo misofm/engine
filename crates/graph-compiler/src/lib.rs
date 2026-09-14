@@ -1001,7 +1001,6 @@ mod tests {
                     effect_contract::ParameterChannel::Right,
                 ] {
                     producer
-                        .producer
                         .try_push(EffectControlRecord::Parameter {
                             parameter_index: 0,
                             channel,
@@ -1023,7 +1022,6 @@ mod tests {
                 effect_contract::ParameterChannel::Right,
             ] {
                 decoy
-                    .producer
                     .try_push(EffectControlRecord::Parameter {
                         parameter_index: 0,
                         channel,
@@ -2702,7 +2700,7 @@ mod tests {
             let mut expected_largest = 0_u64;
             for (index, entry) in effects.entries.iter_mut().enumerate() {
                 let capped_capacity = entry.metadata.automation_capacity as usize;
-                let actual_capacity = producers[index].producer.capacity();
+                let actual_capacity = producers[index].capacity();
                 assert_eq!(
                     actual_capacity,
                     requested_depth.get().min(capped_capacity),
@@ -2973,7 +2971,7 @@ mod tests {
         for (entry, producer) in compressor_effects.entries.iter().zip(&compressor_producers) {
             assert_eq!(entry.effect_id, "compressor");
             assert_eq!(
-                producer.producer.capacity(),
+                producer.capacity(),
                 compressor_depth
                     .get()
                     .min(entry.metadata.automation_capacity as usize)
@@ -2985,7 +2983,7 @@ mod tests {
                 .expect("compressor queue payload");
             let independent =
                 engine::realtime::bounded_spsc_retained_payload::<EffectControlRecord>(
-                    NonZeroUsize::new(producer.producer.capacity()).expect("capacity"),
+                    NonZeroUsize::new(producer.capacity()).expect("capacity"),
                 )
                 .expect("independent compressor payload");
             assert_eq!(

@@ -3005,8 +3005,8 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
         .get(effect_slot)
         .and_then(Option::as_ref)
         .expect("effect producer");
-    let before_success = producer.producer.success_count();
-    let before_full = producer.producer.full_count();
+    let before_success = producer.success_count();
+    let before_full = producer.full_count();
     let before_in_flight = ready.in_flight[queue_slot];
 
     assert!(ready.preflight_effect(queue_slot, target).is_err());
@@ -3021,8 +3021,8 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
         .get(effect_slot)
         .and_then(Option::as_ref)
         .expect("effect producer remains");
-    assert_eq!(producer.producer.success_count(), before_success);
-    assert_eq!(producer.producer.full_count(), before_full);
+    assert_eq!(producer.success_count(), before_success);
+    assert_eq!(producer.full_count(), before_full);
     assert_eq!(ready.in_flight[queue_slot], before_in_flight);
 }
 
@@ -3049,7 +3049,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
                 .map(|owner| {
                     owner
                         .as_ref()
-                        .map(|owner| (owner.producer.success_count(), owner.producer.full_count()))
+                        .map(|owner| (owner.success_count(), owner.full_count()))
                 })
                 .collect::<Vec<_>>(),
         )

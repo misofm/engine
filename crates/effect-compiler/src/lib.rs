@@ -1,8 +1,10 @@
 //! Off-render native effect session preparation.
 #![allow(missing_docs)]
+mod control;
 mod diagnostic;
 mod migration;
 mod prepare;
+pub use control::{EffectControlOwner, EffectControlOwnerError, EffectControlOwnerPhase};
 pub use diagnostic::*;
 pub use migration::*;
 /// Re-export the EQ's copied-word evaluator so host composition uses the exact owner analysis

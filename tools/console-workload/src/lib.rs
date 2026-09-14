@@ -969,7 +969,6 @@ impl SessionRuntime {
         for producer in &mut self.controls {
             for tap_index in 0..producer.descriptor.observations.len() as u32 {
                 producer
-                    .producer
                     .try_push(EffectControlRecord::Observe {
                         tap_index,
                         armed: true,
@@ -1025,7 +1024,6 @@ impl SessionRuntime {
     /// Off the clock.
     pub fn push_bypass(&mut self, channel: usize, bypassed: bool) -> bool {
         self.controls[channel]
-            .producer
             .try_push(EffectControlRecord::Bypass(bypassed))
             .is_ok()
     }
@@ -1051,7 +1049,6 @@ impl SessionRuntime {
         value: f32,
     ) -> bool {
         self.controls[channel]
-            .producer
             .try_push(EffectControlRecord::Parameter {
                 parameter_index,
                 channel: parameter_channel,
