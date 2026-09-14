@@ -172,3 +172,15 @@ Representative endpoint/partition, asymmetric lane, disable/reset and identity-b
 mechanism checks also remain before the tranche is complete. This is a buildable
 recovery checkpoint, not tranche completion or a whole-issue adversarial verdict.
 No benchmark or new framework was introduced; #808 remains attempt1/open.
+
+
+### Tranche1 completion checkpoint
+
+The bank setter now addresses one populated lane and preserves neighboring and padding
+ramps. Target validation requires exact identity iff the addressed cutoff is +0,
+rejects -0 and inconsistent pairs, and retains the fixed numerical safety bound.
+Focused gates cover exact endpoints/partitioning, retarget/disable/reset, launch-rate
+maximum successors, bank isolation and the actual identity trim-body dispatch.
+Builtin and lane tests, strict relevant clippy and Wasm checks pass. No timing run
+or new evidence framework was added. Public metadata remains prepared-only pending
+host/SDK closure; this completes DSP tranche1, not issue #808.

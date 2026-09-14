@@ -706,6 +706,7 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
 /// frame A+64 uses the exact target words.  `filter_remaining` is indexed `[channel][section]`;
 /// zero-count lanes are harmless and let one bank run its bounded prefix without a per-lane
 /// dispatch.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn input_chain_ramp_block_filter<L: Lane>(
     left: &mut [f32],
@@ -819,6 +820,7 @@ fn current_target_identity<L: Lane>(target: &SvfCoef<L>) -> L::Mask {
 
 /// Mono-collapse form of [`input_chain_ramp_block_filter`].  Only channel zero advances; the
 /// owner mirrors its complete filter and trim records onto channel one after the block.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     io: &mut [f32],
@@ -925,6 +927,8 @@ fn identity_chain_ramp_block<L: Lane>(
     frames: usize,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
+    #[cfg(test)]
+    IDENTITY_RAMP_DISPATCHES.with(|count| count.set(count.get() + 1));
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
@@ -986,6 +990,8 @@ fn identity_chain_ramp_block_mono<L: Lane>(
     frames: usize,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
+    #[cfg(test)]
+    IDENTITY_RAMP_DISPATCHES.with(|count| count.set(count.get() + 1));
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
     let one = L::splat(1.0);
@@ -1462,6 +1468,7 @@ pub const fn plan_is_channel_symmetric(plan: &InputChainPlan) -> bool {
 #[cfg(test)]
 std::thread_local! {
     static MIXED_PLAN_SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static IDENTITY_RAMP_DISPATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1509,5 +1516,42 @@ mod mixed_elision_tests {
         check::<f32>();
         check::<Simd4>();
         check::<Simd8>();
+    }
+
+    #[test]
+    fn identity_trim_ramp_wrappers_enter_the_identity_body() {
+        let zero = f32::zero();
+        let identity = SvfCoef {
+            c1: zero,
+            a2: zero,
+            a3: zero,
+            m0: f32::splat(1.0),
+            m1: zero,
+            m2: zero,
+        };
+        let c = InputChainCoef {
+            trim: [f32::splat(1.0); 2],
+            section: [[identity; 2]; 2],
+        };
+        let plan = InputChainPlan {
+            elided: [[true, true], [true, true]],
+        };
+        let mut ramp = InputTrimRamp {
+            current: [f32::splat(1.0); 2],
+            target: [f32::splat(2.0); 2],
+            step: [f32::splat(0.25); 2],
+            remaining: [f32::splat(4.0); 2],
+        };
+        let mut state = InputChainState::default();
+        let mut left = std::vec![1.0; 4];
+        let mut right = left.clone();
+        IDENTITY_RAMP_DISPATCHES.with(|count| count.set(0));
+        let _ = input_chain_ramp_block_elided(
+            &mut left, &mut right, 4, &c, &mut state, &mut ramp, &plan,
+        );
+        assert_eq!(IDENTITY_RAMP_DISPATCHES.with(std::cell::Cell::get), 1);
+        IDENTITY_RAMP_DISPATCHES.with(|count| count.set(0));
+        let _ = input_chain_ramp_block_mono_elided(&mut left, 4, &c, &mut state, &mut ramp, &plan);
+        assert_eq!(IDENTITY_RAMP_DISPATCHES.with(std::cell::Cell::get), 1);
     }
 }

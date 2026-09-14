@@ -16,9 +16,9 @@
 //! patterns and not on `==`.
 
 use lane::kernels::builtins::{
-    InputChainCoef, InputChainPlan, InputChainReport, InputChainState, NONFINITE_LIMIT,
-    input_chain_block, input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
-    no_lanes,
+    InputChainCoef, InputChainPlan, InputChainReport, InputChainState, InputTrimRamp,
+    NONFINITE_LIMIT, input_chain_block, input_chain_block_elided, input_chain_block_mono_elided,
+    input_chain_plan, input_chain_ramp_block, input_chain_ramp_block_elided, no_lanes,
 };
 use lane::kernels::{SvfCoef, svf_step};
 use lane::{Lane, Simd4, Simd8};
@@ -700,6 +700,95 @@ fn mixed_elision_matches_frozen_bodies_w4() {
 #[test]
 fn mixed_elision_matches_frozen_bodies_w8() {
     mixed_reference_cases::<Simd8>();
+}
+
+#[test]
+fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
+    fn check<L: Lane>() {
+        let zero = L::zero();
+        let identity = SvfCoef {
+            c1: zero,
+            a2: zero,
+            a3: zero,
+            m0: L::splat(1.0),
+            m1: zero,
+            m2: zero,
+        };
+        let c = InputChainCoef {
+            trim: [L::splat(1.0); 2],
+            section: [[identity; 2]; 2],
+        };
+        let plan = InputChainPlan {
+            elided: [[true, true], [true, true]],
+        };
+        let seed = InputTrimRamp {
+            current: [L::splat(1.0); 2],
+            target: [L::splat(2.0); 2],
+            step: [L::splat(0.125); 2],
+            remaining: [L::splat(8.0); 2],
+        };
+        let mut reference_ramp = seed;
+        let mut actual_ramp = seed;
+        let mut reference_state = InputChainState::default();
+        let mut actual_state = InputChainState::default();
+        let mut reference_left = vec![1.0; 17 * L::WIDTH];
+        let mut reference_right = reference_left.clone();
+        let mut actual_left = reference_left.clone();
+        let mut actual_right = reference_right.clone();
+        let reference = input_chain_ramp_block(
+            &mut reference_left,
+            &mut reference_right,
+            17,
+            &c,
+            &mut reference_state,
+            &mut reference_ramp,
+        );
+        let actual = input_chain_ramp_block_elided(
+            &mut actual_left,
+            &mut actual_right,
+            17,
+            &c,
+            &mut actual_state,
+            &mut actual_ramp,
+            &plan,
+        );
+        assert_eq!(
+            reference_left
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            actual_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reference_right
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            actual_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(bits(reference.sanitized[0]), bits(actual.sanitized[0]));
+        assert_eq!(
+            bits(L::select(reference.nonfinite[0], L::splat(1.0), L::zero())),
+            bits(L::select(actual.nonfinite[0], L::splat(1.0), L::zero()))
+        );
+        assert_eq!(
+            bits(reference_state.section[0][0].ic1),
+            bits(actual_state.section[0][0].ic1)
+        );
+        for channel in 0..2 {
+            assert_eq!(
+                bits(reference_ramp.current[channel]),
+                bits(actual_ramp.current[channel])
+            );
+            assert_eq!(
+                bits(reference_ramp.remaining[channel]),
+                bits(actual_ramp.remaining[channel])
+            );
+        }
+    }
+    check::<f32>();
+    check::<Simd4>();
+    check::<Simd8>();
 }
 
 // Inspect the actual production functions and the complete free-helper closure. Removing comments

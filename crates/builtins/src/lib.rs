@@ -1330,12 +1330,11 @@ impl<L: Lane> InputStage<L> {
 
     fn load_filter_countdown(&self) -> [[L; 2]; 2] {
         let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
-        for channel in 0..2 {
-            for section in 0..2 {
-                for lane in 0..MAX_BANK_LANES {
-                    words[channel][section][lane] = self.filter_remaining[channel][section][lane]
-                        .min(Self::RAMP_COUNTDOWN_MAXIMUM)
-                        as f32;
+        for (channel, channel_words) in words.iter_mut().enumerate() {
+            for (section, section_words) in channel_words.iter_mut().enumerate() {
+                for (lane, word) in section_words.iter_mut().enumerate() {
+                    *word = self.filter_remaining[channel][section][lane]
+                        .min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
                 }
             }
         }
@@ -1383,8 +1382,9 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Apply one already-validated fixed-size target to one section and one or both channels.
-    fn apply_prepared_filter(&mut self, target: PreparedInputFilterTarget) {
+    fn apply_prepared_filter(&mut self, lane: usize, target: PreparedInputFilterTarget) {
         debug_assert!(target.section < 2);
+        debug_assert!(lane < self.members);
         let section = target.section as usize;
         let target_words = target.coefficients;
         for channel in 0..2 {
@@ -1403,30 +1403,31 @@ impl<L: Lane> InputStage<L> {
                 lane_read::<L>(self.filter_target[channel][section].m1),
                 lane_read::<L>(self.filter_target[channel][section].m2),
             ];
-            let mut step_values = [[0.0_f32; MAX_BANK_LANES]; 6];
+            let mut step_values = [
+                lane_read::<L>(self.filter_step[channel][section].c1),
+                lane_read::<L>(self.filter_step[channel][section].a2),
+                lane_read::<L>(self.filter_step[channel][section].a3),
+                lane_read::<L>(self.filter_step[channel][section].m0),
+                lane_read::<L>(self.filter_step[channel][section].m1),
+                lane_read::<L>(self.filter_step[channel][section].m2),
+            ];
             let mut remaining = self.filter_remaining[channel][section];
-            let mut any_changed = false;
-            for lane in 0..L::WIDTH {
-                let mut changed = false;
-                for index in 0..6 {
-                    let current_word = lane_read::<L>(current_values[index])[lane];
-                    target_values[index][lane] = target_words[index];
-                    if current_word.to_bits() != target_words[index].to_bits() {
-                        step_values[index][lane] =
-                            (target_words[index] - current_word) * (1.0 / 64.0);
-                        changed = true;
-                    }
-                }
-                if changed {
-                    remaining[lane] = INPUT_FILTER_RAMP_SAMPLES;
-                    any_changed = true;
+            let mut changed = false;
+            for index in 0..6 {
+                let current_word = lane_read::<L>(current_values[index])[lane];
+                target_values[index][lane] = target_words[index];
+                if current_word.to_bits() != target_words[index].to_bits() {
+                    step_values[index][lane] = (target_words[index] - current_word) * (1.0 / 64.0);
+                    changed = true;
                 } else {
-                    remaining[lane] = 0;
+                    step_values[index][lane] = 0.0;
                 }
             }
-            if any_changed {
-                self.filter_ramping = true;
-            }
+            remaining[lane] = if changed {
+                INPUT_FILTER_RAMP_SAMPLES
+            } else {
+                0
+            };
             self.filter_target[channel][section] = SvfCoef {
                 c1: lane_words::<L>(&target_values[0]),
                 a2: lane_words::<L>(&target_values[1]),
@@ -1445,6 +1446,14 @@ impl<L: Lane> InputStage<L> {
             };
             self.filter_remaining[channel][section] = remaining;
         }
+        self.filter_ramping = (0..2).any(|channel| {
+            (0..2).any(|section| {
+                self.filter_remaining[channel][section]
+                    .iter()
+                    .take(self.members)
+                    .any(|remaining| *remaining != 0)
+            })
+        });
         self.refresh_filter_plan();
         self.refresh_channel_symmetry();
     }
@@ -1950,6 +1959,7 @@ impl<L: Lane> InputStage<L> {
     /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
         self.state.section[1] = self.state.section[0];
+        self.refresh_filter_plan();
     }
 
     /// The eight live trim-ramp words of one lane. Evidence only.
@@ -2474,7 +2484,7 @@ impl<L: Lane> InputStage<L> {
                 state.ic2 = lane_words::<L>(&ic2);
             }
         }
-        self.plan = input_chain_plan::<L>(&self.coef, &self.state);
+        self.refresh_filter_plan();
     }
 }
 
@@ -3222,7 +3232,7 @@ impl InputBuiltins {
         target: PreparedInputFilterTarget,
     ) -> Result<(), BuiltinParameterError> {
         validate_prepared_input_filter_target(&target)?;
-        self.stage.apply_prepared_filter(target);
+        self.stage.apply_prepared_filter(0, target);
         Ok(())
     }
 
@@ -3477,15 +3487,19 @@ impl BuiltinInputBank {
         }
     }
 
-    /// Applies one trusted precomputed input-filter target to every populated lane in this bank.
+    /// Applies one trusted precomputed input-filter target to one populated lane in this bank.
     pub fn apply_prepared_filter(
         &mut self,
+        lane: usize,
         target: PreparedInputFilterTarget,
     ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
         validate_prepared_input_filter_target(&target)?;
         match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.apply_prepared_filter(target),
-            InputStageKernel::Simd8(stage) => stage.apply_prepared_filter(target),
+            InputStageKernel::Simd4(stage) => stage.apply_prepared_filter(lane, target),
+            InputStageKernel::Simd8(stage) => stage.apply_prepared_filter(lane, target),
         }
         Ok(())
     }

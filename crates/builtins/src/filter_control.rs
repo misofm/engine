@@ -80,7 +80,8 @@ pub fn validate_prepared_input_filter_target(
         || !target
             .pair
             .iter()
-            .all(|value| value.is_finite() && *value >= 0.0)
+            .all(|value| value.is_finite() && (value.to_bits() == 0 || *value > 0.0))
+        || (target.pair[0] > 0.0 && target.pair[1] > 0.0 && target.pair[0] >= target.pair[1])
         || !target
             .coefficients
             .iter()
@@ -90,11 +91,18 @@ pub fn validate_prepared_input_filter_target(
     }
     let c = target.coefficients;
     let identity = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0];
-    if c.iter()
+    let is_identity = c
+        .iter()
         .zip(identity)
-        .all(|(a, b)| a.to_bits() == b.to_bits())
-    {
-        return Ok(());
+        .all(|(a, b)| a.to_bits() == b.to_bits());
+    let disabled = target.pair[target.section as usize].to_bits() == 0.0_f32.to_bits();
+    if disabled {
+        return is_identity
+            .then_some(())
+            .ok_or(BuiltinParameterError::FilterCoefficients);
+    }
+    if is_identity {
+        return Err(BuiltinParameterError::FilterCoefficients);
     }
     let expected_mix = if target.section == 0 {
         [1.0_f32, -BUTTERWORTH_K, -1.0]
@@ -122,7 +130,7 @@ pub fn validate_prepared_input_filter_target(
     let discriminant = (frobenius_sq * frobenius_sq - 4.0 * determinant * determinant).max(0.0);
     let norm_sq = 0.5 * (frobenius_sq + math::sqrt(discriminant));
     let norm = math::sqrt(norm_sq);
-    if !norm.is_finite() || norm > 1.0 + 2f64.powi(-22) {
+    if !norm.is_finite() || norm > 1.0 + (1.0 / 4_194_304.0) {
         return Err(BuiltinParameterError::FilterCoefficients);
     }
     Ok(())
