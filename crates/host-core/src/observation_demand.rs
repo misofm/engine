@@ -13,6 +13,7 @@ use core::{
 
 use builtins::{MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::MeterConsumer;
+use engine::realtime::Consumer;
 use graph::{
     GraphObservationActivationConfig, GraphObservationActivationResources,
     GraphObservationAdmissionError, GraphObservationController,
@@ -185,6 +186,14 @@ pub struct HostObservationController {
     pending: [PendingApplication; 2],
     candidate_handles: Box<[u64]>,
     terminal_closed: bool,
+    /// Number of queued snapshots discarded because their observation generation is no longer
+    /// live for the applied meter selection.
+    ///
+    /// This is control-side delivery diagnostics. The producer's lifetime drop counter remains
+    /// part of [`MeterSnapshot`] and is intentionally not folded into this value.
+    stale_generation_discards: u64,
+    /// Number of matching snapshots superseded by a newer matching snapshot in one bounded read.
+    superseded_snapshots: u64,
     /// Number of queued records discarded while retiring an applied meter selection.
     ///
     /// This is deliberately private and informational. Producer-side drop counts remain owned
@@ -725,6 +734,8 @@ impl HostObservationController {
             pending: [pending_ordinary, pending_removal],
             candidate_handles: candidate_handles.into_boxed_slice(),
             terminal_closed: false,
+            stale_generation_discards: 0,
+            superseded_snapshots: 0,
             retirement_discards: 0,
         })
     }
@@ -813,6 +824,66 @@ impl HostObservationController {
             revision: receipt.revision,
             first_sample: receipt.first_sample,
         })
+    }
+
+    /// Read the newest available snapshot for one applied live meter generation.
+    ///
+    /// State validation is deliberately complete before the consumer is borrowed: a refused read
+    /// cannot drain a queue. Once the meter is known to be live, the queue's availability is
+    /// frozen exactly once and capped by its configured capacity. A producer may publish later,
+    /// but those later records belong to a subsequent read. Matching records are coalesced to the
+    /// newest bounded record; records from an older or otherwise different activation generation
+    /// are discarded and counted separately.
+    pub fn try_read_meter(
+        &mut self,
+        meter: HostMeterId,
+    ) -> Result<Option<ObservedMeterSnapshot>, ObservationReadError> {
+        // An inert owner has no graph endpoint. Check this before closure so that its explicit
+        // no-op lifetime remains distinguishable from a renderer that actually closed.
+        if self.graph.is_none() {
+            return Err(ObservationReadError::NotPrepared);
+        }
+        if self.observe_terminal_closure() {
+            return Err(ObservationReadError::Closed);
+        }
+        if meter.owner != self.owner {
+            return Err(ObservationReadError::WrongOwner);
+        }
+        let Some(prepared_index) = self
+            .meters
+            .iter()
+            .position(|prepared| prepared.id.handle == meter.handle)
+        else {
+            return Err(ObservationReadError::NotPrepared);
+        };
+
+        let Some(accepted) = self
+            .accepted
+            .entries()
+            .iter()
+            .find(|entry| entry.prepared_index == prepared_index)
+        else {
+            return Err(ObservationReadError::Inactive);
+        };
+        let Some(applied) = self
+            .applied
+            .entries()
+            .iter()
+            .find(|entry| entry.prepared_index == prepared_index)
+        else {
+            return Err(ObservationReadError::PendingApplication);
+        };
+        if applied.generation != accepted.generation {
+            return Err(ObservationReadError::PendingApplication);
+        }
+
+        let (newest, stale_count, superseded_count) = read_newest_meter_generation(
+            &mut self.meter_consumers[prepared_index].consumer,
+            applied.generation,
+        );
+        self.stale_generation_discards = self.stale_generation_discards.saturating_add(stale_count);
+        self.superseded_snapshots = self.superseded_snapshots.saturating_add(superseded_count);
+        Ok(newest.map(|snapshot| ObservedMeterSnapshot { meter, snapshot }))
     }
 
     /// Request removal of every selected meter, or report existing quiescence.
@@ -1035,6 +1106,35 @@ impl HostObservationController {
             }
         }
     }
+}
+
+/// Consume only the queue records visible at one read entry and keep the newest matching
+/// generation. This is shared with the owner read path so the bounded/stale rules can be checked
+/// with a real [`MeterAccumulator`](builtins::MeterAccumulator) producer in a private unit test.
+fn read_newest_meter_generation(
+    consumer: &mut Consumer<MeterSnapshot>,
+    generation: u64,
+) -> (Option<MeterSnapshot>, u64, u64) {
+    // Freeze this once. `try_pop` is bounded by the count visible at entry, so a producer
+    // replenishing the queue cannot turn one read into an unbounded drain.
+    let available = consumer.available_at_entry().min(consumer.capacity());
+    let mut newest = None;
+    let mut stale_count = 0_u64;
+    let mut superseded_count = 0_u64;
+    for _ in 0..available {
+        let Ok(snapshot) = consumer.try_pop() else {
+            break;
+        };
+        if snapshot.observation_generation != generation {
+            stale_count = stale_count.saturating_add(1);
+            continue;
+        }
+        if newest.is_some() {
+            superseded_count = superseded_count.saturating_add(1);
+        }
+        newest = Some(snapshot);
+    }
+    (newest, stale_count, superseded_count)
 }
 
 /// Derive the new host-owned metadata heap rows from the concrete owner layout.
@@ -1371,5 +1471,52 @@ mod tests {
             .preflight_graph_demand(0, spectrum)
             .expect_err("spectrum is outside B1");
         assert_eq!(refusal.reason, ObservationRefusalReason::InvalidRequest);
+    }
+
+    #[test]
+    fn generation_filter_uses_actual_accumulator_records_in_one_queue() {
+        use core::num::NonZeroUsize;
+
+        let handle = MeterHandle(NonZeroU64::new(1).expect("handle"));
+        let config = builtins::MeterConfig {
+            period_frames: NonZeroU32::new(2).expect("period"),
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(4).expect("queue"),
+            reset_generation: 1,
+        };
+        let mut prepared = builtins::MeterAccumulator::prepare_selected(
+            handle,
+            config,
+            48_000,
+            MeterMetricSet::SAMPLE_PEAK,
+        )
+        .expect("meter accumulator");
+        let left = [0.25_f32; 2];
+        let right = [-0.25_f32; 2];
+
+        prepared.accumulator.restart_observation(7);
+        prepared
+            .accumulator
+            .observe(&left, &right, 0)
+            .expect("old generation");
+        prepared.accumulator.restart_observation(8);
+        prepared
+            .accumulator
+            .observe(&left, &right, 2)
+            .expect("first live generation");
+        prepared.accumulator.restart_observation(8);
+        prepared
+            .accumulator
+            .observe(&left, &right, 4)
+            .expect("newest live generation");
+
+        let (newest, stale, superseded) = read_newest_meter_generation(&mut prepared.consumer, 8);
+        let newest = newest.expect("matching snapshot");
+        assert_eq!(newest.observation_generation, 8);
+        assert_eq!(newest.start_sample, 4);
+        assert_eq!(stale, 1);
+        assert_eq!(superseded, 1);
+        assert_eq!(prepared.consumer.available_at_entry(), 0);
     }
 }

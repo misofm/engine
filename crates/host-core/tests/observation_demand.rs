@@ -12,7 +12,7 @@ use host_core::{
     ObservationRefusalReason, ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter,
     SourceSubmission, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
     SpectrumChannels, SpectrumTarget, StartedRenderSession, compile_host_session,
-    prepare_host_runtime_with_observation_demand,
+    prepare_host_runtime, prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
 };
 
@@ -77,6 +77,16 @@ fn meters() -> [HostMeterRequest; 2] {
     })
 }
 
+fn all_meters() -> Vec<HostMeterRequest> {
+    (0..9)
+        .map(|index| HostMeterRequest {
+            track_id: format!("eq{index}").into(),
+            tap: MeterTap::PostMatrix,
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        })
+        .collect()
+}
+
 fn demand(meters: &[HostMeterRequest]) -> HostObservationPreparation<'_> {
     HostObservationPreparation {
         meters,
@@ -87,6 +97,12 @@ fn demand(meters: &[HostMeterRequest]) -> HostObservationPreparation<'_> {
             maximum_retained_bytes: u64::MAX,
         },
     }
+}
+
+fn all_demand(meters: &[HostMeterRequest]) -> HostObservationPreparation<'_> {
+    let mut demand = demand(meters);
+    demand.activation.maximum_active_observers = meters.len();
+    demand
 }
 
 fn common_admission_bytes(report: HostPrepareReport) -> u64 {
@@ -109,7 +125,7 @@ fn render_source_block(
     render: &mut StartedRenderSession,
     sources: &mut host_core::SourceControlSet,
     block: usize,
-) {
+) -> [f32; 128 * 2] {
     const QUANTUM: usize = 128;
     let left = [0.25_f32; QUANTUM];
     let right = [-0.25_f32; QUANTUM];
@@ -130,6 +146,7 @@ fn render_source_block(
     let _ = render
         .render_planar(&mut output, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
         .expect("render block");
+    output
 }
 
 #[test]
@@ -584,6 +601,248 @@ fn real_render_subset_removal_keeps_sibling_work_and_final_stop_is_quiescent() {
 }
 
 #[test]
+fn reads_fence_state_without_draining_and_keep_unchanged_siblings_live() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let base_demand = demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+    let (_foreign_host, _, foreign_owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    let foreign = foreign_owner.meters()[0].id;
+    let mut unknown = ids[0];
+    unknown.handle = MeterHandle(NonZeroU64::new(99).expect("unknown handle"));
+
+    let first = owner
+        .replace_meters(&ids[..1])
+        .expect("first meter admission");
+    assert_eq!(
+        owner.try_read_meter(ids[0]),
+        Err(host_core::ObservationReadError::PendingApplication)
+    );
+    assert_eq!(
+        owner.try_read_meter(ids[1]),
+        Err(host_core::ObservationReadError::Inactive)
+    );
+    assert_eq!(
+        owner.try_read_meter(foreign),
+        Err(host_core::ObservationReadError::WrongOwner)
+    );
+    assert_eq!(
+        owner.try_read_meter(unknown),
+        Err(host_core::ObservationReadError::NotPrepared)
+    );
+
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    builtins::test_only_reset_peak_samples();
+    let _ = render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 128);
+    // The first block has published a real queue record, but its application receipt has not been
+    // reconciled yet. Every state error still leaves that record untouched.
+    assert_eq!(
+        owner.try_read_meter(ids[0]),
+        Err(host_core::ObservationReadError::PendingApplication)
+    );
+    assert_eq!(
+        owner.try_read_meter(ids[1]),
+        Err(host_core::ObservationReadError::Inactive)
+    );
+    assert_eq!(
+        owner.try_read_meter(foreign),
+        Err(host_core::ObservationReadError::WrongOwner)
+    );
+    assert_eq!(
+        owner.try_read_meter(unknown),
+        Err(host_core::ObservationReadError::NotPrepared)
+    );
+    assert_eq!(
+        owner.try_applied().expect("first receipt").revision,
+        first.revision
+    );
+
+    // The sibling admission leaves ids[0]'s applied generation live while ids[1] waits for the
+    // next boundary. The refusal below must preserve that still-readable queue entry.
+    let sibling = owner.replace_meters(&ids).expect("sibling admission");
+    assert_eq!(
+        owner.try_read_meter(ids[1]),
+        Err(host_core::ObservationReadError::PendingApplication)
+    );
+    assert_eq!(
+        owner
+            .replace_meters(&ids[..1])
+            .expect_err("ordinary credit is occupied")
+            .reason,
+        ObservationRefusalReason::Backpressure
+    );
+    let previous = owner
+        .try_read_meter(ids[0])
+        .expect("unchanged sibling stays readable")
+        .expect("first live window");
+    assert_eq!(previous.snapshot.observation_generation, first.revision);
+    assert_eq!(previous.snapshot.start_sample, 0);
+
+    builtins::test_only_reset_peak_samples();
+    let _ = render_source_block(&mut render, &mut sources, 1);
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 2 * 128);
+    assert_eq!(
+        owner.try_applied().expect("sibling receipt").revision,
+        sibling.revision
+    );
+    let fresh = owner
+        .try_read_meter(ids[1])
+        .expect("fresh meter read")
+        .expect("fresh activation window");
+    assert_eq!(fresh.meter, ids[1]);
+    assert_eq!(fresh.snapshot.observation_generation, sibling.revision);
+    assert_eq!(fresh.snapshot.start_sample, 128);
+    assert_eq!(owner.try_read_meter(ids[1]), Ok(None));
+}
+
+#[test]
+fn selected_meter_churn_keeps_nine_track_bank_tail_pcm_bit_identical() {
+    const BLOCKS: usize = 5;
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+
+    let baseline = prepare_host_runtime(&compiled, &caps()).expect("baseline host");
+    let (mut baseline_render, mut baseline_sources, _) =
+        baseline.start_render_session().expect("baseline render");
+    let baseline_outputs = (0..BLOCKS)
+        .map(|block| render_source_block(&mut baseline_render, &mut baseline_sources, block))
+        .collect::<Vec<_>>();
+    assert!(
+        baseline_outputs
+            .iter()
+            .flatten()
+            .any(|sample| *sample != 0.0),
+        "fixture must exercise nonzero PCM"
+    );
+
+    let requests = all_meters();
+    let observation = all_demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("nine-track selected owner");
+    let ids = owner_ids(&owner);
+    let selections = [
+        None,
+        Some(vec![0]),
+        Some((0..9).collect::<Vec<_>>()),
+        Some(vec![8]),
+        Some(Vec::new()),
+    ];
+    let expected_selected = [0, 1, 9, 1, 0];
+    let (mut render, mut sources, _) = host.start_render_session().expect("selected render");
+    for (block, (selection, selected)) in selections.iter().zip(expected_selected).enumerate() {
+        if let Some(selection) = selection {
+            let handles = selection
+                .iter()
+                .map(|index| ids[*index])
+                .collect::<Vec<_>>();
+            owner.replace_meters(&handles).expect("churn admission");
+        }
+        builtins::test_only_reset_peak_samples();
+        let output = render_source_block(&mut render, &mut sources, block);
+        assert_eq!(
+            output.map(f32::to_bits),
+            baseline_outputs[block].map(f32::to_bits),
+            "selected observation changed PCM at block {block}"
+        );
+        assert_eq!(
+            builtins::test_only_peak_samples(),
+            2 * selected * 128,
+            "selected meter sample sites at block {block}"
+        );
+        if selection.is_some() {
+            let applied = owner.try_applied().expect("churn receipt");
+            assert_eq!(applied.first_sample, (block * 128) as u64);
+        }
+    }
+    assert_eq!(owner.stop_all(), Ok(host_core::ObservationStop::Quiescent));
+}
+
+#[test]
+fn stalled_reader_drains_only_the_entry_bounded_queue() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let observation = demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .unwrap();
+    let ids = owner_ids(&owner);
+    let accepted = owner.replace_meters(&ids[..1]).expect("meter admission");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+
+    for block in 0..3 {
+        builtins::test_only_reset_peak_samples();
+        let _ = render_source_block(&mut render, &mut sources, block);
+        assert_eq!(builtins::test_only_peak_samples(), 2 * 128);
+        if block == 0 {
+            assert_eq!(
+                owner.try_applied().expect("first receipt").revision,
+                accepted.revision
+            );
+        }
+    }
+
+    // The configured queue has two slots. The third producer window is dropped by the engine;
+    // this read may pop only the two records visible at entry and returns the newest of them.
+    let newest = owner
+        .try_read_meter(ids[0])
+        .expect("bounded read")
+        .expect("queued windows");
+    assert_eq!(newest.snapshot.start_sample, 128);
+    assert_eq!(newest.snapshot.window_sequence, 1);
+    assert_eq!(owner.try_read_meter(ids[0]), Ok(None));
+
+    builtins::test_only_reset_peak_samples();
+    let _ = render_source_block(&mut render, &mut sources, 3);
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 128);
+    let delivered_after_drop = owner
+        .try_read_meter(ids[0])
+        .expect("post-drop read")
+        .expect("next bounded window");
+    assert_eq!(delivered_after_drop.snapshot.start_sample, 3 * 128);
+    assert_eq!(delivered_after_drop.snapshot.window_sequence, 3);
+    assert_eq!(
+        delivered_after_drop.snapshot.cumulative_dropped_snapshots,
+        1
+    );
+
+    let removal = match owner.stop_all().expect("stop active meter") {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("active meter requires removal"),
+    };
+    builtins::test_only_reset_peak_samples();
+    let _ = render_source_block(&mut render, &mut sources, 4);
+    assert_eq!(builtins::test_only_peak_samples(), 0);
+    assert_eq!(
+        owner.try_applied().expect("removal receipt").revision,
+        removal.revision
+    );
+    assert_eq!(owner.stop_all(), Ok(host_core::ObservationStop::Quiescent));
+
+    let reactivated = owner.replace_meters(&ids[..1]).expect("fresh activation");
+    builtins::test_only_reset_peak_samples();
+    let _ = render_source_block(&mut render, &mut sources, 5);
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 128);
+    assert_eq!(
+        owner.try_applied().expect("reactivation receipt").revision,
+        reactivated.revision
+    );
+    let fresh = owner
+        .try_read_meter(ids[0])
+        .expect("fresh generation read")
+        .expect("fresh generation window");
+    assert_eq!(fresh.snapshot.observation_generation, reactivated.revision);
+    assert_eq!(fresh.snapshot.start_sample, 5 * 128);
+    assert_eq!(fresh.snapshot.window_sequence, 4);
+    assert_eq!(fresh.snapshot.cumulative_dropped_snapshots, 1);
+}
+
+#[test]
 fn dropping_the_renderer_closes_pending_observation_without_a_fake_receipt() {
     let compiled = compile_host_session(SESSION, &caps()).unwrap();
     let requests = meters();
@@ -598,6 +857,10 @@ fn dropping_the_renderer_closes_pending_observation_without_a_fake_receipt() {
 
     assert!(owner.is_closed());
     assert_eq!(owner.try_applied(), None);
+    assert_eq!(
+        owner.try_read_meter(ids[0]),
+        Err(host_core::ObservationReadError::Closed)
+    );
     assert_eq!(
         owner.stop_all(),
         Err(host_core::ObservationRefusal {

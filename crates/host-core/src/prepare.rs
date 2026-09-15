@@ -1333,14 +1333,13 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             if resources.reserved_bytes > observations.work_limits.maximum_retained_bytes {
                 return Err(resource("host.observation.retained_limit"));
             }
-            if let Some(activation) = resources.graph_activation {
-                if activation.maximum_transition_entry_visits_per_block
+            if let Some(activation) = resources.graph_activation
+                && activation.maximum_transition_entry_visits_per_block
                     > observations
                         .work_limits
                         .maximum_transition_entry_visits_per_block
-                {
-                    return Err(resource("host.observation.transition_limit"));
-                }
+            {
+                return Err(resource("host.observation.transition_limit"));
             }
             resources
         }
