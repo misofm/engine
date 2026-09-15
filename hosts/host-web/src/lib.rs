@@ -2624,7 +2624,7 @@ impl AudioWorkletEngineHost {
         }
         let (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes) =
             spectrum_collection_staging_bytes(spectrum_request.as_ref())?;
-        let projection = project_buffers(
+        let mut projection = project_buffers(
             document_bytes,
             shape.sample_rate_hz,
             shape.quantum_frames,
@@ -2641,6 +2641,32 @@ impl AudioWorkletEngineHost {
                 ),
             ),
         )?;
+        if observation_preparation.is_some() {
+            let protected_spectrum_payload_bytes = crate::ffi::SPECTRUM_CAPTURE_PAYLOAD_BYTES;
+            projection.report.bridge_metadata_bytes = projection
+                .report
+                .bridge_metadata_bytes
+                .checked_add(protected_spectrum_payload_bytes)
+                .ok_or_else(|| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+                })?;
+            projection.report.bridge_retained_bytes = projection
+                .report
+                .bridge_retained_bytes
+                .checked_add(protected_spectrum_payload_bytes)
+                .ok_or_else(|| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+                })?;
+            let protected_spectrum_buffer_bytes = SPECTRUM_CAPTURE_BYTES as u64;
+            projection.report.largest_bridge_allocation_bytes = projection
+                .report
+                .largest_bridge_allocation_bytes
+                .max(protected_spectrum_buffer_bytes);
+            projection.report.largest_named_allocation_bytes = projection
+                .report
+                .largest_named_allocation_bytes
+                .max(protected_spectrum_buffer_bytes);
+        }
         let retained_projection = projected_retained_bytes(
             &session,
             source_ring_frames,

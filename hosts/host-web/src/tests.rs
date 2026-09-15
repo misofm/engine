@@ -8772,6 +8772,9 @@ fn protected_audio_only_commands_skip_observation_credit_after_refusal() {
 
 #[test]
 fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
+    const PROTECTED_SPECTRUM_PAYLOAD_BYTES: u64 = 2_097_152;
+    const PROTECTED_SPECTRUM_BUFFER_BYTES: u64 = 1_048_576;
+
     let document = one_track_resource_session(128);
     let request = protected_eq_request();
     let mut preparation = protected_eq_preparation(&request);
@@ -8791,23 +8794,58 @@ fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
     assert!(ready.meters.is_empty());
     assert!(ready.observation.legacy().is_none());
     let retained = storage.ingress.bounds.retained_bytes;
+    let native_reserved = ready
+        .host
+        .report
+        .observation_demand_resources
+        .reserved_bytes;
     let legacy = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(128)).unwrap();
     let overlap = size_of::<HostObservationController>() as u64;
     let target_bytes = match &storage.spectrum_demand.target {
         SpectrumTarget::TrackPostMatrix(target) => target.len() as u64,
         _ => panic!("protected EQ target kind"),
     };
+    let expected_bridge_metadata = legacy
+        .resources
+        .bridge_metadata_bytes
+        .checked_sub(overlap)
+        .and_then(|bytes| bytes.checked_add(target_bytes))
+        .and_then(|bytes| bytes.checked_add(PROTECTED_SPECTRUM_PAYLOAD_BYTES))
+        .expect("protected bridge metadata arithmetic");
+    let expected_bridge_retained = legacy
+        .resources
+        .bridge_retained_bytes
+        .checked_sub(overlap)
+        .and_then(|bytes| bytes.checked_add(target_bytes))
+        .and_then(|bytes| bytes.checked_add(PROTECTED_SPECTRUM_PAYLOAD_BYTES))
+        .expect("protected bridge retained arithmetic");
     assert_eq!(
         host.resources.bridge_metadata_bytes,
-        legacy.resources.bridge_metadata_bytes - overlap + target_bytes
+        expected_bridge_metadata
     );
     assert_eq!(
         host.resources.bridge_retained_bytes,
-        legacy.resources.bridge_retained_bytes - overlap + target_bytes
+        expected_bridge_retained
+    );
+    assert_eq!(
+        retained,
+        native_reserved
+            .checked_add(expected_bridge_retained)
+            .expect("protected ingress retained arithmetic")
     );
     assert_eq!(
         host.resources.largest_bridge_allocation_bytes,
-        legacy.resources.largest_bridge_allocation_bytes
+        legacy
+            .resources
+            .largest_bridge_allocation_bytes
+            .max(PROTECTED_SPECTRUM_BUFFER_BYTES)
+    );
+    assert_eq!(
+        host.resources.largest_named_allocation_bytes,
+        legacy
+            .resources
+            .largest_named_allocation_bytes
+            .max(PROTECTED_SPECTRUM_BUFFER_BYTES)
     );
     #[cfg(feature = "test-support")]
     host_core::test_only_reset_spectrum_operation_counts();
