@@ -90,12 +90,12 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationIngressLimits, WebObservationResult,
-    WebObservationSelection, WebObservationWorkLimits, WebPreparedEffectCompanionHeader,
-    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget, WebResourceReport,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationIngressLimits,
+    WebObservationPreparationRecord, WebObservationResult, WebObservationSelection,
+    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
+    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -816,6 +816,346 @@ fn observation_ingress_limits_fields() -> [Field; 15] {
             offset_of!(WebObservationIngressLimits, maximum_retained_bytes),
             "u64",
         ),
+    ]
+}
+
+const OBSERVATION_PREPARATION_WORK_LIMIT_NAMES: [&str; 13] = [
+    "workLimits.structSize",
+    "workLimits.abiVersion",
+    "workLimits.maximumActiveMeterChannels",
+    "workLimits.maximumMeterSamplesPerBlock",
+    "workLimits.maximumMeterPublicationsPerBlock",
+    "workLimits.maximumMeterPublicationBytesPerBlock",
+    "workLimits.maximumActiveSpectrumCaptures",
+    "workLimits.maximumCaptureInputSamplesPerBlock",
+    "workLimits.maximumCaptureCopySamplesPerBlock",
+    "workLimits.maximumCapturePublicationsPerBlock",
+    "workLimits.maximumCaptureBytesPerSecond",
+    "workLimits.maximumTransitionEntryVisitsPerBlock",
+    "workLimits.maximumRetainedBytes",
+];
+
+const OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES: [&str; 15] = [
+    "ingressLimits.structSize",
+    "ingressLimits.abiVersion",
+    "ingressLimits.maximumControlBytes",
+    "ingressLimits.maximumObservationRows",
+    "ingressLimits.maximumResultBytes",
+    "ingressLimits.ordinaryOperationsPerBoundary",
+    "ingressLimits.removalOperationsPerBoundary",
+    "ingressLimits.alignmentPadding",
+    "ingressLimits.maximumAdmissionEntryVisits",
+    "ingressLimits.maximumResponseBindingVisits",
+    "ingressLimits.maximumResponseSectionVisits",
+    "ingressLimits.maximumResponseCopyBytes",
+    "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+    "ingressLimits.maximumCleanupEntryVisitsPerBoundary",
+    "ingressLimits.maximumRetainedBytes",
+];
+
+const OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES: [&str; 8] = [
+    "spectrumRequest.structSize",
+    "spectrumRequest.abiVersion",
+    "spectrumRequest.target",
+    "spectrumRequest.channels",
+    "spectrumRequest.targetIdBytes",
+    "spectrumRequest.reserved0",
+    "spectrumRequest.maximumCaptureBytes",
+    "spectrumRequest.reserved",
+];
+
+fn observation_preparation_fields() -> [Field; 46] {
+    let work_limits = observation_work_limits_fields();
+    let ingress_limits = observation_ingress_limits_fields();
+    let spectrum_request = spectrum_request_fields();
+
+    let work_limits_offset = offset_of!(WebObservationPreparationRecord, work_limits);
+    let ingress_limits_offset = offset_of!(WebObservationPreparationRecord, ingress_limits);
+    let spectrum_request_offset = offset_of!(WebObservationPreparationRecord, spectrum_request);
+    let target_id_offset = offset_of!(WebObservationPreparationRecord, target_id);
+
+    assert_eq!(size_of::<WebObservationPreparationRecord>(), 392);
+    assert_eq!(
+        work_limits.len(),
+        OBSERVATION_PREPARATION_WORK_LIMIT_NAMES.len()
+    );
+    assert_eq!(
+        ingress_limits.len(),
+        OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES.len()
+    );
+    assert_eq!(
+        spectrum_request.len(),
+        OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES.len()
+    );
+    assert_eq!(
+        offset_of!(
+            WebObservationPreparationRecord,
+            activation_maximum_retained_bytes
+        ) + size_of::<u64>(),
+        work_limits_offset
+    );
+    assert_eq!(
+        work_limits_offset + size_of::<WebObservationWorkLimits>(),
+        ingress_limits_offset
+    );
+    assert_eq!(
+        ingress_limits_offset + size_of::<WebObservationIngressLimits>(),
+        spectrum_request_offset
+    );
+    assert_eq!(
+        spectrum_request_offset + size_of::<WebSpectrumRequest>(),
+        target_id_offset
+    );
+    assert_eq!(
+        target_id_offset + 128,
+        size_of::<WebObservationPreparationRecord>()
+    );
+    assert_eq!(work_limits[0].1, 0);
+    assert_eq!(
+        work_limits[12].1 + size_of::<u64>(),
+        size_of::<WebObservationWorkLimits>()
+    );
+    assert_eq!(ingress_limits[0].1, 0);
+    assert_eq!(
+        ingress_limits[14].1 + size_of::<u64>(),
+        size_of::<WebObservationIngressLimits>()
+    );
+    assert_eq!(spectrum_request[0].1, 0);
+    assert_eq!(
+        spectrum_request[7].1 + size_of::<[u32; 2]>(),
+        size_of::<WebSpectrumRequest>()
+    );
+
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationPreparationRecord, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationPreparationRecord, abi_version),
+            "u32",
+        ),
+        (
+            "profile",
+            offset_of!(WebObservationPreparationRecord, profile),
+            "u32",
+        ),
+        (
+            "meterCount",
+            offset_of!(WebObservationPreparationRecord, meter_count),
+            "u32",
+        ),
+        (
+            "residentTaps",
+            offset_of!(WebObservationPreparationRecord, resident_taps),
+            "u32",
+        ),
+        (
+            "spectrumCount",
+            offset_of!(WebObservationPreparationRecord, spectrum_count),
+            "u32",
+        ),
+        (
+            "maximumActiveObservers",
+            offset_of!(WebObservationPreparationRecord, maximum_active_observers),
+            "u32",
+        ),
+        (
+            "reserved0",
+            offset_of!(WebObservationPreparationRecord, reserved0),
+            "u32",
+        ),
+        (
+            "activationMaximumRetainedBytes",
+            offset_of!(
+                WebObservationPreparationRecord,
+                activation_maximum_retained_bytes
+            ),
+            "u64",
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[0],
+            work_limits_offset + work_limits[0].1,
+            work_limits[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[1],
+            work_limits_offset + work_limits[1].1,
+            work_limits[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[2],
+            work_limits_offset + work_limits[2].1,
+            work_limits[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[3],
+            work_limits_offset + work_limits[3].1,
+            work_limits[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[4],
+            work_limits_offset + work_limits[4].1,
+            work_limits[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[5],
+            work_limits_offset + work_limits[5].1,
+            work_limits[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[6],
+            work_limits_offset + work_limits[6].1,
+            work_limits[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[7],
+            work_limits_offset + work_limits[7].1,
+            work_limits[7].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[8],
+            work_limits_offset + work_limits[8].1,
+            work_limits[8].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[9],
+            work_limits_offset + work_limits[9].1,
+            work_limits[9].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[10],
+            work_limits_offset + work_limits[10].1,
+            work_limits[10].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[11],
+            work_limits_offset + work_limits[11].1,
+            work_limits[11].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[12],
+            work_limits_offset + work_limits[12].1,
+            work_limits[12].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[0],
+            ingress_limits_offset + ingress_limits[0].1,
+            ingress_limits[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[1],
+            ingress_limits_offset + ingress_limits[1].1,
+            ingress_limits[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[2],
+            ingress_limits_offset + ingress_limits[2].1,
+            ingress_limits[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[3],
+            ingress_limits_offset + ingress_limits[3].1,
+            ingress_limits[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[4],
+            ingress_limits_offset + ingress_limits[4].1,
+            ingress_limits[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[5],
+            ingress_limits_offset + ingress_limits[5].1,
+            ingress_limits[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[6],
+            ingress_limits_offset + ingress_limits[6].1,
+            ingress_limits[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[7],
+            ingress_limits_offset + ingress_limits[7].1,
+            ingress_limits[7].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[8],
+            ingress_limits_offset + ingress_limits[8].1,
+            ingress_limits[8].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[9],
+            ingress_limits_offset + ingress_limits[9].1,
+            ingress_limits[9].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[10],
+            ingress_limits_offset + ingress_limits[10].1,
+            ingress_limits[10].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[11],
+            ingress_limits_offset + ingress_limits[11].1,
+            ingress_limits[11].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[12],
+            ingress_limits_offset + ingress_limits[12].1,
+            ingress_limits[12].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[13],
+            ingress_limits_offset + ingress_limits[13].1,
+            ingress_limits[13].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[14],
+            ingress_limits_offset + ingress_limits[14].1,
+            ingress_limits[14].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[0],
+            spectrum_request_offset + spectrum_request[0].1,
+            spectrum_request[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[1],
+            spectrum_request_offset + spectrum_request[1].1,
+            spectrum_request[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[2],
+            spectrum_request_offset + spectrum_request[2].1,
+            spectrum_request[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[3],
+            spectrum_request_offset + spectrum_request[3].1,
+            spectrum_request[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[4],
+            spectrum_request_offset + spectrum_request[4].1,
+            spectrum_request[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[5],
+            spectrum_request_offset + spectrum_request[5].1,
+            spectrum_request[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[6],
+            spectrum_request_offset + spectrum_request[6].1,
+            spectrum_request[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[7],
+            spectrum_request_offset + spectrum_request[7].1,
+            spectrum_request[7].2,
+        ),
+        ("targetId", target_id_offset, "u8[128]"),
     ]
 }
 
@@ -2029,6 +2369,13 @@ pub fn render() -> String {
         "observationIngressLimits",
         size_of::<WebObservationIngressLimits>() as u32,
         &observation_ingress_limits_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationPreparation",
+        size_of::<WebObservationPreparationRecord>() as u32,
+        &observation_preparation_fields(),
         true,
     );
     render_structure(

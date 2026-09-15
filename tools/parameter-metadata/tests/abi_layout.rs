@@ -25,7 +25,8 @@ use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
     COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
-    WebObservationIngressLimits, WebObservationWorkLimits, default_source_ring_frames,
+    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationWorkLimits,
+    default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -588,6 +589,130 @@ fn observation_ingress_limits_layout_matches_the_rust_record() {
         u64
     );
     assert_field!("maximumRetainedBytes", maximum_retained_bytes, u64);
+}
+
+/// The preparation record is published as one flattened, non-overlapping byte layout. The
+/// nested records remain authoritative through their own generated rows; this test checks the
+/// parent size/boundaries, the prefixed names, and the derived ingress padding without duplicating
+/// every child Rust field assertion here.
+#[test]
+fn observation_preparation_layout_flattens_the_rust_record() {
+    let document = render();
+    let structure = "observationPreparation";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationPreparationRecord>());
+
+    assert_eq!(
+        field_entry(&document, structure, "structSize"),
+        (0, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "activationMaximumRetainedBytes"),
+        (32, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "workLimits.structSize"),
+        (40, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "workLimits.maximumRetainedBytes"),
+        (128, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.structSize"),
+        (136, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.alignmentPadding"),
+        (164, "u8[4]".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.maximumRetainedBytes"),
+        (216, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "spectrumRequest.structSize"),
+        (224, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "spectrumRequest.reserved"),
+        (256, "u32[2]".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "targetId"),
+        (264, "u8[128]".into())
+    );
+
+    let names = [
+        "structSize",
+        "abiVersion",
+        "profile",
+        "meterCount",
+        "residentTaps",
+        "spectrumCount",
+        "maximumActiveObservers",
+        "reserved0",
+        "activationMaximumRetainedBytes",
+        "workLimits.structSize",
+        "workLimits.abiVersion",
+        "workLimits.maximumActiveMeterChannels",
+        "workLimits.maximumMeterSamplesPerBlock",
+        "workLimits.maximumMeterPublicationsPerBlock",
+        "workLimits.maximumMeterPublicationBytesPerBlock",
+        "workLimits.maximumActiveSpectrumCaptures",
+        "workLimits.maximumCaptureInputSamplesPerBlock",
+        "workLimits.maximumCaptureCopySamplesPerBlock",
+        "workLimits.maximumCapturePublicationsPerBlock",
+        "workLimits.maximumCaptureBytesPerSecond",
+        "workLimits.maximumTransitionEntryVisitsPerBlock",
+        "workLimits.maximumRetainedBytes",
+        "ingressLimits.structSize",
+        "ingressLimits.abiVersion",
+        "ingressLimits.maximumControlBytes",
+        "ingressLimits.maximumObservationRows",
+        "ingressLimits.maximumResultBytes",
+        "ingressLimits.ordinaryOperationsPerBoundary",
+        "ingressLimits.removalOperationsPerBoundary",
+        "ingressLimits.alignmentPadding",
+        "ingressLimits.maximumAdmissionEntryVisits",
+        "ingressLimits.maximumResponseBindingVisits",
+        "ingressLimits.maximumResponseSectionVisits",
+        "ingressLimits.maximumResponseCopyBytes",
+        "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+        "ingressLimits.maximumCleanupEntryVisitsPerBoundary",
+        "ingressLimits.maximumRetainedBytes",
+        "spectrumRequest.structSize",
+        "spectrumRequest.abiVersion",
+        "spectrumRequest.target",
+        "spectrumRequest.channels",
+        "spectrumRequest.targetIdBytes",
+        "spectrumRequest.reserved0",
+        "spectrumRequest.maximumCaptureBytes",
+        "spectrumRequest.reserved",
+        "targetId",
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (index, name) in names.iter().enumerate() {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded preparation structure"
+        );
+        let (offset, kind) = field_entry(&document, structure, name);
+        assert_eq!(offset, next_offset, "field {name} tiles row {index}");
+        next_offset += match kind.as_str() {
+            "u8" => 1,
+            "u8[4]" => 4,
+            "u8[128]" => 128,
+            "u32" | "f32" => 4,
+            "u32[2]" => 8,
+            "u64" => 8,
+            other => panic!("unexpected preparation field type {other}"),
+        };
+    }
+    assert_eq!(next_offset, bytes);
 }
 
 /// Regeneration is deterministic: the same tree renders the same bytes.

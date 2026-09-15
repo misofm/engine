@@ -232,6 +232,7 @@ STRUCTURES = {
     "observationSelection": 32,
     "observationWorkLimits": 96,
     "observationIngressLimits": 88,
+    "observationPreparation": 392,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -354,6 +355,32 @@ OBSERVATION_INGRESS_LIMITS_FIELDS = [
 OBSERVATION_INGRESS_LIMITS_TYPES = [
     "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64",
     "u64", "u64", "u64", "u64",
+]
+OBSERVATION_PREPARATION_FIELDS = [
+    "structSize", "abiVersion", "profile", "meterCount", "residentTaps", "spectrumCount",
+    "maximumActiveObservers", "reserved0", "activationMaximumRetainedBytes",
+    "workLimits.structSize", "workLimits.abiVersion", "workLimits.maximumActiveMeterChannels",
+    "workLimits.maximumMeterSamplesPerBlock", "workLimits.maximumMeterPublicationsPerBlock",
+    "workLimits.maximumMeterPublicationBytesPerBlock", "workLimits.maximumActiveSpectrumCaptures",
+    "workLimits.maximumCaptureInputSamplesPerBlock", "workLimits.maximumCaptureCopySamplesPerBlock",
+    "workLimits.maximumCapturePublicationsPerBlock", "workLimits.maximumCaptureBytesPerSecond",
+    "workLimits.maximumTransitionEntryVisitsPerBlock", "workLimits.maximumRetainedBytes",
+    "ingressLimits.structSize", "ingressLimits.abiVersion", "ingressLimits.maximumControlBytes",
+    "ingressLimits.maximumObservationRows", "ingressLimits.maximumResultBytes",
+    "ingressLimits.ordinaryOperationsPerBoundary", "ingressLimits.removalOperationsPerBoundary",
+    "ingressLimits.alignmentPadding", "ingressLimits.maximumAdmissionEntryVisits",
+    "ingressLimits.maximumResponseBindingVisits", "ingressLimits.maximumResponseSectionVisits",
+    "ingressLimits.maximumResponseCopyBytes", "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+    "ingressLimits.maximumCleanupEntryVisitsPerBoundary", "ingressLimits.maximumRetainedBytes",
+    "spectrumRequest.structSize", "spectrumRequest.abiVersion", "spectrumRequest.target",
+    "spectrumRequest.channels", "spectrumRequest.targetIdBytes", "spectrumRequest.reserved0",
+    "spectrumRequest.maximumCaptureBytes", "spectrumRequest.reserved", "targetId",
+]
+OBSERVATION_PREPARATION_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u64",
+    "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+    "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u32[2]", "u8[128]",
 ]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
@@ -509,6 +536,11 @@ def validate(document: object) -> None:
             f"observationIngressLimits names exactly {OBSERVATION_INGRESS_LIMITS_FIELDS}")
     require([row["type"] for row in ingress_limits] == OBSERVATION_INGRESS_LIMITS_TYPES,
             f"observationIngressLimits types exactly {OBSERVATION_INGRESS_LIMITS_TYPES}")
+    preparation = structures["observationPreparation"]["fields"]
+    require([row["name"] for row in preparation] == OBSERVATION_PREPARATION_FIELDS,
+            f"observationPreparation names exactly {OBSERVATION_PREPARATION_FIELDS}")
+    require([row["type"] for row in preparation] == OBSERVATION_PREPARATION_TYPES,
+            f"observationPreparation types exactly {OBSERVATION_PREPARATION_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
