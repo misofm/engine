@@ -176,6 +176,10 @@ impl SpectrumStaging {
         if self.capture.is_some() && self.result.is_some() {
             return Ok(());
         }
+        #[cfg(test)]
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        });
         let mut capture = Vec::new();
         capture
             .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
@@ -590,6 +594,7 @@ thread_local! {
 thread_local! {
     static LIVE_RESPONSE_CAPTURE_FAULT: Cell<Option<ResponseSnapshotError>> = const { Cell::new(None) };
     static LIVE_RESPONSE_CAPTURE_OWNER_CALLS: Cell<u32> = const { Cell::new(0) };
+    static SPECTRUM_CAPTURE_CONFIGURE_ENTRIES: Cell<u32> = const { Cell::new(0) };
 }
 
 fn next_handle() -> u32 {
@@ -7265,6 +7270,61 @@ pub(crate) mod live_response_ffi_tests {
 #[cfg(test)]
 mod spectrum_ffi_tests {
     use super::*;
+
+    #[test]
+    fn cold_spectrum_capture_configuration_is_idempotent() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        let first_result = SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture());
+        let first_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
+        let capacities = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            staging.capture.as_ref().map(|capture| {
+                (
+                    capture.len(),
+                    capture.capacity(),
+                    staging.result.as_ref().map(Vec::len),
+                    staging.result.as_ref().map(Vec::capacity),
+                )
+            })
+        });
+        let second_result = if first_result.is_ok() {
+            Some(SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture()))
+        } else {
+            None
+        };
+        let second_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
+
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        match first_result {
+            Ok(()) => {
+                assert_eq!(
+                    capacities,
+                    Some((
+                        SPECTRUM_CAPTURE_BYTES,
+                        SPECTRUM_CAPTURE_BYTES,
+                        Some(SPECTRUM_CAPTURE_BYTES),
+                        Some(SPECTRUM_CAPTURE_BYTES),
+                    ))
+                );
+                assert_eq!(second_result, Some(Ok(())));
+                assert_eq!(first_entry_count, 1);
+                assert_eq!(second_entry_count, 1);
+            }
+            Err(result) => {
+                assert_eq!(result, RESULT_REFUSED_BUDGET);
+                assert_eq!(first_entry_count, 1);
+                assert_eq!(capacities, None);
+                assert_eq!(second_result, None);
+                eprintln!(
+                    "unable to assert successful cold spectrum capture configuration: allocator refused the fixed capacity"
+                );
+            }
+        }
+    }
 
     #[test]
     fn spectrum_capture_capacity_validator_rejects_explicit_surplus() {
