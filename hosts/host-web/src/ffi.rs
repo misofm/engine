@@ -1611,6 +1611,22 @@ fn live_response_grid(request: WebLiveResponseRequest) -> Result<ResponsePreview
     }
 }
 
+fn protected_live_response_grid(
+    request: WebLiveResponseRequest,
+    sample_rate_hz: u32,
+) -> Result<ResponsePreviewGrid, u32> {
+    let grid = live_response_grid(request)?;
+    let nyquist_hz = sample_rate_hz as f32 * 0.5;
+    if request.minimum_hz < 0.0
+        || request.minimum_hz >= request.maximum_hz
+        || request.maximum_hz > nyquist_hz
+        || (request.grid == crate::RESPONSE_GRID_LOGARITHMIC && request.minimum_hz <= 0.0)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok(grid)
+}
+
 fn live_response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
     staging.live_result_header = WebLiveResponseResult {
         struct_size: LIVE_RESPONSE_RESULT_BYTES,
@@ -1866,7 +1882,8 @@ fn run_protected_live_response_capture(
         host.record_observation_admission(OPERATION, RESULT_INVALID_ARGUMENT, None, None, false);
         return RESULT_INVALID_ARGUMENT;
     }
-    if let Err(result) = live_response_grid(request) {
+    let sample_rate_hz = host.status().sample_rate_hz;
+    if let Err(result) = protected_live_response_grid(request, sample_rate_hz) {
         host.record_observation_admission(OPERATION, result, None, None, false);
         return result;
     }
@@ -6575,6 +6592,72 @@ pub(crate) mod live_response_ffi_tests {
             || configure_live_request(|request| request.grid = u32::MAX),
             RESULT_INVALID_ARGUMENT,
         );
+    }
+
+    #[test]
+    fn ffi_protected_response_semantic_grid_refusals_preserve_real_markers_before_sink() {
+        let cases = [
+            (
+                "finite reversed endpoints",
+                crate::RESPONSE_GRID_LINEAR,
+                20_000.0,
+                Some(20.0),
+            ),
+            (
+                "equal endpoints",
+                crate::RESPONSE_GRID_LINEAR,
+                20.0,
+                Some(20.0),
+            ),
+            (
+                "negative minimum",
+                crate::RESPONSE_GRID_LINEAR,
+                -1.0,
+                Some(20.0),
+            ),
+            (
+                "logarithmic zero minimum",
+                crate::RESPONSE_GRID_LOGARITHMIC,
+                0.0,
+                Some(20_000.0),
+            ),
+            (
+                "maximum above Nyquist",
+                crate::RESPONSE_GRID_LINEAR,
+                20.0,
+                None,
+            ),
+        ];
+        for (case, grid, minimum_hz, maximum_hz) in cases {
+            let handle = boot_private_protected();
+            let markers = real_response_markers_after_boundary(handle);
+            let callback_before = live_response_owner_callback_calls();
+            let maximum_hz = maximum_hz.unwrap_or_else(|| {
+                LIVE_HOST.with(|slot| {
+                    let live = slot.borrow();
+                    let sample_rate_hz = live
+                        .as_ref()
+                        .expect("protected live host")
+                        .host
+                        .status()
+                        .sample_rate_hz;
+                    sample_rate_hz as f32 * 0.5 + 1.0
+                })
+            });
+            configure_live_request(|request| {
+                request.grid = grid;
+                request.minimum_hz = minimum_hz;
+                request.maximum_hz = maximum_hz;
+            });
+
+            assert_real_response_refusal(case, handle, &markers, RESULT_INVALID_ARGUMENT);
+            assert_eq!(
+                live_response_owner_callback_calls(),
+                callback_before,
+                "{case} must not invoke the response sink owner callback"
+            );
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        }
     }
 
     #[test]
