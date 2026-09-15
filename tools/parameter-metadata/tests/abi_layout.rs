@@ -24,9 +24,9 @@ use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
-    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationWorkLimits,
-    default_source_ring_frames,
+    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationDemand,
+    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
+    WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -713,6 +713,116 @@ fn observation_preparation_layout_flattens_the_rust_record() {
         };
     }
     assert_eq!(next_offset, bytes);
+}
+
+/// The demand record is published from the six leaves of the authoritative Rust record.
+#[test]
+fn observation_demand_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationDemand";
+    assert_eq!(
+        structure_bytes(&document, structure),
+        size_of::<WebObservationDemand>() as u64
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationDemand, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("operation", operation, u32);
+    assert_field!("count", count, u32);
+    assert_field!("owner", owner, u64);
+    let (reserved_offset, reserved_type) = field_entry(&document, structure, "reserved");
+    assert_eq!(reserved_offset, offset_of!(WebObservationDemand, reserved));
+    assert_eq!(reserved_type, "u32[2]");
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("operation", size_of::<u32>()),
+        ("count", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("reserved", size_of::<[u32; 2]>()),
+    ];
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, size_of::<WebObservationDemand>());
+}
+
+/// The receipt record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_receipt_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationReceipt";
+    assert_eq!(
+        structure_bytes(&document, structure),
+        size_of::<WebObservationReceipt>() as u64
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationReceipt, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("domain", domain, u32);
+    assert_field!("state", state, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("sequence", sequence, u64);
+    assert_field!("applicationSample", application_sample, u64);
+    assert_field!("result", result, u32);
+    assert_field!("reserved", reserved, u32);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("domain", size_of::<u32>()),
+        ("state", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("sequence", size_of::<u64>()),
+        ("applicationSample", size_of::<u64>()),
+        ("result", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+    ];
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, size_of::<WebObservationReceipt>());
 }
 
 /// Regeneration is deterministic: the same tree renders the same bytes.

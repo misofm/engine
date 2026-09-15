@@ -315,6 +315,31 @@
         { "name": "targetId", "offset": 264, "type": "u8[128]" }
       ]
     },
+    "observationDemand": {
+      "bytes": 32,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "operation", "offset": 8, "type": "u32" },
+        { "name": "count", "offset": 12, "type": "u32" },
+        { "name": "owner", "offset": 16, "type": "u64" },
+        { "name": "reserved", "offset": 24, "type": "u32[2]" }
+      ]
+    },
+    "observationReceipt": {
+      "bytes": 48,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "domain", "offset": 8, "type": "u32" },
+        { "name": "state", "offset": 12, "type": "u32" },
+        { "name": "owner", "offset": 16, "type": "u64" },
+        { "name": "sequence", "offset": 24, "type": "u64" },
+        { "name": "applicationSample", "offset": 32, "type": "u64" },
+        { "name": "result", "offset": 40, "type": "u32" },
+        { "name": "reserved", "offset": 44, "type": "u32" }
+      ]
+    },
     "observationResult": {
       "bytes": 96,
       "fields": [

@@ -90,12 +90,13 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationIngressLimits,
-    WebObservationPreparationRecord, WebObservationResult, WebObservationSelection,
-    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
-    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
-    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
-    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationDemand, WebObservationIngressLimits,
+    WebObservationPreparationRecord, WebObservationReceipt, WebObservationResult,
+    WebObservationSelection, WebObservationWorkLimits, WebPreparedEffectCompanionHeader,
+    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget, WebResourceReport,
+    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
+    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
+    WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -1156,6 +1157,67 @@ fn observation_preparation_fields() -> [Field; 46] {
             spectrum_request[7].2,
         ),
         ("targetId", target_id_offset, "u8[128]"),
+    ]
+}
+
+fn observation_demand_fields() -> [Field; 6] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationDemand, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationDemand, abi_version),
+            "u32",
+        ),
+        (
+            "operation",
+            offset_of!(WebObservationDemand, operation),
+            "u32",
+        ),
+        ("count", offset_of!(WebObservationDemand, count), "u32"),
+        ("owner", offset_of!(WebObservationDemand, owner), "u64"),
+        (
+            "reserved",
+            offset_of!(WebObservationDemand, reserved),
+            "u32[2]",
+        ),
+    ]
+}
+
+fn observation_receipt_fields() -> [Field; 9] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationReceipt, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationReceipt, abi_version),
+            "u32",
+        ),
+        ("domain", offset_of!(WebObservationReceipt, domain), "u32"),
+        ("state", offset_of!(WebObservationReceipt, state), "u32"),
+        ("owner", offset_of!(WebObservationReceipt, owner), "u64"),
+        (
+            "sequence",
+            offset_of!(WebObservationReceipt, sequence),
+            "u64",
+        ),
+        (
+            "applicationSample",
+            offset_of!(WebObservationReceipt, application_sample),
+            "u64",
+        ),
+        ("result", offset_of!(WebObservationReceipt, result), "u32"),
+        (
+            "reserved",
+            offset_of!(WebObservationReceipt, reserved),
+            "u32",
+        ),
     ]
 }
 
@@ -2376,6 +2438,20 @@ pub fn render() -> String {
         "observationPreparation",
         size_of::<WebObservationPreparationRecord>() as u32,
         &observation_preparation_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationDemand",
+        size_of::<WebObservationDemand>() as u32,
+        &observation_demand_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationReceipt",
+        size_of::<WebObservationReceipt>() as u32,
+        &observation_receipt_fields(),
         true,
     );
     render_structure(

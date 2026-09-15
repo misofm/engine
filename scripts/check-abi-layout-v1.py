@@ -233,6 +233,8 @@ STRUCTURES = {
     "observationWorkLimits": 96,
     "observationIngressLimits": 88,
     "observationPreparation": 392,
+    "observationDemand": 32,
+    "observationReceipt": 48,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -381,6 +383,17 @@ OBSERVATION_PREPARATION_TYPES = [
     "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
     "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
     "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u32[2]", "u8[128]",
+]
+OBSERVATION_DEMAND_FIELDS = [
+    "structSize", "abiVersion", "operation", "count", "owner", "reserved",
+]
+OBSERVATION_DEMAND_TYPES = ["u32", "u32", "u32", "u32", "u64", "u32[2]"]
+OBSERVATION_RECEIPT_FIELDS = [
+    "structSize", "abiVersion", "domain", "state", "owner", "sequence",
+    "applicationSample", "result", "reserved",
+]
+OBSERVATION_RECEIPT_TYPES = [
+    "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
 ]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
@@ -541,6 +554,16 @@ def validate(document: object) -> None:
             f"observationPreparation names exactly {OBSERVATION_PREPARATION_FIELDS}")
     require([row["type"] for row in preparation] == OBSERVATION_PREPARATION_TYPES,
             f"observationPreparation types exactly {OBSERVATION_PREPARATION_TYPES}")
+    demand = structures["observationDemand"]["fields"]
+    require([row["name"] for row in demand] == OBSERVATION_DEMAND_FIELDS,
+            f"observationDemand names exactly {OBSERVATION_DEMAND_FIELDS}")
+    require([row["type"] for row in demand] == OBSERVATION_DEMAND_TYPES,
+            f"observationDemand types exactly {OBSERVATION_DEMAND_TYPES}")
+    receipt = structures["observationReceipt"]["fields"]
+    require([row["name"] for row in receipt] == OBSERVATION_RECEIPT_FIELDS,
+            f"observationReceipt names exactly {OBSERVATION_RECEIPT_FIELDS}")
+    require([row["type"] for row in receipt] == OBSERVATION_RECEIPT_TYPES,
+            f"observationReceipt types exactly {OBSERVATION_RECEIPT_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
