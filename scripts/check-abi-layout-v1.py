@@ -231,6 +231,7 @@ STRUCTURES = {
     "commandReport": 48,
     "observationSelection": 32,
     "observationWorkLimits": 96,
+    "observationIngressLimits": 88,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -341,6 +342,18 @@ OBSERVATION_WORK_LIMITS_FIELDS = [
 ]
 OBSERVATION_WORK_LIMITS_TYPES = [
     "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+]
+OBSERVATION_INGRESS_LIMITS_FIELDS = [
+    "structSize", "abiVersion", "maximumControlBytes", "maximumObservationRows",
+    "maximumResultBytes", "ordinaryOperationsPerBoundary", "removalOperationsPerBoundary",
+    "alignmentPadding", "maximumAdmissionEntryVisits", "maximumResponseBindingVisits",
+    "maximumResponseSectionVisits", "maximumResponseCopyBytes",
+    "maximumHandlerCopyBytesPerBoundary", "maximumCleanupEntryVisitsPerBoundary",
+    "maximumRetainedBytes",
+]
+OBSERVATION_INGRESS_LIMITS_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64",
+    "u64", "u64", "u64", "u64",
 ]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
@@ -491,6 +504,11 @@ def validate(document: object) -> None:
             f"observationWorkLimits names exactly {OBSERVATION_WORK_LIMITS_FIELDS}")
     require([row["type"] for row in work_limits] == OBSERVATION_WORK_LIMITS_TYPES,
             f"observationWorkLimits types exactly {OBSERVATION_WORK_LIMITS_TYPES}")
+    ingress_limits = structures["observationIngressLimits"]["fields"]
+    require([row["name"] for row in ingress_limits] == OBSERVATION_INGRESS_LIMITS_FIELDS,
+            f"observationIngressLimits names exactly {OBSERVATION_INGRESS_LIMITS_FIELDS}")
+    require([row["type"] for row in ingress_limits] == OBSERVATION_INGRESS_LIMITS_TYPES,
+            f"observationIngressLimits types exactly {OBSERVATION_INGRESS_LIMITS_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
@@ -610,6 +628,13 @@ def self_test() -> int:
     def widen_field(document: dict) -> None:
         document["structures"]["status"]["fields"][0]["type"] = "u64"
 
+    def widen_ingress_padding(document: dict) -> None:
+        for row in document["structures"]["observationIngressLimits"]["fields"]:
+            if row["name"] == "alignmentPadding":
+                row["type"] = "u32"
+                return
+        raise AssertionError("the ingress padding row exists in the valid fixture")
+
     def hole_in_layout(document: dict) -> None:
         document["structures"]["commandReport"]["fields"][3]["offset"] = 16
 
@@ -650,6 +675,7 @@ def self_test() -> int:
         ("a boot option is renamed", rename_field),
         ("a boot option is dropped", drop_field),
         ("a status word is widened", widen_field),
+        ("ingress padding changes to a same-width scalar", widen_ingress_padding),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
         ("the export set is unsorted", unsorted_exports),

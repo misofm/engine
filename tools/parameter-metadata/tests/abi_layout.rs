@@ -24,8 +24,8 @@ use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationWorkLimits,
-    default_source_ring_frames,
+    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
+    WebObservationIngressLimits, WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -499,6 +499,92 @@ fn observation_work_limits_layout_matches_the_rust_record() {
     assert_field!(
         "maximumTransitionEntryVisitsPerBlock",
         maximum_transition_entry_visits_per_block,
+        u64
+    );
+    assert_field!("maximumRetainedBytes", maximum_retained_bytes, u64);
+}
+
+/// The ingress-limit record publishes every Rust scalar and its actual alignment hole.
+///
+/// The padding row is derived from adjacent Rust fields rather than represented by a Rust
+/// reserved member. It is nonsemantic: consumers may ignore its bytes and must not require them
+/// to be zero.
+#[test]
+fn observation_ingress_limits_layout_matches_the_rust_record() {
+    let document = render();
+    assert_eq!(
+        structure_bytes(&document, "observationIngressLimits"),
+        size_of::<WebObservationIngressLimits>() as u64,
+        "the published ingress-limit size is the Rust record size"
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, "observationIngressLimits", $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationIngressLimits, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("maximumControlBytes", maximum_control_bytes, u32);
+    assert_field!("maximumObservationRows", maximum_observation_rows, u32);
+    assert_field!("maximumResultBytes", maximum_result_bytes, u32);
+    assert_field!(
+        "ordinaryOperationsPerBoundary",
+        ordinary_operations_per_boundary,
+        u32
+    );
+    assert_field!(
+        "removalOperationsPerBoundary",
+        removal_operations_per_boundary,
+        u32
+    );
+
+    let removal_end =
+        offset_of!(WebObservationIngressLimits, removal_operations_per_boundary) + size_of::<u32>();
+    let admission_start = offset_of!(WebObservationIngressLimits, maximum_admission_entry_visits);
+    assert_eq!(admission_start - removal_end, 4);
+    let (padding_offset, padding_type) =
+        field_entry(&document, "observationIngressLimits", "alignmentPadding");
+    assert_eq!(padding_offset, removal_end);
+    assert_eq!(padding_type, "u8[4]");
+
+    assert_field!(
+        "maximumAdmissionEntryVisits",
+        maximum_admission_entry_visits,
+        u64
+    );
+    assert_field!(
+        "maximumResponseBindingVisits",
+        maximum_response_binding_visits,
+        u64
+    );
+    assert_field!(
+        "maximumResponseSectionVisits",
+        maximum_response_section_visits,
+        u64
+    );
+    assert_field!("maximumResponseCopyBytes", maximum_response_copy_bytes, u64);
+    assert_field!(
+        "maximumHandlerCopyBytesPerBoundary",
+        maximum_handler_copy_bytes_per_boundary,
+        u64
+    );
+    assert_field!(
+        "maximumCleanupEntryVisitsPerBoundary",
+        maximum_cleanup_entry_visits_per_boundary,
         u64
     );
     assert_field!("maximumRetainedBytes", maximum_retained_bytes, u64);

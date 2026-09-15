@@ -90,11 +90,12 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationResult, WebObservationSelection,
-    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
-    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
-    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
-    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationIngressLimits, WebObservationResult,
+    WebObservationSelection, WebObservationWorkLimits, WebPreparedEffectCompanionHeader,
+    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget, WebResourceReport,
+    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
+    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
+    WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -724,6 +725,95 @@ fn observation_work_limits_fields() -> [Field; 13] {
         (
             "maximumRetainedBytes",
             offset_of!(WebObservationWorkLimits, maximum_retained_bytes),
+            "u64",
+        ),
+    ]
+}
+
+fn observation_ingress_limits_fields() -> [Field; 15] {
+    let removal_end =
+        offset_of!(WebObservationIngressLimits, removal_operations_per_boundary) + size_of::<u32>();
+    let admission_start = offset_of!(WebObservationIngressLimits, maximum_admission_entry_visits);
+    let alignment_padding_bytes = admission_start - removal_end;
+    assert_eq!(
+        alignment_padding_bytes, 4,
+        "the ingress record's alignment gap must be four bytes"
+    );
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationIngressLimits, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationIngressLimits, abi_version),
+            "u32",
+        ),
+        (
+            "maximumControlBytes",
+            offset_of!(WebObservationIngressLimits, maximum_control_bytes),
+            "u32",
+        ),
+        (
+            "maximumObservationRows",
+            offset_of!(WebObservationIngressLimits, maximum_observation_rows),
+            "u32",
+        ),
+        (
+            "maximumResultBytes",
+            offset_of!(WebObservationIngressLimits, maximum_result_bytes),
+            "u32",
+        ),
+        (
+            "ordinaryOperationsPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                ordinary_operations_per_boundary
+            ),
+            "u32",
+        ),
+        (
+            "removalOperationsPerBoundary",
+            offset_of!(WebObservationIngressLimits, removal_operations_per_boundary),
+            "u32",
+        ),
+        ("alignmentPadding", removal_end, "u8[4]"),
+        ("maximumAdmissionEntryVisits", admission_start, "u64"),
+        (
+            "maximumResponseBindingVisits",
+            offset_of!(WebObservationIngressLimits, maximum_response_binding_visits),
+            "u64",
+        ),
+        (
+            "maximumResponseSectionVisits",
+            offset_of!(WebObservationIngressLimits, maximum_response_section_visits),
+            "u64",
+        ),
+        (
+            "maximumResponseCopyBytes",
+            offset_of!(WebObservationIngressLimits, maximum_response_copy_bytes),
+            "u64",
+        ),
+        (
+            "maximumHandlerCopyBytesPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                maximum_handler_copy_bytes_per_boundary
+            ),
+            "u64",
+        ),
+        (
+            "maximumCleanupEntryVisitsPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                maximum_cleanup_entry_visits_per_boundary
+            ),
+            "u64",
+        ),
+        (
+            "maximumRetainedBytes",
+            offset_of!(WebObservationIngressLimits, maximum_retained_bytes),
             "u64",
         ),
     ]
@@ -1932,6 +2022,13 @@ pub fn render() -> String {
         "observationWorkLimits",
         size_of::<WebObservationWorkLimits>() as u32,
         &observation_work_limits_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationIngressLimits",
+        size_of::<WebObservationIngressLimits>() as u32,
+        &observation_ingress_limits_fields(),
         true,
     );
     render_structure(
