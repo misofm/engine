@@ -288,11 +288,13 @@ struct ObservationEndpointStaging {
 
 impl Default for ObservationEndpointStaging {
     fn default() -> Self {
-        let mut demand = WebObservationDemand::default();
         // Keep WebObservationDemand's established zero-default/layout unchanged. Endpoint
         // staging is the owned ABI workspace, so its headers are initialized explicitly here.
-        demand.struct_size = size_of::<WebObservationDemand>() as u32;
-        demand.abi_version = ABI_VERSION;
+        let demand = WebObservationDemand {
+            struct_size: size_of::<WebObservationDemand>() as u32,
+            abi_version: ABI_VERSION,
+            ..WebObservationDemand::default()
+        };
         Self {
             preparation: WebObservationPreparationRecord::default(),
             demand,
@@ -4315,20 +4317,18 @@ fn apply_observation_demand(
     // A repeated pending stop is an identity query on the already-admitted native operation. It
     // is reachable only after every fixed field and the owner have matched, so malformed and
     // wrong-owner records still spend their classified attempt below.
-    if valid_stop {
-        if let Some(receipt) = host.pending_stop_receipt() {
-            // The pending receipt is authoritative, but the preceding admission may have been
-            // replaced by a refusal. Rebuild the successful pending projection and retag only
-            // its wire operation; never copy that arbitrary refusal's result or reason.
-            host.record_observation_admission(
-                OBSERVATION_OPERATION_STOP_GRAPH,
-                RESULT_OK,
-                None,
-                Some(receipt),
-                true,
-            );
-            return RESULT_OK;
-        }
+    if valid_stop && let Some(receipt) = host.pending_stop_receipt() {
+        // The pending receipt is authoritative, but the preceding admission may have been
+        // replaced by a refusal. Rebuild the successful pending projection and retag only
+        // its wire operation; never copy that arbitrary refusal's result or reason.
+        host.record_observation_admission(
+            OBSERVATION_OPERATION_STOP_GRAPH,
+            RESULT_OK,
+            None,
+            Some(receipt),
+            true,
+        );
+        return RESULT_OK;
     }
 
     let permit = match host.begin_observation(class, lengths) {
@@ -4688,10 +4688,11 @@ enum StagedBootMode {
 
 impl ObservationEndpointStaging {
     fn reset_outputs(&mut self) {
-        let mut demand = WebObservationDemand::default();
-        demand.struct_size = size_of::<WebObservationDemand>() as u32;
-        demand.abi_version = ABI_VERSION;
-        self.demand = demand;
+        self.demand = WebObservationDemand {
+            struct_size: size_of::<WebObservationDemand>() as u32,
+            abi_version: ABI_VERSION,
+            ..WebObservationDemand::default()
+        };
         self.admission = WebObservationAdmission::default();
         self.status = WebObservationStatus::default();
         self.capture_identity = WebObservationCaptureIdentity::default();
@@ -4866,11 +4867,11 @@ fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
 
         match result {
             Ok(host) => {
-                if matches!(mode, StagedBootMode::ProtectedObservation) {
-                    if let Err(failure) = prewarm_observation_staging() {
-                        staging.record_failure(failure);
-                        return None;
-                    }
+                if matches!(mode, StagedBootMode::ProtectedObservation)
+                    && let Err(failure) = prewarm_observation_staging()
+                {
+                    staging.record_failure(failure);
+                    return None;
                 }
                 staging.result = RESULT_OK;
                 staging.diagnostic_bytes = 0;
