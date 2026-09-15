@@ -26,7 +26,7 @@ use crate::{
     OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
     OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationClass, ObservationIngressLimits,
     ObservationLengths, ObservationReadChannels, ObservationReadError, ObservationReadValues,
-    ProtectedSpectrumReadError, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
+    ProtectedResponseCaptureError, ProtectedSpectrumReadError, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
     RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
     RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL,
     RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
@@ -45,7 +45,7 @@ use crate::{
     WebObservationProfile, WebObservationReceipt, WebObservationResult, WebObservationSelection,
     WebObservationStatus, WebResponseParameter, WebResponseRequest, WebResponseResult,
     WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, legacy_response_refusal,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -1759,6 +1759,218 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
         }
         Ok(())
     }
+}
+
+/// Capture one protected selected track through the shared ordinary ingress permit.
+///
+/// The protected path is deliberately separate from the legacy compatibility path below. Every
+/// refusal before the admitted native call leaves the previously committed response payload and
+/// identity untouched; only an admitted provider/sink failure uses the legacy failure header.
+fn run_protected_live_response_capture(
+    host: &mut AudioWorkletEngineHost,
+    staging: &mut ResponseStaging,
+) -> u32 {
+    const OPERATION: u32 = 8;
+    const RESPONSE_CAPTURE_KIND: u32 = 1;
+
+    // Copy fixed scalars before any request interpretation. The ordinary attempt is classified
+    // from these declared lengths, so an oversized request spends the attempt before refusal.
+    let request = *staging.live_request;
+    let live_token = staging.live_token;
+    let control_bytes = match u64::try_from(size_of::<WebLiveResponseRequest>())
+        .ok()
+        .and_then(|header| header.checked_add(u64::from(request.track_id_bytes)))
+    {
+        Some(value) => value,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            return host.record_observation_refusal(OPERATION, refusal);
+        }
+    };
+    let permit = match host.begin_observation(
+        ObservationClass::Ordinary,
+        ObservationLengths {
+            control_bytes,
+            rows: 1,
+            result_bytes: u64::from(request.maximum_result_bytes),
+        },
+    ) {
+        Ok(permit) => permit,
+        Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+    };
+
+    // Token exhaustion and every shape/target/capacity check below are pre-provider refusals. The
+    // permit has already spent this boundary's Ordinary attempt, but no response staging is
+    // touched and no capture identity is replaced.
+    let sequence = match live_token.checked_add(1) {
+        Some(value) => value,
+        None => {
+            host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    let track_id_bytes = match usize::try_from(request.track_id_bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+    let maximum_result_bytes = match usize::try_from(request.maximum_result_bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+    if request.struct_size != LIVE_RESPONSE_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.reserved != [0; 3]
+        || track_id_bytes == 0
+        || track_id_bytes > staging.live_track_id.len()
+        || request.maximum_result_bytes == 0
+        || maximum_result_bytes > staging.live_result.len()
+    {
+        host.record_observation_admission(OPERATION, RESULT_INVALID_ARGUMENT, None, None, false);
+        return RESULT_INVALID_ARGUMENT;
+    }
+    if let Err(result) = live_response_grid(request) {
+        host.record_observation_admission(OPERATION, result, None, None, false);
+        return result;
+    }
+    let track_id = match core::str::from_utf8(&staging.live_track_id[..track_id_bytes]) {
+        Ok(value) if !value.is_empty() && value.len() <= LIVE_RESPONSE_MAXIMUM_ID_BYTES => value,
+        _ => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+
+    let packed_bound = match host.response_capture_preflight(track_id) {
+        Ok(value) => value,
+        Err(error) => {
+            let result = live_response_capture_error_code(error);
+            host.record_observation_admission(OPERATION, result, None, None, false);
+            return result;
+        }
+    };
+    let actual_result_bytes = match u64::try_from(staging.live_result.len()) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if u64::from(request.maximum_result_bytes) < packed_bound
+        || actual_result_bytes < packed_bound
+        || u64::from(request.maximum_result_bytes) > actual_result_bytes
+    {
+        host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+        return RESULT_REFUSED_BUDGET;
+    }
+    let owner = match host.protected_observation_identity() {
+        Ok((owner, _epoch)) => owner,
+        Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+    };
+
+    // All known fixed capacity and target/state checks are complete before constructing the sink.
+    // The affine permit is moved exactly once into the typed admitted seam.
+    let captured = {
+        let mut sink =
+            match LiveResponseCaptureSink::new(&mut staging.live_result[..maximum_result_bytes]) {
+                Ok(value) => value,
+                Err(error) => {
+                    let result = live_response_capture_error_code(error);
+                    host.record_observation_admission(OPERATION, result, None, None, false);
+                    return result;
+                }
+            };
+        let result = host.copy_response_snapshot_admitted(permit, track_id, &mut sink);
+        match result {
+            Ok(capture) => Ok((capture, sink.owner_count, sink.excluded_count, sink.next)),
+            Err(error) => Err(error),
+        }
+    };
+    let (capture, owner_count, excluded_count, result_bytes) = match captured {
+        Ok(value) => value,
+        Err(ProtectedResponseCaptureError::Refused(refusal)) => {
+            return live_response_capture_error_code(legacy_response_refusal(refusal));
+        }
+        Err(ProtectedResponseCaptureError::Capture(error)) => {
+            let result = live_response_capture_error_code(error);
+            return live_response_failure(staging, result);
+        }
+    };
+    if result_bytes > maximum_result_bytes {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+
+    let owners_offset = size_of::<WebLiveResponseResult>() as u32;
+    staging.live_result_header = WebLiveResponseResult {
+        struct_size: LIVE_RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        mode: LIVE_RESPONSE_MODE_TARGET,
+        meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+        channels: request.channels,
+        points: 0,
+        owner_count: u32::try_from(owner_count).unwrap_or(0),
+        excluded_count: u32::try_from(excluded_count).unwrap_or(0),
+        sample_rate_hz: host.status().sample_rate_hz,
+        reserved0: 0,
+        reserved1: 0,
+        captured_sample: capture.captured_sample,
+        snapshot_token: sequence,
+        result_bytes: u64::try_from(result_bytes).unwrap_or(u64::MAX),
+        frequencies_offset: 0,
+        left_offset: 0,
+        right_offset: 0,
+        owners_offset,
+        owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+        section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+        reserved: [0; 2],
+    };
+    if !copy_live_record(&mut staging.live_result, 0, &staging.live_result_header) {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+
+    // The raw payload is complete before the three committed publication scalars become visible.
+    staging.live_result_len = result_bytes;
+    staging.live_token = sequence;
+    host.commit_observation_capture_identity(WebObservationCaptureIdentity {
+        struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+        abi_version: ABI_VERSION,
+        kind: RESPONSE_CAPTURE_KIND,
+        flags: 0,
+        owner: owner.get(),
+        observation_generation: 0,
+        selection_epoch: 0,
+        snapshot_token: sequence,
+    });
+    RESULT_OK
 }
 
 fn run_live_response_capture(
@@ -4082,11 +4294,16 @@ pub extern "C" fn miso_engine_web_v1_track_response_capture(handle: u32) -> u32 
         let Some(live) = live.as_mut().filter(|value| value.handle == handle) else {
             return RESULT_WRONG_STATE;
         };
+        let protected = live.host.protected_observation_prepared();
         RESPONSE_STAGING.with(|staging_slot| {
             let Ok(mut staging) = staging_slot.try_borrow_mut() else {
                 return RESULT_INTERNAL;
             };
-            run_live_response_capture(&mut live.host, &mut staging)
+            if protected {
+                run_protected_live_response_capture(&mut live.host, &mut staging)
+            } else {
+                run_live_response_capture(&mut live.host, &mut staging)
+            }
         })
     })
 }
@@ -5769,6 +5986,9 @@ mod response_budget_tests {
 #[cfg(test)]
 pub(crate) mod live_response_ffi_tests {
     use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
     use core::alloc::Layout;
     use core::cell::Cell;
     use std::alloc::{GlobalAlloc, System};
@@ -5876,6 +6096,138 @@ pub(crate) mod live_response_ffi_tests {
 
     fn captured_header() -> WebLiveResponseResult {
         RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
+    }
+
+    fn boot_private_protected() -> u32 {
+        no_live_host();
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().reset());
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "private protected fixture must boot");
+        handle
+    }
+
+    #[test]
+    fn ffi_protected_response_capture_publishes_raw_and_identity() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let header = captured_header();
+        assert_eq!(header.result, RESULT_OK);
+        assert_eq!(header.snapshot_token, 1);
+        assert!(header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_result_len),
+            header.result_bytes as usize
+        );
+        let identity = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        });
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        assert_eq!(identity.kind, 1);
+        assert_eq!(identity.flags, 0);
+        assert_eq!(identity.owner, owner);
+        assert_eq!(identity.observation_generation, 0);
+        assert_eq!(identity.selection_epoch, 0);
+        assert_eq!(identity.snapshot_token, 1);
+        assert_eq!(
+            miso_engine_web_v1_dispose(handle),
+            RESULT_OK,
+            "protected response fixture dispose"
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_preflight_refusal_preserves_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"missing", 65_536);
+        let seeded_header = WebLiveResponseResult {
+            struct_size: LIVE_RESPONSE_RESULT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            mode: LIVE_RESPONSE_MODE_TARGET,
+            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+            channels: crate::RESPONSE_CHANNEL_BOTH,
+            snapshot_token: 41,
+            result_bytes: LIVE_RESPONSE_RESULT_BYTES as u64,
+            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+            ..WebLiveResponseResult::default()
+        };
+        let identity = WebObservationCaptureIdentity {
+            struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+            abi_version: ABI_VERSION,
+            kind: 2,
+            flags: 1,
+            owner: 41,
+            observation_generation: 42,
+            selection_epoch: 43,
+            snapshot_token: 41,
+        };
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_result.fill(0xa5);
+            assert!(copy_live_record(
+                &mut staging.live_result,
+                0,
+                &seeded_header
+            ));
+            staging.live_result_header = seeded_header;
+            staging.live_result_len = size_of::<WebLiveResponseResult>();
+            staging.live_token = seeded_header.snapshot_token;
+        });
+        LIVE_HOST.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("protected live host")
+                .host
+                .commit_observation_capture_identity(identity);
+        });
+        let before_bytes = RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            staging.live_result[..staging.live_result_len].to_vec()
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.live_result_header, seeded_header);
+            assert_eq!(staging.live_result_len, before_bytes.len());
+            assert_eq!(
+                &staging.live_result[..staging.live_result_len],
+                before_bytes
+            );
+            assert_eq!(staging.live_token, seeded_header.snapshot_token);
+        });
+        LIVE_HOST.with(|slot| {
+            assert_eq!(
+                *slot
+                    .borrow()
+                    .as_ref()
+                    .expect("protected live host")
+                    .host
+                    .observation_capture_identity(),
+                identity
+            );
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
     #[test]
