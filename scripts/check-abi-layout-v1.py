@@ -488,7 +488,8 @@ def check_fields(name: str, fields: object, total: int) -> None:
 def check_named(document: dict, group: str, expected: list[tuple[int, str]]) -> None:
     rows = document["constants"].get(group)
     require(isinstance(rows, list), f"constants.{group} is a list")
-    require(all(isinstance(row, dict) and set(row) == {"value", "name"} for row in rows),
+    require(all(isinstance(row, dict) and set(row) == {"value", "name"}
+                and type(row["value"]) is int for row in rows),
             f"constants.{group} rows are exactly value/name")
     actual = [(row["value"], row["name"]) for row in rows]
     require(actual == expected, f"constants.{group} is {actual}, expected {expected}")
@@ -777,11 +778,32 @@ def self_test() -> int:
                 return
         raise AssertionError("the ingress padding row exists in the valid fixture")
 
+    def preparation_field(document: dict, name: str) -> dict:
+        for row in document["structures"]["observationPreparation"]["fields"]:
+            if row["name"] == name:
+                return row
+        raise AssertionError(f"the preparation field {name} exists in the valid fixture")
+
+    def drop_preparation_nested_leaf(document: dict) -> None:
+        fields = document["structures"]["observationPreparation"]["fields"]
+        row = preparation_field(document, "workLimits.maximumRetainedBytes")
+        fields.remove(row)
+
+    def widen_preparation_nested_leaf(document: dict) -> None:
+        preparation_field(document, "workLimits.maximumMeterSamplesPerBlock")["type"] = "f64"
+
     def hole_in_layout(document: dict) -> None:
         document["structures"]["commandReport"]["fields"][3]["offset"] = 16
 
     def drop_export(document: dict) -> None:
         document["exports"].pop()
+
+    def drop_protected_boot_export(document: dict) -> None:
+        export = "miso_engine_web_v1_boot_with_observation_demand"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError("the protected boot export exists in the valid fixture") from error
 
     def unsorted_exports(document: dict) -> None:
         document["exports"].reverse()
@@ -810,6 +832,30 @@ def self_test() -> int:
     def duplicate_result_name(document: dict) -> None:
         document["constants"]["resultCodes"][5]["name"] = "prepareRejected"
 
+    def drop_refusal_none(document: dict) -> None:
+        rows = document["constants"]["observationRefusalReasons"]
+        for row in rows:
+            if row["name"] == "none" and row["value"] == 0:
+                rows.remove(row)
+                return
+        raise AssertionError("the observation refusal none=0 row exists in the valid fixture")
+
+    def change_observation_flag(document: dict) -> None:
+        rows = document["constants"]["observationStatusFlags"]
+        for row in rows:
+            if row["name"] == "terminal":
+                row["value"] = 16
+                return
+        raise AssertionError("the observation terminal flag exists in the valid fixture")
+
+    def boolean_named_value(document: dict) -> None:
+        rows = document["constants"]["observationProfiles"]
+        for row in rows:
+            if row["name"] == "eqSpectrum":
+                row["value"] = True
+                return
+        raise AssertionError("the observation eqSpectrum row exists in the valid fixture")
+
     mutations = [
         ("an alias row is dropped", drop_alias),
         ("an alias repeats its base name", alias_repeats_base),
@@ -818,8 +864,11 @@ def self_test() -> int:
         ("a boot option is dropped", drop_field),
         ("a status word is widened", widen_field),
         ("ingress padding changes to a same-width scalar", widen_ingress_padding),
+        ("a preparation nested leaf is dropped", drop_preparation_nested_leaf),
+        ("a preparation nested leaf type changes at the same width", widen_preparation_nested_leaf),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
+        ("the protected observation boot export is dropped", drop_protected_boot_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
@@ -829,6 +878,9 @@ def self_test() -> int:
         ("the 192-byte prepare config returns", prepare_config_returns),
         ("the ABI version goes stale", stale_abi_version),
         ("a retired result name returns", duplicate_result_name),
+        ("the refusal none=0 row is dropped", drop_refusal_none),
+        ("an observation status flag value changes", change_observation_flag),
+        ("a named numeric value becomes boolean", boolean_named_value),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)
