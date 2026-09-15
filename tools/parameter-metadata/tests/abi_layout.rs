@@ -25,8 +25,9 @@ use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
     COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationAdmission,
-    WebObservationDemand, WebObservationIngressLimits, WebObservationPreparationRecord,
-    WebObservationReceipt, WebObservationWorkLimits, default_source_ring_frames,
+    WebObservationCaptureIdentity, WebObservationDemand, WebObservationIngressLimits,
+    WebObservationPreparationRecord, WebObservationReceipt, WebObservationStatus,
+    WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -962,6 +963,134 @@ fn observation_admission_layout_flattens_the_rust_record() {
         assert_eq!(
             field_offset(&document, structure, name),
             receipt_offset + child_offset
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
+}
+
+/// The status record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_status_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationStatus";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationStatus>());
+    assert_eq!(bytes, 64);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationStatus, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("profile", profile, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("pendingCount", pending_count, u32);
+    assert_field!("reserved", reserved, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("ingressEpoch", ingress_epoch, u64);
+    assert_field!("acceptedGeneration", accepted_generation, u64);
+    assert_field!("appliedGeneration", applied_generation, u64);
+    assert_field!("selectionEpoch", selection_epoch, u64);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("profile", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("pendingCount", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("ingressEpoch", size_of::<u64>()),
+        ("acceptedGeneration", size_of::<u64>()),
+        ("appliedGeneration", size_of::<u64>()),
+        ("selectionEpoch", size_of::<u64>()),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded status structure"
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
+}
+
+/// The capture identity record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_capture_identity_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationCaptureIdentity";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationCaptureIdentity>());
+    assert_eq!(bytes, 48);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationCaptureIdentity, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("kind", kind, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("observationGeneration", observation_generation, u64);
+    assert_field!("selectionEpoch", selection_epoch, u64);
+    assert_field!("snapshotToken", snapshot_token, u64);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("kind", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("observationGeneration", size_of::<u64>()),
+        ("selectionEpoch", size_of::<u64>()),
+        ("snapshotToken", size_of::<u64>()),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded capture identity structure"
         );
         assert_eq!(field_offset(&document, structure, name), next_offset);
         next_offset += width;

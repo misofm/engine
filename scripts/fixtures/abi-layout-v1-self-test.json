@@ -226,6 +226,22 @@
         { "name": "reserved", "offset": 28, "type": "u32" }
       ]
     },
+    "observationStatus": {
+      "bytes": 64,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "profile", "offset": 8, "type": "u32" },
+        { "name": "flags", "offset": 12, "type": "u32" },
+        { "name": "pendingCount", "offset": 16, "type": "u32" },
+        { "name": "reserved", "offset": 20, "type": "u32" },
+        { "name": "owner", "offset": 24, "type": "u64" },
+        { "name": "ingressEpoch", "offset": 32, "type": "u64" },
+        { "name": "acceptedGeneration", "offset": 40, "type": "u64" },
+        { "name": "appliedGeneration", "offset": 48, "type": "u64" },
+        { "name": "selectionEpoch", "offset": 56, "type": "u64" }
+      ]
+    },
     "observationWorkLimits": {
       "bytes": 96,
       "fields": [
@@ -364,6 +380,19 @@
         { "name": "receipt.applicationSample", "offset": 216, "type": "u64" },
         { "name": "receipt.result", "offset": 224, "type": "u32" },
         { "name": "receipt.reserved", "offset": 228, "type": "u32" }
+      ]
+    },
+    "observationCaptureIdentity": {
+      "bytes": 48,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "kind", "offset": 8, "type": "u32" },
+        { "name": "flags", "offset": 12, "type": "u32" },
+        { "name": "owner", "offset": 16, "type": "u64" },
+        { "name": "observationGeneration", "offset": 24, "type": "u64" },
+        { "name": "selectionEpoch", "offset": 32, "type": "u64" },
+        { "name": "snapshotToken", "offset": 40, "type": "u64" }
       ]
     },
     "observationResult": {

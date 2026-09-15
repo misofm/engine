@@ -230,12 +230,14 @@ STRUCTURES = {
     "meterHeader": 64,
     "commandReport": 48,
     "observationSelection": 32,
+    "observationStatus": 64,
     "observationWorkLimits": 96,
     "observationIngressLimits": 88,
     "observationPreparation": 392,
     "observationDemand": 32,
     "observationReceipt": 48,
     "observationAdmission": 232,
+    "observationCaptureIdentity": 48,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -337,6 +339,13 @@ OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
     "reserved",
 ]
+OBSERVATION_STATUS_FIELDS = [
+    "structSize", "abiVersion", "profile", "flags", "pendingCount", "reserved", "owner",
+    "ingressEpoch", "acceptedGeneration", "appliedGeneration", "selectionEpoch",
+]
+OBSERVATION_STATUS_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u64", "u64",
+]
 OBSERVATION_WORK_LIMITS_FIELDS = [
     "structSize", "abiVersion", "maximumActiveMeterChannels", "maximumMeterSamplesPerBlock",
     "maximumMeterPublicationsPerBlock", "maximumMeterPublicationBytesPerBlock",
@@ -406,6 +415,11 @@ OBSERVATION_ADMISSION_TYPES = [
     "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u64", "u64",
     "u8[128]", "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
 ]
+OBSERVATION_CAPTURE_IDENTITY_FIELDS = [
+    "structSize", "abiVersion", "kind", "flags", "owner", "observationGeneration",
+    "selectionEpoch", "snapshotToken",
+]
+OBSERVATION_CAPTURE_IDENTITY_TYPES = ["u32", "u32", "u32", "u32", "u64", "u64", "u64", "u64"]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
     "channels", "sampleRateHz", "reserved0", "firstSample", "endSample", "sequence", "blocks",
@@ -550,6 +564,11 @@ def validate(document: object) -> None:
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
+    observation_status = structures["observationStatus"]["fields"]
+    require([row["name"] for row in observation_status] == OBSERVATION_STATUS_FIELDS,
+            f"observationStatus names exactly {OBSERVATION_STATUS_FIELDS}")
+    require([row["type"] for row in observation_status] == OBSERVATION_STATUS_TYPES,
+            f"observationStatus types exactly {OBSERVATION_STATUS_TYPES}")
     work_limits = structures["observationWorkLimits"]["fields"]
     require([row["name"] for row in work_limits] == OBSERVATION_WORK_LIMITS_FIELDS,
             f"observationWorkLimits names exactly {OBSERVATION_WORK_LIMITS_FIELDS}")
@@ -580,6 +599,11 @@ def validate(document: object) -> None:
             f"observationAdmission names exactly {OBSERVATION_ADMISSION_FIELDS}")
     require([row["type"] for row in admission] == OBSERVATION_ADMISSION_TYPES,
             f"observationAdmission types exactly {OBSERVATION_ADMISSION_TYPES}")
+    capture_identity = structures["observationCaptureIdentity"]["fields"]
+    require([row["name"] for row in capture_identity] == OBSERVATION_CAPTURE_IDENTITY_FIELDS,
+            f"observationCaptureIdentity names exactly {OBSERVATION_CAPTURE_IDENTITY_FIELDS}")
+    require([row["type"] for row in capture_identity] == OBSERVATION_CAPTURE_IDENTITY_TYPES,
+            f"observationCaptureIdentity types exactly {OBSERVATION_CAPTURE_IDENTITY_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")

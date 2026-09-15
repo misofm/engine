@@ -90,13 +90,13 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationAdmission, WebObservationDemand,
-    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
-    WebObservationResult, WebObservationSelection, WebObservationWorkLimits,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
-    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
-    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationAdmission, WebObservationCaptureIdentity,
+    WebObservationDemand, WebObservationIngressLimits, WebObservationPreparationRecord,
+    WebObservationReceipt, WebObservationResult, WebObservationSelection, WebObservationStatus,
+    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
+    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -563,6 +563,54 @@ fn observation_selection_fields() -> [Field; 8] {
             "reserved",
             offset_of!(WebObservationSelection, reserved),
             "u32",
+        ),
+    ]
+}
+
+fn observation_status_fields() -> [Field; 11] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationStatus, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationStatus, abi_version),
+            "u32",
+        ),
+        ("profile", offset_of!(WebObservationStatus, profile), "u32"),
+        ("flags", offset_of!(WebObservationStatus, flags), "u32"),
+        (
+            "pendingCount",
+            offset_of!(WebObservationStatus, pending_count),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebObservationStatus, reserved),
+            "u32",
+        ),
+        ("owner", offset_of!(WebObservationStatus, owner), "u64"),
+        (
+            "ingressEpoch",
+            offset_of!(WebObservationStatus, ingress_epoch),
+            "u64",
+        ),
+        (
+            "acceptedGeneration",
+            offset_of!(WebObservationStatus, accepted_generation),
+            "u64",
+        ),
+        (
+            "appliedGeneration",
+            offset_of!(WebObservationStatus, applied_generation),
+            "u64",
+        ),
+        (
+            "selectionEpoch",
+            offset_of!(WebObservationStatus, selection_epoch),
+            "u64",
         ),
     ]
 }
@@ -1344,6 +1392,51 @@ fn observation_admission_fields() -> [Field; 21] {
             OBSERVATION_ADMISSION_RECEIPT_NAMES[8],
             receipt_offset + receipt[8].1,
             receipt[8].2,
+        ),
+    ]
+}
+
+fn observation_capture_identity_fields() -> [Field; 8] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationCaptureIdentity, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationCaptureIdentity, abi_version),
+            "u32",
+        ),
+        (
+            "kind",
+            offset_of!(WebObservationCaptureIdentity, kind),
+            "u32",
+        ),
+        (
+            "flags",
+            offset_of!(WebObservationCaptureIdentity, flags),
+            "u32",
+        ),
+        (
+            "owner",
+            offset_of!(WebObservationCaptureIdentity, owner),
+            "u64",
+        ),
+        (
+            "observationGeneration",
+            offset_of!(WebObservationCaptureIdentity, observation_generation),
+            "u64",
+        ),
+        (
+            "selectionEpoch",
+            offset_of!(WebObservationCaptureIdentity, selection_epoch),
+            "u64",
+        ),
+        (
+            "snapshotToken",
+            offset_of!(WebObservationCaptureIdentity, snapshot_token),
+            "u64",
         ),
     ]
 }
@@ -2548,6 +2641,13 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
+        "observationStatus",
+        size_of::<WebObservationStatus>() as u32,
+        &observation_status_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
         "observationWorkLimits",
         size_of::<WebObservationWorkLimits>() as u32,
         &observation_work_limits_fields(),
@@ -2586,6 +2686,13 @@ pub fn render() -> String {
         "observationAdmission",
         size_of::<WebObservationAdmission>() as u32,
         &observation_admission_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationCaptureIdentity",
+        size_of::<WebObservationCaptureIdentity>() as u32,
+        &observation_capture_identity_fields(),
         true,
     );
     render_structure(
