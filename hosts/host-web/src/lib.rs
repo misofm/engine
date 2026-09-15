@@ -700,6 +700,38 @@ pub const OBSERVATION_CAPTURE_KIND_RESPONSE: u32 = 1;
 pub const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
 /// A capture identity carries graph-generation fields.
 pub const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
+/// No observation refusal was recorded.
+pub const OBSERVATION_REFUSAL_REASON_NONE: u32 = 0;
+/// No prepared observation owner exists for the operation.
+pub const OBSERVATION_REFUSAL_REASON_NOT_PREPARED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::NotPrepared);
+/// A handle belongs to another observation owner.
+pub const OBSERVATION_REFUSAL_REASON_WRONG_OWNER: u32 =
+    observation_refusal_reason(ObservationRefusalReason::WrongOwner);
+/// The requested selection exceeds a configured capacity.
+pub const OBSERVATION_REFUSAL_REASON_CAPACITY: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Capacity);
+/// The requested selection exceeds an inclusive work or retained-byte limit.
+pub const OBSERVATION_REFUSAL_REASON_WORK_BUDGET: u32 =
+    observation_refusal_reason(ObservationRefusalReason::WorkBudget);
+/// A bounded publication or application credit is occupied.
+pub const OBSERVATION_REFUSAL_REASON_BACKPRESSURE: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Backpressure);
+/// The requested removal is not a subset of the accepted selection.
+pub const OBSERVATION_REFUSAL_REASON_CONFLICT: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Conflict);
+/// The observation owner has reached terminal closure.
+pub const OBSERVATION_REFUSAL_REASON_CLOSED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Closed);
+/// The request is not valid for this owner or tranche.
+pub const OBSERVATION_REFUSAL_REASON_INVALID_REQUEST: u32 =
+    observation_refusal_reason(ObservationRefusalReason::InvalidRequest);
+/// Checked identity, cost, or allocation arithmetic overflowed.
+pub const OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW: u32 =
+    observation_refusal_reason(ObservationRefusalReason::ArithmeticOverflow);
+/// No further observation revision can be represented.
+pub const OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::RevisionExhausted);
 /// A protected continuous-spectrum read preserves either its exact admission refusal or the
 /// complete native availability outcome. The public Rust compatibility facade maps this typed
 /// seam back to [`SpectrumContinuousReadError`] after the native result has been retained.
@@ -728,7 +760,7 @@ fn observation_not_prepared() -> ObservationRefusal {
     }
 }
 
-fn observation_refusal_reason(reason: ObservationRefusalReason) -> u32 {
+const fn observation_refusal_reason(reason: ObservationRefusalReason) -> u32 {
     match reason {
         ObservationRefusalReason::NotPrepared => 1,
         ObservationRefusalReason::WrongOwner => 2,
