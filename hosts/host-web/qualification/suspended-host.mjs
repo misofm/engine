@@ -326,7 +326,11 @@ async function runSuspendedFixture(urls) {
   };
   let context = null;
   let activeHost = null;
+  let resumeTarget = null;
+  let resumeOwner = null;
   let resumeDescriptor = null;
+  let resumeOwnDescriptor = null;
+  let resumeResolution = null;
   let resumeTrapInstalled = false;
   let resumeAttempts = 0;
   let nativeResumeCalls = 0;
@@ -498,7 +502,7 @@ async function runSuspendedFixture(urls) {
       try {
         assertStatus(mutated, host, `red.${field}`);
       } catch (error) {
-        refused = error.code === "STATUS_ASSERTION" && error.field === `red.${field}`;
+        refused = error.code === "STATUS_ASSERTION" && error.field === `red.${field}.${field}`;
       }
       gate(`red.${field}`, refused, "rendered-counter mutation was accepted");
       redControls.renderedCounterMutations[field] = { outcome: "refused", mutatedValue: mutated[field].toString() };
@@ -589,25 +593,59 @@ async function runSuspendedFixture(urls) {
     },
   };
   try {
-    const resumePrototype = AudioContext.prototype;
-    resumeDescriptor = Object.getOwnPropertyDescriptor(resumePrototype, "resume");
-    if (resumeDescriptor === undefined || typeof resumeDescriptor.value !== "function") {
-      throw fixtureFailure("AudioContext.prototype.resume is not an own callable method", "RESUME_TRAP_INSTALL");
+    resumeTarget = AudioContext.prototype;
+    resumeOwnDescriptor = Object.getOwnPropertyDescriptor(resumeTarget, "resume");
+    let candidatePrototype = resumeTarget;
+    let ownerDepth = 0;
+    while (candidatePrototype !== null) {
+      const candidateDescriptor = Object.getOwnPropertyDescriptor(candidatePrototype, "resume");
+      if (candidateDescriptor !== undefined) {
+        if (typeof candidateDescriptor.value !== "function") {
+          throw fixtureFailure(
+            `resolved resume descriptor at prototype depth ${ownerDepth} is not callable`,
+            "RESUME_TRAP_INSTALL",
+          );
+        }
+        resumeOwner = candidatePrototype;
+        resumeDescriptor = candidateDescriptor;
+        break;
+      }
+      candidatePrototype = Object.getPrototypeOf(candidatePrototype);
+      ownerDepth += 1;
     }
+    if (resumeDescriptor === null) {
+      throw fixtureFailure("AudioContext prototype chain has no callable resume method", "RESUME_TRAP_INSTALL");
+    }
+    const ownerName = resumeOwner === resumeTarget
+      ? "AudioContext.prototype"
+      : `${resumeOwner?.constructor?.name ?? "unknown"}.prototype`;
+    resumeResolution = {
+      target: "AudioContext.prototype",
+      owner: ownerName,
+      ownerDepth,
+      callable: typeof resumeDescriptor.value === "function",
+      originalOwnDescriptor: resumeOwnDescriptor === undefined ? null : {
+        configurable: resumeOwnDescriptor.configurable,
+        enumerable: resumeOwnDescriptor.enumerable,
+        writable: resumeOwnDescriptor.writable,
+        callable: typeof resumeOwnDescriptor.value === "function",
+      },
+    };
     const resumeTrap = function suspendedQualificationResumeTrap() {
       resumeAttempts += 1;
       return Promise.reject(fixtureFailure("resume refused by qualification trap", "RESUME_TRAP"));
     };
-    Object.defineProperty(resumePrototype, "resume", { ...resumeDescriptor, value: resumeTrap });
+    Object.defineProperty(resumeTarget, "resume", { ...resumeDescriptor, value: resumeTrap });
     resumeTrapInstalled = true;
 
     context = await runStage("create.realAudioContext", () => new AudioContext({ sampleRate: SAMPLE_RATE }));
     initialContext = clock();
-    if (initialContext.state === "running") {
-      await runStage("suspend.initialRunningContext", () => context.suspend());
-    } else if (initialContext.state !== "suspended") {
-      throw fixtureFailure(`real AudioContext started in ${initialContext.state}`, "CONTEXT_STATE");
-    }
+    gate(
+      "initialContext.state",
+      initialContext.state === "suspended" || initialContext.state === "running",
+      `unexpected initial state ${initialContext.state}`,
+    );
+    await runStage("suspend.initialContext", () => context.suspend());
     gate("postSuspension.state", context.state === "suspended", `was ${context.state}`);
     currentTimeBaseline = context.currentTime;
     report.initialContext = initialContext;
@@ -679,8 +717,20 @@ async function runSuspendedFixture(urls) {
     else cleanup.push({ label: "cleanup.context.close", outcome: "not-created" });
     if (resumeTrapInstalled) {
       try {
-        Object.defineProperty(AudioContext.prototype, "resume", resumeDescriptor);
-        cleanup.push({ label: "cleanup.resumeTrap.restore", outcome: "pass" });
+        if (resumeOwnDescriptor === undefined) {
+          if (!delete resumeTarget.resume) {
+            throw fixtureFailure("temporary own resume trap could not be deleted", "RESUME_TRAP_RESTORE");
+          }
+        } else {
+          Object.defineProperty(resumeTarget, "resume", resumeOwnDescriptor);
+        }
+        cleanup.push({
+          label: "cleanup.resumeTrap.restore",
+          outcome: "pass",
+          action: resumeOwnDescriptor === undefined ? "deleted-own-trap" : "restored-original-own-descriptor",
+          owner: resumeResolution?.owner,
+          callable: resumeResolution?.callable,
+        });
       } catch (error) {
         cleanup.push({ label: "cleanup.resumeTrap.restore", outcome: "unknown-after-loss", error: errorDetails(error) });
       }
@@ -692,6 +742,7 @@ async function runSuspendedFixture(urls) {
 
   report.initialContext = initialContext;
   report.postSuspension = report.postSuspension ?? null;
+  report.resumeResolution = resumeResolution;
   report.finalContextBeforeTeardown = finalContextBeforeTeardown;
   report.currentTimeBaseline = currentTimeBaseline;
   report.resumeAttempts = resumeAttempts;
