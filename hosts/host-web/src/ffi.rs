@@ -1201,7 +1201,10 @@ fn commit_protected_spectrum_window(
         let at = right_offset + index * size_of::<f32>();
         bytes[at..at + size_of::<f32>()].copy_from_slice(&value.to_le_bytes());
     }
-    debug_assert!(copy_live_record(bytes, 0, &header));
+    assert!(
+        copy_live_record(bytes, 0, &header),
+        "protected spectrum header capacity was preflighted"
+    );
     staging.capture_len = total_bytes;
     staging.result_len = 0;
 }
@@ -3316,16 +3319,6 @@ fn protected_spectrum_stream_read(handle: u32) -> u32 {
                 Ok(cadence) => cadence,
                 Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
             };
-            if !staging.stream_active || staging.stream_cadence != Some(cadence) {
-                return protected_spectrum_read_refusal(
-                    host,
-                    ObservationRefusalReason::InvalidRequest,
-                    None,
-                    None,
-                    None,
-                );
-            }
-
             let header_bytes = usize::try_from(SPECTRUM_WINDOW_HEADER_BYTES)
                 .expect("fixed spectrum header fits usize");
             let plane_bytes = (SPECTRUM_WINDOW_FRAMES as usize) * size_of::<f32>();
@@ -8233,6 +8226,92 @@ mod observation_checkpoint_c2a_tests {
                 + host_core::SPECTRUM_WINDOW_FRAMES * size_of::<f32>()
         );
         dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_writes_raw_header_bytes_in_release_safe_path() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert!(
+                bytes[..SPECTRUM_WINDOW_HEADER_BYTES as usize]
+                    .iter()
+                    .any(|byte| *byte != 0),
+                "the committed header must contain raw bytes in release builds"
+            );
+            let header: WebSpectrumWindow =
+                read_live_record(bytes, 0).expect("committed protected header");
+            assert_eq!(header.struct_size, SPECTRUM_WINDOW_HEADER_BYTES);
+            assert_eq!(header.abi_version, ABI_VERSION);
+            assert_eq!(header.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+            assert_eq!(header.channels, SPECTRUM_CHANNEL_BOTH);
+            assert_eq!(header.frames, SPECTRUM_WINDOW_FRAMES);
+            assert_eq!(header.snapshot_token, 1);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_reports_native_inactive_before_and_after_stop() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let booted = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(booted),
+            RESULT_WRONG_STATE
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_WRONG_STATE);
+            assert_eq!(host.observation_admission().reason, 0);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_INACTIVE
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        dispose(booted);
+
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let stopped = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(stopped, 0.0),
+            RESULT_OK
+        );
+        render_one_block(stopped);
+        assert_eq!(miso_engine_web_v1_observation_application_take(stopped), 1);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(stopped), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(stopped),
+            RESULT_WRONG_STATE
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_WRONG_STATE);
+            assert_eq!(host.observation_admission().reason, 0);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_INACTIVE
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        dispose(stopped);
     }
 
     #[test]
