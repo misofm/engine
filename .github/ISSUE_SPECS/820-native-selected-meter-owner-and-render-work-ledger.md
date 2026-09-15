@@ -263,3 +263,15 @@ Test the defensive stale-generation helper with actual MeterAccumulator-produced
 
 At the coherent issue boundary, run existing host-core native/control-provider tests, proportional shared-preparation/compiler realtime checks, and the existing Wasm build once. No new benchmark infrastructure, timed run, broad fixture matrix, or future SDK scaffolding. Root checkpoints/delivers in the active delivery mode; final fresh adversarial review and upstream GitHub synchronization remain required before closure.
 
+
+## B1 evidence
+
+Fresh Luna MAX added the frozen public records, checked process-local owner IDs,
+and private pure meter budget. Preflight takes a selected meter count, avoiding
+request-object reconstruction during later admission. Only fixed transition and
+retained reservations survive into empty-selection cost; spectrum work stays zero
+and nonzero spectrum demand is refused. Tests cover unique/sticky-exhausted IDs,
+exact/one-below limits, checked overflow, empty/fixed costs and failed projection
+preserving accepted work. Nine focused tests PASS with and without control-provider;
+formatting/diff PASS. Only observation_demand.rs and lib.rs exports changed.
+Host preparation and admission remain the sequential B2 tasks.

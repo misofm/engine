@@ -95,6 +95,7 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod observation_demand;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -123,6 +124,11 @@ pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+};
+pub use observation_demand::{
+    HostMeterId, ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
+    ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
+    ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
 };
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
