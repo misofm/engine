@@ -6217,6 +6217,16 @@ pub(crate) mod live_response_ffi_tests {
         });
     }
 
+    fn assert_response_staging_markers(markers: &ResponseMarkers) {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.live_result, markers.raw_result);
+            assert_eq!(staging.live_result_len, markers.live_result_len);
+            assert_eq!(staging.live_token, markers.live_token);
+            assert_eq!(staging.live_result_header, markers.live_result_header);
+        });
+    }
+
     fn boot_private_protected() -> u32 {
         no_live_host();
         RESPONSE_STAGING.with(|slot| slot.borrow_mut().reset());
@@ -6307,7 +6317,47 @@ pub(crate) mod live_response_ffi_tests {
             );
         });
         assert_response_markers(&markers);
+
+        RESPONSE_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_response_markers(&markers);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_handles_preserve_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request(b"eq0");
+        let markers = seed_response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(0),
+            RESULT_WRONG_STATE
+        );
+        assert_response_markers(&markers);
+
+        let unrelated = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(unrelated),
+            RESULT_WRONG_STATE
+        );
+        assert_response_markers(&markers);
+
+        let committed_identity = markers.capture_identity;
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_WRONG_STATE
+        );
+        assert_response_staging_markers(&markers);
+        let terminal_identity =
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.capture_identity);
+        assert_eq!(terminal_identity, committed_identity);
     }
 
     #[test]
