@@ -1424,6 +1424,35 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     folds: u64,
 }
 
+/// Layout witness for the retained [`Runtime`] owner without observation activation state.
+///
+/// This mirror intentionally keeps every current runtime field except the optional activation
+/// endpoint, its dispatch cursor, and its failure-invalidation flag. The containing executor
+/// witness in `lib.rs` uses the corresponding owner-level delta for the retained accounting term;
+/// this runtime-level witness remains available to independently prove the nested layout.
+#[allow(dead_code)]
+pub(crate) struct RuntimeWithoutObservationActivation {
+    pub(crate) lease: ArenaLease,
+    pub(crate) delays: Box<[CompensationDelay]>,
+    pub(crate) track_delays: Box<[TrackDelayLine]>,
+    pub(crate) units: Box<[RuntimeUnit]>,
+    pub(crate) split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
+    pub(crate) identity: Box<[UnitIdentity]>,
+    pub(crate) response_bindings: Box<[ResponseOwnerBinding]>,
+    pub(crate) bank_inputs: Box<[u32]>,
+    pub(crate) bank_outputs: Box<[u32]>,
+    pub(crate) redirects: u64,
+    pub(crate) folds: u64,
+}
+
+pub(crate) fn observation_runtime_layout() -> Option<u64> {
+    u64::try_from(
+        core::mem::size_of::<Runtime>()
+            .checked_sub(core::mem::size_of::<RuntimeWithoutObservationActivation>())?,
+    )
+    .ok()
+}
+
 pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
     (
         u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())

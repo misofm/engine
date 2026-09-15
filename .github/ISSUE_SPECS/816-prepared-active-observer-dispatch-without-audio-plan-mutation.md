@@ -311,3 +311,26 @@ implements the defined test-only work counters, mixed controlled direct/alias/
 permanent order case, failure allocation guard and pending-close receipt case.
 Keep one uncommitted source tranche. Attempt 2 receives one adversarial verdict
 after both corrections and focused gates are complete.
+
+Attempt-2 discriminator seam: hidden test-only runtime counters record observer
+object accesses and bank-member accesses at the actual legacy-loop/selected-lookup
+sites, independently of callbacks. The transition counter resets at boundary
+entry and counts consumed old/new entries at every index advance. A mixed five-row
+fixture uses controlled direct handle20, permanent direct10, controlled alias1,
+permanent alias30 on the first bank lane, plus controlled direct40 on tail lane2;
+fixed/candidate bindings keep identical handle/node order. Expected all-active
+ordinals are [1,0,2,3,4], stopped controlled ordinals [1,3]. Two unchanged admitted
+transitions consume20 entries with zero hooks at maxcontrolled3/permanent2. Reuse
+the existing allocator fixture on failure and serialize mode-changing tests only
+with a control-side test mutex because allocator mode is process-global. A pending
+owner-close test retains a prior applied receipt without inventing one for the
+unapplied removal. Full bounded handoff: /tmp/observation-816-discriminator-brief.md.
+
+Attempt 2 accounting checkpoint: checked containing-layout witnesses now charge
+the controller and runtime state in activation retained bytes, while preserving
+a heap-only largest-allocation report. Baseline graph metadata charges runtime
+state and documents the overlap. Independent layout/resource tests cover the
+combined accounting. Luna accounting validation: graph library 79/79,
+graph-compiler library 73/73, graph check, all-target Clippy with warnings denied,
+formatting and diff checks passed. Dispatch discriminators and the independent
+attempt-2 verdict remain pending; this is not an issue completion claim.

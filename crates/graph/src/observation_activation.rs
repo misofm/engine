@@ -28,10 +28,17 @@ pub struct GraphObservationActivationConfig {
 /// Exact retained storage and transition limits for one prepared activation transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphObservationActivationResources {
-    /// Sum of every prepared activation allocation, including queue payloads and endpoints.
+    /// Sum of every prepared activation allocation, including queue payloads, endpoints, and the
+    /// containing executor's inline observation state. The latter overlaps baseline graph runtime
+    /// metadata and is identified separately by [`Self::runtime_state_bytes`].
     pub retained_bytes: u64,
-    /// Largest single prepared activation allocation.
+    /// Largest activation-owned standalone heap allocation. Inline controller and executor state
+    /// are retained in [`Self::retained_bytes`] but are not standalone allocations.
     pub largest_allocation_bytes: u64,
+    /// The containing graph executor layout delta occupied by observation activation state. A
+    /// combined graph and activation estimate subtracts this once when the graph estimate already
+    /// includes runtime metadata.
+    pub runtime_state_bytes: u64,
     /// The configured controlled-observer population limit.
     pub maximum_active_observers: usize,
     /// Checked bound for one ordinary transition or two transitions at one boundary.
@@ -796,15 +803,24 @@ fn activation_resources(
         rows[12] = u64::try_from(retirement.slot_payload_bytes)
             .map_err(|_| GraphObservationAdmissionError::RetainedBytes)?;
     }
-    let retained_bytes = rows.iter().try_fold(0_u64, |total, row| {
+    let heap_bytes = rows.iter().try_fold(0_u64, |total, row| {
         total
             .checked_add(*row)
             .ok_or(GraphObservationAdmissionError::RetainedBytes)
     })?;
+    let (_, runtime_state_bytes) =
+        crate::observation_runtime_layout().ok_or(GraphObservationAdmissionError::RetainedBytes)?;
+    let controller_bytes = u64::try_from(core::mem::size_of::<GraphObservationController>())
+        .map_err(|_| GraphObservationAdmissionError::RetainedBytes)?;
+    let retained_bytes = heap_bytes
+        .checked_add(controller_bytes)
+        .and_then(|total| total.checked_add(runtime_state_bytes))
+        .ok_or(GraphObservationAdmissionError::RetainedBytes)?;
     let largest_allocation_bytes = rows.iter().copied().max().unwrap_or(0);
     Ok(GraphObservationActivationResources {
         retained_bytes,
         largest_allocation_bytes,
+        runtime_state_bytes,
         maximum_active_observers,
         maximum_transition_entry_visits_per_block,
     })
@@ -819,6 +835,15 @@ fn layout_array<T>(length: usize) -> Result<u64, GraphObservationAdmissionError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn independent_layout<T>(length: usize) -> u64 {
+        u64::try_from(
+            Layout::array::<T>(length)
+                .expect("independent layout")
+                .size(),
+        )
+        .expect("independent layout fits u64")
+    }
 
     fn catalog() -> Box<[ActivationBinding]> {
         vec![
@@ -958,6 +983,94 @@ mod tests {
         assert_eq!(
             controller.replace(&[]),
             Err(GraphObservationAdmissionError::OwnerClosed)
+        );
+    }
+
+    #[test]
+    fn resource_report_matches_independent_heap_and_inline_layout_oracle() {
+        let permanent = [ActivationEntry {
+            unit: 0,
+            member: None,
+            observer: 9,
+            ordinal: 0,
+        }];
+        let maximum_active_observers = 3;
+        let (controller, _) = prepare_activation(
+            catalog(),
+            &permanent,
+            GraphObservationActivationConfig {
+                maximum_active_observers,
+                maximum_retained_bytes: u64::MAX,
+            },
+        )
+        .expect("activation");
+        let resources = controller.resources();
+        let snapshot_capacity = maximum_active_observers + permanent.len();
+        let catalog_bytes = independent_layout::<ActivationBinding>(2);
+        let permanent_bytes = independent_layout::<ActivationEntry>(permanent.len());
+        let accepted_bytes = independent_layout::<u64>(maximum_active_observers);
+        let snapshot_bytes = independent_layout::<ActivationEntry>(snapshot_capacity);
+        let alive_bytes = independent_layout::<SharedRendererAlive>(1);
+        let publication =
+            bounded_spsc_retained_payload::<PublishedSnapshot>(NonZeroUsize::new(1).expect("one"))
+                .expect("publication layout");
+        let removal =
+            bounded_spsc_retained_payload::<PublishedSnapshot>(NonZeroUsize::new(1).expect("one"))
+                .expect("removal layout");
+        let retirement =
+            bounded_spsc_retained_payload::<RetiredSnapshot>(NonZeroUsize::new(2).expect("two"))
+                .expect("retirement layout");
+        assert_eq!(
+            publication.slot_count, 2,
+            "publication includes sentinel slot"
+        );
+        assert_eq!(removal.slot_count, 2, "removal includes sentinel slot");
+        assert_eq!(
+            retirement.slot_count, 3,
+            "retirement includes sentinel slot"
+        );
+
+        let queue_bytes = |payload: engine::realtime::SpscRetainedPayload| {
+            u64::try_from(payload.ring_header_bytes)
+                .expect("ring header fits u64")
+                .checked_add(u64::try_from(payload.slot_payload_bytes).expect("slots fit u64"))
+                .expect("queue layout fits u64")
+        };
+        let heap_rows = [
+            snapshot_bytes,
+            snapshot_bytes,
+            snapshot_bytes,
+            catalog_bytes,
+            permanent_bytes,
+            accepted_bytes,
+            alive_bytes,
+            u64::try_from(publication.ring_header_bytes).expect("ring header fits u64"),
+            u64::try_from(publication.slot_payload_bytes).expect("slots fit u64"),
+            u64::try_from(removal.ring_header_bytes).expect("ring header fits u64"),
+            u64::try_from(removal.slot_payload_bytes).expect("slots fit u64"),
+            u64::try_from(retirement.ring_header_bytes).expect("ring header fits u64"),
+            u64::try_from(retirement.slot_payload_bytes).expect("slots fit u64"),
+        ];
+        let heap_total = heap_rows
+            .iter()
+            .try_fold(0_u64, |total, row| total.checked_add(*row))
+            .expect("heap layout fits u64");
+        let controller_bytes = u64::try_from(core::mem::size_of::<GraphObservationController>())
+            .expect("controller layout fits u64");
+        let (_, runtime_state_bytes) = crate::test_only_observation_runtime_layout();
+        let expected_retained = heap_total
+            .checked_add(controller_bytes)
+            .and_then(|total| total.checked_add(runtime_state_bytes))
+            .expect("activation layout fits u64");
+        assert_eq!(resources.retained_bytes, expected_retained);
+        assert_eq!(resources.runtime_state_bytes, runtime_state_bytes);
+        assert_eq!(
+            resources.largest_allocation_bytes,
+            heap_rows.iter().copied().max().expect("heap rows")
+        );
+        assert_eq!(
+            queue_bytes(publication) + queue_bytes(removal) + queue_bytes(retirement),
+            heap_rows[7..].iter().sum::<u64>()
         );
     }
 }

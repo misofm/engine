@@ -274,6 +274,10 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
     pub runtime_owner_field_bytes: u64,
     pub runtime_owner_allocation_bytes: u64,
+    /// The actual containing [`GraphExecutor`] layout delta occupied by observation activation
+    /// state. This inline runtime term is charged for every graph, including graphs without an
+    /// activation controller, and overlaps the activation report's `runtime_state_bytes` field.
+    pub observation_runtime_state_bytes: u64,
     /// Boxed response-owner binding table retained by the prepared runtime.
     pub response_binding_table_bytes: u64,
     /// Payload bytes retained by the per-owner stable-id and track-id strings.
@@ -304,6 +308,7 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime::scalar_split_op_layout();
         let (runtime_owner_field_bytes, runtime_owner_allocation_bytes) =
             scalar_split_runtime_owner_layout();
+        let (_, observation_runtime_state_bytes) = observation_runtime_layout()?;
         let runtime_op_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeOp>())
             .expect("runtime op layout fits u64");
         let runtime_unit_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>())
@@ -318,7 +323,9 @@ impl GraphRuntimeMetadataResourceEstimate {
                 .expect("response binding layout fits u64");
         let response_binding_table_bytes =
             response_binding_entry_bytes.checked_mul(response_binding_count)?;
-        let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
+        let total_bytes = runtime_field_bytes
+            .checked_add(emitted_op_delta_bytes)?
+            .checked_add(observation_runtime_state_bytes)?;
         let total_bytes = total_bytes
             .checked_add(response_binding_table_bytes)?
             .checked_add(response_binding_string_bytes)?;
@@ -332,6 +339,7 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime_unit_containing_bytes,
             runtime_owner_field_bytes,
             runtime_owner_allocation_bytes,
+            observation_runtime_state_bytes,
             response_binding_table_bytes,
             response_binding_string_bytes,
             largest_response_binding_string_bytes,
@@ -2026,6 +2034,48 @@ struct GraphExecutorWithoutSplitPairTable {
     source_input_buffers: Box<[(usize, u32)]>,
 }
 
+/// Same retained executor owner with observation activation state removed from its embedded
+/// runtime. The difference from [`GraphExecutor`] is the exact inline runtime contribution used
+/// by activation accounting; all other fields stay identical so owner padding is included.
+#[allow(dead_code)]
+struct GraphExecutorWithoutObservationActivation {
+    runtime: runtime::RuntimeWithoutObservationActivation,
+    output: u32,
+    sample_rate_hz: u32,
+    source_set: Option<GraphPreparedSourceSet>,
+    source_input_buffers: Box<[(usize, u32)]>,
+}
+
+pub(crate) fn observation_runtime_layout() -> Option<(u64, u64)> {
+    let runtime_state_bytes = runtime::observation_runtime_layout()?;
+    let owner_state_bytes = u64::try_from(core::mem::size_of::<GraphExecutor>().checked_sub(
+        core::mem::size_of::<GraphExecutorWithoutObservationActivation>(),
+    )?)
+    .ok()?;
+    Some((runtime_state_bytes, owner_state_bytes))
+}
+
+#[cfg(test)]
+pub(crate) fn test_only_observation_runtime_layout() -> (u64, u64) {
+    let runtime_state_bytes = u64::try_from(
+        core::mem::size_of::<runtime::Runtime>()
+            .checked_sub(core::mem::size_of::<
+                runtime::RuntimeWithoutObservationActivation,
+            >())
+            .expect("observation runtime witness layout"),
+    )
+    .expect("observation runtime witness fits u64");
+    let owner_state_bytes = u64::try_from(
+        core::mem::size_of::<GraphExecutor>()
+            .checked_sub(core::mem::size_of::<
+                GraphExecutorWithoutObservationActivation,
+            >())
+            .expect("observation executor witness layout"),
+    )
+    .expect("observation executor witness fits u64");
+    (runtime_state_bytes, owner_state_bytes)
+}
+
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
     let field_delta = core::mem::size_of::<GraphExecutor>()
         .checked_sub(core::mem::size_of::<GraphExecutorWithoutSplitPairTable>())
@@ -2697,10 +2747,28 @@ mod tests {
         );
         let (_, runtime_field) = runtime::scalar_split_runtime_layout();
         let (executor_field, executor_size) = scalar_split_runtime_owner_layout();
+        let runtime_state = u64::try_from(
+            core::mem::size_of::<runtime::Runtime>()
+                .checked_sub(core::mem::size_of::<
+                    runtime::RuntimeWithoutObservationActivation,
+                >())
+                .expect("observation runtime witness layout"),
+        )
+        .expect("observation runtime witness fits u64");
+        let owner_state = u64::try_from(
+            core::mem::size_of::<GraphExecutor>()
+                .checked_sub(core::mem::size_of::<
+                    GraphExecutorWithoutObservationActivation,
+                >())
+                .expect("observation executor witness layout"),
+        )
+        .expect("observation executor witness fits u64");
         assert_eq!(resource.runtime_field_bytes, runtime_field);
         assert_eq!(resource.runtime_op_layout_delta_bytes, op_delta);
         assert_eq!(resource.runtime_unit_layout_delta_bytes, unit_delta);
         assert_eq!(resource.runtime_owner_field_bytes, executor_field);
+        assert_eq!(resource.observation_runtime_state_bytes, owner_state);
+        assert_eq!(runtime::observation_runtime_layout(), Some(runtime_state));
         assert_eq!(
             resource.emitted_op_layout_delta_bytes,
             op_delta.max(unit_delta)
@@ -2709,7 +2777,7 @@ mod tests {
         assert_eq!(resource.runtime_unit_containing_bytes, unit_size * emitted);
         assert_eq!(
             resource.total_bytes,
-            runtime_field + op_delta.max(unit_delta) * emitted
+            runtime_field + op_delta.max(unit_delta) * emitted + owner_state
         );
         assert_eq!(
             resource.largest_allocation_bytes,
@@ -2741,6 +2809,64 @@ mod tests {
         assert!(estimate.checked_add_runtime_metadata(resource).is_none());
         assert_eq!(estimate, overflow_before);
         assert_ne!(overflow_before, before);
+    }
+
+    #[test]
+    fn observation_runtime_state_is_charged_for_empty_graph_and_overlaps_activation_once() {
+        let baseline =
+            GraphRuntimeMetadataResourceEstimate::checked_for(0).expect("zero-op runtime metadata");
+        let runtime_state = u64::try_from(
+            core::mem::size_of::<runtime::Runtime>()
+                .checked_sub(core::mem::size_of::<
+                    runtime::RuntimeWithoutObservationActivation,
+                >())
+                .expect("observation runtime witness layout"),
+        )
+        .expect("observation runtime witness fits u64");
+        let owner_state = u64::try_from(
+            core::mem::size_of::<GraphExecutor>()
+                .checked_sub(core::mem::size_of::<
+                    GraphExecutorWithoutObservationActivation,
+                >())
+                .expect("observation executor witness layout"),
+        )
+        .expect("observation executor witness fits u64");
+        assert_eq!(baseline.observation_runtime_state_bytes, owner_state);
+        assert_eq!(runtime::observation_runtime_layout(), Some(runtime_state));
+        assert_eq!(
+            baseline.total_bytes,
+            baseline.runtime_field_bytes + owner_state
+        );
+
+        let catalog = vec![observation_activation::ActivationBinding {
+            handle: 1,
+            entry: observation_activation::ActivationEntry {
+                unit: 0,
+                member: None,
+                observer: 0,
+                ordinal: 1,
+            },
+        }]
+        .into_boxed_slice();
+        let (controller, _realtime) = observation_activation::prepare_activation(
+            catalog,
+            &[],
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        )
+        .expect("activation resource report");
+        let activation = controller.resources();
+        let combined = baseline
+            .total_bytes
+            .checked_add(activation.retained_bytes)
+            .and_then(|total| total.checked_sub(owner_state))
+            .expect("combined runtime accounting");
+        assert_eq!(
+            combined,
+            baseline.total_bytes + activation.retained_bytes - activation.runtime_state_bytes
+        );
     }
 
     #[test]
