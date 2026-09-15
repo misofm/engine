@@ -27,3 +27,33 @@ Order: this E0 decision → aggregate accounting/ownership contract → bounded 
 ## Closure and evidence record
 
 One stateless issue record and matching GitHub issue/title/number are the allowed tracked outcome. A fresh Luna MAX agent appends the source-backed capability table and conditional decision to this body in one bounded round; root commits/pushes that exact-path checkpoint; fresh Astra MEDIUM adversarially verifies it. No runtime/app/source implementation or benchmark corpus belongs here. Record which facts are verified, which costs/feasibility remain unproven, and the named successor issues/owners. The **one issue-wide implementation ceiling** is Luna MAX at most two attempts, then Sol HIGH one, then Astra XHIGH one if still unsatisfactory; each candidate gets fresh Astra MEDIUM review. Agent replacement, checkpoint or prose slice never resets that ledger. Close only after PASS evidence commit is upstream and GitHub body/state match. This issue establishes no full app rollout ETA.
+
+## Reviewed source-backed decision record
+
+**Review basis:** current app `f38a34dc12b81e22462c3fd8fadf44489c00e590` at `/tmp/miso-app-e0-scope` and current engine `d31773151a80397f710e31a045e690f2d6a2f1c1`. This is a policy-only review of the paths below; it does not implement or qualify a combined host.
+
+| Classification | Capability or boundary | Evidence and interpretation |
+|---|---|---|
+| **Verified — app** | Opening builds a finite `trackPostMatrix`/`both` spectrum collection and passes ordinary console observation taps; the capture allowance is multiplied per prepared target. | `src/lib/mixer/engine/open-session.ts:291-305`; `src/lib/mixer/spectrum.ts:35-60`. The per-target allowance is not an aggregate monitoring budget. |
+| **Verified — app** | The ordinary meter publication carries track/master peaks, track/master GR, validity/loss, and absolute `firstSample`/`endSample`; a valid nonempty span re-anchors the playback clock. Paused seek waits for target-generation PCM prefill before playback. | `src/lib/mixer/engine/index.ts:1361-1385,1643-1682`; `src/lib/mixer/engine/index.ts:611-628`. These are preservation baselines, not new coexistence guarantees. |
+| **Verified — app** | Spectrum and response have separate reader/mount paths; display spectrum may retain a recent valid result across a gap. | `src/lib/mixer/engine/index.ts:402-403,448-456`; `src/lib/mixer/spectrum.ts:22-32`. This supports keeping paused response preview a separate calculation path. |
+| **Verified — engine** | Protected preparation rejects nonzero console options and meters, requires one active observer and one stereo post-matrix target, and response capture requires that exact prepared target. | `hosts/host-web/src/lib.rs:1945-2010,3561-3588`. |
+| **Verified — engine** | Ordinary/protected preparation conflicts; protected spectrum selection and meter lease are refused; resident taps are refused. | `hosts/host-web/src/lib.rs:4160-4185,4452-4464,7740-7745`; `crates/host-core/src/prepare.rs:782-788`. |
+| **Verified — engine** | An unsupported protected removal attempt can consume the removal-class credit before refusal; credits reset only after a successful render boundary. | `hosts/host-web/src/lib.rs:2912-2933,4457-4464`; `hosts/host-web/src/observation_ingress.rs:170-210,247-262`. |
+| **Conditional preferred policy** | Prefer one playback host that preserves ordinary peaks/GR, meter-span clock correction, PCM, and playback ownership under their existing contracts; keep protected EQ spectrum/response as a separate observation family and paused response preview separate. Ordinary monitoring gains no protected guarantees, but its cost is included in aggregate admission. | This is the reviewed policy inference, conditional on every named successor gate. It is not a claim that the combined host is feasible today. |
+| **UNKNOWN — adoption/cost** | Combined preparation, admission, stop isolation, desired/accepted/applied selection, native delivery, browser/SDK retention/identity, production trace, and relative implementation cost are not established by these sources. | Do not infer feasibility, impossibility, numerical ceilings, migration, rollout timing, or cost ranking from the current boundary. |
+
+### Decision and named successors
+
+**Decision:** Coexistence is conditionally preferred as the product direction, but the current native protected fixed-target/zero-console profile, preparation conflict, selection refusal, resident restriction, and shared removal-credit consumption make a combined host unsupported **today**. Adoption is blocked pending evidence; this ruling does not force migration or assert that coexistence will pass.
+
+The following named successor work is required before adoption:
+
+1. **Aggregate observation accounting and bounded retention:** derive checked shared/transient work and storage accounting across ordinary observers, protected targets, response/spectrum copies, ingress, browser/host/SDK retention, and paused preview; prove exact-bound acceptance and one-unit-under refusal without partial mutation.
+2. **Family-isolated stop/removal admission:** prevent ordinary operations from consuming EQ removal/terminal reservations; preserve awaiting-admission, accepted/Pending, Applied, and terminal outcomes through saturation and aggregate close.
+3. **Selection identity transaction:** implement desired/accepted/applied state with owner, epoch, and application revision/boundary that survives the `A1 -> B -> A2` sequence and delayed receipts/captures; refusal preserves the prior accepted target.
+4. **Native combined qualification:** prove combined preparation, rendering, delivery, and isolation with explicitly nonzero GR and unchanged PCM, including the frozen asymmetric fixture and bounds.
+5. **Browser/SDK retention and identity:** prove bounded receipt/result retention, target identity delivery, and suspended-browser hide/disposal behavior for the exposed path.
+6. **Production trace/PCM evidence:** provide production trace and PCM comparison tooling as a separately reviewable evidence prerequisite.
+
+**Exact closure claim:** E0 closes only as the statement “conditional coexistence preferred; adoption blocked today pending the named successors and their evidence,” after this record is reviewed and its checkpoint is upstream. It does not close native implementation, combined-host feasibility, numerical qualification, browser/SDK rollout, or production tracing. No separate human-approval gate, app ETA, or invented limit is part of this issue.
