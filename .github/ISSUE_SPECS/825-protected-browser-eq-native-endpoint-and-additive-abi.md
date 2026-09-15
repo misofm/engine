@@ -489,3 +489,8 @@ B2 acquires the observation, spectrum and boot staging borrows before taking a l
 ## ABI checkpoint B1 attempt 1 adversarial evidence
 
 Checkpoint `17702e15` compiles and passes three new B1 tests, all 129 host-web library tests, locked check, format and diff checks; it is an explicitly provisional recovery point. Astra MEDIUM returned FAIL on three material defects: demand pointer omitted the required handle/live-owner validation; valid repeated StopGraph could copy an intervening refusal instead of authoritative successful Pending receipt identity; and scalar query wrappers treated a conflicting LIVE_HOST borrow as terminal absence, exposing stale staged output. The retained tests missed all three. Attempt 2 is bounded to these corrections and fixtures; B2 cannot start while B1 is unaccepted.
+
+
+## ABI checkpoint B1 attempt 2 adversarial evidence
+
+Checkpoint `9ad69729` corrects the three source defects and passes five focused B1 tests, 134 full host-web library tests, locked check, format and diff checks. Astra MEDIUM found the production behavior correct but returned FAIL because borrow-conflict and unrelated-handle tests still asserted exported `u32` pointers; on native 64-bit those can truncate to zero even when an erroneous stale raw pointer exists. Attempt 3 changes only the test assertions to inspect raw helper nullness for live conflicts/unrelated handles and raw non-nullness for valid live/terminal handles. B2 remains paused until this discrimination passes review.
