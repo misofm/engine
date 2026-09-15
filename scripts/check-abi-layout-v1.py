@@ -639,7 +639,9 @@ def validate(document: object) -> None:
         "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
         "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes", "maximumPreparedSpectrumTargets",
         "spectrumStreamStatuses", "spectrumStreamMetadataBytes",
-        "observationProfiles", "observationOperations",
+        "observationProfiles", "observationOperations", "observationReceiptDomains",
+        "observationReceiptStates", "observationAdmissionFlags", "observationStatusFlags",
+        "observationCaptureKinds", "observationCaptureFlags",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -668,6 +670,20 @@ def validate(document: object) -> None:
         (10, "oneShot"), (11, "collectionSelection"), (12, "meterLease"),
         (13, "meterRead"), (14, "residentRead"),
     ])
+    check_named(document, "observationReceiptDomains", [(1, "graph"), (2, "resident")])
+    check_named(document, "observationReceiptStates", [
+        (1, "pending"), (2, "applied"), (3, "closed"), (4, "failed"),
+    ])
+    check_named(document, "observationAdmissionFlags", [
+        (1, "receiptPresent"), (2, "requestedPresent"), (4, "maximumPresent"),
+        (8, "pendingBoundary"),
+    ])
+    check_named(document, "observationStatusFlags", [
+        (1, "ordinaryAvailable"), (2, "removalAvailable"), (4, "terminal"),
+        (8, "renderFailed"),
+    ])
+    check_named(document, "observationCaptureKinds", [(1, "response"), (2, "spectrum")])
+    check_named(document, "observationCaptureFlags", [(1, "graphGeneration")])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a

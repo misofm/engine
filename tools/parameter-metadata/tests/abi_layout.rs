@@ -435,6 +435,126 @@ fn observation_profiles_and_operations_are_exactly_the_shared_constants() {
     );
 }
 
+/// The six C2b groups publish every row from the shared host-web authority in order.
+///
+/// The source records keep zero as the empty sentinel for domains, states, and capture kinds;
+/// those sentinels are deliberately absent from the named wire vocabulary. Resident is retained
+/// as a reserved wire name only, without implying executable V1 support.
+#[test]
+fn observation_receipts_flags_and_captures_are_exactly_shared_constants() {
+    let document = render();
+    let groups = [
+        (
+            "observationReceiptDomains",
+            vec![
+                (
+                    host_web::OBSERVATION_RECEIPT_DOMAIN_GRAPH,
+                    "graph".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_DOMAIN_RESIDENT,
+                    "resident".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationReceiptStates",
+            vec![
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_PENDING,
+                    "pending".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_APPLIED,
+                    "applied".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_CLOSED,
+                    "closed".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_FAILED,
+                    "failed".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationAdmissionFlags",
+            vec![
+                (
+                    host_web::OBSERVATION_ADMISSION_RECEIPT,
+                    "receiptPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_REQUESTED,
+                    "requestedPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_MAXIMUM,
+                    "maximumPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                    "pendingBoundary".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationStatusFlags",
+            vec![
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                    "ordinaryAvailable".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                    "removalAvailable".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_TERMINAL,
+                    "terminal".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_RENDER_FAILED,
+                    "renderFailed".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationCaptureKinds",
+            vec![
+                (
+                    host_web::OBSERVATION_CAPTURE_KIND_RESPONSE,
+                    "response".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_CAPTURE_KIND_SPECTRUM,
+                    "spectrum".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationCaptureFlags",
+            vec![(
+                host_web::OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION,
+                "graphGeneration".to_owned(),
+            )],
+        ),
+    ];
+    assert_eq!(
+        groups.iter().map(|(_, rows)| rows.len()).sum::<usize>(),
+        17,
+        "C2b publishes exactly the seventeen shared rows"
+    );
+    for (group, expected) in groups {
+        assert_eq!(
+            named_constants(&document, group),
+            expected,
+            "{group} is the shared host-web vocabulary in frozen order"
+        );
+    }
+}
+
 /// Every published struct offset is the engine's, and the document carries its whole schema.
 #[test]
 fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
