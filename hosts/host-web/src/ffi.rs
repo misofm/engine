@@ -21,9 +21,10 @@ use crate::{
     LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
     LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
     MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH,
-    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
-    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationIngressLimits,
+    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_OPERATION_STOP,
+    OBSERVATION_OPERATION_STOP_GRAPH, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
+    ObservationAddress, ObservationClass, ObservationIngressLimits, ObservationLengths,
     ObservationReadChannels, ObservationReadError, ObservationReadValues,
     RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
@@ -56,14 +57,15 @@ use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    GraphObservationActivationConfig, ObservationWorkLimits, ResponseParameterOverride,
-    ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
-    ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot, ResponseSnapshotAvailability,
-    ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
-    SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence, SpectrumCaptureCollectionEntry,
-    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
-    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumSmoothingConfig, SpectrumTarget,
-    SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
+    GraphObservationActivationConfig, ObservationRefusal, ObservationRefusalReason,
+    ObservationWorkLimits, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
+    ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
+    ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
+    ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
+    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
+    SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow,
+    SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow, prepare_response_preview,
+    query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -3484,6 +3486,268 @@ pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
     })
 }
 
+/// Return the fixed protected-observation preparation record address.
+///
+/// The protected boot transaction remains private in this checkpoint. This pointer is therefore
+/// only a control-side staging address; publishing it does not publish a protected boot entry
+/// point or create an owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_preparation_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(ptr::from_mut(&mut staging.endpoint.preparation))
+    })
+}
+
+/// Return the actual protected-observation preparation record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_preparation_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationPreparationRecord>()).unwrap_or(0)
+}
+
+/// Return the fixed protected-observation demand record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(ptr::from_mut(&mut staging.endpoint.demand))
+    })
+}
+
+/// Return the actual protected-observation demand record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationDemand>()).unwrap_or(0)
+}
+
+/// Meter-row capacity for the scalar protected-observation demand endpoint.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_capacity() -> u32 {
+    0
+}
+
+fn observation_demand_class(operation: u32) -> ObservationClass {
+    match operation {
+        2 | OBSERVATION_OPERATION_STOP_GRAPH => ObservationClass::Removal,
+        _ => ObservationClass::Ordinary,
+    }
+}
+
+fn observation_demand_refusal(
+    host: &mut AudioWorkletEngineHost,
+    operation: u32,
+    reason: ObservationRefusalReason,
+) -> u32 {
+    host.record_observation_refusal(
+        operation,
+        ObservationRefusal {
+            reason,
+            limit: None,
+            requested: None,
+            maximum: None,
+        },
+    )
+}
+
+fn apply_observation_demand(
+    host: &mut AudioWorkletEngineHost,
+    demand: WebObservationDemand,
+) -> u32 {
+    let operation = demand.operation;
+    let class = observation_demand_class(operation);
+    let lengths = ObservationLengths {
+        control_bytes: size_of::<WebObservationDemand>() as u64,
+        rows: 0,
+        result_bytes: 0,
+    };
+    let (owner, _) = match host.protected_observation_identity() {
+        Ok(identity) => identity,
+        Err(refusal) => return host.record_observation_refusal(operation, refusal),
+    };
+    let header_valid = demand.struct_size == size_of::<WebObservationDemand>() as u32
+        && demand.abi_version == ABI_VERSION
+        && demand.reserved == [0; 2];
+    let valid_stop = header_valid
+        && operation == OBSERVATION_OPERATION_STOP_GRAPH
+        && demand.count == 0
+        && demand.owner == owner.get();
+
+    // A repeated pending stop is an identity query on the already-admitted native operation. It
+    // is reachable only after every fixed field and the owner have matched, so malformed and
+    // wrong-owner records still spend their classified attempt below.
+    if valid_stop {
+        if let Some(receipt) = host.pending_stop_receipt() {
+            let mut admission = *host.observation_admission();
+            admission.operation = OBSERVATION_OPERATION_STOP_GRAPH;
+            admission.receipt = receipt;
+            host.side_records.admission = admission;
+            return admission.result;
+        }
+    }
+
+    let permit = match host.begin_observation(class, lengths) {
+        Ok(permit) => permit,
+        Err(refusal) => return host.record_observation_refusal(operation, refusal),
+    };
+    if !header_valid {
+        return observation_demand_refusal(
+            host,
+            operation,
+            ObservationRefusalReason::InvalidRequest,
+        );
+    }
+    if demand.owner != owner.get() {
+        return observation_demand_refusal(host, operation, ObservationRefusalReason::WrongOwner);
+    }
+    if operation != OBSERVATION_OPERATION_STOP_GRAPH {
+        host.record_observation_admission(
+            operation,
+            RESULT_UNSUPPORTED,
+            Some(ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            }),
+            None,
+            false,
+        );
+        return RESULT_UNSUPPORTED;
+    }
+    if demand.count != 0 {
+        return observation_demand_refusal(
+            host,
+            operation,
+            ObservationRefusalReason::InvalidRequest,
+        );
+    }
+
+    // The native helper owns receipt reservation and the single stop publication. Its admission
+    // record remains authoritative; only the wire operation tag is retagged after that call.
+    let result = host.stop_spectrum_stream_admitted(permit);
+    if host.observation_admission().operation == OBSERVATION_OPERATION_STOP {
+        host.side_records.admission.operation = OBSERVATION_OPERATION_STOP_GRAPH;
+    }
+    result
+}
+
+/// Apply one fixed protected-observation demand record to a live matching protected owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_apply(handle: u32) -> u32 {
+    if handle == 0 {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(staging) = slot.try_borrow() else {
+            return RESULT_INTERNAL;
+        };
+        let demand = staging.endpoint.demand;
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            apply_observation_demand(host, demand)
+        })
+    })
+}
+
+fn observation_admission_ptr_for_handle(handle: u32) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if let Some(admission) = with_host(handle, None, |host| Some(*host.observation_admission()))
+        {
+            staging.endpoint.admission = admission;
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.admission));
+        }
+        if staging.endpoint.handle == handle {
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.admission));
+        }
+        0
+    })
+}
+
+fn observation_status_ptr_for_handle(handle: u32) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if let Some(status) = with_host(handle, None, |host| Some(host.observation_status())) {
+            staging.endpoint.status = status;
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.status));
+        }
+        if staging.endpoint.handle == handle {
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.status));
+        }
+        0
+    })
+}
+
+fn observation_capture_identity_ptr_for_handle(handle: u32) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if let Some(identity) = with_host(handle, None, |host| {
+            Some(*host.observation_capture_identity())
+        }) {
+            staging.endpoint.capture_identity = identity;
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.capture_identity));
+        }
+        if staging.endpoint.handle == handle {
+            return pointer_u32(ptr::from_mut(&mut staging.endpoint.capture_identity));
+        }
+        0
+    })
+}
+
+/// Return the current or matching retained terminal admission record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_admission_ptr(handle: u32) -> u32 {
+    observation_admission_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation admission record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_admission_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationAdmission>()).unwrap_or(0)
+}
+
+/// Return the current or matching retained terminal status record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_status_ptr(handle: u32) -> u32 {
+    observation_status_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation status record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_status_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationStatus>()).unwrap_or(0)
+}
+
+/// Return the current or matching retained terminal capture-identity record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_capture_identity_ptr(handle: u32) -> u32 {
+    observation_capture_identity_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation capture-identity record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_capture_identity_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationCaptureIdentity>()).unwrap_or(0)
+}
+
 /// Stage an exact-length document before boot. Refuses lengths above the engine bound.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
@@ -5677,7 +5941,7 @@ mod observation_checkpoint_a_tests {
     use super::*;
     use crate::{WebObservationIngressLimits, WebObservationWorkLimits};
 
-    fn protected_preparation_record() -> WebObservationPreparationRecord {
+    pub(super) fn protected_preparation_record() -> WebObservationPreparationRecord {
         let mut record = WebObservationPreparationRecord {
             struct_size: crate::OBSERVATION_PREPARATION_BYTES,
             abi_version: ABI_VERSION,
@@ -5734,7 +5998,7 @@ mod observation_checkpoint_a_tests {
         record
     }
 
-    fn stage_protected_boot(document: &[u8], record: WebObservationPreparationRecord) {
+    pub(super) fn stage_protected_boot(document: &[u8], record: WebObservationPreparationRecord) {
         BOOT_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             *staging.options = WebBootOptions {
@@ -5749,11 +6013,11 @@ mod observation_checkpoint_a_tests {
         test_stage_document(document);
     }
 
-    fn protected_document() -> &'static [u8] {
+    pub(super) fn protected_document() -> &'static [u8] {
         include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json")
     }
 
-    fn no_live_host() {
+    pub(super) fn no_live_host() {
         assert!(LIVE_HOST.with(|slot| slot.borrow().is_none()));
     }
 
@@ -5954,5 +6218,221 @@ mod observation_checkpoint_a_tests {
             "the actual staging container is charged exactly once"
         );
         assert!(observation_staging_largest_allocation_bytes() >= containing);
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_b1_tests {
+    use super::*;
+    use crate::OBSERVATION_RECEIPT_STATE_PENDING;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn stage_demand(handle: u32, operation: u32, count: u32, owner: u64) {
+        assert_ne!(handle, 0);
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation,
+                count,
+                owner,
+                reserved: [0; 2],
+            };
+        });
+    }
+
+    fn owner(handle: u32) -> u64 {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        })
+    }
+
+    #[test]
+    fn additive_demand_stops_native_stream_and_repeats_pending_identity() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        assert_eq!(
+            miso_engine_web_v1_observation_preparation_bytes() as usize,
+            size_of::<WebObservationPreparationRecord>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_bytes() as usize,
+            size_of::<WebObservationDemand>()
+        );
+        assert_eq!(miso_engine_web_v1_observation_demand_capacity(), 0);
+        assert_eq!(
+            miso_engine_web_v1_observation_admission_bytes() as usize,
+            size_of::<WebObservationAdmission>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_status_bytes() as usize,
+            size_of::<WebObservationStatus>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_capture_identity_bytes() as usize,
+            size_of::<WebObservationCaptureIdentity>()
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let first = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(first.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(first.receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+        assert_ne!(first.receipt.sequence, 0);
+
+        // The second valid StopGraph demand is a scalar identity shortcut. It must preserve the
+        // native pending receipt and must not try another native stop or spend removal credit.
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let repeated = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(repeated.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(repeated.receipt, first.receipt);
+        assert_eq!(
+            LIVE_HOST.with(|slot| slot
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .host
+                .side_records
+                .pending_count),
+            2
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn demand_class_credits_are_spent_by_unsupported_and_malformed_records() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        // An unsupported ordinary operation consumes the ordinary attempt before semantic
+        // classification; its retry is therefore backpressure.
+        stage_demand(handle, 1, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_UNSUPPORTED
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let ordinary = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(ordinary.operation, 1);
+        assert_eq!(ordinary.reason, 8);
+        assert_eq!(ordinary.result, RESULT_UNSUPPORTED);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        // A malformed removal record spends the removal attempt too. The owner is matching here,
+        // so the fixed header failure is observable rather than a native stop attempt.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.reason, 8);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn wrong_owner_removal_spends_credit_and_read_only_queries_do_not_poll() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        stage_demand(
+            handle,
+            OBSERVATION_OPERATION_STOP_GRAPH,
+            0,
+            expected_owner.wrapping_add(1),
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let wrong_owner = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(wrong_owner.reason, 2);
+
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+        // Start creates one real native pending receipt. Scalar getters must leave that pending
+        // row untouched: they only project fixed scalar records and never reconcile the queue.
+        let second = boot_protected();
+        let second_owner = owner(second);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(second, 0.0),
+            RESULT_OK
+        );
+        let pending_before = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .unwrap()
+                .host
+                .side_records
+                .pending_count
+        });
+        let _ = miso_engine_web_v1_observation_admission_ptr(second);
+        let _ = miso_engine_web_v1_observation_status_ptr(second);
+        let _ = miso_engine_web_v1_observation_capture_identity_ptr(second);
+        let _ = miso_engine_web_v1_observation_preparation_ptr();
+        let _ = miso_engine_web_v1_observation_demand_ptr();
+        let (pending_after, status) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().unwrap().host;
+            (host.side_records.pending_count, host.observation_status())
+        });
+        assert_eq!(pending_after, pending_before);
+        assert_eq!(status.pending_count, u32::from(pending_before));
+        assert_eq!(status.owner, second_owner);
+
+        assert_eq!(miso_engine_web_v1_dispose(second), RESULT_OK);
+        no_live_host();
     }
 }
