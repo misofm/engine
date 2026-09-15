@@ -635,6 +635,28 @@ fn refuse_protected_observation_alias(
     })
 }
 
+/// Classify a stream endpoint only after inspecting the matching live host.
+///
+/// A failed host borrow and every nonmatching handle are terminal at the ABI boundary. They must
+/// not be mistaken for a legacy host, because the legacy fallback writes the shared stream
+/// staging record on refusal. Only an inspected matching host may select the legacy or protected
+/// implementation.
+fn stream_host_dispatch(handle: u32) -> Result<bool, u32> {
+    if handle == 0 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    LIVE_HOST.with(|slot| {
+        // These aliases may enter the legacy path, which later needs an exclusive host borrow.
+        // Acquire that same kind of borrow for classification so an immutable conflict cannot be
+        // mistaken for a verified legacy host and mutate stream staging on the fallback path.
+        let mut slot = slot.try_borrow_mut().map_err(|_| RESULT_INTERNAL)?;
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return Err(RESULT_INVALID_ARGUMENT);
+        };
+        Ok(live.host.protected_observation_prepared())
+    })
+}
+
 fn pointer_u32<T>(pointer: *const T) -> u32 {
     u32::try_from(pointer.addr()).unwrap_or(0)
 }
@@ -2986,12 +3008,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
 /// duration is validated before the prepared capture changes state.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
-    if with_host(
-        handle,
-        false,
-        AudioWorkletEngineHost::protected_observation_prepared,
-    ) {
-        return protected_spectrum_stream_start(handle, smoothing_ms);
+    match stream_host_dispatch(handle) {
+        Ok(true) => return protected_spectrum_stream_start(handle, smoothing_ms),
+        Ok(false) => {}
+        Err(result) => return result,
     }
     let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
         Ok(value) => value,
@@ -3384,12 +3404,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
 /// Stop the managed native stream and retain its final normalized profile in metadata.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
-    if with_host(
-        handle,
-        false,
-        AudioWorkletEngineHost::protected_observation_prepared,
-    ) {
-        return protected_spectrum_stream_stop(handle);
+    match stream_host_dispatch(handle) {
+        Ok(true) => return protected_spectrum_stream_stop(handle),
+        Ok(false) => {}
+        Err(result) => return result,
     }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
@@ -7560,6 +7578,30 @@ mod observation_checkpoint_c2a_tests {
         handle
     }
 
+    fn boot_legacy() -> u32 {
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            let target_id = b"main-out";
+            *staging.request = WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                target_id_bytes: target_id.len() as u32,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            };
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
+        });
+        let document = protected_document();
+        let handle = test_boot(document, WebBootOptions::explicit_defaults());
+        assert_ne!(handle, 0, "legacy fixture must boot");
+        handle
+    }
+
     fn dispose(handle: u32) {
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
         no_live_host();
@@ -7673,9 +7715,27 @@ mod observation_checkpoint_c2a_tests {
             let status = host.observation_status();
             assert_eq!(status.accepted_generation, 0);
             assert_eq!(status.pending_count, 0);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "invalid smoothing spends the ordinary attempt"
+            );
             assert_eq!(host.observation_admission().operation, 4);
             assert_eq!(host.observation_admission().result, RESULT_INVALID_ARGUMENT);
         });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_BACKPRESSURE,
+            "a valid retry cannot publish after the invalid smoothing attempt"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
 
@@ -7700,9 +7760,134 @@ mod observation_checkpoint_c2a_tests {
             let status = host.observation_status();
             assert_eq!(status.accepted_generation, 0);
             assert_eq!(status.pending_count, 0);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "history exhaustion spends the ordinary attempt"
+            );
             assert_eq!(host.observation_admission().operation, 4);
             assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
         });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_BACKPRESSURE,
+            "a valid retry cannot publish after history exhaustion"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_dispatch_refusals_preserve_markers_for_host_borrow_and_invalid_handles() {
+        let handle = boot_protected();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+
+        let invalid_handle = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(invalid_handle, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(0, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn legacy_stream_dispatch_refusals_preserve_markers_for_both_host_borrow_kinds() {
+        let handle = boot_legacy();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
+
+        let invalid_handle = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(invalid_handle, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(markers);
+        assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
 
