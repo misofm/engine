@@ -33,10 +33,10 @@ use engine::realtime::{
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, DependencyLevel,
     GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
-    GraphObservationBlock, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo,
-    GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet, GraphRuntimeBindings,
-    GraphRuntimeObserver, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor, PreparedGraphPlan,
-    StableGraphId, TrackStage,
+    GraphObservationActivationConfig, GraphObservationBlock, GraphObservationController,
+    GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor,
+    GraphPreparedSourceSet, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
+    GraphRuntimeSplitPairProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -2658,6 +2658,61 @@ fn forged_request_seal() -> MeterRequestSeal {
     }
 }
 
+struct PreparedBuiltinsBindingValidation {
+    builtin_nodes: BTreeSet<GraphNodeId>,
+    builtin_observer_pairs: BTreeSet<(GraphNodeId, u64)>,
+}
+
+/// Split a graph bind failure back into the sealed compiler-owned artifact and the caller-owned
+/// bindings. The graph may reject after the wrapper has appended its private bindings, so the
+/// partition is deliberately shared by every bind policy and source-set variant.
+fn restore_graph_bind_failure<R>(
+    plan: Box<PreparedGraphPlan>,
+    bindings: GraphRuntimeBindings,
+    validation: &PreparedBuiltinsBindingValidation,
+    report: R,
+    track_controls: Vec<TrackControlProducer>,
+    meter_consumers: Vec<MeterConsumer>,
+) -> (PreparedBuiltinsGraphArtifact<R>, GraphRuntimeBindings) {
+    let envelope = bindings.envelope;
+    let mut builtin_processors = Vec::new();
+    let mut external_processors = Vec::new();
+    for binding in bindings.nodes {
+        if validation.builtin_nodes.contains(&binding.node) {
+            builtin_processors.push(binding);
+        } else {
+            external_processors.push(binding);
+        }
+    }
+    let mut builtin_observers = Vec::new();
+    let mut external_observers = Vec::new();
+    for observer in bindings.observers {
+        if validation
+            .builtin_observer_pairs
+            .contains(&(observer.node.clone(), observer.handle))
+        {
+            builtin_observers.push(observer);
+        } else {
+            external_observers.push(observer);
+        }
+    }
+    (
+        PreparedBuiltinsGraphArtifact {
+            graph: *plan,
+            builtin_processors,
+            builtin_observers,
+            report,
+            track_controls,
+            meter_consumers,
+        },
+        GraphRuntimeBindings {
+            envelope,
+            nodes: external_processors,
+            observers: external_observers,
+        },
+    )
+}
+
 impl<R> PreparedBuiltinsGraphArtifact<R> {
     /// Immutable caller-owned graph report.
     #[must_use]
@@ -2711,19 +2766,18 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .filter(move |node| !builtin_nodes.contains(node) && !bank_nodes.contains(node))
     }
 
-    /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
-    #[allow(clippy::result_large_err)]
-    pub fn into_bound(
-        mut self,
-        mut bindings: GraphRuntimeBindings,
-    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphBindFailure<R>> {
+    fn prepare_binding_validation(
+        &self,
+        bindings: &GraphRuntimeBindings,
+        source_set: Option<&GraphPreparedSourceSet>,
+    ) -> Result<PreparedBuiltinsBindingValidation, &'static str> {
         let builtin_nodes: BTreeSet<_> = self
             .builtin_processors
             .iter()
             .map(|binding| binding.node.clone())
             .collect();
         let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().collect();
-        let expected: BTreeSet<_> = self
+        let expected_external_nodes: BTreeSet<_> = self
             .graph
             .required_bindings
             .iter()
@@ -2735,96 +2789,6 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .iter()
             .map(|binding| binding.node.clone())
             .collect();
-        let duplicate_nodes = supplied.len() != bindings.nodes.len();
-        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
-        let mut observer_pairs = BTreeSet::new();
-        let valid_observers = bindings
-            .observers
-            .iter()
-            .chain(self.builtin_observers.iter())
-            .all(|observer| {
-                matches!(
-                    observer.node,
-                    GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
-                ) && observer_pairs.insert((observer.node.clone(), observer.handle))
-            });
-        if bindings.envelope != self.graph.envelope
-            || duplicate_nodes
-            || overlaps_builtin
-            || supplied != expected
-            || !valid_observers
-        {
-            let code = if !valid_observers {
-                "graph.plan.observer"
-            } else if bindings.envelope != self.graph.envelope {
-                "graph.plan.envelope_mismatch"
-            } else {
-                "graph.plan.binding"
-            };
-            return Err(PreparedBuiltinsGraphBindFailure {
-                artifact: self,
-                bindings,
-                code,
-            });
-        }
-        bindings.nodes.append(&mut self.builtin_processors);
-        bindings.observers.append(&mut self.builtin_observers);
-        let plan = match self.graph.bind(bindings) {
-            Ok(plan) => plan,
-            Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
-        };
-        #[cfg(feature = "test-support")]
-        let selected_split_fader = graph::test_only_selected_split_fader();
-        Ok(PreparedBuiltinsGraphBound {
-            track_controls: self.track_controls,
-            plan,
-            meter_consumers: self.meter_consumers,
-            #[cfg(feature = "test-support")]
-            test_only_post_fader_buffer: selected_split_fader
-                .as_ref()
-                .map(|selected| selected.buffer),
-            #[cfg(feature = "test-support")]
-            test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
-        })
-    }
-
-    /// Consume the sealed wrapper and bind one coordinator-owned source set.
-    ///
-    /// The wrapper first applies the same builtin-node and observer prevalidation as
-    /// [`Self::into_bound`]. It then appends only its genuine private bindings and delegates the
-    /// source claims to the graph's transactional source-set bind. Every rejection returns the
-    /// opaque artifact, caller bindings, and source set without cloning or exposing sealed parts.
-    #[allow(clippy::result_large_err)]
-    pub fn into_bound_with_source_set(
-        mut self,
-        mut bindings: GraphRuntimeBindings,
-        source_set: GraphPreparedSourceSet,
-    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphSourceBindFailure<R>> {
-        let builtin_nodes: BTreeSet<_> = self
-            .builtin_processors
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().collect();
-        let expected: BTreeSet<_> = self
-            .graph
-            .required_bindings
-            .iter()
-            .filter(|node| !builtin_nodes.contains(*node) && !bank_nodes.contains(*node))
-            .cloned()
-            .collect();
-        let supplied: BTreeSet<_> = bindings
-            .nodes
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let source_nodes: BTreeSet<_> = source_set
-            .claims()
-            .iter()
-            .map(|claim| claim.node.clone())
-            .collect();
-        let mut all_supplied = supplied.clone();
-        all_supplied.extend(source_nodes);
         let duplicate_nodes = supplied.len() != bindings.nodes.len();
         let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
         let builtin_observer_pairs: BTreeSet<_> = self
@@ -2843,81 +2807,265 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                     GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
                 ) && observer_pairs.insert((observer.node.clone(), observer.handle))
             });
-        if bindings.envelope != self.graph.envelope
-            || duplicate_nodes
-            || overlaps_builtin
-            || all_supplied != expected
-            || !valid_observers
-        {
-            let code = if !valid_observers {
-                "graph.plan.observer"
-            } else if bindings.envelope != self.graph.envelope {
-                "graph.plan.envelope_mismatch"
-            } else if duplicate_nodes || overlaps_builtin {
-                "graph.plan.binding"
-            } else if all_supplied != expected {
-                "source.graph.binding_mismatch"
-            } else {
-                "graph.plan.binding"
-            };
-            return Err(PreparedBuiltinsGraphSourceBindFailure {
-                artifact: self,
-                bindings,
-                source_set,
-                code,
-            });
+        let coverage_matches = if let Some(source_set) = source_set {
+            let source_nodes: BTreeSet<_> = source_set
+                .claims()
+                .iter()
+                .map(|claim| claim.node.clone())
+                .collect();
+            let mut all_supplied = supplied.clone();
+            all_supplied.extend(source_nodes);
+            all_supplied == expected_external_nodes
+        } else {
+            supplied == expected_external_nodes
+        };
+        if !valid_observers {
+            return Err("graph.plan.observer");
         }
+        if bindings.envelope != self.graph.envelope {
+            return Err("graph.plan.envelope_mismatch");
+        }
+        if source_set.is_some() {
+            if duplicate_nodes || overlaps_builtin {
+                return Err("graph.plan.binding");
+            }
+            if !coverage_matches {
+                return Err("source.graph.binding_mismatch");
+            }
+        } else if duplicate_nodes || overlaps_builtin || !coverage_matches {
+            return Err("graph.plan.binding");
+        }
+        Ok(PreparedBuiltinsBindingValidation {
+            builtin_nodes,
+            builtin_observer_pairs,
+        })
+    }
+
+    fn append_private_bindings(&mut self, bindings: &mut GraphRuntimeBindings) {
         bindings.nodes.append(&mut self.builtin_processors);
         bindings.observers.append(&mut self.builtin_observers);
-        match self.graph.bind_with_source_set(bindings, source_set) {
-            Ok(plan) => {
-                #[cfg(feature = "test-support")]
-                let selected_split_fader = graph::test_only_selected_split_fader();
-                Ok(PreparedBuiltinsGraphBound {
-                    track_controls: self.track_controls,
-                    plan,
-                    meter_consumers: self.meter_consumers,
-                    #[cfg(feature = "test-support")]
-                    test_only_post_fader_buffer: selected_split_fader
-                        .as_ref()
-                        .map(|selected| selected.buffer),
-                    #[cfg(feature = "test-support")]
-                    test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
+    }
+
+    fn bound_from_plan(
+        plan: PreparedRenderPlan,
+        track_controls: Vec<TrackControlProducer>,
+        meter_consumers: Vec<MeterConsumer>,
+    ) -> PreparedBuiltinsGraphBound {
+        #[cfg(feature = "test-support")]
+        let selected_split_fader = graph::test_only_selected_split_fader();
+        PreparedBuiltinsGraphBound {
+            track_controls,
+            plan,
+            meter_consumers,
+            #[cfg(feature = "test-support")]
+            test_only_post_fader_buffer: selected_split_fader
+                .as_ref()
+                .map(|selected| selected.buffer),
+            #[cfg(feature = "test-support")]
+            test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
+        }
+    }
+
+    /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphBindFailure<R>> {
+        let validation = match self.prepare_binding_validation(&bindings, None) {
+            Ok(validation) => validation,
+            Err(code) => {
+                return Err(PreparedBuiltinsGraphBindFailure {
+                    artifact: self,
+                    bindings,
+                    code,
+                });
+            }
+        };
+        self.append_private_bindings(&mut bindings);
+        let PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: _,
+            builtin_observers: _,
+            report,
+            track_controls,
+            meter_consumers,
+        } = self;
+        match graph.bind(bindings) {
+            Ok(plan) => Ok(Self::bound_from_plan(plan, track_controls, meter_consumers)),
+            Err(failure) => {
+                let (artifact, bindings) = restore_graph_bind_failure(
+                    failure.plan,
+                    failure.bindings,
+                    &validation,
+                    report,
+                    track_controls,
+                    meter_consumers,
+                );
+                Err(PreparedBuiltinsGraphBindFailure {
+                    artifact,
+                    bindings,
+                    code: failure.code,
                 })
             }
+        }
+    }
+
+    /// Consume the sealed wrapper and attach its private builtin bindings with a prepared
+    /// host-controlled observation activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound_with_observation_activation(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+        config: GraphObservationActivationConfig,
+    ) -> Result<
+        (PreparedBuiltinsGraphBound, GraphObservationController),
+        PreparedBuiltinsGraphBindFailure<R>,
+    > {
+        let validation = match self.prepare_binding_validation(&bindings, None) {
+            Ok(validation) => validation,
+            Err(code) => {
+                return Err(PreparedBuiltinsGraphBindFailure {
+                    artifact: self,
+                    bindings,
+                    code,
+                });
+            }
+        };
+        self.append_private_bindings(&mut bindings);
+        let PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: _,
+            builtin_observers: _,
+            report,
+            track_controls,
+            meter_consumers,
+        } = self;
+        match graph.bind_with_observation_activation(bindings, config) {
+            Ok((plan, controller)) => Ok((
+                Self::bound_from_plan(plan, track_controls, meter_consumers),
+                controller,
+            )),
             Err(failure) => {
-                let mut builtin_processors = Vec::new();
-                let mut external_processors = Vec::new();
-                for binding in failure.bindings.nodes {
-                    if builtin_nodes.contains(&binding.node) {
-                        builtin_processors.push(binding);
-                    } else {
-                        external_processors.push(binding);
-                    }
-                }
-                let mut builtin_observers = Vec::new();
-                let mut external_observers = Vec::new();
-                for observer in failure.bindings.observers {
-                    if builtin_observer_pairs.contains(&(observer.node.clone(), observer.handle)) {
-                        builtin_observers.push(observer);
-                    } else {
-                        external_observers.push(observer);
-                    }
-                }
+                let (artifact, bindings) = restore_graph_bind_failure(
+                    failure.plan,
+                    failure.bindings,
+                    &validation,
+                    report,
+                    track_controls,
+                    meter_consumers,
+                );
+                Err(PreparedBuiltinsGraphBindFailure {
+                    artifact,
+                    bindings,
+                    code: failure.code,
+                })
+            }
+        }
+    }
+
+    /// Consume the sealed wrapper and bind one coordinator-owned source set.
+    ///
+    /// The wrapper first applies the same builtin-node and observer prevalidation as
+    /// [`Self::into_bound`]. It then appends only its genuine private bindings and delegates the
+    /// source claims to the graph's transactional source-set bind. Every rejection returns the
+    /// opaque artifact, caller bindings, and source set without cloning or exposing sealed parts.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound_with_source_set(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphSourceBindFailure<R>> {
+        let validation = match self.prepare_binding_validation(&bindings, Some(&source_set)) {
+            Ok(validation) => validation,
+            Err(code) => {
+                return Err(PreparedBuiltinsGraphSourceBindFailure {
+                    artifact: self,
+                    bindings,
+                    source_set,
+                    code,
+                });
+            }
+        };
+        self.append_private_bindings(&mut bindings);
+        let PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: _,
+            builtin_observers: _,
+            report,
+            track_controls,
+            meter_consumers,
+        } = self;
+        match graph.bind_with_source_set(bindings, source_set) {
+            Ok(plan) => Ok(Self::bound_from_plan(plan, track_controls, meter_consumers)),
+            Err(failure) => {
+                let (artifact, bindings) = restore_graph_bind_failure(
+                    failure.plan,
+                    failure.bindings,
+                    &validation,
+                    report,
+                    track_controls,
+                    meter_consumers,
+                );
                 Err(PreparedBuiltinsGraphSourceBindFailure {
-                    artifact: PreparedBuiltinsGraphArtifact {
-                        graph: *failure.plan,
-                        builtin_processors,
-                        builtin_observers,
-                        report: self.report,
-                        track_controls: self.track_controls,
-                        meter_consumers: self.meter_consumers,
-                    },
-                    bindings: GraphRuntimeBindings {
-                        envelope: failure.bindings.envelope,
-                        nodes: external_processors,
-                        observers: external_observers,
-                    },
+                    artifact,
+                    bindings,
+                    source_set: failure.source_set,
+                    code: failure.code,
+                })
+            }
+        }
+    }
+
+    /// Consume the sealed wrapper and bind one coordinator-owned source set with a prepared
+    /// host-controlled observation activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound_with_source_set_and_observation_activation(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+        config: GraphObservationActivationConfig,
+    ) -> Result<
+        (PreparedBuiltinsGraphBound, GraphObservationController),
+        PreparedBuiltinsGraphSourceBindFailure<R>,
+    > {
+        let validation = match self.prepare_binding_validation(&bindings, Some(&source_set)) {
+            Ok(validation) => validation,
+            Err(code) => {
+                return Err(PreparedBuiltinsGraphSourceBindFailure {
+                    artifact: self,
+                    bindings,
+                    source_set,
+                    code,
+                });
+            }
+        };
+        self.append_private_bindings(&mut bindings);
+        let PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: _,
+            builtin_observers: _,
+            report,
+            track_controls,
+            meter_consumers,
+        } = self;
+        match graph.bind_with_source_set_and_observation_activation(bindings, source_set, config) {
+            Ok((plan, controller)) => Ok((
+                Self::bound_from_plan(plan, track_controls, meter_consumers),
+                controller,
+            )),
+            Err(failure) => {
+                let (artifact, bindings) = restore_graph_bind_failure(
+                    failure.plan,
+                    failure.bindings,
+                    &validation,
+                    report,
+                    track_controls,
+                    meter_consumers,
+                );
+                Err(PreparedBuiltinsGraphSourceBindFailure {
+                    artifact,
+                    bindings,
                     source_set: failure.source_set,
                     code: failure.code,
                 })
@@ -4935,6 +5083,14 @@ mod tests {
     }
 
     fn source_bind_fixture() -> SourceBindFixture {
+        source_bind_fixture_with_observer(false)
+    }
+
+    fn controlled_source_bind_fixture() -> SourceBindFixture {
+        source_bind_fixture_with_observer(true)
+    }
+
+    fn source_bind_fixture_with_observer(controlled: bool) -> SourceBindFixture {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
@@ -5021,17 +5177,18 @@ mod tests {
         let builtin_drops = Arc::new(AtomicUsize::new(0));
         let external_drops = Arc::new(AtomicUsize::new(0));
         let source_drops = Arc::new(AtomicUsize::new(0));
+        let builtin_observer = if controlled {
+            GraphNodeObserverBinding::controlled(builtin.clone(), 0x22_73, Box::new(NoopObserver))
+        } else {
+            GraphNodeObserverBinding::new(builtin.clone(), 0x22_73, Box::new(NoopObserver))
+        };
         let artifact = PreparedBuiltinsGraphArtifact {
             graph,
             builtin_processors: vec![GraphNodeBinding::new(
                 builtin.clone(),
                 Box::new(DropProcessor(Arc::clone(&builtin_drops))),
             )],
-            builtin_observers: vec![GraphNodeObserverBinding::new(
-                builtin.clone(),
-                0x22_73,
-                Box::new(NoopObserver),
-            )],
+            builtin_observers: vec![builtin_observer],
             report: 0x22_73,
             track_controls: Vec::new(),
             meter_consumers: Vec::new(),
@@ -5254,6 +5411,95 @@ mod tests {
         assert_eq!(failure.artifact.builtin_observers.len(), 1);
         assert_eq!(failure.artifact.builtin_observers[0].handle, 0x22_73);
         assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+    }
+
+    #[test]
+    fn controlled_source_activation_refusal_restores_all_inputs_for_retry() {
+        let fixture = controlled_source_bind_fixture();
+        let ownership = fixture.ownership();
+        let expected = [fixture.output.clone()];
+        let failure = match fixture
+            .artifact
+            .into_bound_with_source_set_and_observation_activation(
+                fixture.bindings,
+                fixture.source_set,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 0,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            ) {
+            Ok(_) => panic!("zero-capacity activation bind accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_capacity");
+        assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+
+        let PreparedBuiltinsGraphSourceBindFailure {
+            artifact,
+            bindings,
+            source_set,
+            ..
+        } = failure;
+        let (bound, controller) = artifact
+            .into_bound_with_source_set_and_observation_activation(
+                bindings,
+                source_set,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("activation retry rejected: {}", failure.code));
+        assert_eq!(controller.resources().maximum_active_observers, 1);
+        drop(bound);
+        drop(controller);
+        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(ownership.source_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn legacy_bind_with_controlled_meter_refuses_and_retries_through_activation_wrapper() {
+        let mut fixture = controlled_source_bind_fixture();
+        fixture.bindings.nodes.push(GraphNodeBinding::new(
+            fixture.input.clone(),
+            Box::new(DropProcessor(Arc::clone(&fixture.external_drops))),
+        ));
+        let ownership = fixture.ownership();
+        let expected = [fixture.output.clone(), fixture.input.clone()];
+        let failure = match fixture.artifact.into_bound(fixture.bindings) {
+            Ok(_) => panic!("legacy bind accepted a controlled observer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_required");
+        assert_eq!(
+            failure
+                .bindings
+                .nodes
+                .iter()
+                .map(|binding| binding.node.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(failure.bindings.observers.len(), 0);
+        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 0);
+
+        let PreparedBuiltinsGraphBindFailure {
+            artifact, bindings, ..
+        } = failure;
+        let (bound, _controller) = artifact
+            .into_bound_with_observation_activation(
+                bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("activation retry rejected: {}", failure.code));
+        drop(bound);
+        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 2);
     }
 
     #[test]

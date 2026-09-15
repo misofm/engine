@@ -151,3 +151,13 @@ the coherent issue boundary. No transcript cases or outcomes were weakened.
 
 Coordinator subdivided A3 into wrapper/refusal implementation and a separate
 actual-render proof so each fresh Luna has one bounded ownership or test task.
+
+## A3a evidence
+
+Fresh Luna MAX added both activation bind wrappers, shared wrapper prevalidation
+and ownership rollback, and replaced the legacy no-source panic with the expected
+ownership-preserving activation-required refusal. Existing SourceBindFixture
+probes cover source/no-source refusal and successful retry. Compiler checks with
+and without test-support, five focused controlled tests, two existing source
+ownership tests, formatting and diff checks PASS. Only compiler lib source changed.
+A3b actual-render selected-work/PCM/window proof remains pending.
