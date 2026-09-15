@@ -253,3 +253,61 @@ Clippy for graph --all-targets --features test-support with -D warnings passes
 expects the argument-count style lint: its existing seven audio parameters gain
 one observer-options argument; no runtime check or correctness gate is suppressed.
 Independent Astra XHIGH attempt-1 review is in progress.
+
+## Attempt 1 independent verdict: FAIL
+
+Fresh Astra XHIGH reviewed source through cf975cbe and independently ran the
+complete graph library plus rt9 integration evidence: 77/77 and 7/7 pass. Queue
+ownership, revision ordering, resident dispatch and active failure handling are
+coherent, but the frozen contract is not yet met:
+
+- Retained-byte admission omits endpoint-owner storage. A one-controlled-row
+  native layout probe reports 1,248 bytes while controller/realtime values occupy
+  another 264/232 bytes, plus runtime cursor/flag layout. The current budget test
+  derives its oracle from that incomplete report. Runtime metadata's split-table
+  subtraction witness cancels the new activation fields rather than charging them.
+- Actual controlled direct/alias order and mixed permanent/controlled dispatch
+  are not exercised. Callback/acquisition counts do not measure dormant traversal,
+  and activation hooks do not measure unchanged-entry transition work. Add the
+  frozen operation-site counters, mixed ordering case, selected-failure allocation
+  guard and pending-owner-close/receipt case using existing fixtures.
+
+Full coordinator-local review: /tmp/observation-816-attempt1-review.md. This is
+attempt 1's sole adversarial verdict. Issue remains open; no native closure or
+production readiness is claimed. Attempt 2 is bounded to these corrections:
+first exact endpoint/runtime accounting, then the missing focused discriminators,
+using fresh Luna MAX agents with a checkpoint between source tranches. No host,
+SDK, transport redesign or benchmark framework is authorized by this correction.
+
+## Attempt 2 frozen correction
+
+Issue #816 attempt-2 accounting and transition-counter ruling — design clarification, not another verdict.
+
+Use the proposed layout witnesses; keep the transport and three backing arrays unchanged. `RuntimeWithoutObservationActivation` mirrors every current Runtime field except `observation_activation`, `observation_cursor`, and `observation_failure_invalidated`. `GraphExecutorWithoutObservationActivation` mirrors GraphExecutor, substituting that Runtime witness. Preserve the existing split-table witnesses and charges.
+
+Define checked, target-derived quantities:
+
+- `R = size_of::<GraphExecutor>() - size_of::<GraphExecutorWithoutObservationActivation>()`. This is the retained contribution in the actual containing allocation, including its padding; do not substitute the naked realtime endpoint size. Also derive the Runtime-level difference for the focused layout test. Use the containing-owner difference if padding makes the two differ.
+- `C = size_of::<GraphObservationController>()`, including its inline endpoint, pointer, ledger, and resource-report fields. Compute this after adding the report field below; do not pin the attempt-1 native sizes.
+- `H = sum(existing activation heap-allocation rows)`: three snapshot arrays, catalog, permanent array, accepted-handle array, liveness Arc allocation, and the six queue ring/slot allocations. Each shared allocation appears once. Existing zero-capacity row behavior remains unchanged.
+
+Add just `pub runtime_state_bytes: u64` to `GraphObservationActivationResources`, set it to R, and document that it overlaps the baseline graph runtime metadata. A public controller-size field is unnecessary. Set activation `retained_bytes = H + C + R` using checked additions and apply the inclusive configured byte budget to that total. Layout/conversion/overflow failure remains RetainedBytes before caller objects move.
+
+Add `pub observation_runtime_state_bytes: u64` to `GraphRuntimeMetadataResourceEstimate`, also R. Its `total_bytes` becomes its existing checked total plus R, exactly once, for every graph—including activation None. Those fields occupy the executor allocation even when no controller/pool exists. Keep the existing `runtime_field_bytes`/`runtime_owner_field_bytes` meanings as split-table accounting; do not silently redefine them. The existing compiler aggregation automatically picks up the new total; no compiler or host redesign is needed.
+
+Keep activation `largest_allocation_bytes = max(existing heap-allocation rows)`: C and R are inline storage, not standalone heap allocations. Clarify that this is the largest activation-owned standalone allocation. The graph metadata's largest-allocation projection already includes the complete real GraphExecutor allocation and must continue doing so. A future aggregate whose graph estimate already includes graph runtime metadata adds `activation.retained_bytes - activation.runtime_state_bytes`, with checked arithmetic, and takes the maximum of the graph and activation allocation maxima. This documents the exact overlap; do not implement a speculative host aggregator here.
+
+Required focused tests: derive the two witness differences and C independently using actual types; assert both reports' R and the baseline total with zero emitted ops. With a nonempty controlled catalog and nonzero permanent population, independently sum three capacity-sized entry arrays, catalog/permanent/accepted arrays, the three queue layouts (including sentinel slots and Arc headers), liveness layout, C, and R. Assert retained total and the separate heap maximum, then retain public inclusive/one-below refusal/ownership checks. Also assert `graph_total + activation_total - R` contains the runtime contribution once. Existing no-controller/no-pool behavior remains valid; baseline R is not a pool allocation. Reuse existing graph tests and policy/Wasm checks; no new harness.
+
+Freeze the transition probe as **old/new snapshot entries consumed by the merge**, including unchanged and permanent entries. Increment at the index advances in `notify_changes`: Less consumes one old entry; Greater one new entry; Equal consumes two entries; either one-sided tail consumes one. Count regardless of whether hooks run. Reset once at `apply_boundary` entry and accumulate across both applied candidates. Do not count only activation hooks or pretend this measures repeated head lookups.
+
+Each merge consumes exactly `old.len() + new.len()` entries. Each snapshot is bounded by `maximum_active_observers + permanent_count`, so two merges consume at most the frozen `4 * (maximum_active_observers + permanent_count)`. Every loop iteration consumes at least one entry and performs at most one ordinal comparison, so comparisons are also bounded by the consumed-entry ceiling; a separate comparison counter is unnecessary. Repeated head inspections are at most twice the iteration count and are not the published consumed-entry metric. Test the counter on two transitions with nonzero permanent entries and unchanged controlled entries. No merge algorithm change is required for this defined, meaningful bound.
+
+
+Coordinator assignment order: fresh Luna A2-accounting implements ONLY the layout
+witnesses/report arithmetic/documentation and independent resource tests. After
+that green checkpoint is committed and pushed, a fresh Luna A2-discriminators
+implements the defined test-only work counters, mixed controlled direct/alias/
+permanent order case, failure allocation guard and pending-close receipt case.
+Keep one uncommitted source tranche. Attempt 2 receives one adversarial verdict
+after both corrections and focused gates are complete.
