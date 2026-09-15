@@ -9,6 +9,7 @@
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
+use bench_support::alloc as bench_alloc;
 use builtins::*;
 
 #[test]
@@ -101,6 +102,71 @@ fn meter_windows_discontinuities_resets_and_drops_are_exact() {
     assert_eq!(full_reset.window_sequence, 0);
     assert_eq!(full_reset.cumulative_dropped_snapshots, 0);
     assert_eq!(full_reset.cumulative_discontinuities, 0);
+}
+
+#[test]
+fn meter_observation_restart_discards_partial_window_and_preserves_lifetime_state() {
+    let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(2).expect("constant"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(1).expect("constant"),
+        reset_generation: 9,
+    };
+    let PreparedMeter {
+        mut accumulator,
+        mut consumer,
+    } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
+
+    accumulator
+        .observe(&[1.0], &[0.5], 10)
+        .expect("partial window");
+    accumulator
+        .observe(&[0.25], &[0.25], 11)
+        .expect("complete old window");
+    accumulator
+        .observe(&[0.0, 0.0], &[0.0, 0.0], 12)
+        .expect("dropped old window");
+
+    accumulator
+        .observe(&[1.0], &[0.75], 14)
+        .expect("new partial window");
+    bench_alloc::assert_installed();
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    let restart_mark = bench_alloc::current_thread_counters();
+    accumulator.restart_observation(41);
+    let restart_delta = bench_alloc::current_thread_delta_since(restart_mark);
+    assert_eq!(restart_delta.allocations, 0);
+    assert_eq!(restart_delta.deallocations, 0);
+    assert_eq!(restart_delta.reallocations, 0);
+    assert_eq!(accumulator.observation_generation(), 41);
+    assert_eq!(accumulator.dropped_snapshots(), 1);
+
+    // The old snapshot remains queued while the observation generation changes.
+    let old = consumer.try_pop().expect("old snapshot");
+
+    accumulator
+        .observe(&[0.25, 0.5], &[0.5, 0.25], 100)
+        .expect("fresh window");
+    let fresh = consumer.try_pop().expect("fresh snapshot");
+    assert_eq!(old.observation_generation, 0);
+    assert_eq!(old.reset_generation, config.reset_generation);
+    assert_eq!(old.window_sequence, 0);
+    assert_eq!(fresh.observation_generation, 41);
+    assert_eq!(fresh.reset_generation, config.reset_generation);
+    assert_eq!(
+        (fresh.start_sample, fresh.end_sample, fresh.frames),
+        (100, 102, 2)
+    );
+    assert_eq!(fresh.left.sample_peak, 0.5);
+    assert_eq!(fresh.right.sample_peak, 0.5);
+    assert_eq!(fresh.left.energy, 0.3125);
+    assert_eq!(fresh.right.energy, 0.3125);
+    assert_eq!(fresh.window_sequence, 2);
+    assert_eq!(fresh.cumulative_clipped_samples, 2);
+    assert_eq!(fresh.cumulative_discontinuities, 0);
+    assert_eq!(fresh.cumulative_dropped_snapshots, 1);
 }
 
 #[test]

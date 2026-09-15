@@ -123,3 +123,16 @@ test-builtins-benchmark.sh --check-manifest-consumers and the existing synthetic
 validator suites, never timed workloads for this bookkeeping. Check the C API
 primitive resource oracle and browser-v1 expected.json when their affected layout
 terms change; preserve independent derivations and exact/one-below gates.
+
+## A1 evidence
+
+Fresh Luna MAX implemented observation_generation, scalar-window restart, the
+active-only observer hook and test-support sample-site probe. The focused fixture
+keeps an old snapshot queued through restart, preserves a nonzero drop count and
+monotonic sequence, verifies fresh peak/energy and sample span, and checks zero
+allocator operations during restart. Legacy configured reset generation remains
+separate. Validation: builtins unit14/14, meter integration10/10, allocator tracker
+9/9, compiler library check with and without test-support, formatting/diff PASS.
+Pre-change native layouts were MeterSnapshot160/MeterAccumulator232; integration
+resource/artifact pins are refreshed once at the completed issue boundary.
+A2 preparation and A3 sealed bind forwarding remain pending.

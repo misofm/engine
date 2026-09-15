@@ -4397,6 +4397,12 @@ fn make_scalar_split_pair(
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
+    fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
+        if active {
+            self.0.restart_observation(generation);
+        }
+    }
+
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.0
             .observe(block.left, block.right, block.first_sample)
