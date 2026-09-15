@@ -10866,7 +10866,7 @@ mod observation_checkpoint_b2_tests {
         BOOT_STAGING.with(|slot| {
             slot.borrow_mut().options.console_command_queue_records = 4;
         });
-        let handle = boot_staged_observation_demand(document.len() as u32);
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
         assert_ne!(handle, 0, "protected fixture must boot");
         handle
     }
@@ -11127,6 +11127,190 @@ mod observation_checkpoint_b2_tests {
                 .pending_count
         });
         assert_eq!(pending, 1);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn public_protected_lifecycle_publishes_spectrum_then_response_identity() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+
+        let (pending_status, pending_receipt) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, 4);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_eq!(
+                admission.receipt.state,
+                crate::OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(status.pending_count, 1);
+            assert_ne!(status.owner, 0);
+            assert_eq!(admission.receipt.owner, status.owner);
+            assert_ne!(admission.receipt.sequence, 0);
+            assert_eq!(admission.receipt.sequence, status.accepted_generation);
+            assert_eq!(admission.receipt.application_sample, 0);
+            (status, admission.receipt)
+        });
+
+        render_protected_spectrum_window(handle);
+
+        let applied = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(applied.state, OBSERVATION_RECEIPT_STATE_APPLIED);
+        assert_eq!(applied.result, RESULT_OK);
+        assert_eq!(applied.owner, pending_receipt.owner);
+        assert_eq!(applied.sequence, pending_receipt.sequence);
+        assert_eq!(applied.application_sample, 0);
+
+        let applied_status = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.owner, pending_status.owner);
+            assert_eq!(status.pending_count, 0);
+            assert_eq!(status.accepted_generation, pending_receipt.sequence);
+            assert_eq!(status.applied_generation, pending_receipt.sequence);
+            assert_ne!(status.selection_epoch, 0);
+            let output = host.output_pcm().expect("protected output");
+            assert_eq!(output.len() % 2, 0);
+            let midpoint = output.len() / 2;
+            assert!(output[..midpoint].iter().any(|value| *value != 0.0));
+            assert!(output[midpoint..].iter().any(|value| *value != 0.0));
+            status
+        });
+
+        let (spectrum_header, left, right) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging
+                .capture
+                .as_ref()
+                .expect("protected spectrum capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("spectrum header");
+            let mut left = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let mut right = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            spectrum_f32_plane(bytes, header.left_offset, header.frames, &mut left)
+                .expect("spectrum left plane");
+            spectrum_f32_plane(bytes, header.right_offset, header.frames, &mut right)
+                .expect("spectrum right plane");
+            (header, left, right)
+        });
+        assert_eq!(spectrum_header.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+        assert_eq!(spectrum_header.channels, SPECTRUM_CHANNEL_BOTH);
+        assert_eq!(spectrum_header.snapshot_token, 1);
+        assert!(left.iter().any(|value| *value != 0.0));
+        assert!(right.iter().any(|value| *value != 0.0));
+
+        let spectrum_identity = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(identity.kind, 2);
+            assert_eq!(identity.flags, 1);
+            assert_eq!(identity.owner, applied_status.owner);
+            assert_eq!(
+                identity.observation_generation,
+                applied_status.applied_generation
+            );
+            assert_eq!(identity.selection_epoch, applied_status.selection_epoch);
+            assert_eq!(identity.snapshot_token, spectrum_header.snapshot_token);
+            identity
+        });
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the admitted spectrum read spends this boundary's Ordinary credit"
+            );
+        });
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_ne!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "a render boundary must replenish Ordinary credit"
+            );
+        });
+
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..3].copy_from_slice(b"eq0");
+            staging.live_token = 0;
+            staging.live_result_len = 0;
+            *staging.live_request = WebLiveResponseRequest {
+                struct_size: LIVE_RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                track_id_bytes: 3,
+                grid: crate::RESPONSE_GRID_LINEAR,
+                channels: crate::RESPONSE_CHANNEL_BOTH,
+                points: 5,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+                maximum_result_bytes: 65_536,
+                reserved: [0; 3],
+            };
+        });
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+
+        let response_header = RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let header: WebLiveResponseResult =
+                read_live_record(bytes, 0).expect("response header");
+            assert_eq!(header.result, RESULT_OK);
+            assert_eq!(header.snapshot_token, 1);
+            assert!(header.owner_count > 0);
+            assert!(header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+            assert_eq!(staging.live_result_len, header.result_bytes as usize);
+            assert!(bytes.iter().any(|byte| *byte != 0));
+            let owner_offset = header.owners_offset;
+            let owner: WebLiveResponseOwner =
+                read_live_record(bytes, owner_offset).expect("response owner");
+            let track_id = live_payload_bytes(bytes, owner.track_id_offset, owner.track_id_bytes)
+                .expect("response owner track ID");
+            assert_eq!(track_id, b"eq0");
+            header
+        });
+        let response_identity = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(identity.kind, 1);
+            assert_eq!(identity.flags, 0);
+            assert_eq!(identity.owner, spectrum_identity.owner);
+            assert_eq!(identity.observation_generation, 0);
+            assert_eq!(identity.selection_epoch, 0);
+            assert_eq!(identity.snapshot_token, response_header.snapshot_token);
+            identity
+        });
+        assert_eq!(response_identity.owner, applied_status.owner);
+        assert_eq!(response_identity.snapshot_token, 1);
+
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
         no_live_host();
     }
