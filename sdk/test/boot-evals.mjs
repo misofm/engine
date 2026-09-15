@@ -122,13 +122,6 @@ test("protected observation shipped Wasm ABI and boot", async () => {
     assert.ok(exports.memory instanceof WebAssembly.Memory);
 
     const bootOptions = structure("bootOptions");
-    const optionsPointer = exports.miso_engine_web_v1_boot_options_ptr();
-    range("boot options", optionsPointer, bootOptions.bytes);
-    const options = new DataView(exports.memory.buffer, optionsPointer, bootOptions.bytes);
-    zero(optionsPointer, bootOptions.bytes);
-    writeHeader(options, "bootOptions");
-    writeU32(options, "bootOptions", "requireSampleRateHz", 48_000);
-    writeU32(options, "bootOptions", "requireQuantumFrames", 128);
 
     const preparation = structure("observationPreparation");
     assert.equal(
@@ -253,9 +246,35 @@ test("protected observation shipped Wasm ABI and boot", async () => {
     const document = new TextEncoder().encode(
       sessionDocument({ sampleRateHz: 48_000, quantumFrames: 128 }),
     );
-    const documentPointer = exports.miso_engine_web_v1_document_ptr(document.length);
-    range("document", documentPointer, document.length);
-    new Uint8Array(exports.memory.buffer, documentPointer, document.length).set(document);
+
+    const restageProtectedBoot = (maximumMemoryBytes, maximumRetainedBytes) => {
+      const currentOptionsPointer = exports.miso_engine_web_v1_boot_options_ptr();
+      const currentOptions = view("boot options", currentOptionsPointer, bootOptions.bytes);
+      zero(currentOptionsPointer, bootOptions.bytes);
+      writeHeader(currentOptions, "bootOptions");
+      writeU32(currentOptions, "bootOptions", "requireSampleRateHz", 48_000);
+      writeU32(currentOptions, "bootOptions", "requireQuantumFrames", 128);
+      writeU64(currentOptions, "bootOptions", "maximumMemoryBytes", maximumMemoryBytes);
+
+      const currentPreparationPointer = exports.miso_engine_web_v1_observation_preparation_ptr();
+      const currentPreparation = view(
+        "observation preparation",
+        currentPreparationPointer,
+        preparation.bytes,
+      );
+      writeU64(
+        currentPreparation,
+        "observationPreparation",
+        "ingressLimits.maximumRetainedBytes",
+        maximumRetainedBytes,
+      );
+
+      const currentDocumentPointer = exports.miso_engine_web_v1_document_ptr(document.length);
+      range("document", currentDocumentPointer, document.length);
+      new Uint8Array(exports.memory.buffer, currentDocumentPointer, document.length).set(document);
+    };
+
+    restageProtectedBoot(budget, budget);
 
     handle = exports.miso_engine_web_v1_boot_with_observation_demand(document.length);
     assert.notEqual(handle, 0, "protected boot returns a handle");
