@@ -42,9 +42,10 @@ use host_core::{
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
-    ObservationAccepted, ObservationRefusal, ObservationRefusalReason,
-    ObservedContinuousSpectrumWindow, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
-    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
+    HostSpectrumDemand, HostSpectrumMode, ObservationAccepted, ObservationRefusal,
+    ObservationRefusalReason, ObservationStop, ObservedContinuousSpectrumWindow,
+    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
+    SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
@@ -1537,7 +1538,7 @@ impl PreparedSpectrumCapture {
     }
 }
 
-/// Protected preparation ownership. Operation permits and receipts are added by the next slice.
+/// Protected preparation ownership and the retained spectrum demand/caches.
 #[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
 struct ProtectedObservationStorage {
     controller: HostObservationController,
@@ -1551,8 +1552,11 @@ struct ProtectedObservationStorage {
     /// Maximum packed payloads proved by the immutable ingress projection.
     packed_response_bytes: u64,
     packed_spectrum_bytes: u64,
-    /// Prepared target identity retained off render for later response/spectrum mediation.
-    target_track_id: Box<str>,
+    /// Prepared continuous spectrum demand retained off render for later protected mediation.
+    ///
+    /// The target string is moved into this demand at publication time; every operation borrows
+    /// it, so starting or restarting a stream never allocates or clones the target identity.
+    spectrum_demand: HostSpectrumDemand,
 }
 
 /// The only spectrum/observation owner a ready host may carry.
@@ -2403,6 +2407,226 @@ impl AudioWorkletEngineHost {
         storage.ingress.begin_observation(owner, class, lengths)
     }
 
+    fn protected_observation_identity(
+        &self,
+    ) -> Result<(host_core::ObservationOwnerId, u64), ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        Ok((storage.controller.owner(), storage.ingress.epoch))
+    }
+
+    fn protected_spectrum_cadence(&self) -> Result<SpectrumCadence, ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        Ok(storage.spectrum_cadence)
+    }
+
+    fn protected_spectrum_control_lengths(removal: bool, target_bytes: u64) -> ObservationLengths {
+        if removal {
+            ObservationLengths {
+                control_bytes: size_of::<WebObservationDemand>() as u64,
+                rows: 0,
+                result_bytes: 0,
+            }
+        } else {
+            ObservationLengths {
+                control_bytes: size_of::<WebSpectrumRequest>() as u64 + target_bytes,
+                rows: 1,
+                result_bytes: 0,
+            }
+        }
+    }
+
+    fn protected_spectrum_target_bytes(&self) -> Result<u64, ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        let target = match &storage.spectrum_demand.target {
+            SpectrumTarget::TrackPostInputBuiltins(target)
+            | SpectrumTarget::TrackPostMatrix(target)
+            | SpectrumTarget::Output(target) => target,
+        };
+        Ok(target.len() as u64)
+    }
+
+    fn record_observation_refusal(&mut self, operation: u32, refusal: ObservationRefusal) -> u32 {
+        let result = observation_refusal_result(refusal.reason);
+        self.record_observation_admission(operation, result, Some(refusal), None, false);
+        result
+    }
+
+    fn pending_stop_receipt(&self) -> Option<WebObservationReceipt> {
+        let slot = self.side_records.pending_stop_slot?;
+        let receipt = *self.side_records.receipts.get(slot)?;
+        (receipt.state == OBSERVATION_RECEIPT_STATE_PENDING).then_some(receipt)
+    }
+
+    fn validate_admitted_observation_permit(
+        &mut self,
+        permit: &ObservationPermit,
+        class: ObservationClass,
+        operation: u32,
+    ) -> Result<(), u32> {
+        let (owner, epoch) = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => return Err(self.record_observation_refusal(operation, refusal)),
+        };
+        if let Err(refusal) = permit.validate(owner, epoch, class) {
+            return Err(self.record_observation_refusal(operation, refusal));
+        }
+        if self.status.state != STATE_READY {
+            self.record_observation_admission(operation, RESULT_WRONG_STATE, None, None, false);
+            return Err(RESULT_WRONG_STATE);
+        }
+        Ok(())
+    }
+
+    /// Execute one admitted protected continuous-spectrum start.
+    fn start_spectrum_stream_admitted(
+        &mut self,
+        permit: ObservationPermit,
+    ) -> Result<SpectrumCadence, u32> {
+        const OPERATION: u32 = 4;
+        self.validate_admitted_observation_permit(&permit, ObservationClass::Ordinary, OPERATION)?;
+        let cadence = match self.protected_spectrum_cadence() {
+            Ok(cadence) => cadence,
+            Err(refusal) => return Err(self.record_observation_refusal(OPERATION, refusal)),
+        };
+        let slot = match self.reserve_receipt(ObservationClass::Ordinary) {
+            Ok(slot) => slot,
+            Err(refusal) => return Err(self.record_observation_refusal(OPERATION, refusal)),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return Err(self.record_observation_refusal(OPERATION, observation_not_prepared()));
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return Err(self.record_observation_refusal(OPERATION, observation_not_prepared()));
+            };
+            storage
+                .controller
+                .replace_spectrum(&storage.spectrum_demand)
+        };
+        match native {
+            Ok(accepted) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                if let Some(ready) = self.ready.as_mut()
+                    && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+                {
+                    storage.history_epoch = Some(1);
+                    storage.history_dropped_captures = 0;
+                }
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                Ok(cadence)
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                Err(self.record_observation_refusal(OPERATION, refusal))
+            }
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum restart.
+    fn restart_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
+        const OPERATION: u32 = 5;
+        if let Err(result) = self.validate_admitted_observation_permit(
+            &permit,
+            ObservationClass::Ordinary,
+            OPERATION,
+        ) {
+            return result;
+        }
+        let slot = match self.reserve_receipt(ObservationClass::Ordinary) {
+            Ok(slot) => slot,
+            Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            storage.controller.restart_spectrum()
+        };
+        match native {
+            Ok(accepted) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                if let Some(ready) = self.ready.as_mut()
+                    && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+                {
+                    storage.history_epoch = Some(1);
+                    storage.history_dropped_captures = 0;
+                }
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                RESULT_OK
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                self.record_observation_refusal(OPERATION, refusal)
+            }
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum stop.
+    fn stop_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
+        const OPERATION: u32 = OBSERVATION_OPERATION_STOP;
+        if let Err(result) =
+            self.validate_admitted_observation_permit(&permit, ObservationClass::Removal, OPERATION)
+        {
+            return result;
+        }
+        let slot = match self.reserve_receipt(ObservationClass::Removal) {
+            Ok(slot) => slot,
+            Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            storage.controller.stop_spectrum()
+        };
+        match native {
+            Ok(ObservationStop::Pending(accepted)) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                RESULT_OK
+            }
+            Ok(ObservationStop::Quiescent) => {
+                self.release_receipt(slot);
+                self.record_observation_admission(OPERATION, RESULT_OK, None, None, false);
+                RESULT_OK
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                self.record_observation_refusal(OPERATION, refusal)
+            }
+        }
+    }
+
     /// Reserve one fixed receipt row before a native publication.
     ///
     /// Ordinary work keeps one additional row available for a removal. The cached row counts
@@ -2883,6 +3107,23 @@ impl AudioWorkletEngineHost {
     /// The sample rate and render quantum come from the prepared host, so callers cannot create
     /// a stream whose cadence differs from the graph that will produce its samples.
     pub fn start_spectrum_stream(&mut self) -> Result<SpectrumCadence, u32> {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = 4;
+            let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                Self::protected_spectrum_control_lengths(false, target_bytes),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    return Err(self.record_observation_refusal(OPERATION, refusal));
+                }
+            };
+            return self.start_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
@@ -2908,6 +3149,21 @@ impl AudioWorkletEngineHost {
     /// Restart the active managed stream at a fresh capture epoch without a fallible stop/start
     /// pair. The caller has already prevalidated the replacement analysis configuration.
     pub fn restart_spectrum_stream(&mut self) -> u32 {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = 5;
+            let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                Self::protected_spectrum_control_lengths(false, target_bytes),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+            };
+            return self.restart_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -2947,6 +3203,24 @@ impl AudioWorkletEngineHost {
 
     /// Stop the managed stream and discard its queued native window.
     pub fn stop_spectrum_stream(&mut self) -> u32 {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = OBSERVATION_OPERATION_STOP;
+            if let Some(receipt) = self.pending_stop_receipt() {
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                return RESULT_OK;
+            }
+            let permit = match self.begin_observation(
+                ObservationClass::Removal,
+                Self::protected_spectrum_control_lengths(true, 0),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+            };
+            return self.stop_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -2965,8 +3239,15 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_cadence(&self) -> Option<SpectrumCadence> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.observation.legacy())
-            .and_then(PreparedSpectrumCapture::cadence)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::cadence)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    (storage.controller.spectrum_state().accepted_generation != 0)
+                        .then_some(storage.spectrum_cadence)
+                }
+            })
     }
 
     /// Return the native capture epoch for the active managed stream.
@@ -2974,8 +3255,16 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_epoch(&self) -> Option<u64> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.observation.legacy())
-            .and_then(PreparedSpectrumCapture::stream_epoch)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => capture
+                    .as_ref()
+                    .and_then(PreparedSpectrumCapture::stream_epoch),
+                PreparedObservationStorage::Protected(storage) => {
+                    (storage.controller.spectrum_state().accepted_generation != 0)
+                        .then_some(storage.history_epoch)
+                        .flatten()
+                }
+            })
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
@@ -2998,8 +3287,14 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_target(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.observation.legacy())
-            .and_then(PreparedSpectrumCapture::target)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::target)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(&storage.spectrum_demand.target)
+                }
+            })
             .map(spectrum_target_raw)
             .unwrap_or(0)
     }
@@ -3009,8 +3304,14 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_channels(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.observation.legacy())
-            .and_then(PreparedSpectrumCapture::channels)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::channels)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(storage.spectrum_demand.channels)
+                }
+            })
             .map(spectrum_channels_raw)
             .unwrap_or(0)
     }
@@ -3075,10 +3376,16 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_selection_epoch(&self) -> u64 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.observation.legacy())
-            .map_or(0, |capture| match capture {
-                PreparedSpectrumCapture::Single(_) => 0,
-                PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
+            .map_or(0, |ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().map_or(0, |capture| match capture {
+                        PreparedSpectrumCapture::Single(_) => 0,
+                        PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
+                    })
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    storage.controller.spectrum_state().selection_epoch
+                }
             })
     }
 
@@ -6902,6 +7209,12 @@ fn compile_ready(
             report.largest_named_allocation_bytes =
                 report.largest_named_allocation_bytes.max(target_bytes);
 
+            let spectrum_demand = HostSpectrumDemand {
+                target: SpectrumTarget::TrackPostMatrix(facts.target_track_id),
+                channels: SpectrumChannels::Stereo,
+                mode: HostSpectrumMode::Continuous,
+            };
+
             PreparedObservationStorage::Protected(ProtectedObservationStorage {
                 controller,
                 ingress: ObservationIngressState::new(preparation.ingress, projection.bounds),
@@ -6910,7 +7223,7 @@ fn compile_ready(
                 spectrum_cadence: facts.spectrum_cadence,
                 packed_response_bytes: projection.packed_response_bytes,
                 packed_spectrum_bytes: projection.packed_spectrum_bytes,
-                target_track_id: facts.target_track_id,
+                spectrum_demand,
             })
         }
         (None, None, None) => PreparedObservationStorage::Legacy(spectrum_capture),

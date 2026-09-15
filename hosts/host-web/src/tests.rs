@@ -8338,7 +8338,10 @@ fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
     let retained = storage.ingress.bounds.retained_bytes;
     let legacy = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(128)).unwrap();
     let overlap = size_of::<HostObservationController>() as u64;
-    let target_bytes = storage.target_track_id.len() as u64;
+    let target_bytes = match &storage.spectrum_demand.target {
+        SpectrumTarget::TrackPostMatrix(target) => target.len() as u64,
+        _ => panic!("protected EQ target kind"),
+    };
     assert_eq!(
         host.resources.bridge_metadata_bytes,
         legacy.resources.bridge_metadata_bytes - overlap + target_bytes
@@ -8413,6 +8416,185 @@ fn protected_eq_boot_rejects_incompatible_options_and_target() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn protected_eq_controls_use_native_receipts_and_fixed_metadata() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+
+    assert_eq!(host.spectrum_target(), SPECTRUM_TARGET_TRACK_POST_MATRIX);
+    assert_eq!(host.spectrum_channels(), SPECTRUM_CHANNEL_BOTH);
+    assert_eq!(host.spectrum_selection_epoch(), 0);
+    assert_eq!(host.spectrum_stream_cadence(), None);
+    assert_eq!(host.spectrum_stream_epoch(), None);
+    {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        assert_eq!(storage.history_epoch, None);
+        assert_eq!(storage.history_dropped_captures, 0);
+    }
+
+    let cadence = host.start_spectrum_stream().expect("native start");
+    assert_eq!(host.spectrum_stream_cadence(), Some(cadence));
+    assert_eq!(host.spectrum_stream_epoch(), Some(1));
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    assert_eq!(host.side_records.pending_count, 1);
+    assert_eq!(host.side_records.completed_count, 0);
+    assert_eq!(host.observation_admission().operation, 4);
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_RECEIPT,
+        0
+    );
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+        0
+    );
+    let start_receipt = host.observation_admission().receipt;
+    assert_eq!(start_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(start_receipt.sequence, 1);
+
+    // Ordinary exhaustion cannot consume the removal credit or prevent a pending stop.
+    assert_eq!(host.restart_spectrum_stream(), RESULT_BACKPRESSURE);
+    assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+    let stop_receipt = host.observation_admission().receipt;
+    assert_eq!(
+        host.observation_admission().operation,
+        OBSERVATION_OPERATION_STOP
+    );
+    assert_eq!(stop_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(stop_receipt.sequence, 2);
+    assert_eq!(host.side_records.pending_count, 2);
+
+    let ingress_before_repeat = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+            storage.ingress.epoch,
+        )
+    };
+    assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+    assert_eq!(host.observation_admission().receipt, stop_receipt);
+    let ingress_after_repeat = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+            storage.ingress.epoch,
+        )
+    };
+    assert_eq!(ingress_after_repeat, ingress_before_repeat);
+
+    // Both graph publications apply at one real boundary. The stop leaves the prepared profile
+    // available while reporting inactive cadence/epoch from C's accepted state.
+    #[cfg(feature = "test-support")]
+    host_core::test_only_reset_spectrum_operation_counts();
+    assert_eq!(host.render_next(), RESULT_OK);
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 2);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[1].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].application_sample, 0);
+    assert_eq!(applications[1].application_sample, 0);
+    assert_eq!(applications[0].sequence, start_receipt.sequence);
+    assert_eq!(applications[1].sequence, stop_receipt.sequence);
+    assert_eq!(host.spectrum_stream_cadence(), None);
+    assert_eq!(host.spectrum_stream_epoch(), None);
+    assert_eq!(host.spectrum_target(), SPECTRUM_TARGET_TRACK_POST_MATRIX);
+    assert_eq!(host.spectrum_channels(), SPECTRUM_CHANNEL_BOTH);
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        host_core::test_only_spectrum_operation_counts(),
+        host_core::SpectrumOperationCounts::default()
+    );
+    assert_eq!(host.side_records.pending_count, 0);
+    assert_eq!(host.side_records.completed_count, 0);
+}
+
+#[test]
+fn protected_eq_restart_refusal_releases_row_and_same_target_restart_resets_history() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+
+    host.start_spectrum_stream().expect("native start");
+    assert_eq!(host.render_next(), RESULT_OK);
+    let before_refusal = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.history_epoch,
+            storage.history_dropped_captures,
+            storage.controller.spectrum_state(),
+        )
+    };
+
+    // The host has not reconciled the first native publication yet. C therefore refuses the
+    // restart; the browser reservation is released and the accepted metadata remains intact.
+    assert_eq!(host.restart_spectrum_stream(), RESULT_BACKPRESSURE);
+    assert_eq!(host.side_records.reserved_mask, 0);
+    assert_eq!(host.side_records.pending_count, 1);
+    assert_eq!(host.observation_admission().operation, 5);
+    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+    let after_refusal = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.history_epoch,
+            storage.history_dropped_captures,
+            storage.controller.spectrum_state(),
+        )
+    };
+    assert_eq!(after_refusal, before_refusal);
+
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 1);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].sequence, 1);
+    assert_eq!(host.render_next(), RESULT_OK);
+
+    assert_eq!(host.restart_spectrum_stream(), RESULT_OK);
+    assert_eq!(host.observation_admission().operation, 5);
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_eq!(
+        host.observation_admission().receipt.state,
+        OBSERVATION_RECEIPT_STATE_PENDING
+    );
+    assert_eq!(host.observation_admission().receipt.sequence, 2);
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    assert_eq!(host.spectrum_stream_epoch(), Some(1));
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert_eq!(storage.history_epoch, Some(1));
+    assert_eq!(storage.history_dropped_captures, 0);
 }
 
 #[test]
@@ -8698,7 +8880,10 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     let request = protected_eq_request();
     let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
         document.as_bytes(),
-        boot_options(128),
+        WebBootOptions {
+            console_command_queue_records: 4,
+            ..boot_options(128)
+        },
         &protected_eq_preparation(&request),
     )
     .expect("protected boot");
@@ -8765,11 +8950,28 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     assert!(host.take_observation_applications().is_empty());
     assert_eq!(host.side_records.pending_count, 2);
 
-    assert_eq!(host.render_next(), RESULT_OK);
-    host.status.next_absolute_sample = u64::MAX;
+    assert_eq!(
+        host.ready.as_ref().expect("ready ownership").controls.len(),
+        1
+    );
+    host.ready.as_mut().expect("ready ownership").controls[0]
+        .producer
+        .try_push(TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..Matrix2x2::IDENTITY
+            },
+            smoothing_samples: 0,
+        })
+        .expect("test-only malformed matrix record");
     assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(host.status().state, STATE_FAILED);
+    assert_eq!(host.status().rendered_quanta, 0);
+    assert_eq!(host.status().next_absolute_sample, 0);
     let applications = host.take_observation_applications();
     assert_eq!(applications.len(), 2);
+    assert_eq!(applications[0].application_sample, 0);
+    assert_eq!(applications[1].application_sample, 0);
     assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
     assert_eq!(applications[1].state, OBSERVATION_RECEIPT_STATE_APPLIED);
     assert_eq!(applications[0].owner, applications[1].owner);
