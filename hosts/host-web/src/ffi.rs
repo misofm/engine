@@ -6407,6 +6407,141 @@ pub(crate) mod live_response_ffi_tests {
         assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
     }
 
+    fn real_response_markers_after_boundary(handle: u32) -> ResponseMarkers {
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_OK,
+            "private protected response fixture capture"
+        );
+        render_one_protected_boundary(handle);
+        let markers = response_markers();
+        assert!(
+            markers.raw_result.iter().any(|byte| *byte != 0),
+            "real response payload must be nonzero"
+        );
+        assert_eq!(markers.live_result_header.result, RESULT_OK);
+        assert!(markers.live_result_len > LIVE_RESPONSE_RESULT_BYTES as usize);
+        assert!(markers.live_token > 0);
+        assert_eq!(markers.capture_identity.kind, 1);
+        assert_ne!(markers.capture_identity.owner, 0);
+        assert_eq!(markers.capture_identity.snapshot_token, markers.live_token);
+        markers
+    }
+
+    fn assert_real_response_refusal(
+        case: &str,
+        handle: u32,
+        markers: &ResponseMarkers,
+        expected: u32,
+    ) {
+        let result = miso_engine_web_v1_track_response_capture(handle);
+        assert_eq!(result, expected, "{case} result");
+        assert_response_markers(markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "{case} spends the Ordinary attempt"
+            );
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: expected,
+                    operation: 8,
+                    ingress_epoch: status.ingress_epoch,
+                    ..WebObservationAdmission::default()
+                },
+                "{case} admission"
+            );
+        });
+    }
+
+    fn configure_live_request(request: impl FnOnce(&mut WebLiveResponseRequest)) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            request(&mut staging.live_request);
+        });
+    }
+
+    fn configure_live_track_id(bytes: &[u8], declared_bytes: u32) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            assert!(bytes.len() <= staging.live_track_id.len());
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..bytes.len()].copy_from_slice(bytes);
+            staging.live_request.track_id_bytes = declared_bytes;
+        });
+    }
+
+    fn run_real_response_refusal(case: &str, configure: impl FnOnce(), expected: u32) {
+        let handle = boot_private_protected();
+        let markers = real_response_markers_after_boundary(handle);
+        configure();
+        assert_real_response_refusal(case, handle, &markers, expected);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_malformed_fixed_request_preserves_real_markers() {
+        run_real_response_refusal(
+            "malformed struct size",
+            || configure_live_request(|request| request.struct_size -= 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "malformed ABI version",
+            || configure_live_request(|request| request.abi_version += 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "nonzero reserved request field",
+            || configure_live_request(|request| request.reserved[0] = 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_grid_preserves_real_markers() {
+        run_real_response_refusal(
+            "invalid response grid",
+            || configure_live_request(|request| request.grid = u32::MAX),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_id_preserves_real_markers() {
+        run_real_response_refusal(
+            "invalid UTF-8 track ID",
+            || configure_live_track_id(&[0xff], 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "overlong track ID",
+            || {
+                configure_live_track_id(
+                    b"eq0",
+                    u32::try_from(LIVE_RESPONSE_MAXIMUM_ID_BYTES + 1)
+                        .expect("overlong ID declaration"),
+                )
+            },
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_wrong_exact_target_preserves_real_markers() {
+        run_real_response_refusal(
+            "wrong prepared response target",
+            || configure_live_track_id(b"eq1", 3),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
     #[test]
     fn ffi_protected_response_shares_ordinary_credit_with_spectrum_and_replenishes_at_render() {
         let handle = boot_private_protected();
@@ -6467,10 +6602,7 @@ pub(crate) mod live_response_ffi_tests {
         );
 
         stage_request_with_limit(b"eq0", 65_536);
-        assert_eq!(
-            miso_engine_web_v1_track_response_capture(handle),
-            RESULT_OK
-        );
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
         assert_eq!(captured_header().snapshot_token, markers.live_token + 1);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
@@ -6481,10 +6613,7 @@ pub(crate) mod live_response_ffi_tests {
         stage_request_with_limit(b"eq0", 65_536);
         assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
 
-        assert_eq!(
-            miso_engine_web_v1_track_response_capture(handle),
-            RESULT_OK
-        );
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
         assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
