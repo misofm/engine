@@ -36,6 +36,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_boot_with_observation_demand",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
@@ -61,12 +62,26 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_admission_bytes",
+    "miso_engine_web_v1_observation_admission_ptr",
+    "miso_engine_web_v1_observation_application_bytes",
+    "miso_engine_web_v1_observation_application_capacity",
+    "miso_engine_web_v1_observation_application_ptr",
+    "miso_engine_web_v1_observation_application_take",
+    "miso_engine_web_v1_observation_capture_identity_bytes",
+    "miso_engine_web_v1_observation_capture_identity_ptr",
     "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_demand_apply",
+    "miso_engine_web_v1_observation_demand_bytes",
+    "miso_engine_web_v1_observation_demand_capacity",
+    "miso_engine_web_v1_observation_demand_ptr",
     "miso_engine_web_v1_observation_effect_index",
     "miso_engine_web_v1_observation_effect_slot_id",
     "miso_engine_web_v1_observation_id_capacity",
     "miso_engine_web_v1_observation_id_ptr",
     "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_preparation_bytes",
+    "miso_engine_web_v1_observation_preparation_ptr",
     "miso_engine_web_v1_observation_rack",
     "miso_engine_web_v1_observation_read",
     "miso_engine_web_v1_observation_result_bytes",
@@ -74,6 +89,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_observation_selection_bytes",
     "miso_engine_web_v1_observation_selection_capacity",
     "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_status_bytes",
+    "miso_engine_web_v1_observation_status_ptr",
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
@@ -554,6 +571,691 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 28,
           "type": "u32"
+        }
+      ]
+    },
+    "observationStatus": {
+      "bytes": 64,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "profile",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "flags",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "pendingCount",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "reserved",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "owner",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "ingressEpoch",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "acceptedGeneration",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "appliedGeneration",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "selectionEpoch",
+          "offset": 56,
+          "type": "u64"
+        }
+      ]
+    },
+    "observationWorkLimits": {
+      "bytes": 96,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "maximumActiveMeterChannels",
+          "offset": 8,
+          "type": "u64"
+        },
+        {
+          "name": "maximumMeterSamplesPerBlock",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "maximumMeterPublicationsPerBlock",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "maximumMeterPublicationBytesPerBlock",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "maximumActiveSpectrumCaptures",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "maximumCaptureInputSamplesPerBlock",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "maximumCaptureCopySamplesPerBlock",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "maximumCapturePublicationsPerBlock",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "maximumCaptureBytesPerSecond",
+          "offset": 72,
+          "type": "u64"
+        },
+        {
+          "name": "maximumTransitionEntryVisitsPerBlock",
+          "offset": 80,
+          "type": "u64"
+        },
+        {
+          "name": "maximumRetainedBytes",
+          "offset": 88,
+          "type": "u64"
+        }
+      ]
+    },
+    "observationIngressLimits": {
+      "bytes": 88,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "maximumControlBytes",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "maximumObservationRows",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "maximumResultBytes",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "ordinaryOperationsPerBoundary",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "removalOperationsPerBoundary",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "alignmentPadding",
+          "offset": 28,
+          "type": "u8[4]"
+        },
+        {
+          "name": "maximumAdmissionEntryVisits",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "maximumResponseBindingVisits",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "maximumResponseSectionVisits",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "maximumResponseCopyBytes",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "maximumHandlerCopyBytesPerBoundary",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "maximumCleanupEntryVisitsPerBoundary",
+          "offset": 72,
+          "type": "u64"
+        },
+        {
+          "name": "maximumRetainedBytes",
+          "offset": 80,
+          "type": "u64"
+        }
+      ]
+    },
+    "observationPreparation": {
+      "bytes": 392,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "profile",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "meterCount",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "residentTaps",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumCount",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "maximumActiveObservers",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "activationMaximumRetainedBytes",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.structSize",
+          "offset": 40,
+          "type": "u32"
+        },
+        {
+          "name": "workLimits.abiVersion",
+          "offset": 44,
+          "type": "u32"
+        },
+        {
+          "name": "workLimits.maximumActiveMeterChannels",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumMeterSamplesPerBlock",
+          "offset": 56,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumMeterPublicationsPerBlock",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumMeterPublicationBytesPerBlock",
+          "offset": 72,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumActiveSpectrumCaptures",
+          "offset": 80,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumCaptureInputSamplesPerBlock",
+          "offset": 88,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumCaptureCopySamplesPerBlock",
+          "offset": 96,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumCapturePublicationsPerBlock",
+          "offset": 104,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumCaptureBytesPerSecond",
+          "offset": 112,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumTransitionEntryVisitsPerBlock",
+          "offset": 120,
+          "type": "u64"
+        },
+        {
+          "name": "workLimits.maximumRetainedBytes",
+          "offset": 128,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.structSize",
+          "offset": 136,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.abiVersion",
+          "offset": 140,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.maximumControlBytes",
+          "offset": 144,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.maximumObservationRows",
+          "offset": 148,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.maximumResultBytes",
+          "offset": 152,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.ordinaryOperationsPerBoundary",
+          "offset": 156,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.removalOperationsPerBoundary",
+          "offset": 160,
+          "type": "u32"
+        },
+        {
+          "name": "ingressLimits.alignmentPadding",
+          "offset": 164,
+          "type": "u8[4]"
+        },
+        {
+          "name": "ingressLimits.maximumAdmissionEntryVisits",
+          "offset": 168,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumResponseBindingVisits",
+          "offset": 176,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumResponseSectionVisits",
+          "offset": 184,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumResponseCopyBytes",
+          "offset": 192,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+          "offset": 200,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumCleanupEntryVisitsPerBoundary",
+          "offset": 208,
+          "type": "u64"
+        },
+        {
+          "name": "ingressLimits.maximumRetainedBytes",
+          "offset": 216,
+          "type": "u64"
+        },
+        {
+          "name": "spectrumRequest.structSize",
+          "offset": 224,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.abiVersion",
+          "offset": 228,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.target",
+          "offset": 232,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.channels",
+          "offset": 236,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.targetIdBytes",
+          "offset": 240,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.reserved0",
+          "offset": 244,
+          "type": "u32"
+        },
+        {
+          "name": "spectrumRequest.maximumCaptureBytes",
+          "offset": 248,
+          "type": "u64"
+        },
+        {
+          "name": "spectrumRequest.reserved",
+          "offset": 256,
+          "type": "u32[2]"
+        },
+        {
+          "name": "targetId",
+          "offset": 264,
+          "type": "u8[128]"
+        }
+      ]
+    },
+    "observationDemand": {
+      "bytes": 32,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "operation",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "count",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "owner",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 24,
+          "type": "u32[2]"
+        }
+      ]
+    },
+    "observationReceipt": {
+      "bytes": 48,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "domain",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "state",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "owner",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "sequence",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "applicationSample",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "result",
+          "offset": 40,
+          "type": "u32"
+        },
+        {
+          "name": "reserved",
+          "offset": 44,
+          "type": "u32"
+        }
+      ]
+    },
+    "observationAdmission": {
+      "bytes": 232,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "result",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "operation",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "flags",
+          "offset": 16,
+          "type": "u32"
+        },
+        {
+          "name": "reason",
+          "offset": 20,
+          "type": "u32"
+        },
+        {
+          "name": "limitBytes",
+          "offset": 24,
+          "type": "u32"
+        },
+        {
+          "name": "reserved",
+          "offset": 28,
+          "type": "u32"
+        },
+        {
+          "name": "ingressEpoch",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "requested",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "maximum",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "limit",
+          "offset": 56,
+          "type": "u8[128]"
+        },
+        {
+          "name": "receipt.structSize",
+          "offset": 184,
+          "type": "u32"
+        },
+        {
+          "name": "receipt.abiVersion",
+          "offset": 188,
+          "type": "u32"
+        },
+        {
+          "name": "receipt.domain",
+          "offset": 192,
+          "type": "u32"
+        },
+        {
+          "name": "receipt.state",
+          "offset": 196,
+          "type": "u32"
+        },
+        {
+          "name": "receipt.owner",
+          "offset": 200,
+          "type": "u64"
+        },
+        {
+          "name": "receipt.sequence",
+          "offset": 208,
+          "type": "u64"
+        },
+        {
+          "name": "receipt.applicationSample",
+          "offset": 216,
+          "type": "u64"
+        },
+        {
+          "name": "receipt.result",
+          "offset": 224,
+          "type": "u32"
+        },
+        {
+          "name": "receipt.reserved",
+          "offset": 228,
+          "type": "u32"
+        }
+      ]
+    },
+    "observationCaptureIdentity": {
+      "bytes": 48,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "abiVersion",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "flags",
+          "offset": 12,
+          "type": "u32"
+        },
+        {
+          "name": "owner",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "observationGeneration",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "selectionEpoch",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "snapshotToken",
+          "offset": 40,
+          "type": "u64"
         }
       ]
     },
@@ -2168,6 +2870,200 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
+      }
+    ],
+    "observationProfiles": [
+      {
+        "value": 0,
+        "name": "legacyUnprotected"
+      },
+      {
+        "value": 1,
+        "name": "eqSpectrum"
+      }
+    ],
+    "observationOperations": [
+      {
+        "value": 1,
+        "name": "replaceMeters"
+      },
+      {
+        "value": 2,
+        "name": "removeMetersTo"
+      },
+      {
+        "value": 3,
+        "name": "stopGraph"
+      },
+      {
+        "value": 4,
+        "name": "startSpectrum"
+      },
+      {
+        "value": 5,
+        "name": "restartSpectrum"
+      },
+      {
+        "value": 6,
+        "name": "readSpectrum"
+      },
+      {
+        "value": 7,
+        "name": "stopSpectrum"
+      },
+      {
+        "value": 8,
+        "name": "captureResponse"
+      },
+      {
+        "value": 9,
+        "name": "rawObservationBatch"
+      },
+      {
+        "value": 10,
+        "name": "oneShot"
+      },
+      {
+        "value": 11,
+        "name": "collectionSelection"
+      },
+      {
+        "value": 12,
+        "name": "meterLease"
+      },
+      {
+        "value": 13,
+        "name": "meterRead"
+      },
+      {
+        "value": 14,
+        "name": "residentRead"
+      }
+    ],
+    "observationReceiptDomains": [
+      {
+        "value": 1,
+        "name": "graph"
+      },
+      {
+        "value": 2,
+        "name": "resident"
+      }
+    ],
+    "observationReceiptStates": [
+      {
+        "value": 1,
+        "name": "pending"
+      },
+      {
+        "value": 2,
+        "name": "applied"
+      },
+      {
+        "value": 3,
+        "name": "closed"
+      },
+      {
+        "value": 4,
+        "name": "failed"
+      }
+    ],
+    "observationAdmissionFlags": [
+      {
+        "value": 1,
+        "name": "receiptPresent"
+      },
+      {
+        "value": 2,
+        "name": "requestedPresent"
+      },
+      {
+        "value": 4,
+        "name": "maximumPresent"
+      },
+      {
+        "value": 8,
+        "name": "pendingBoundary"
+      }
+    ],
+    "observationStatusFlags": [
+      {
+        "value": 1,
+        "name": "ordinaryAvailable"
+      },
+      {
+        "value": 2,
+        "name": "removalAvailable"
+      },
+      {
+        "value": 4,
+        "name": "terminal"
+      },
+      {
+        "value": 8,
+        "name": "renderFailed"
+      }
+    ],
+    "observationCaptureKinds": [
+      {
+        "value": 1,
+        "name": "response"
+      },
+      {
+        "value": 2,
+        "name": "spectrum"
+      }
+    ],
+    "observationCaptureFlags": [
+      {
+        "value": 1,
+        "name": "graphGeneration"
+      }
+    ],
+    "observationRefusalReasons": [
+      {
+        "value": 0,
+        "name": "none"
+      },
+      {
+        "value": 1,
+        "name": "notPrepared"
+      },
+      {
+        "value": 2,
+        "name": "wrongOwner"
+      },
+      {
+        "value": 3,
+        "name": "capacity"
+      },
+      {
+        "value": 4,
+        "name": "workBudget"
+      },
+      {
+        "value": 5,
+        "name": "backpressure"
+      },
+      {
+        "value": 6,
+        "name": "conflict"
+      },
+      {
+        "value": 7,
+        "name": "closed"
+      },
+      {
+        "value": 8,
+        "name": "invalidRequest"
+      },
+      {
+        "value": 9,
+        "name": "arithmeticOverflow"
+      },
+      {
+        "value": 10,
+        "name": "revisionExhausted"
       }
     ],
     "observationChannels": [
