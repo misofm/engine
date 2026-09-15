@@ -1,0 +1,24 @@
+# Protected FFI response capture transaction
+
+Depends on #826 PASS/upstream and #825's pushed foundation at `codex/observation-browser-eq@4c235ed5`. #825 is stopped/superseded for attempt accounting. This issue owns one closable source outcome: using the PRIVATE staged protected boot fixture, the existing `miso_engine_web_v1_track_response_capture` export captures the exact prepared track through one shared Ordinary permit and atomically publishes packed response bytes, checked snapshot token and owner identity. Public protected boot, generated ABI publication, SDK and app behavior are outside this issue.
+
+## Scope and frozen transaction
+
+Allowed production edits: `hosts/host-web/src/ffi.rs`, with only narrow factoring/visibility of existing typed admission/target checks in `hosts/host-web/src/lib.rs` if source requires it; existing focused response/boot fixtures. No new provider, graph index, owner, ledger, buffer, worker or render change.
+
+Retain a matching exclusively borrowable mutable host before response staging. Read fixed request/token scalars, acquire one Ordinary permit with checked declared request/ID/result lengths before semantic traversal, and check `live_token.checked_add(1)` before any sink or raw failure/result write. Validate fixed headers/reserved fields, grid, bounded ID length and UTF-8, exact prepared target and Ready state, and declared/actual result capacity at least the cached packed-response bound and no greater than actual staging. Do all known target/state/capacity preflight before `LiveResponseCaptureSink::new`, then invoke the existing typed admitted seam using that same permit once. Only complete success writes final header/result and publishes valid length, next token and kind-1 response capture identity together: actual owner, graph-generation/selection fields zero. Response creates no application receipt.
+
+Pre-provider admission/shape/target/state/capacity/token refusal preserves previously committed response bytes, header, length, token and capture identity; it spends the classified attempt where admission was acquired. `Capture(MissingTrack)` and `Capture(Owner)` can occur before provider entry, so the enum variant alone never authorizes failure-output mutation. Only actual admitted provider/sink execution errors use the existing defined failure-header behavior, without advancing the successful token or identity. Preserve old public result mapping, and keep response/spectrum on the same Ordinary credit.
+
+## Objective gates
+
+- Seed a real successful response and nonzero committed raw/header/length/token/identity. Exhausted credit/token, malformed header/grid, invalid UTF-8/ID, wrong target, unavailable host and undersized declared/actual capacity leave those markers unchanged. Rejected preflight invokes a counting sink/provider zero times and proves the Ordinary attempt was spent when applicable.
+- Real successful capture packs the prepared track and publishes matching raw token/actual owner/kind Response/zero graph fields. A genuine provider/sink failure retains its defined failure header but not a new successful token/identity. No response receipt is invented.
+- Shared response/spectrum credit; both shared and exclusive `LIVE_HOST` borrow conflicts, invalid/disposed handle and response staging conflict preserve meaningful committed output. Legacy response/boot tests remain green.
+- Focused fixtures; full locked `host-web --lib --features test-support`; locked host-web/workspace check, strict Clippy, format/diff and existing realtime policy/mutation gates. Use shared `CARGO_TARGET_DIR=/home/bl/misofm/engine/target`. No new harness/benchmark.
+
+## Delivery and evidence record
+
+At most four coherent issue-wide implementation rounds: fresh Luna MAX rounds 1–2, Sol HIGH round 3 if needed, Astra XHIGH round 4 if needed. Each gets one independent fresh Astra MEDIUM adversarial verdict; fixture-only revisions count. After round four FAIL, stop and rebrief. Root commits exact-path green or candid useful recovery checkpoints before another tranche and synchronizes pushed evidence/GitHub. Record checkpoint hash, preflight-versus-provider invocation matrix, before/after committed markers, exact commands/results, reviewer verdict and remaining findings here. This issue is a reviewable source correction; public protected boot plus generated ABI/artifact delivery belong to the next publication successor, and browser/SDK/app adoption follows separately.
+
+Decision/evidence: pending implementation round 1.
