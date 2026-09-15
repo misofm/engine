@@ -9016,3 +9016,100 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     assert_eq!(terminal[0].state, OBSERVATION_RECEIPT_STATE_CLOSED);
     assert_eq!(terminal[0].result, RESULT_WRONG_STATE);
 }
+
+#[test]
+fn protected_eq_reads_preserve_pending_windows_and_native_fault_identity() {
+    let mut model = parse_session_json(&one_track_resource_session(128)).unwrap();
+    model.sources[0].frames = 48_000;
+    let document = canonical_session_json(&model).unwrap();
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .unwrap();
+    host.start_spectrum_stream().unwrap();
+    let accepted = host.observation_admission().receipt;
+    for block in 0..16 {
+        feed_compressor_block(&mut host, 128, block);
+    }
+    assert_eq!(
+        host.read_protected_spectrum_stream().unwrap_err(),
+        ProtectedSpectrumReadError::Native(HostSpectrumReadError::PendingApplication)
+    );
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+        0
+    );
+    assert_eq!(host.take_observation_applications().len(), 1);
+    let before = *host.observation_capture_identity();
+    assert!(matches!(
+        host.read_protected_spectrum_stream(),
+        Err(ProtectedSpectrumReadError::Refused(ObservationRefusal {
+            reason: ObservationRefusalReason::Backpressure,
+            ..
+        }))
+    ));
+    assert_eq!(*host.observation_capture_identity(), before);
+    feed_compressor_block(&mut host, 128, 16);
+    let first = host.read_spectrum_stream().unwrap();
+    assert_eq!(first.first_sample, 0);
+    assert!(first.left.iter().any(|sample| *sample != 0.0));
+    let committed = *host.observation_capture_identity();
+    assert_eq!(committed.owner, accepted.owner);
+    assert_eq!(committed.observation_generation, accepted.sequence);
+    assert_eq!(committed.selection_epoch, host.spectrum_selection_epoch());
+    assert_eq!(committed.snapshot_token, first.sequence + 1);
+
+    // Overfill the existing one-window queue. Gap reports retain its queued window and the last
+    // successfully published identity; the following admitted read returns that same old window.
+    for block in 17..48 {
+        feed_compressor_block(&mut host, 128, block);
+    }
+    let gap = host.read_protected_spectrum_stream().unwrap_err();
+    assert!(matches!(
+        gap,
+        ProtectedSpectrumReadError::Native(HostSpectrumReadError::Gap {
+            stream_epoch: 1,
+            dropped_captures: 1,
+            ..
+        })
+    ));
+    assert_eq!(*host.observation_capture_identity(), committed);
+    feed_compressor_block(&mut host, 128, 48);
+    let observed = host.read_protected_spectrum_stream().unwrap();
+    assert_eq!(observed.owner.get(), accepted.owner);
+    assert_eq!(observed.observation_generation, accepted.sequence);
+    assert_eq!(observed.selection_epoch, committed.selection_epoch);
+    assert_eq!(observed.window.first_sample, 2048);
+    assert!(observed.window.left.iter().any(|sample| *sample != 0.0));
+
+    // A real source-generation change invalidates partial capture while keeping the host usable.
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    let plane = [0.5_f32; 128];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            2,
+            0,
+            48_000,
+            &[&plane, &plane],
+            128,
+            false
+        ),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert!(matches!(
+        host.read_protected_spectrum_stream(),
+        Err(ProtectedSpectrumReadError::Native(
+            HostSpectrumReadError::Failed {
+                stream_epoch: 2,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(host.spectrum_stream_epoch(), Some(2));
+    assert_eq!(*host.observation_capture_identity(), committed);
+}

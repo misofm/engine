@@ -42,10 +42,10 @@ use host_core::{
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
-    HostSpectrumDemand, HostSpectrumMode, ObservationAccepted, ObservationRefusal,
-    ObservationRefusalReason, ObservationStop, ObservedContinuousSpectrumWindow,
-    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
-    SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
+    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationAccepted,
+    ObservationRefusal, ObservationRefusalReason, ObservationStop,
+    ObservedContinuousSpectrumWindow, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
+    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
@@ -468,6 +468,16 @@ const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
 const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
 const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
 const OBSERVATION_OPERATION_STOP: u32 = 7;
+const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
+
+/// A protected continuous-spectrum read preserves either its exact admission refusal or the
+/// complete native availability outcome. The public Rust compatibility facade maps this typed
+/// seam back to [`SpectrumContinuousReadError`] after the native result has been retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedSpectrumReadError {
+    Refused(ObservationRefusal),
+    Native(HostSpectrumReadError),
+}
 
 fn observation_not_prepared() -> ObservationRefusal {
     ObservationRefusal {
@@ -506,6 +516,45 @@ fn observation_refusal_result(reason: ObservationRefusalReason) -> u32 {
         | ObservationRefusalReason::RevisionExhausted => RESULT_REFUSED_BUDGET,
         ObservationRefusalReason::Backpressure => RESULT_BACKPRESSURE,
         ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => RESULT_WRONG_STATE,
+    }
+}
+
+fn legacy_spectrum_read_error(error: HostSpectrumReadError) -> SpectrumContinuousReadError {
+    match error {
+        HostSpectrumReadError::Inactive | HostSpectrumReadError::Closed => {
+            SpectrumContinuousReadError::NotActive
+        }
+        HostSpectrumReadError::PendingApplication | HostSpectrumReadError::Pending => {
+            SpectrumContinuousReadError::Pending
+        }
+        HostSpectrumReadError::Warming => SpectrumContinuousReadError::Warming,
+        HostSpectrumReadError::Failed { stream_epoch, .. } => {
+            SpectrumContinuousReadError::Failed { stream_epoch }
+        }
+        HostSpectrumReadError::Gap {
+            stream_epoch,
+            dropped_captures,
+            ..
+        } => SpectrumContinuousReadError::Gap {
+            stream_epoch,
+            dropped_captures,
+        },
+    }
+}
+
+fn legacy_spectrum_read_refusal(refusal: ObservationRefusal) -> SpectrumContinuousReadError {
+    match refusal.reason {
+        ObservationRefusalReason::Closed | ObservationRefusalReason::NotPrepared => {
+            SpectrumContinuousReadError::NotActive
+        }
+        ObservationRefusalReason::WrongOwner
+        | ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::Backpressure
+        | ObservationRefusalReason::Conflict
+        | ObservationRefusalReason::InvalidRequest
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => SpectrumContinuousReadError::Pending,
     }
 }
 
@@ -2445,6 +2494,24 @@ impl AudioWorkletEngineHost {
         }
     }
 
+    fn protected_spectrum_read_lengths(&self) -> ObservationLengths {
+        let result_bytes = self
+            .ready
+            .as_ref()
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(storage.packed_spectrum_bytes)
+                }
+                PreparedObservationStorage::Legacy(_) => None,
+            })
+            .unwrap_or(0);
+        ObservationLengths {
+            control_bytes: 0,
+            rows: 1,
+            result_bytes,
+        }
+    }
+
     fn protected_spectrum_target_bytes(&self) -> Result<u64, ObservationRefusal> {
         let Some(ready) = self.ready.as_ref() else {
             return Err(observation_not_prepared());
@@ -2625,6 +2692,147 @@ impl AudioWorkletEngineHost {
                 self.record_observation_refusal(OPERATION, refusal)
             }
         }
+    }
+
+    fn record_protected_spectrum_read_refusal(
+        &mut self,
+        refusal: ObservationRefusal,
+    ) -> ProtectedSpectrumReadError {
+        let result = observation_refusal_result(refusal.reason);
+        self.record_observation_admission(
+            OBSERVATION_OPERATION_READ_SPECTRUM,
+            result,
+            Some(refusal),
+            None,
+            false,
+        );
+        ProtectedSpectrumReadError::Refused(refusal)
+    }
+
+    fn cache_protected_spectrum_history(&mut self, stream_epoch: u64, dropped_captures: u64) {
+        if let Some(ready) = self.ready.as_mut()
+            && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+        {
+            storage.history_epoch = Some(stream_epoch);
+            storage.history_dropped_captures = dropped_captures;
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum read.
+    ///
+    /// The permit is validated directly so callers of the typed seam retain the complete
+    /// [`ObservationRefusal`] rather than receiving only the lossy legacy result code. Once the
+    /// owner and host state are admitted, the native controller is called exactly once; native
+    /// availability outcomes are recorded without touching receipt rows or polling applications.
+    fn read_spectrum_stream_admitted(
+        &mut self,
+        permit: ObservationPermit,
+    ) -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError> {
+        let owner_epoch = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => {
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            }
+        };
+        if let Err(refusal) =
+            permit.validate(owner_epoch.0, owner_epoch.1, ObservationClass::Ordinary)
+        {
+            return Err(self.record_protected_spectrum_read_refusal(refusal));
+        }
+        if self.status.state != STATE_READY {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::Closed,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            self.record_observation_admission(
+                OBSERVATION_OPERATION_READ_SPECTRUM,
+                RESULT_WRONG_STATE,
+                Some(refusal),
+                None,
+                false,
+            );
+            return Err(ProtectedSpectrumReadError::Refused(refusal));
+        }
+
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                let refusal = observation_not_prepared();
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                let refusal = observation_not_prepared();
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            };
+            storage.controller.try_read_continuous_spectrum()
+        };
+
+        match native {
+            Ok(window) => {
+                self.cache_protected_spectrum_history(
+                    window.window.stream_epoch,
+                    window.window.dropped_captures,
+                );
+                self.record_observation_admission(
+                    OBSERVATION_OPERATION_READ_SPECTRUM,
+                    RESULT_OK,
+                    None,
+                    None,
+                    false,
+                );
+                Ok(window)
+            }
+            Err(error) => {
+                let (result, pending_boundary) = match error {
+                    HostSpectrumReadError::Inactive | HostSpectrumReadError::Closed => {
+                        (RESULT_WRONG_STATE, false)
+                    }
+                    HostSpectrumReadError::PendingApplication
+                    | HostSpectrumReadError::Warming
+                    | HostSpectrumReadError::Pending => (
+                        RESULT_BACKPRESSURE,
+                        matches!(error, HostSpectrumReadError::PendingApplication),
+                    ),
+                    HostSpectrumReadError::Failed { stream_epoch, .. } => {
+                        self.cache_protected_spectrum_history(stream_epoch, 0);
+                        (RESULT_RENDER_REJECTED, false)
+                    }
+                    HostSpectrumReadError::Gap {
+                        stream_epoch,
+                        dropped_captures,
+                        ..
+                    } => {
+                        self.cache_protected_spectrum_history(stream_epoch, dropped_captures);
+                        (RESULT_OK, false)
+                    }
+                };
+                self.record_observation_admission(
+                    OBSERVATION_OPERATION_READ_SPECTRUM,
+                    result,
+                    None,
+                    None,
+                    pending_boundary,
+                );
+                Err(ProtectedSpectrumReadError::Native(error))
+            }
+        }
+    }
+
+    /// Admit and execute one protected continuous-spectrum read.
+    fn read_protected_spectrum_stream(
+        &mut self,
+    ) -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError> {
+        let permit = match self.begin_observation(
+            ObservationClass::Ordinary,
+            self.protected_spectrum_read_lengths(),
+        ) {
+            Ok(permit) => permit,
+            Err(refusal) => {
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            }
+        };
+        self.read_spectrum_stream_admitted(permit)
     }
 
     /// Reserve one fixed receipt row before a native publication.
@@ -3189,6 +3397,44 @@ impl AudioWorkletEngineHost {
     pub fn read_spectrum_stream(
         &mut self,
     ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            return match self.read_protected_spectrum_stream() {
+                Ok(observed) => match Self::spectrum_capture_identity(&observed) {
+                    Ok(identity) => {
+                        self.commit_observation_capture_identity(identity);
+                        Ok(observed.window)
+                    }
+                    Err(result) => {
+                        // The native window has already been admitted and consumed. Preserve it
+                        // in the typed seam, but report the checked post-read identity overflow
+                        // through the compatibility facade without wrapping the token.
+                        let refusal = ObservationRefusal {
+                            reason: ObservationRefusalReason::ArithmeticOverflow,
+                            limit: None,
+                            requested: None,
+                            maximum: None,
+                        };
+                        self.record_observation_admission(
+                            OBSERVATION_OPERATION_READ_SPECTRUM,
+                            result,
+                            Some(refusal),
+                            None,
+                            false,
+                        );
+                        Err(SpectrumContinuousReadError::Pending)
+                    }
+                },
+                Err(ProtectedSpectrumReadError::Refused(refusal)) => {
+                    Err(legacy_spectrum_read_refusal(refusal))
+                }
+                Err(ProtectedSpectrumReadError::Native(error)) => {
+                    Err(legacy_spectrum_read_error(error))
+                }
+            };
+        }
         if self.status.state != STATE_READY {
             return Err(SpectrumContinuousReadError::NotActive);
         }
