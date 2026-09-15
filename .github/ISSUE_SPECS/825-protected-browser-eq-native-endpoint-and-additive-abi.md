@@ -494,3 +494,8 @@ Checkpoint `17702e15` compiles and passes three new B1 tests, all 129 host-web l
 ## ABI checkpoint B1 attempt 2 adversarial evidence
 
 Checkpoint `9ad69729` corrects the three source defects and passes five focused B1 tests, 134 full host-web library tests, locked check, format and diff checks. Astra MEDIUM found the production behavior correct but returned FAIL because borrow-conflict and unrelated-handle tests still asserted exported `u32` pointers; on native 64-bit those can truncate to zero even when an erroneous stale raw pointer exists. Attempt 3 changes only the test assertions to inspect raw helper nullness for live conflicts/unrelated handles and raw non-nullness for valid live/terminal handles. B2 remains paused until this discrimination passes review.
+
+
+## ABI checkpoint B1 accepted evidence
+
+Fixture checkpoint `d5f57446` directly asserts raw pointer nullness during LIVE_HOST borrow conflicts and for unrelated handles, and raw non-nullness for valid live and matching disposed terminal query handles. It retains the exported `u32` pointer checks without using their native truncation as evidence. Five focused B1 tests and all 134 host-web library tests pass, with two existing ignored; locked check, format and diff checks pass. Astra MEDIUM returned PASS on attempt 3 for the additive demand/scalar-query path. B2 may now add application transfer and final disposal handoff; protected public boot remains unavailable.
