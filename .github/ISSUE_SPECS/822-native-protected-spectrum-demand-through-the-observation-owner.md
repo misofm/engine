@@ -1,261 +1,36 @@
 # Native protected spectrum demand through the observation owner
 
-Status: Astra XHIGH design approved by coordinator for five bounded Luna MAX assignments. Depends on closed #820 (PR #821, merge e907b632).
+Status: OPEN. Astra XHIGH design and continuous-first scope approved by coordinator. Depends on closed #820 (PR #821, merge e907b632). C1–C4 are pushed; C5 is next. This canonical body supersedes the earlier one-shot/cache draft without changing the approved continuous-first contract.
 
+## Smallest closable capability
 
-## Authoritative continuous-first contract
+The native observation owner supports the existing fixed 2048-frame **continuous** spectrum: exact prepared-target replacement, same-target restart, reserved stop, generation-fenced reads and zero capture dispatch after applied stop. One spectrum producer may be accepted at a time, sharing the existing owner, graph activation endpoint and work budget with selected meters. UI demand changes never rebuild/swap an audio plan or reset audio DSP.
 
-Fresh Astra XHIGH reviewed this reduction against the approved browser EQ contract; root approved it on 2026-09-15. This section supersedes every conflicting one-shot delivery/cache/API/gate requirement in the detailed preparation notes below. C2 private paired-slot machinery stays unchanged.
+Scope: existing `crates/host-core/src/spectrum.rs`, `observation_demand.rs`, preparation/export glue and existing host/spectrum tests. Preserve legacy permanently bound single/collection and one-shot behavior. No browser/SDK implementation, resident-effect demand, overlapping FFT, configurable hop/FFT, simultaneous public jobs, new worker/transport, benchmark framework or native continuous result cache in this issue.
 
-**Coordinator-approved scope: close #822 for protected continuous spectrum; protected one-shot follows the working browser EQ milestone.** Replace every conflicting one-shot/last-result requirement in #822 with this amendment. The closable capability is exact prepared-target continuous replace, same-target restart, reserved stop, generation-fenced continuous reads, and zero graph dispatch after applied stop. Preserve paired slots, private ownership, complete meter/spectrum unions, capture identity, budget equations, bounded retirement and receipt authority. Legacy permanent one-shot remains unchanged. C1/C2 may proceed unchanged; private one-shot machinery already shared with legacy capture need not be removed.
+Protected one-shot admission/read and automatic completion cleanup follow the working browser EQ milestone in a bounded successor. Do not introduce placeholder protected one-shot methods now. The next browser milestone uses one exact TrackPostMatrix dual-mono continuous feed and already refuses protected one-shot aliases.
 
-## Exact API and refusal
-
-Keep `HostSpectrumDemand`, `ObservedContinuousSpectrumWindow`, `replace_spectrum`, `restart_spectrum`, `stop_spectrum`, and `try_read_continuous_spectrum`. Defer protected `ObservedSpectrumWindow` and `try_read_spectrum`; do not implement placeholder methods. Retain `HostSpectrumMode::{OneShot, Continuous}` if C2 uses it. Following the existing terminal-owner check, `replace_spectrum(OneShot)` returns exactly:
-
-```rust
-ObservationRefusal {
-    reason: ObservationRefusalReason::InvalidRequest,
-    limit: None,
-    requested: None,
-    maximum: None,
-}
-```
-
-Refuse before target lookup, slot staging or graph publication; preserve accepted/applied state, queues, work and identity counters. No new native refusal variant or numeric mapping is needed. The protected browser endpoint continues its already specified `Unsupported` result before invoking C; its alias policy does not depend on native one-shot support.
-
-## Last-result contract
-
-**No native continuous result cache is required.** Continuous reads transfer a single generation-stamped window to the caller; neither approved browser contract requests native replay or last-result access. Their preserved previous values are existing ABI committed output and SDK publication state, maintained independently when admission/read does not succeed.
-
-Delete #822's native tagged last-result-cell guarantee explicitly, including retention through accepted replacement. A refused replacement preserves the active capture and any unread queued record. An accepted replacement never resets the old active slot before application; subsequent reads report PendingApplication until the accepted generation applies. Successfully returned old windows remain caller-owned and distinguishable by identity. Stop/application fences future delivery and performs bounded retired-queue cleanup. No duplicated payload storage, cache validity flag or extra native result copy is necessary.
-
-## Replacement handoffs and gates
-
-**C3:** Keep real preparation, complete-set selections/scratch and checked meter-plus-spectrum cost composition. Omit inline last-result storage and pending-one-shot-delivery metadata; derive retained bytes from actual reduced layouts. Keep all existing C3 preparation, union-capacity, exact/one-below, overflow, no-raw-control and dormant-work gates.
-
-**C4:** Implement continuous replace/restart/stop, meter-union preservation, `stop_all`, and bounded `try_applied` reconciliation. Remove result-cell initialization/invalidation and mode-transition behavior. Replace the mode-change gate with atomic OneShot refusal. Preserve A→B, same-A restart, no pre-boundary mutation, failed-publication queue/state preservation, ordinary-plus-removal receipts, repeated-stop identity, terminal closure and applied-stop zero-dispatch gates. Reads consume no receipts; only `try_applied` reconciles application.
-
-**C5:** Implement only fenced continuous reading, with one entry-bounded queue pop, independent selection/generation/stream identities and existing Failed/Gap metadata. Retain applicable state errors; omit one-shot delivery and `CleanupRefused`. Remove automatic-removal retries, cleanup-admission exhaustion and undelivered-one-shot gates. Preserve stale-record rejection before projection, pending-generation nonconsumption, stream-epoch collisions, failed render/full queue, PCM parity, resident/planar operation counts, Q>2048, realtime guards and the proportional native/Wasm closure gates. Continuous reads never publish removal; explicit stop remains mandatory.
-
-
-The protected read error for this slice is `HostSpectrumReadError::{Inactive, PendingApplication, Warming, Pending, Closed, Failed { owner: ObservationOwnerId, observation_generation: u64, stream_epoch: u64 }, Gap { owner: ObservationOwnerId, observation_generation: u64, stream_epoch: u64, dropped_captures: u64 }}`. No protected one-shot API, Invalid, WrongMode, or CleanupRefused variant is introduced here.
-
-Successor scope, to be numbered at this issue boundary: protected OneShot admission/read, automatic reserved removal, one retained undelivered result, retry/exhaustion/closure semantics, exact storage accounting and representative contention gates. It follows the working browser EQ milestone and remains part of the overall production rollout. No native continuous replay/cache is promised.
-
-## Detailed preparation and implementation notes
-
-
-Depends on #820. Smallest closable result: the native demand owner supports the existing fixed 2048 one-shot/continuous spectrum and exact prepared-target selection, including same-target restart, with one admitted spectrum producer. Last stop removes graph dispatch. No overlap, custom hop/FFT, extra workers or simultaneous jobs. Scope: existing `crates/host-core/src/spectrum.rs`, `observation_demand.rs`, preparation/export glue and existing spectrum/host tests.
-
-## Capture identity, ownership and render hooks
-
-Root approved two slots as the smallest solution compatible with #816. #816 does not call activation_changed for an unchanged handle, so mutating/restarting an active capture in place would race render and bypass the admitted boundary.
-
-Add crate-private controlled preparation and ownership alongside legacy types:
-
-```rust
-pub(crate) fn prepare_controlled_capture_collection(
-    request: &SpectrumCaptureCollectionRequest, graph_nodes: &[GraphNodeId],
-    maximum_named_allocation_bytes: u64,
-) -> Result<(Vec<GraphNodeObserverBinding>, ControlledSpectrumCaptureCollection), SpectrumPrepareError>;
-pub(crate) fn controlled_spectrum_capture_collection_resources(
-    entries: &[SpectrumCaptureCollectionEntry],
-) -> Result<SpectrumCaptureResources, SpectrumPrepareError>;
-```
-
-`ControlledSpectrumCaptureCollection` privately retains each public exact `(target,channels)` entry and TWO existing SpectrumCapture storage/queue/observer instances. Reuse the existing one-slot `SpectrumCapturedRecord` queue and scalar/array capture state; this is storage duplication, not a new transport. Legacy single/collection constructors still prepare their old one-slot-per-entry permanent bindings and retain their API. Controlled preparation calls a shared private variant of `prepare_capture_with_handle` selecting `GraphNodeObserverBinding::controlled`.
-
-Stable public entry identity is its exact target+channel mask plus owner, not its internal slot. Internal handle for flat slot i is `u64::MAX-i`; meter handles rise from 1. Preflight total `2*entry_count`, every subtract and disjoint meter/spectrum handle ranges before creating bindings. Duplicate exact public entries remain a refusal. Charge TWO full captures/queues/bindings per entry, all control-side slot/entry/target storage and the expanded graph catalog exactly. Do not multiply the active spectrum work by two: only one slot is accepted active. Do not expose slots as two supported jobs.
-
-Freeze slot lifecycle: `Free` (prepared, never active, or safely retired), `Staged` (candidate descriptor only), `Pending(revision)` (published obligation), `Active(generation)`, `Retiring(removal_or_replacement_revision)`. A slot becomes Free only after the graph receipt that removed that handle has been consumed, and its bounded one-item old queue has been cleaned OFF RENDER. That receipt proves no later observer call can touch the old slot. The new active observer may be rendering concurrently; never clean/reconfigure it. Pending ordinary and reserved removal each retain their obligations, so a slot admitted then removed at one boundary is still reconciled through both receipts. A renderer closure terminals outstanding slots and cleanup follows owner disposal off render. Implement admission/application/retirement as independent optional scalar fields (`admitted_generation`, `applied_generation`, `retiring_at_revision`) plus a staged flag, not an exclusive enum that would overwrite Pending when a reserved removal follows it. Thus a candidate can be admitted at revision r and scheduled for removal at r+1 while both receipts remain represented.
-
-Staging operates only on a Free slot. It may reset that slot's bounded control-side queue, shared mode/cadence/epoch/failure metadata and read cursors before publication; it must leave its ARMED flag/shared.active false. It NEVER invokes existing raw `arm`, `start_continuous`, `commit_continuous`, `cancel`, `stop_continuous` on the currently active or pending slot. After all checks, graph publication is the sole commit. If publication refuses, return the candidate to Free; old selected fields, active shared values and result remain unchanged.
-
-`SpectrumCaptureObserver::activation_changed(true,generation,first_sample)` sets its private observation_generation, resets only scalar one-shot/continuous cursors and fault/sequence history, and enables the PRESTAGED mode (`state=ARMED` for one-shot or `shared.active=1` for continuous). It performs no array zeroing or queue pop. False disables only that slot's state and invalidates scalar partial history; it cannot alter sibling slot state. Existing sample extraction/finite checks remain. All hooks are O(1). Add a private observation_generation to `SpectrumCapturedRecord`; add it to the observer/buffer/finish seams so records are stamped where produced. Existing fixed-demand captures carry zero. Exact resource projection uses new actual layouts.
-
-Freeze the private function family rather than asking Luna to invent a staging protocol:
-
-```rust
-pub(crate) struct ControlledSpectrumCandidate { /* scalar slot/entry indices, mode, cadence */ }
-impl ControlledSpectrumCandidate {
-    pub(crate) fn observer_handle(&self) -> u64;
-}
-impl ControlledSpectrumCaptureCollection {
-    pub(crate) fn stage(
-        &mut self, target: &SpectrumTarget, channels: SpectrumChannels,
-        mode: HostSpectrumMode, cadence: SpectrumCadence,
-    ) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError>;
-    pub(crate) fn commit_candidate(
-        &mut self, candidate: ControlledSpectrumCandidate, revision: u64,
-    );
-    pub(crate) fn cancel_candidate(&mut self, candidate: ControlledSpectrumCandidate);
-    pub(crate) fn commit_removal(&mut self, revision: u64);
-    pub(crate) fn reconcile_applied(&mut self, revision: u64);
-}
-```
-
-The candidate is affine (not Clone/Copy publicly) and stores only fixed scalar metadata; it owns no render resources. stage performs every capture-specific check before changing the free slot. commit_candidate records its new Pending revision and marks the previously accepted slot Retiring at that revision; commit_removal marks the last accepted spectrum slot Retiring. Both are metadata-only and infallible after graph publication. reconcile_applied resolves exactly that revision's slot changes, cleans only the retired one-item queues, and makes them Free. The host's two pending records remain the receipt authority; the spectrum owner does not introduce a second queue. The candidate mode/cadence is immutable once staged through application. Free/retired-slot lookup is control-side and the existing singular capture helpers are reused privately; none of these functions is called from render.
-
-For protected reads factor the existing try_read/try_read_continuous state machines into private record-returning helpers so generation is checked before converting away SpectrumCapturedRecord. Preserve their established failure/drop handling for legacy callers. Do not call the old public read method then guess a discarded generation from current shared state.
-
-## Host operations, revision identity and cost
-
-The controller owns the ControlledSpectrumCaptureCollection; it returns no raw SpectrumCapture/Collection. Extend preparation to accept Some(nonempty) through controlled preparation and the same artifact source bind. Normalize a singular request to a one-entry collection at any later compatibility adapter boundary.
-
-Freeze additive host operations:
+## Public host contract
 
 ```rust
 pub enum HostSpectrumMode { OneShot, Continuous }
 pub struct HostSpectrumDemand {
-    pub target: SpectrumTarget, pub channels: SpectrumChannels,
+    pub target: SpectrumTarget,
+    pub channels: SpectrumChannels,
     pub mode: HostSpectrumMode,
 }
-pub struct ObservedSpectrumWindow {
-    pub owner: ObservationOwnerId, pub observation_generation: u64,
-    pub selection_epoch: u64, pub window: SpectrumWindow,
-}
 pub struct ObservedContinuousSpectrumWindow {
-    pub owner: ObservationOwnerId, pub observation_generation: u64,
-    pub selection_epoch: u64, pub window: SpectrumContinuousWindow,
+    pub owner: ObservationOwnerId,
+    pub observation_generation: u64,
+    pub selection_epoch: u64,
+    pub window: SpectrumContinuousWindow,
 }
-impl HostObservationController {
-    pub fn replace_spectrum(&mut self, demand: &HostSpectrumDemand)
-        -> Result<ObservationAccepted, ObservationRefusal>;
-    pub fn restart_spectrum(&mut self)
-        -> Result<ObservationAccepted, ObservationRefusal>;
-    pub fn stop_spectrum(&mut self) -> Result<ObservationStop, ObservationRefusal>;
-    pub fn try_read_spectrum(&mut self)
-        -> Result<ObservedSpectrumWindow, HostSpectrumReadError>;
-    pub fn try_read_continuous_spectrum(&mut self)
-        -> Result<ObservedContinuousSpectrumWindow, HostSpectrumReadError>;
-}
-```
-
-`HostSpectrumReadError` distinguishes `Inactive`, `PendingApplication`, `Warming`, `Pending`, `WrongMode`, `Closed`, and the existing Invalid/Failed/Gap metadata wrapped WITH owner and observation_generation. Do not collapse telemetry faults into budget errors. The prepared host rate/Q fixes `SpectrumCadence::new(rate,Q)`; requested unsupported rate/quantum is not a new mutator in this API.
-
-Replace validates the exact catalog entry/mode, prepares the Free alternate slot, reserves its work and one complete union/pending record, then publishes graph.replace retaining all accepted meters and replacing only the spectrum handle. `restart_spectrum` uses the same admitted target/mode/cadence with the other internal slot and is a real new activation, even for the same target. Same-target replacement also starts a fresh capture; adapters that want idempotent selection compare their accepted target first, preserving existing collection.select no-op semantics. A one-shot-to-continuous change uses the alternate slot; it never calls legacy commit_continuous on the active slot. Current and pending application metadata remain separate.
-
-`selection_epoch` is a checked host-control counter, incremented only when the public target/channels changes, reserved before publication and committed after success. Observation generation is graph revision for EVERY new capture/restart/mode change. Existing SpectrumContinuousWindow.stream_epoch remains that capture activation's DSP-history/fault epoch, initialized at 1 and advanced by existing failure behavior; sequence starts at zero per activation. Its full identity is `(owner, observation_generation, stream_epoch)`. Do not attempt a concurrent cross-slot global stream_epoch allocator or compare local epochs from distinct generations. Legacy APIs retain their old semantics. Later ABI/SDK migration must transport the separate generation and fence it; this native slice does not reinterpret an existing frozen wire epoch.
-
-Reads first require the corresponding generation applied, then pop at most the one queue slot available at entry. A slot's read is accepted only for that observation generation. Off-render changes of accepted demand do not destructively clear the last valid old result; it stays available in the owner's bounded retained last-result cell marked with its old generation until replacement applies or explicit stop cleanup retires it. New-generation `try_read_*` reports pending/warming and never presents that cached old result as current. The same slot cannot be reused until its removal receipt/cleanup. Failure/refusal tests inspect preservation of this cell.
-
-`stop_spectrum` publishes graph.remove_to retaining meters; it disables no active state before that boundary. It uses reserved removal even with an ordinary pending replacement, and repeats share an identical pending stop receipt. After receipt, clean only the affected at-most-two slots (one pop each), clear/fence retained result and return Quiescent when no pending cleanup remains. It never scans every prepared target. `stop_all` removes both families in one removal snapshot. A completed one-shot remains a bounded owned request until read/cancel reconciliation submits its removal: after successfully taking its window, queue that removal through the same reserved lane, retain the returned window, and report pending cleanup if necessary. No result-read path may silently bypass or drop required stop. Quiescence is promised only after removal applies; inactive one-shot checks before that are not claimed as zero graph dispatch.
-
-Worst-case C work for the ONE active capture, Q quantum, R sample rate, C selected channels, N=2048:
-
-- `active_spectrum_captures=1`.
-- `capture_input_samples_per_block=C*Q`: includes existing finite-validation reads even on a continuous WAITING block. Capture copying reads are charged separately below.
-- `capture_copy_samples_per_block=C*min(Q,N)+4*N`: selected input-to-capture copies plus the two full dual-plane 2048-value payload copies at the publication seam. Record metadata is accounted in publication bytes; do not claim inactive channel planes disappear from the current fixed record layout. Count full-queue attempts too. Use existing operation-site probes to verify this model; if actual source-level payload copies exceed it, correct the frozen projection before acceptance, not the gate.
-- `capture_publications_per_block=1`: current capture functions finish at most one window per callback, even if Q>N. This slice adds no catch-up loop.
-- For rate budgeting under restarts, let `F=ceil(N/Q)*Q` with checked arithmetic. Charge `capture_bytes_per_second=(ceil(R/F)+1)*size_of::<SpectrumCapturedRecord>()`. This bounds any one-second publication interval including adversarial alignment and captures restarted earlier than the steady continuous hop; using merely 30 Hz would undercharge churn. The one-byte/generation metadata change follows actual size. It is a payload production budget, not browser serialization;03 budgets handler copies separately.
-
-Add these costs to the active meter cost, and check every field BEFORE staging publication. Maximum capture count zero refuses start but permits capacity preparation; >1 in limits does not enable >1 product capability. For absent demand all measurement/copy/publication costs are zero while exact retained bytes and fixed transition allowance remain reserved. Candidate/browser profile values from the production plan remain unqualified until parent hardware/deadline evidence; no universal CPU claim is made here.
-
-Native acceptance gates: A active/B dormant, A→B and same-A restart with nonzero signal; before boundary A unchanged and after boundary fresh generation/warmup; graph publication refusal preserves A state/result; pending start+reserved close yields both receipts then zero graph dispatch; removing spectrum retains meters and vice versa; last close, failed render, queue-full reader and generation collision fixtures. PCM bit identity, operation-site counts and no allocation/free/lock/syscall at activation/deactivation/render. Existing native/Wasm suites, no new benchmark infrastructure. Close C for native controlled fixed-spectrum support only.
-
-
-## Coordinator-approved bounded implementation contract
-
-The following decisions define the exact private seams and sequential task boundaries; they supersede any conflicting draft detail above. Execute five sequential disposable Luna MAX tasks; checkpoint each before the next.
-
-# Protected native spectrum: bounded implementation handoffs
-
-Astra XHIGH design frozen 2026-09-15 and reconciled by the coordinator against #820 source candidate a45aee3f. Extend its existing HostObservationController, MeterSelection, PendingApplication and ObservationBudget; do not restart ownership design. These are five sequential compiling checkpoints inside one implementation attempt, each for a fresh disposable Luna MAX. Root commits each focused-green tranche before the next. Root owns numbering, issue evidence, final fresh review and delivery.
-
-The closable product remains C from `02-frozen-native-feed-slices.md`: existing fixed 2048-frame one-shot/continuous spectrum, two preallocated internal slots per exact target/channel entry, at most one accepted spectrum slot, the same private host owner and budget, generation-fenced reads, and zero dispatch after applied stop. Keep the frozen public constructors, demand/result records and methods. No overlap, configurable FFT/hop, simultaneous jobs, SDK/browser migration, resident-effect subscription work, worker/queue redesign, benchmark run or new harness. The existing `observe_resident` capture path is the banked audio input path and remains in scope; it is not resident-effect subscription scope.
-
-## Source findings and root rulings already obtained
-
-* `spectrum.rs:1076` `prepare_capture_with_handle` always constructs a permanent binding; add a private binding-policy parameter and keep every legacy caller Permanent. `SpectrumCapture::commit_continuous`, `cancel` and `stop_continuous` mutate shared state and use draining loops; protected admission must not call them on an active/pending slot.
-* `SpectrumCaptureObserver` currently has no activation hook/generation. Both planar and banked capture paths reach `one_shot_finish`/`continuous_finish`; generation must flow through both. Record reads currently erase the private record identity; continuous reading loops after invalidated records. Protected reads must have a frozen one-pop budget before projection.
-* **Approved root correction:** `continuous_capture_resident` currently reloads selected inputs for `0..frames`, even when `count < frames`. Narrow its second extraction loop to `0..count` and remove the inner `frame < count` checks. Retain the entire preceding selected-input finiteness scan and its `C*Q` charge. Captured PCM/validation stay the same; this makes C's frozen extraction accounting true for `Q > 2048` and final partial windows.
-* **Approved root correction:** there are no existing spectrum operation-site probes, despite the draft wording. Add small thread-local, test-only counters in this module using the repository's existing test-support pattern; no harness or benchmark. Count validation samples, actual selected storage writes, full-record payload construction, and publication attempts separately. The existing graph dispatch counters and allocation/realtime guards remain the graph/realtime evidence.
-* **Approved root public clarification:** add `HostSpectrumReadError::CleanupRefused(ObservationRefusal)`. A completed one-shot can meet a reserved meter-removal obligation, so its own automatic removal may refuse after a valid window is popped. Cache once in the required bounded last-result cell; set `pending_one_shot_delivery`; return the window only after its removal is accepted. Backpressure returns the existing `Pending` and preserves the undelivered window. Other cleanup-admission failures return `CleanupRefused`; Closed returns Closed and terminally invalidates delivery. Never translate revision exhaustion to endless Pending. Only `try_applied` consumes receipts; there is no retry queue or hidden receipt polling. A later read retries the cached delivery/removal; `stop_spectrum` exposes the same stored pending stop receipt or refusal. An explicit applied stop cancels undelivered data.
-
-These are actual draft/source gaps, not reasons to expand C. No further architectural contradiction was found in the inspected capture seams.
-
-## Small private seams to freeze before Luna
-
-### Capture storage and scalar lifecycle
-
-Use a boxed array of private entries, each containing exactly `[ControlledSpectrumSlot; 2]`. A slot contains its existing `SpectrumCapture`, precomputed graph handle and scalar lifecycle fields `staged`, `admitted_generation`, `applied_generation`, `retiring_at_revision`. Public target/channels can be read from slot zero's immutable capture: do not allocate a third identity string merely to mirror it. The two existing captures each keep their immutable target/channel metadata and queue. No runtime collection growth.
-
-Keep the frozen `stage`, `commit_candidate`, `cancel_candidate`, `commit_removal`, `reconcile_applied` function family. Add only `ControlledSpectrumCandidate::descriptor(&self) -> ControlledSpectrumDescriptor`, an infallible getter, so the host can prepare its complete-set metadata before publication. A descriptor is Copy scalar data: public entry index, internal slot index/handle, mode. Its host selection adds observation generation and selection epoch. The affine candidate is consumed exactly once by commit or cancellation and owns no heap/render object. `stage` checks the exact entry, chooses only one of its two Free slots, prepares shared mode/cadence/local stream epoch 1/read counters, and leaves one-shot state IDLE and continuous active false. It never reads or resets the current active slot's state.
-
-Keep a fixed two-element array of touched slot indices in the collection, plus an optional accepted slot index. It is a lookup cache for current slot metadata, not another publication/receipt queue. At most an old applied slot and its pending replacement/removal exist. `reconcile_applied(revision)` visits only these at-most-two slots: apply matching admitted generation first; then, for matching retiring revision, freeze/pop at most the one available queue item and clear its lifecycle to Free. Compact the index cache. Never scan the entire prepared collection for reconciliation/stop. Pending admission and later removal remain separate fields until both real receipts are consumed. Staged candidate space is checked before mutating the Free slot; cancellation returns it to Free.
-
-Pass `observation_generation` through `SpectrumCaptureBuffers` and use that same small borrowed buffer bundle for planar/resident capture and both finish helpers. This avoids a separate state path and repetitive extra arguments. Activation true copies the graph generation, resets scalar partial/history/completion state, and enables the prestaged mode. Activation false disables only that slot and clears scalar partial/completion state. Neither hook touches arrays, queues, targets, heap ownership or the host ledger. Zero-initialized inactive channel planes remain safe because an internal slot's channel mask never changes.
-
-Factor private record-returning read helpers beneath existing public raw reads. Add a bounded policy to the continuous helper: legacy callers retain their existing invalidation/drop behavior; the protected caller freezes `available_at_entry()` once and permits at most that one pop, returning Pending/Warming after discarding a stale record instead of chasing a refill. Check observation generation on the record before projecting either public window. Do not infer it from shared atomics. Use crate-private `try_read_record(&mut self, maximum_pops: Option<usize>) -> Result<SpectrumCapturedRecord, SpectrumCaptureReadError>` and `try_read_continuous_record(&mut self, maximum_pops: Option<usize>) -> Result<SpectrumCapturedRecord, SpectrumContinuousReadError>`: None preserves the legacy path, Some(available) enforces the protected entry budget including zero. Expose the record only crate-wide with generation and window-projection getters; no public raw-record surface is needed.
-
-### Extend #820's existing complete sets and budget
-
-Keep #820's five meter selection arrays. Add one optional scalar spectrum selection to each complete set (accepted, applied, candidate, ordinary pending, removal pending); do not allocate per-target pending arrays or create a second controller. The contiguous handle scratch must accommodate the complete legal union: `min(maximum_active_observers, prepared_meter_count + usize::from(nonempty_spectrum_catalog))`, checked before allocation. Meter array capacity remains its existing `min(prepared_meter_count, maximum_active_observers)`. Every admission checks the complete union count; two internal slots do not consume two active-demand credits.
-
-Prepared spectrum slot handles are `u64::MAX - flat_slot_index`, checked and disjoint from all prepared meter handles before bindings are created. Meter replacements/removals retain the exact accepted spectrum descriptor and its generation; spectrum changes retain all accepted meters. Ordinary publication still requires both pending records free; reserved removal requires only the removal record free. No mutation polls receipts for capacity. `try_applied` remains the sole receipt authority and also calls the bounded spectrum reconciler for that exact revision.
-
-Keep the collection and last-result cell inline inside the existing host owner, and count their actual containing layout through #820's owner-inline formula. A single tagged last-result cell holds one spectrum payload plus owner/generation/selection-epoch/mode/history metadata; it is not a per-target cache. Add a scalar pending-one-shot-delivery flag. Do not allocate a Box on each read. Preserve the old valid cell while a replacement is only accepted, and clear/fence it when that replacement applies or explicit stop cleanup retires it. New-demand reads never return the old cell as current.
-
-Use one checked selection-epoch counter with the last successfully selected public entry index. No selected spectrum/empty catalog reads return Inactive; terminal closure returns Closed; then require accepted mode and matching applied generation before accessing its queue. Start at zero; first selection is epoch 1. Change it only for a different exact public target/channels entry; mode changes/restarts and stopping do not increment it. Failed publication commits neither counter nor last entry. Every activation gets the graph revision separately, and its local continuous history starts at stream epoch 1, sequence 0. Do not allocate a cross-slot epoch service.
-
-Preparation uses the existing demand constructor and shared preparation transaction, enabling its already declared nonempty spectrum request. Empty meter plus nonempty spectrum is a real controlled catalog, not #820's inert owner case. Empty both remains inert. Derive cadence once from the prepared rate/Q. Keep resident-effect taps refused. The returned console handles contain no raw spectrum capture/controller.
-
-Use the frozen C equations exactly after the approved resident-loop correction: one capture; validation `C*Q`; copy `C*min(Q,2048)+4*2048`; one publication attempt/block; bytes/sec `(ceil(R/(ceil(2048/Q)*Q))+1)*size_of::<SpectrumCapturedRecord>()`, with checked arithmetic. Charge publication attempts even on full queues. The extra metadata's real size follows the record layout. These are conservative source-operation/payload bounds, not machine memcpy counts or deadline guarantees. `ObservationBudget::preflight_graph_demand` must now compose its meter projection with only the five spectrum work fields; fixed retained/transition cost is charged once, not copied from the argument again. No public count above one enables another job.
-
-Controlled resources charge two actual observer/queue/shared-state/binding/identity allocations per entry plus the concrete boxed entry array (which already contains both control-side captures and slot metadata). Do not also add an independent capture-value array. The inline collection/cache are already in the containing owner. Graph activation charges the expanded immutable catalog exactly once. Keep #820's graph runtime/controller overlaps and existing host spectrum row straight: narrow reservation includes capture storage; common graph/model admission already includes that row, so do not add it a second time through owner metadata. Exact/one-below tests derive actual layouts; no copied native-byte constants.
-
-## Five sequential handoffs
-
-### C1 — Record identity and render hooks
-
-Paths: `src/spectrum.rs`, its existing unit tests, minimal test-support exports if needed. Implement generation stamping through the common buffer/finish family, constant-size activation hooks, private record-returning read helpers, the approved resident extraction correction and local counters. Existing preparations still bind permanently and old records use generation zero; protected host methods do not exist yet.
-
-Focused gates: both planar/resident finish records stamp the hook generation; scalar reset discards partial history without clearing arrays; old queued record retains its generation; inactive hook state performs no capture work; legacy one-shot/continuous/drop/failure tests retain their behavior. Actual controlled graph zero-dispatch proof follows with controlled preparation in C2/C4; C1 must not invent a temporary binding path. Resident final-partial and `Q>2048` sample/copy counts remain mandatory in C5 using the existing banked host fixture; C1 does not add a rack test constructor or dependency just for private lane construction. Existing allocation guard around hooks. Compile/test this family and checkpoint; do not run a target matrix.
-
-### C2 — Two-slot preparation and lifecycle ownership
-
-Paths: `src/spectrum.rs` and its unit tests; declare the frozen `HostSpectrumMode` at its final host-facing location if needed. Implement the shared permanent/controlled preparation policy, exact controlled resource helper, paired slot collection/candidate, staging/cancel/commit/reconcile, and descriptor getter. No public host start/stop methods.
-
-Focused gates: duplicate target rejection; two handle ranges/resource counts; exact/one-below capture/allocation caps; stage A while B active leaves B shared metadata/queue untouched; cancellation changes no accepted state; pending start followed by reserved removal retains both revision fields; each retirement pop is bounded and reuse is impossible before receipt; same-target alternate-slot reuse after cleanup. Test several dormant entries but assert reconciliation touches at most two indices. Compile/checkpoint before preparation integration.
-
-### C3 — Real host preparation, complete-set storage and cost
-
-Paths: `observation_demand.rs`, `prepare.rs`, `lib.rs`, existing focused preparation/observation tests. Enable nonempty controlled spectrum catalogs in both demand constructors; extend actual owner/complete-set/scratch layouts and narrow/common resource reports; implement checked spectrum cost composition. Preserve #820 meter methods with their new complete-set representation while spectrum is still initially absent. No fake/stub public spectrum methods.
-
-Focused gates: empty meters/nonempty spectrum, both catalogs, both empty, exactly prepared targets, initially zero sample work, no returned raw controls, resident refusal unchanged; exact/one-below spectrum work fields, complete union capacity, overflow and cap accounting. Use real layouts and the existing preparation fixtures. Constructor refusal returns no partially prepared host. Compile/checkpoint.
-
-### C4 — Host admission, receipts and stop reconciliation
-
-Paths: `observation_demand.rs` and focused host observation tests, only small spectrum accessor adjustments justified by the frozen descriptor. Implement replace/restart/stop_spectrum and extend meter publication, try_applied and stop_all to complete unions. Include the required tagged result cell and invalidation points; production reads follow in C5. Validate request, union capacity, work, identity arithmetic and pending room before staging; prepare all commit metadata; graph publish last; cancel the Free candidate on graph refusal. Post-success commits are infallible scalar/fixed-array writes.
-
-Focused real-host gates: A active/B pending then fresh B; same-A restart and mode change; no shared-state mutation before boundary; publication refusal preserves producer state/generation/result; one ordinary plus reserved removal yields two receipts even at one sample; removing either family retains the other; repeated stops reuse their receipt; last stop eliminates actual dispatch; closure is terminal. No graph rebuild/plan swap/DSP reset. Compile/checkpoint.
-
-### C5 — Fenced results and native closure
-
-Paths: same owner/spectrum files, `tests/observation_demand.rs`, existing `tests/spectrum.rs`, exports/docs/evidence necessary for C. Implement frozen read APIs/error type, owner/generation wrapping for Invalid/Failed/Gap, bounded stale discard, and the ruled one-shot cached-delivery/automatic-removal path. State errors do not consume queues or receipts. Preserve continuous history/failure semantics and last-result lifetime; generation, selection epoch and DSP stream epoch stay separate.
-
-Focused gates: stale raw record rejected before projection; wrong mode/pending generation leaves queues alone; two different activations can both have stream epoch 1 without collision; failed render/full queue metadata fenced; valid cached one-shot + occupied meter removal returns Pending without losing data, then read retries removal and returns data once; cleanup revision exhaustion is CleanupRefused, closure Closed, explicit stop cancels undelivered data; successful read's stop returns pending until its real receipt. Complete PCM bit-identity and operation-site checks on the existing native bank-plus-tail fixture plus a representative planar output, including idle/staged/active/waiting/full/retired states. A short unit case covers Q>2048; no new fixture corpus.
-
-At this coherent issue boundary run the existing host-core native/control-provider suites, proportional shared-preparation/compiler realtime gates and existing Wasm build once. Reuse graph dispatch/TLS probes and allocation/free/lock/syscall guards. No timed benchmark, generic counter framework, broad target matrix, or fixture expansion successor folded into C. Root records the native-only capability, obtains a fresh adversarial verdict, pushes/synchronizes/closes the numbered issue under the active delivery mode. This design author is not that final reviewer.
-
-## Exact host spectrum read error
-
-Freeze this additive enum in `observation_demand.rs`, exported with the other host observation records. Fault identity is the owner and applied observation generation being read; preserve the existing native stream epoch and cumulative drop value verbatim. No additional fault wrapper or selection-epoch field is needed.
-
-```rust
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostSpectrumReadError {
     Inactive,
     PendingApplication,
     Warming,
     Pending,
-    WrongMode,
     Closed,
-    Invalid {
-        owner: ObservationOwnerId,
-        observation_generation: u64,
-    },
     Failed {
         owner: ObservationOwnerId,
         observation_generation: u64,
@@ -267,36 +42,125 @@ pub enum HostSpectrumReadError {
         stream_epoch: u64,
         dropped_captures: u64,
     },
-    CleanupRefused(ObservationRefusal),
+}
+impl HostObservationController {
+    pub fn replace_spectrum(&mut self, demand: &HostSpectrumDemand)
+        -> Result<ObservationAccepted, ObservationRefusal>;
+    pub fn restart_spectrum(&mut self)
+        -> Result<ObservationAccepted, ObservationRefusal>;
+    pub fn stop_spectrum(&mut self) -> Result<ObservationStop, ObservationRefusal>;
+    pub fn try_read_continuous_spectrum(&mut self)
+        -> Result<ObservedContinuousSpectrumWindow, HostSpectrumReadError>;
 }
 ```
 
-`Invalid` preserves `SpectrumCaptureReadError::Invalid`; `Failed` and `Gap` preserve the corresponding `SpectrumContinuousReadError` payloads. State variants and cleanup handling keep the rules above: cleanup Backpressure is Pending, cleanup Closed is Closed, and other cleanup admission failures retain their exact refusal in CleanupRefused.
+After the terminal-owner check, `replace_spectrum(OneShot)` refuses with `ObservationRefusalReason::InvalidRequest` and all optional details None, before target lookup, staging or publication. It preserves accepted/applied state, queues, work and identity counters. No new native refusal code; browser aliases later retain their specified Unsupported result. Do not add `ObservedSpectrumWindow`, `try_read_spectrum`, Invalid, WrongMode or CleanupRefused here.
 
-## Delivery boundary
+Every successful replacement/restart activates a new graph generation, including the same target. `selection_epoch` starts at zero, first selection is 1, and changes only when the exact public target/channels entry changes. Mode/restart/stop do not advance it; failed publication commits neither this checked counter nor the last selected entry. Each capture activation starts its local continuous `stream_epoch` at 1 and sequence at zero. Complete identity is owner + observation generation + stream epoch; selection epoch describes public target selection separately. No cross-slot epoch allocator.
 
-This issue closes for native controlled fixed-spectrum support only, after fresh adversarial review, proportional gates, merged evidence, and GitHub synchronization. Browser ingress, resident observation protection, SDK scopes, overlap, and simultaneous spectrum jobs remain separate successor slices.
+## Paired storage and capture lifecycle
 
-## Next visible product milestone
+Two internal preallocated slots per exact public entry are required because #816 does not invoke activation hooks for unchanged handles. A restart must switch slots at the admitted boundary, not mutate an active capture in place. These slots do not represent two supported public jobs.
 
-After this native slice, the approved next milestone is an additive opt-in protected browser EQ path in the existing packed browser fixture, before the full resident migration: empty meter catalog, zero resident taps, one exact dual-mono trackPostMatrix spectrum entry, bounded live-response capture, atomically refused raw Observe/Unobserve batches. Existing boot remains explicitly legacy/unprotected during that intermediate milestone; eventual complete browser/SDK/adapter/app migration still remains required. This ordering does not add browser implementation to the present native issue.
+```rust
+pub(crate) fn prepare_controlled_capture_collection(
+    request: &SpectrumCaptureCollectionRequest,
+    graph_nodes: &[GraphNodeId],
+    maximum_named_allocation_bytes: u64,
+) -> Result<(Vec<GraphNodeObserverBinding>, ControlledSpectrumCaptureCollection), SpectrumPrepareError>;
+pub(crate) fn controlled_spectrum_capture_collection_resources(
+    entries: &[SpectrumCaptureCollectionEntry],
+) -> Result<SpectrumCaptureResources, SpectrumPrepareError>;
+```
 
-## Implementation evidence — C1 checkpoint
+Use the shared singular preparation implementation with private Permanent/Controlled binding policy. Existing callers remain Permanent; controlled slots use `GraphNodeObserverBinding::controlled`. Reject duplicate exact entries. Slot i uses checked handle `u64::MAX-i`; meter handles rise from 1. Check `2*entry_count`, subtraction, nonzero handles and combined disjoint ranges before creating spectrum bindings. No compiled track limit.
 
-Generation-stamped capture records, scalar activation hooks, bounded private raw readers, local operation probes, and the resident `0..count` extraction correction are implemented. Root reran the focused spectrum unit filter: 26 passed (`/tmp/observation-822-c1-unit.log`); the implementer also reported the nine existing spectrum integration cases, both feature checks, and realtime policy passing. This checkpoint is not issue completion. Direct resident final-partial/large-quantum operation assertions and an actual allocation guard around activation hooks remain to be added before C2; controlled graph dispatch proof remains in the later integration slice. The inactive planar continuous path now returns before finite validation, matching the dormant no-work contract.
+The collection owns a boxed array of entries, each containing exactly two existing `SpectrumCapture` values plus slot handles and independent scalar fields: staged, admitted_generation, applied_generation, retiring_at_revision. Public metadata comes from slot zero's immutable capture; no third identity string. A fixed two-index touched cache plus last accepted slot identifies all pending/active/retiring slots. Do not introduce another receipt queue or scan the whole catalog for retirement.
 
-### C1 focused gate follow-up
+An affine candidate owns only scalar entry/slot/handle/mode/cadence metadata. Its `observer_handle()` and Copy `descriptor()` getters allow the host to prepare complete-set metadata before publication. Freeze these private operations:
 
-Added the missing one-shot resident finite-validation probe sites and actual allocation/reallocation/free assertions around activation, deactivation and reactivation in both capture modes. Disposable Luna MAX reported 26 spectrum unit tests and nine spectrum integration tests passing, plus fmt/diff checks. Direct resident lane construction is unavailable through host-core's current dependencies, so root moves those two operation-count cases to C5's existing banked host fixture; the issue closure requirement is retained. No new rack API or test framework is introduced. C2 may proceed after this checkpoint.
+```rust
+stage(target, channels, mode, cadence) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError>
+commit_candidate(candidate, revision)
+cancel_candidate(candidate)
+commit_removal(revision)
+reconcile_applied(revision)
+```
 
-### C2 paired ownership checkpoint
+Stage validates first and modifies only a Free slot. It may perform bounded control-side cleanup/reset, but leaves one-shot IDLE and continuous active=false. Continuous staged history is epoch1. Never call raw arm/start/commit_continuous/cancel/stop on an active or pending slot. A private stage-by-prepared-entry helper may share this path for restart without cloning a target string.
 
-Implemented private permanent/controlled binding policy, two preallocated capture slots per exact entry, concrete paired resource projection, affine staged candidates and bounded retirement/reconciliation. Root reviewed the lifecycle, preserved legacy capture-before-allocation refusal order, required explicit private invariant assertions after publication, and retained continuous local epoch1. HostSpectrumMode is declared/exported; no host start/read methods exist yet. Focused unit gates cover duplicate/one-below resource refusal, high handles, staging/cancel preservation, two pending revision fields, blocked early reuse and alternate-slot reuse. Root reran both controlled spectrum unit cases successfully (/tmp/observation-822-c2-focused.log); implementer reports cargo check, all53 host-core lib tests, nine spectrum integration tests and fmt/diff checks passing. Actual graph dispatch/queued-result preservation and resident operation counts remain integration gates in C4/C5; this checkpoint does not claim browser delivery.
+Graph publication is the last fallible admission operation. On refusal, cancel only the staged Free candidate. On success, commit candidate/old-slot retirement and host ledger by infallible bounded metadata writes. Private invariant failures must not silently skip post-publication bookkeeping. A pending start followed by removal keeps both revision fields until their actual receipts arrive.
 
-### C3 real preparation checkpoint
+For each consumed receipt, reconcile only the at-most-two touched slot indices: apply matching admission first; clean matching retired slots with at most one off-render queue pop each, then mark Free and compact the same bounded cache. No reuse before the removal receipt. The collection's last accepted slot may remain until its retirement receipt; the host accepted complete set is the admission/stop authority. Closure is terminal; disposal/reclamation stays off render.
 
-Both demand constructors now prepare controlled spectrum catalogs with the existing source/graph bind, actual paired resources and no returned raw capture. Complete-set scalar spectrum storage, separate meter/union capacities, disjoint handles, prepared cadence and checked five-field spectrum work projection are implemented. No public start/read methods or native result cache were added. Common graph admission charges the spectrum resource row once; narrow reservation includes that same row once. Root retained conditional graph-node cloning for actual spectrum requests and preserved the graph's zero-activation-capacity refusal; a zero spectrum work limit still permits dormant preparation. Root expanded the existing resource case to invoke the serialized constructor too, then reran the test-support observation integration suite: 16 PASS (/tmp/observation-822-c3-focused.log). Implementer reports 15 no-default observation integration,12 observation unit,31 spectrum unit,9 spectrum integration, both no-default/control-provider checks and fmt/diff PASS. Actual dormant capture probes stay zero during a real banked host render.
+`activation_changed(true,generation,first_sample)` sets the private observation generation, resets scalar capture/history/fault/sequence state and enables the prestaged mode. False disables only that slot and invalidates partial scalar history. Neither hook clears arrays, pops queues, changes targets, allocates/frees, resets audio DSP or performs locks/syscalls. Retained preallocated memory and bounded graph activation checks remain explicitly allowed.
 
-### C4 family-stop clarification
+Stamp `SpectrumCapturedRecord.observation_generation` at production through the shared borrowed buffer/finish family for both planar and resident inputs. Legacy captures retain generation0. Private record-returning helpers preserve identity before projection: `try_read_record(maximum_pops: Option<usize>)` and `try_read_continuous_record(maximum_pops: Option<usize>)`. None preserves legacy behavior; Some enforces the frozen pop budget, including zero. Keep existing failure/drop behavior.
 
-For stop_spectrum with accepted spectrum absent, return Quiescent if applied spectrum is absent and neither pending complete selection contains spectrum. Unrelated meter-only receipts need not delay spectrum-family quiescence. Otherwise reuse the highest-revision pending complete selection that excludes spectrum, preserving pending start followed by reserved stop before either receipt. stop_all keeps complete-host quiescence semantics across both families. Only try_applied consumes receipts. A private stage-by-prepared-entry helper is permitted to implement restart without cloning target strings; it reuses the existing staged-slot protocol and adds no public API.
+## Complete sets, preparation and stop
+
+Extend #820's existing five complete selection sets with one optional scalar spectrum descriptor/generation/selection_epoch each. Meter arrays remain capacity `min(prepared_meter_count, maximum_active_observers)`. Handle scratch uses checked `min(maximum_active_observers, prepared_meter_count + bool(nonempty_spectrum_catalog))`. Every admission checks the complete union; two internal capture slots consume only one active selection credit.
+
+Both existing demand constructors admit nonempty controlled spectrum through their shared preparation/source bind. Empty spectrum normalizes absent; both catalogs empty retains the inert owner/no activation transport. Spectrum-only is a real controlled catalog. Resident-effect taps remain refused. Derive `SpectrumCadence::new(prepared_rate,Q)` once. Returned console handles expose no raw spectrum or selected-meter bypass. Clone graph target IDs only when actual spectrum preparation needs them.
+
+Meter replace/remove preserves the accepted spectrum descriptor/generation; spectrum operations preserve accepted meters. Ordinary publication requires both pending records free, reserved removal only its own record free. No mutation polls receipts for capacity and no accepted obligation is coalesced away. Only `try_applied` consumes actual receipts, matches exact revision, reconciles spectrum and recycles that record, clearing optional selection metadata.
+
+`stop_all` removes both families in one reserved snapshot; `remove_meters_to([])` alone now retains spectrum and cannot implement it. `stop_spectrum` removes only spectrum. If accepted spectrum is absent, and applied spectrum plus both pending complete selections are also absent, it returns Quiescent despite unrelated meter-only receipts. Otherwise reuse the highest-revision pending complete selection excluding spectrum; this preserves pending start+reserved stop before either receipt and repeated-stop identity. Quiescence never precedes required spectrum retirement. Renderer closure returns Closed without synthesizing Applied.
+
+## Reads and retained results
+
+Check terminal closure, accepted selection, then matching applied descriptor/generation before accessing a queue. Freeze selected-slot availability once, capped at one, and invoke the existing private record helper. Reject a record's observation generation before projecting its public window; stale discard returns Pending within the same pop budget. Never chase a producer refill. State refusals consume no queue or receipt.
+
+Wrap Failed/Gap with owner and applied observation generation while preserving native stream epoch/drop values. Native NotActive maps Inactive; Warming/Pending map directly. Reads publish no removal or other mutation.
+
+There is no native replay/cache guarantee. Returned windows remain caller-owned. A refused replacement preserves active producer state and unread queued data; an accepted replacement leaves the old active slot untouched until application, while new-demand reads return PendingApplication. ABI committed output and SDK last publication remain their own later responsibilities.
+
+## Checked work and resource accounting
+
+For one active capture, selected channels C, quantum Q, rate R and N=2048, reserve:
+
+- active_spectrum_captures = 1;
+- capture_input_samples_per_block = C*Q, including continuous WAITING finite validation;
+- capture_copy_samples_per_block = C*min(Q,N)+4*N, including two full dual-plane payload copies;
+- capture_publications_per_block = 1, including full-queue attempts;
+- capture_bytes_per_second = (ceil(R/(ceil(N/Q)*Q))+1)*sizeof(SpectrumCapturedRecord), including restart alignment.
+
+Use checked arithmetic. Add only these five fields to existing meter work plus fixed transition/retained reservation; never copy fixed rows from the spectrum argument again. All measurement/copy/publication costs are zero without active demand. A zero maximum_active_spectrum_captures work limit permits dormant preparation, but the graph's existing nonempty-catalog/zero-activation-capacity refusal remains. A limit above one does not enable multiple jobs. Bounds describe source operations/payloads, not universal CPU/deadline guarantees.
+
+Charge two actual observers, queues, shared states, bindings and identities per entry, plus the concrete boxed entry array containing both control captures and lifecycle metadata. Do not add the legacy independent capture-value array. Inline collection/selection/cadence state is in actual owner size; no result payload cache. Graph activation charges its expanded catalog once. Keep #820 H-C owner and A-R graph overlaps: narrow reservation includes spectrum capture storage, while common graph/model admission already includes the spectrum report row and must not add it through owner metadata again. Derive actual layouts and named-allocation maxima; no copied native byte constants.
+
+The approved resident continuous correction narrows its second extraction loop to `0..count`, preserving the full preceding selected-input finite scan. Small test-only TLS counters measure actual finite-validation samples, selected storage writes, payload constructions and publication attempts; no counter framework or benchmark runner.
+
+## Bounded execution and closure gates
+
+Use fresh disposable Luna MAX agents sequentially; root reviews, commits exact paths, pushes and synchronizes GitHub before the next tranche. One implementation attempt contains these checkpoints; final native adversarial verdict comes from a fresh Astra XHIGH agent.
+
+1. **C1 capture identity/hooks — pushed.** Generation stamping, scalar activation reset, bounded raw record reads, resident extraction correction and operation probes. Both mode hooks have actual allocation/reallocation/free guards. Old queued generation and legacy behavior are preserved.
+2. **C2 paired preparation/lifecycle — pushed.** Duplicate/handle/resource caps, staging/cancel preservation, independent pending+removal revisions, blocked early reuse, alternate-slot reuse and at-most-two-index reconciliation.
+3. **C3 host preparation/storage/cost — pushed.** Spectrum-only/mixed/empty catalogs, both constructors, exact targets, no raw controls, dormant render probes, inclusive/one-below limits, checked work composition and retained accounting.
+4. **C4 admission/receipts/stop — checkpointed.** Real nonzero A→B and same-A restart, atomic OneShot refusal, pre-boundary/failed-publication state and queued-data preservation, ordinary+reserved receipts at one boundary, family-preserving removal, repeated stop, actual zero dispatch after final stop and terminal closure. No public reads yet.
+5. **C5 fenced continuous reads.** Pending-generation nonconsumption, stale-record rejection before projection, independent observation/selection/history identities (including stream_epoch1 across activations), queue-full/failure fencing, actual nonzero PCM bit identity and capture-site counts using existing bank-plus-tail and representative planar fixtures. Finish resident final-partial and Q>2048 operation-count cases here; they were deferred from C1 because direct resident lane construction is private, not waived. No new rack API/framework merely for fixture setup.
+
+At closure run proportional existing host-core native/control-provider, shared preparation/compiler realtime and Wasm gates. Reuse actual allocation/free/lock/syscall guards and deterministic fixtures. No timed benchmark, second fixture corpus or broad new matrix. Root handles shipped artifact/layout integration, fresh native review, required PR qualification, merge/evidence and GitHub closure. Native issue completion is not browser/app deployment.
+
+## Checkpoint evidence
+
+- #820 foundation: PR821 merged e907b632; fresh native review PASS and required qualification succeeded.
+- C1: b290ed41 production identity/hooks; 958c1e2e actual hook allocation guards and resident validation probes. Focused spectrum unit and nine existing spectrum integration cases passed; full direct resident count proof remains C5 as above.
+- Continuous-first scope: fresh Astra recommendation approved and pushed d45ce3f9; protected one-shot/cache removed from this critical path.
+- C2: 37b107ca. Root reran both controlled unit cases PASS; implementer checked host-core, all53 lib tests and nine spectrum integration cases, fmt/diff PASS. Real graph/queued-result integration remains C4/C5.
+- C3: 0d2812a4. Root test-support observation integration16 PASS, including serialized constructor invocation and actual dormant render probes. Implementer reported no-default integration15, observation unit12, spectrum unit31, spectrum integration9, no-default/control-provider checks and fmt/diff PASS. Resource composition test includes nonzero meter/fixed rows and deliberately nonzero spectrum fixed rows to prove they are not charged twice.
+
+Reproduce focused gates with `CARGO_TARGET_DIR=/home/bl/misofm/engine/target cargo test -p host-core --features test-support --test observation_demand`, `cargo test -p host-core --lib`, and `cargo test -p host-core --test spectrum`; use the same target directory for each Cargo invocation. Final issue-wide evidence and verdict remain outstanding.
+
+## Successor and next visible milestone
+
+At this issue boundary, number the stateless protected-one-shot successor: admission/read, automatic reserved removal, one retained undelivered result, retry/exhaustion/closure semantics, actual storage accounting and representative contention gates. Rebrief its delivery contract; do not import a general continuous cache. Schedule it after working browser EQ.
+
+Next deliver an additive opt-in protected EQ through the existing packed browser fixture: empty meter catalog, zero resident taps, one exact TrackPostMatrix dual-mono spectrum entry, bounded live-response capture, atomically refused raw Observe/Unobserve batches, and actual native generation carried through the existing worker/SDK owner. Legacy boot remains explicitly unprotected during that intermediate milestone; protected boot never falls back. Complete browser/SDK/adapter/app migration, resident feeds, overlap and multiple-job support remain part of the broader production rollout.
+
+### C4 checkpoint evidence and consolidated read gates
+
+Implemented continuous replace/restart/stop, shared complete-union publication, checked selection epochs, staged-candidate cancellation on graph refusal, family-specific and whole-owner stops, and exact-revision reconciliation. Public window record is declared for C5; no public read method or native cache yet. Root reviewed publication/cancellation and corrected OneShot refusal ordering for inert owners and complete-family applied-empty checks. Root reran the test-support observation integration suite:20 PASS; implementer reports no-default19, library test-support55, locked check and fmt/diff PASS.
+
+The new cases prove restart/stop admission, repeated stop identity, pending start+reserved stop receipt order, meter/spectrum work preservation, atomic OneShot refusal including an inert owner, and zero capture operations after applied stop. Actual cross-target window generations, unread-queue preservation after graph-publication refusal, sibling generation continuity, and spectrum-specific renderer closure are consolidated into C5's real read fixture; they are not claimed complete by C4's work/receipt assertions. Those gates remain mandatory before issue closure.

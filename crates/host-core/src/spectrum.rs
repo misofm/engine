@@ -1571,6 +1571,23 @@ impl ControlledSpectrumCaptureCollection {
         })
     }
 
+    /// Resolve one exact prepared public entry without cloning its target identity.
+    pub(crate) fn prepared_entry_index(
+        &self,
+        target: &SpectrumTarget,
+        channels: SpectrumChannels,
+    ) -> Result<usize, SpectrumCaptureCollectionSelectionError> {
+        self.target_entry(target, channels)
+            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
+    }
+
+    /// Return the prepared channel mask for an entry selected by its stable preparation index.
+    pub(crate) fn entry_channels(&self, entry_index: usize) -> Option<SpectrumChannels> {
+        self.entries
+            .get(entry_index)
+            .map(|entry| entry.slots[0].capture.channels())
+    }
+
     fn free_slot(&self, entry_index: usize) -> Option<usize> {
         (0..CONTROLLED_SLOTS_PER_ENTRY).find_map(|slot_index| {
             let flat_slot = Self::flat_slot(entry_index, slot_index)?;
@@ -1586,9 +1603,20 @@ impl ControlledSpectrumCaptureCollection {
         mode: HostSpectrumMode,
         cadence: SpectrumCadence,
     ) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError> {
-        let entry_index = self
-            .target_entry(target, channels)
-            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)?;
+        let entry_index = self.prepared_entry_index(target, channels)?;
+        self.stage_prepared_entry(entry_index, mode, cadence)
+    }
+
+    /// Stage one exact prepared entry without cloning or comparing its target identity.
+    pub(crate) fn stage_prepared_entry(
+        &mut self,
+        entry_index: usize,
+        mode: HostSpectrumMode,
+        cadence: SpectrumCadence,
+    ) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError> {
+        if entry_index >= self.entries.len() {
+            return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+        }
         if self.touched[..self.touched_len]
             .iter()
             .copied()

@@ -21,7 +21,8 @@ use graph::{
 
 use crate::spectrum::{
     ControlledSpectrumCaptureCollection, ControlledSpectrumDescriptor, SPECTRUM_WINDOW_FRAMES,
-    SpectrumCadence, SpectrumCapturedRecord, SpectrumChannels,
+    SpectrumCadence, SpectrumCapturedRecord, SpectrumChannels, SpectrumContinuousWindow,
+    SpectrumTarget,
 };
 
 /// The process-local identity of one prepared observation owner.
@@ -51,10 +52,34 @@ pub struct HostMeterId {
 /// The capture mode selected for one host-owned spectrum demand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostSpectrumMode {
-    /// Capture one complete fixed-size window.
+    /// Reserved for protected one-shot capture; current host admission refuses this mode.
     OneShot,
     /// Continue publishing fixed-size windows at the prepared cadence.
     Continuous,
+}
+
+/// One exact prepared spectrum entry requested by a host-owned observation controller.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostSpectrumDemand {
+    /// The prepared graph boundary to observe.
+    pub target: SpectrumTarget,
+    /// The channel planes the observer copies and publishes.
+    pub channels: SpectrumChannels,
+    /// The capture mode. Protected host admission currently accepts continuous mode only.
+    pub mode: HostSpectrumMode,
+}
+
+/// One caller-owned continuous spectrum window with its observation generation.
+#[derive(Clone, Copy, Debug)]
+pub struct ObservedContinuousSpectrumWindow {
+    /// The observation owner that produced the window.
+    pub owner: ObservationOwnerId,
+    /// The graph observation generation that produced the window.
+    pub observation_generation: u64,
+    /// The public target-selection epoch for this stream.
+    pub selection_epoch: u64,
+    /// The bounded captured window and its DSP stream metadata.
+    pub window: SpectrumContinuousWindow,
 }
 
 /// One meter in the prepared, immutable observation catalog.
@@ -133,6 +158,7 @@ struct MeterSelectionEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SpectrumSelectionEntry {
     descriptor: ControlledSpectrumDescriptor,
+    channels: SpectrumChannels,
     generation: u64,
     selection_epoch: u64,
 }
@@ -157,6 +183,23 @@ impl PublicationKind {
             Self::Removal => 1,
         }
     }
+}
+
+enum MeterSelectionSource<'a> {
+    Explicit(&'a [HostMeterId]),
+    Accepted,
+}
+
+#[derive(Clone, Copy)]
+enum SpectrumSelectionUpdate {
+    Keep,
+    Remove,
+    Select {
+        entry_index: usize,
+        channels: SpectrumChannels,
+        mode: HostSpectrumMode,
+        selection_epoch: u64,
+    },
 }
 
 impl MeterSelection {
@@ -220,6 +263,11 @@ pub struct HostObservationController {
     meter_consumers: Vec<MeterConsumer>,
     spectrum: Option<ControlledSpectrumCaptureCollection>,
     pub(crate) spectrum_cadence: Option<SpectrumCadence>,
+    /// Last successfully selected public spectrum entry. The value persists through stop so a
+    /// same-entry re-selection/restart keeps its selection epoch.
+    spectrum_selection_entry: Option<usize>,
+    /// Checked public target-selection identity, independent of graph generation and DSP epoch.
+    spectrum_selection_epoch: u64,
     budget: ObservationBudget,
     accepted: MeterSelection,
     applied: MeterSelection,
@@ -544,6 +592,18 @@ fn map_graph_refusal(error: GraphObservationAdmissionError) -> ObservationRefusa
     }
 }
 
+fn map_spectrum_selection_refusal(
+    error: crate::spectrum::SpectrumCaptureCollectionSelectionError,
+) -> ObservationRefusal {
+    match error {
+        crate::spectrum::SpectrumCaptureCollectionSelectionError::UnknownEntry => not_prepared(),
+        crate::spectrum::SpectrumCaptureCollectionSelectionError::Busy => backpressure(),
+        crate::spectrum::SpectrumCaptureCollectionSelectionError::EpochOverflow => {
+            arithmetic_overflow()
+        }
+    }
+}
+
 /// Project checked meter work and add the fixed preparation reservation.
 fn project_meter_work(
     meter_count: u64,
@@ -840,6 +900,8 @@ impl HostObservationController {
             meter_consumers,
             spectrum,
             spectrum_cadence,
+            spectrum_selection_entry: None,
+            spectrum_selection_epoch: 0,
             budget,
             accepted,
             applied,
@@ -891,20 +953,134 @@ impl HostObservationController {
         &mut self,
         meters: &[HostMeterId],
     ) -> Result<ObservationAccepted, ObservationRefusal> {
-        self.publish_meter_candidate(meters, PublicationKind::Ordinary)
+        self.publish_candidate(
+            MeterSelectionSource::Explicit(meters),
+            PublicationKind::Ordinary,
+            SpectrumSelectionUpdate::Keep,
+        )
     }
 
     /// Remove meters to the complete selected subset using the reserved removal publication.
     ///
     /// A removal may pass one outstanding ordinary publication, but cannot overlap another
     /// removal. It is validated against the latest accepted set rather than the last applied set,
-    /// so the two graph credits remain useful for a bounded ordinary-then-removal sequence.
+    /// so the two graph credits remain useful for a bounded ordinary-then-removal sequence. The
+    /// accepted spectrum selection, when present, is retained.
     #[allow(clippy::result_large_err)]
     pub fn remove_meters_to(
         &mut self,
         remaining: &[HostMeterId],
     ) -> Result<ObservationAccepted, ObservationRefusal> {
-        self.publish_meter_candidate(remaining, PublicationKind::Removal)
+        self.publish_candidate(
+            MeterSelectionSource::Explicit(remaining),
+            PublicationKind::Removal,
+            SpectrumSelectionUpdate::Keep,
+        )
+    }
+
+    /// Replace the protected continuous spectrum selection while retaining the accepted meters.
+    ///
+    /// One-shot demands are deliberately refused after the terminal-owner check and before any
+    /// target lookup, staging or graph publication. This keeps the protected one-shot successor
+    /// out of the continuous-first slice without changing the legacy permanent capture API.
+    #[allow(clippy::result_large_err)]
+    pub fn replace_spectrum(
+        &mut self,
+        demand: &HostSpectrumDemand,
+    ) -> Result<ObservationAccepted, ObservationRefusal> {
+        if self.observe_terminal_closure() {
+            return Err(closed());
+        }
+        if demand.mode == HostSpectrumMode::OneShot {
+            return Err(invalid_request());
+        }
+        if self.graph.is_none() {
+            return Err(not_prepared());
+        }
+        let spectrum = self.spectrum.as_ref().ok_or_else(not_prepared)?;
+        let entry_index = spectrum
+            .prepared_entry_index(&demand.target, demand.channels)
+            .map_err(map_spectrum_selection_refusal)?;
+        let selection_epoch = self.reserve_selection_epoch(entry_index)?;
+        // The target lookup, complete-set union, work projection and publication-credit checks
+        // all happen in `publish_candidate` before its Free alternate slot is staged.
+        self.publish_candidate(
+            MeterSelectionSource::Accepted,
+            PublicationKind::Ordinary,
+            SpectrumSelectionUpdate::Select {
+                entry_index,
+                channels: demand.channels,
+                mode: demand.mode,
+                selection_epoch,
+            },
+        )
+    }
+
+    /// Restart the accepted continuous spectrum target on a fresh graph generation.
+    #[allow(clippy::result_large_err)]
+    pub fn restart_spectrum(&mut self) -> Result<ObservationAccepted, ObservationRefusal> {
+        self.ensure_graph_live()?;
+        let accepted = self.accepted.spectrum.ok_or_else(conflict)?;
+        if accepted.descriptor.mode != HostSpectrumMode::Continuous {
+            return Err(invalid_request());
+        }
+        let channels = self
+            .spectrum
+            .as_ref()
+            .and_then(|spectrum| spectrum.entry_channels(accepted.descriptor.entry_index))
+            .ok_or_else(not_prepared)?;
+        self.publish_candidate(
+            MeterSelectionSource::Accepted,
+            PublicationKind::Ordinary,
+            SpectrumSelectionUpdate::Select {
+                entry_index: accepted.descriptor.entry_index,
+                channels,
+                mode: HostSpectrumMode::Continuous,
+                selection_epoch: accepted.selection_epoch,
+            },
+        )
+    }
+
+    /// Stop only the spectrum family, retaining the accepted meter set.
+    ///
+    /// This family-level stop does not wait for unrelated meter-only receipts. If a spectrum stop
+    /// is already pending, its exact acknowledgement is returned without spending a revision.
+    #[allow(clippy::result_large_err)]
+    pub fn stop_spectrum(&mut self) -> Result<ObservationStop, ObservationRefusal> {
+        if self.graph.is_none() {
+            return Ok(ObservationStop::Quiescent);
+        }
+        if self.observe_terminal_closure() {
+            return Err(closed());
+        }
+
+        if self.accepted.spectrum.is_none() {
+            let applied_has_spectrum = self.applied.spectrum.is_some();
+            let pending_has_spectrum = self
+                .pending
+                .iter()
+                .any(|pending| pending.accepted.is_some() && pending.selection.spectrum.is_some());
+            if !applied_has_spectrum && !pending_has_spectrum {
+                return Ok(ObservationStop::Quiescent);
+            }
+            if let Some(accepted) = self.pending_without_spectrum() {
+                return Ok(ObservationStop::Pending(accepted));
+            }
+            // An accepted/applied spectrum with no pending complete removal is not expected after
+            // a successful admission. Preserve the refusal rather than fabricating a receipt.
+            return Err(backpressure());
+        }
+
+        if let Some(accepted) = self.pending_without_spectrum() {
+            return Ok(ObservationStop::Pending(accepted));
+        }
+
+        self.publish_candidate(
+            MeterSelectionSource::Accepted,
+            PublicationKind::Removal,
+            SpectrumSelectionUpdate::Remove,
+        )
+        .map(ObservationStop::Pending)
     }
 
     /// Reconcile at most one real graph application receipt.
@@ -940,6 +1116,7 @@ impl HostObservationController {
         );
         self.pending[pending_index].selection.len = 0;
         self.pending[pending_index].selection.spectrum = None;
+        self.candidate.spectrum = None;
 
         Some(ObservationApplied {
             owner: self.owner,
@@ -1008,7 +1185,7 @@ impl HostObservationController {
         Ok(newest.map(|snapshot| ObservedMeterSnapshot { meter, snapshot }))
     }
 
-    /// Request removal of every selected meter, or report existing quiescence.
+    /// Request removal of every selected meter and spectrum family, or report quiescence.
     ///
     /// Stop never polls the graph receipt queue. If an empty publication is already accepted,
     /// the same stored acknowledgement is returned so repeating stop cannot spend a revision.
@@ -1022,16 +1199,10 @@ impl HostObservationController {
         }
 
         if self.accepted.total_len() == 0 {
-            if let Some(accepted) = self
-                .pending
-                .iter()
-                .filter_map(|pending| pending.accepted)
-                .filter(|accepted| accepted.work.active_meter_channels == 0)
-                .max_by_key(|accepted| accepted.revision)
-            {
+            if let Some(accepted) = self.pending_empty_selection() {
                 return Ok(ObservationStop::Pending(accepted));
             }
-            if self.applied.len == 0
+            if self.applied.total_len() == 0
                 && self
                     .pending
                     .iter()
@@ -1041,63 +1212,65 @@ impl HostObservationController {
             }
         }
 
-        self.remove_meters_to(&[]).map(ObservationStop::Pending)
+        self.publish_candidate(
+            MeterSelectionSource::Explicit(&[]),
+            PublicationKind::Removal,
+            SpectrumSelectionUpdate::Remove,
+        )
+        .map(ObservationStop::Pending)
     }
 
     #[allow(clippy::result_large_err)]
-    fn publish_meter_candidate(
+    fn publish_candidate(
         &mut self,
-        requested: &[HostMeterId],
+        source: MeterSelectionSource<'_>,
         kind: PublicationKind,
+        spectrum_update: SpectrumSelectionUpdate,
     ) -> Result<ObservationAccepted, ObservationRefusal> {
-        // An empty prepared catalog has no graph endpoint. Keep this distinction from a terminal
-        // endpoint: the inert owner is live, but there is nothing to publish into.
-        if self.graph.is_none() {
-            return Err(not_prepared());
-        }
-        if self.observe_terminal_closure() {
-            return Err(closed());
-        }
+        self.ensure_graph_live()?;
 
-        // Check owner identity before handle lookup. A numerically matching handle from another
-        // prepared owner must never address this owner's consumer.
-        if requested.iter().any(|meter| meter.owner != self.owner) {
-            return Err(wrong_owner());
-        }
-        if requested.len() > self.candidate.entries.len() {
-            return Err(capacity());
-        }
-
-        // Resolve each handle into the preallocated candidate scratch and reject duplicates. The
-        // immutable prepared catalog is scanned on the control side; no lookup map is retained by
-        // the owner.
-        for (index, meter) in requested.iter().enumerate() {
-            let prepared_index = self
-                .meters
-                .iter()
-                .position(|prepared| prepared.id.handle == meter.handle)
-                .ok_or_else(not_prepared)?;
-            if requested[..index]
-                .iter()
-                .any(|previous| previous.handle == meter.handle)
-            {
-                return Err(invalid_request());
+        let requested_len = match source {
+            MeterSelectionSource::Explicit(requested) => {
+                if requested.iter().any(|meter| meter.owner != self.owner) {
+                    return Err(wrong_owner());
+                }
+                if requested.len() > self.candidate.entries.len() {
+                    return Err(capacity());
+                }
+                for (index, meter) in requested.iter().enumerate() {
+                    let prepared_index = self
+                        .meters
+                        .iter()
+                        .position(|prepared| prepared.id.handle == meter.handle)
+                        .ok_or_else(not_prepared)?;
+                    if requested[..index]
+                        .iter()
+                        .any(|previous| previous.handle == meter.handle)
+                    {
+                        return Err(invalid_request());
+                    }
+                    self.candidate.entries[index] = MeterSelectionEntry {
+                        prepared_index,
+                        generation: self
+                            .accepted
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.prepared_index == prepared_index)
+                            .map_or(0, |entry| entry.generation),
+                    };
+                }
+                requested.len()
             }
-            self.candidate.entries[index] = MeterSelectionEntry {
-                prepared_index,
-                generation: self
-                    .accepted
-                    .entries()
-                    .iter()
-                    .find(|entry| entry.prepared_index == prepared_index)
-                    .map_or(0, |entry| entry.generation),
-            };
-        }
-        self.candidate.len = requested.len();
-        // C3 exposes no protected spectrum mutator yet. Keep the complete-set scalar explicitly
-        // empty for meter publications so a future spectrum publication cannot inherit stale
-        // candidate metadata.
-        self.candidate.spectrum = None;
+            MeterSelectionSource::Accepted => {
+                let count = self.accepted.len;
+                if count > self.candidate.entries.len() {
+                    return Err(capacity());
+                }
+                self.candidate.entries[..count].copy_from_slice(self.accepted.entries());
+                count
+            }
+        };
+        self.candidate.len = requested_len;
 
         if matches!(kind, PublicationKind::Removal)
             && self.candidate.entries().iter().any(|entry| {
@@ -1111,9 +1284,41 @@ impl HostObservationController {
             return Err(conflict());
         }
 
+        let mut staged_candidate = None;
+        let spectrum_cost = match spectrum_update {
+            SpectrumSelectionUpdate::Keep => {
+                self.candidate.spectrum = self.accepted.spectrum;
+                self.candidate
+                    .spectrum
+                    .map_or(Ok(ObservationWorkCost::ZERO), |selection| {
+                        self.spectrum_cost(selection.channels)
+                    })?
+            }
+            SpectrumSelectionUpdate::Remove => {
+                self.candidate.spectrum = None;
+                ObservationWorkCost::ZERO
+            }
+            SpectrumSelectionUpdate::Select { channels, .. } => {
+                self.candidate.spectrum = None;
+                // This checked projection proves the complete union and work budget before the
+                // Free alternate slot is staged below.
+                self.spectrum_cost(channels)?
+            }
+        };
+        let spectrum_present = !matches!(spectrum_update, SpectrumSelectionUpdate::Remove)
+            && (matches!(spectrum_update, SpectrumSelectionUpdate::Select { .. })
+                || self.candidate.spectrum.is_some());
+        let candidate_handle_len = self
+            .candidate
+            .len
+            .checked_add(usize::from(spectrum_present))
+            .ok_or_else(arithmetic_overflow)?;
+        if candidate_handle_len > self.candidate_handles.len() {
+            return Err(capacity());
+        }
         let work = self
             .budget
-            .preflight_graph_demand(self.candidate.len, ObservationWorkCost::ZERO)?;
+            .preflight_graph_demand(self.candidate.len, spectrum_cost)?;
 
         // Ordinary demand consumes the ordinary credit and is serialized against the reserved
         // removal record. Removal demand consumes only the removal credit, allowing it to follow
@@ -1128,17 +1333,42 @@ impl HostObservationController {
             return Err(backpressure());
         }
 
+        if let SpectrumSelectionUpdate::Select {
+            entry_index,
+            channels,
+            mode,
+            selection_epoch,
+        } = spectrum_update
+        {
+            let cadence = self.spectrum_cadence.ok_or_else(not_prepared)?;
+            let spectrum = self.spectrum.as_mut().ok_or_else(not_prepared)?;
+            let staged = spectrum
+                .stage_prepared_entry(entry_index, mode, cadence)
+                .map_err(map_spectrum_selection_refusal)?;
+            let descriptor = staged.descriptor();
+            self.candidate.spectrum = Some(SpectrumSelectionEntry {
+                descriptor,
+                generation: 0,
+                selection_epoch,
+                channels,
+            });
+            staged_candidate = Some(staged);
+        }
+
         self.candidate
             .entries_mut()
             .sort_unstable_by_key(|entry| self.meters[entry.prepared_index].id.handle.0.get());
         for (index, entry) in self.candidate.entries().iter().enumerate() {
             self.candidate_handles[index] = self.meters[entry.prepared_index].id.handle.0.get();
         }
+        if let Some(spectrum) = self.candidate.spectrum {
+            self.candidate_handles[self.candidate.len] = spectrum.descriptor.observer_handle;
+        }
 
         // `graph.replace`/`remove_to` is deliberately the last fallible operation. The candidate
-        // storage and handle slice were both prepared above, so graph acceptance leaves only
-        // infallible generation filling, bounded copies and budget assignment.
-        let graph_accepted = {
+        // storage and handle slice were both prepared above. A graph refusal returns only the
+        // newly staged Free slot; all accepted/applied state remains untouched.
+        let graph_result = {
             let graph = self.graph.as_mut().expect("graph checked above");
             match kind {
                 PublicationKind::Ordinary => {
@@ -1148,14 +1378,53 @@ impl HostObservationController {
                     graph.remove_to(&self.candidate_handles[..self.candidate.total_len()])
                 }
             }
-        }
-        .map_err(map_graph_refusal)?;
+        };
+        let graph_accepted = match graph_result {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                if let Some(staged) = staged_candidate {
+                    self.spectrum
+                        .as_mut()
+                        .expect("staged spectrum has a collection")
+                        .cancel_candidate(staged);
+                }
+                return Err(map_graph_refusal(error));
+            }
+        };
 
         let revision = graph_accepted.revision;
         for entry in self.candidate.entries_mut() {
             if entry.generation == 0 {
                 entry.generation = revision;
             }
+        }
+        if let Some(spectrum_selection) = self.candidate.spectrum.as_mut()
+            && spectrum_selection.generation == 0
+        {
+            spectrum_selection.generation = revision;
+        }
+        if let Some(staged) = staged_candidate {
+            self.spectrum
+                .as_mut()
+                .expect("staged spectrum has a collection")
+                .commit_candidate(staged, revision);
+            self.spectrum_selection_entry = self
+                .candidate
+                .spectrum
+                .map(|selection| selection.descriptor.entry_index);
+            self.spectrum_selection_epoch = self
+                .candidate
+                .spectrum
+                .map_or(self.spectrum_selection_epoch, |selection| {
+                    selection.selection_epoch
+                });
+        } else if matches!(spectrum_update, SpectrumSelectionUpdate::Remove)
+            && self.accepted.spectrum.is_some()
+        {
+            self.spectrum
+                .as_mut()
+                .expect("accepted spectrum has a collection")
+                .commit_removal(revision);
         }
         let accepted = ObservationAccepted {
             owner: self.owner,
@@ -1168,6 +1437,52 @@ impl HostObservationController {
         self.accepted.copy_from(&self.candidate);
         self.budget.commit_graph_demand(work);
         Ok(accepted)
+    }
+
+    fn ensure_graph_live(&mut self) -> Result<(), ObservationRefusal> {
+        // An empty prepared catalog has no graph endpoint. Keep this distinction from a terminal
+        // endpoint: an inert owner is live but has nothing to publish into.
+        if self.graph.is_none() {
+            return Err(not_prepared());
+        }
+        if self.observe_terminal_closure() {
+            return Err(closed());
+        }
+        Ok(())
+    }
+
+    fn reserve_selection_epoch(&self, entry_index: usize) -> Result<u64, ObservationRefusal> {
+        if self.spectrum_selection_entry == Some(entry_index) {
+            Ok(self.spectrum_selection_epoch)
+        } else {
+            self.spectrum_selection_epoch
+                .checked_add(1)
+                .ok_or_else(arithmetic_overflow)
+        }
+    }
+
+    fn spectrum_cost(
+        &self,
+        channels: SpectrumChannels,
+    ) -> Result<ObservationWorkCost, ObservationRefusal> {
+        let cadence = self.spectrum_cadence.ok_or_else(not_prepared)?;
+        project_spectrum_work(cadence, channels)
+    }
+
+    fn pending_without_spectrum(&self) -> Option<ObservationAccepted> {
+        self.pending
+            .iter()
+            .filter(|pending| pending.selection.spectrum.is_none())
+            .filter_map(|pending| pending.accepted)
+            .max_by_key(|accepted| accepted.revision)
+    }
+
+    fn pending_empty_selection(&self) -> Option<ObservationAccepted> {
+        self.pending
+            .iter()
+            .filter(|pending| pending.selection.total_len() == 0)
+            .filter_map(|pending| pending.accepted)
+            .max_by_key(|accepted| accepted.revision)
     }
 
     fn observe_terminal_closure(&mut self) -> bool {
