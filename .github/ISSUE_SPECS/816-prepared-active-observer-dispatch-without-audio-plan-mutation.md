@@ -179,3 +179,36 @@ all fallible activation preparation. Focused preflight and existing alias tests,
 cargo check -p graph, formatting and diff checks pass. Public bind and render
 dispatch integration remain B2; no native active-dispatch capability is claimed
 from this checkpoint alone.
+
+### Coordinator concurrency ruling during B2
+
+The realtime endpoint must sample removal-queue availability before ordinary-queue
+availability. The unique producer publishes an ordinary revision before its
+subsequent removal revision; acquiring the removal publication first guarantees
+the subsequent ordinary availability read includes that earlier publication.
+Reading ordinary first could observe zero, race both publications, then observe
+one removal and apply revisions out of order. Counts remain bounded and frozen
+for this boundary. Include all newly render-reachable activation helper bodies
+in existing realtime-policy coverage.
+
+B2 consistency rulings: preflight and materialization must both use stable
+per-node handle sorting, preserving equal-handle legacy permanent rows. Failure
+invalidation covers the entire currently active snapshot, including active
+observers not reached in the failed block; each observer decides which completed
+window remains valid. It never scans dormant bindings. Existing realtime policy
+continues to prohibit panic/expect/unwrap in marked activation helpers.
+
+### Attempt 1 tranche B2 checkpoint
+
+Fresh Luna MAX wired additive transactional bind APIs, block-entry activation,
+active-only dispatch, selected failure invalidation, runtime layout witnesses and
+the concurrency/ordering rulings above. The existing graph library suite plus
+a public controlled-bind activation test passes: 75/75. cargo check -p graph and
+diff checks pass. Root realtime-policy gate passes with 50 marked regions in
+14 files (local log /tmp/observation-816-b2-realtime-policy.log).
+
+This is a working native dispatch checkpoint. Before the issue verdict, a fresh
+bounded evidence tranche must exercise allocator-guarded active audio, PCM across
+empty/single/maximum/churn sets, bank/tail and failure behavior, input-operation
+counters, and transactional source ownership. Root owns Wasm and independent
+review. No host/SDK/browser adoption or deadline qualification is claimed yet.

@@ -1243,8 +1243,9 @@ impl PreparedGraphPlan {
         self,
         bindings: GraphRuntimeBindings,
     ) -> Result<PreparedRenderPlan, GraphBindFailure> {
-        match self.bind_optional_source_set(bindings, None) {
-            Ok(plan) => Ok(plan),
+        match self.bind_optional_source_set(bindings, None, None) {
+            Ok((plan, None)) => Ok(plan),
+            Ok((_, Some(_))) => unreachable!("legacy bind cannot prepare activation"),
             Err((plan, bindings, _, code)) => Err(GraphBindFailure {
                 plan: Box::new(plan),
                 bindings,
@@ -1260,7 +1261,7 @@ impl PreparedGraphPlan {
         bindings: GraphRuntimeBindings,
         source_set: GraphPreparedSourceSet,
     ) -> Result<PreparedRenderPlan, GraphSourceBindFailure> {
-        self.bind_optional_source_set(bindings, Some(source_set))
+        self.bind_optional_source_set(bindings, Some(source_set), None)
             .map_err(
                 |(plan, bindings, source_set, code)| GraphSourceBindFailure {
                     plan: Box::new(plan),
@@ -1269,6 +1270,52 @@ impl PreparedGraphPlan {
                     code,
                 },
             )
+            .and_then(|(plan, activation)| {
+                if activation.is_some() {
+                    unreachable!("legacy source bind cannot prepare activation")
+                }
+                Ok(plan)
+            })
+    }
+
+    /// Bind with a prepared, host-controlled observer activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_observation_activation(
+        self,
+        bindings: GraphRuntimeBindings,
+        config: GraphObservationActivationConfig,
+    ) -> Result<(PreparedRenderPlan, GraphObservationController), GraphBindFailure> {
+        match self.bind_optional_source_set(bindings, None, Some(config)) {
+            Ok((plan, Some(controller))) => Ok((plan, controller)),
+            Ok((_, None)) => unreachable!("configured bind must prepare an activation controller"),
+            Err((plan, bindings, _, code)) => Err(GraphBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                code,
+            }),
+        }
+    }
+
+    /// Bind one sealed source set with a prepared observer activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_source_set_and_observation_activation(
+        self,
+        bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+        config: GraphObservationActivationConfig,
+    ) -> Result<(PreparedRenderPlan, GraphObservationController), GraphSourceBindFailure> {
+        match self.bind_optional_source_set(bindings, Some(source_set), Some(config)) {
+            Ok((plan, Some(controller))) => Ok((plan, controller)),
+            Ok((_, None)) => {
+                unreachable!("configured source bind must prepare an activation controller")
+            }
+            Err((plan, bindings, source_set, code)) => Err(GraphSourceBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                source_set: source_set.expect("source-set bind retains source set"),
+                code,
+            }),
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -1276,8 +1323,9 @@ impl PreparedGraphPlan {
         self,
         mut bindings: GraphRuntimeBindings,
         mut source_set: Option<GraphPreparedSourceSet>,
+        activation_config: Option<GraphObservationActivationConfig>,
     ) -> Result<
-        PreparedRenderPlan,
+        (PreparedRenderPlan, Option<GraphObservationController>),
         (
             Self,
             GraphRuntimeBindings,
@@ -1450,6 +1498,20 @@ impl PreparedGraphPlan {
                 Ok(planning) => planning,
                 Err(code) => return Err((self, bindings, source_set, code)),
             };
+        let prepared_activation = match runtime::preflight_observation_activation(
+            &self,
+            &program,
+            &bindings,
+            &planning,
+            activation_config,
+        ) {
+            Ok(prepared) => prepared,
+            Err(code) => return Err((self, bindings, source_set, code)),
+        };
+        let (controller, realtime_activation) = prepared_activation
+            .map_or((None, None), |prepared| {
+                (Some(prepared.controller), Some(prepared.realtime))
+            });
         let envelope = self.envelope;
         let plan_id = self.plan_id;
         let mut plan = self;
@@ -1465,8 +1527,9 @@ impl PreparedGraphPlan {
             observers,
             source_set.take(),
             planning,
+            realtime_activation,
         );
-        Ok(PreparedRenderPlan::prepare_with_executor(
+        let render_plan = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
                 envelope,
@@ -1474,7 +1537,8 @@ impl PreparedGraphPlan {
             },
             Box::new(executor),
         )
-        .expect("prevalidated graph plan"))
+        .expect("prevalidated graph plan");
+        Ok((render_plan, controller))
     }
 }
 
@@ -1979,6 +2043,9 @@ impl GraphExecutor {
         observers: Vec<GraphNodeObserverBinding>,
         source_set: Option<GraphPreparedSourceSet>,
         planning: runtime::SequentialPlan,
+        observation_activation: Option<
+            crate::observation_activation::RealtimeObservationActivation,
+        >,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
         let sample_rate_hz = plan.envelope.sample_rate.0;
@@ -2024,7 +2091,14 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames, planning);
+        let runtime = runtime::build_sequential(
+            program,
+            &plan.spec,
+            parts,
+            frames,
+            planning,
+            observation_activation,
+        );
         Self {
             runtime,
             output,
@@ -2079,6 +2153,11 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
         } = self;
+        // Snapshot publication is the only activation state transition, and it occurs before any
+        // source work so observer hooks and the block's source facts share one boundary.
+        runtime.begin_observation_block(time.absolute_sample);
+        let selective_observation = runtime.has_observation_activation();
+        let active_observation = runtime.has_active_observation();
         let source_validity = if let Some(source_set) = source_set.as_mut() {
             if let Err(error) =
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
@@ -2110,17 +2189,36 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
-            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity) {
-                runtime.invalidate_observers_after_failure(time.absolute_sample);
-                #[cfg(any(test, feature = "test-support"))]
-                if !runtime::test_only_completion_disabled() {
+            if !selective_observation {
+                if let Err(error) =
+                    runtime.observe_unit(unit, time.absolute_sample, source_validity)
+                {
+                    runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    #[cfg(any(test, feature = "test-support"))]
+                    if !runtime::test_only_completion_disabled() {
+                        runtime.complete_pending(time.absolute_sample);
+                    }
+                    #[cfg(any(test, feature = "test-support"))]
+                    runtime.test_only_capture_failed_buffer();
+                    #[cfg(not(any(test, feature = "test-support")))]
                     runtime.complete_pending(time.absolute_sample);
+                    return Err(error);
                 }
-                #[cfg(any(test, feature = "test-support"))]
-                runtime.test_only_capture_failed_buffer();
-                #[cfg(not(any(test, feature = "test-support")))]
-                runtime.complete_pending(time.absolute_sample);
-                return Err(error);
+            } else if active_observation {
+                if let Err(error) =
+                    runtime.observe_active_unit(unit, time.absolute_sample, source_validity)
+                {
+                    runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    #[cfg(any(test, feature = "test-support"))]
+                    if !runtime::test_only_completion_disabled() {
+                        runtime.complete_pending(time.absolute_sample);
+                    }
+                    #[cfg(any(test, feature = "test-support"))]
+                    runtime.test_only_capture_failed_buffer();
+                    #[cfg(not(any(test, feature = "test-support")))]
+                    runtime.complete_pending(time.absolute_sample);
+                    return Err(error);
+                }
             }
         }
         let (left, right) = runtime.buffer(*output_buffer);
@@ -4717,6 +4815,58 @@ mod tests {
                 .entries()
                 .iter()
                 .any(|entry| entry.member == Some(3) && entry.observer == 1)
+        );
+    }
+
+    #[test]
+    fn public_observation_activation_bind_dispatches_only_after_boundary_admission() {
+        let (plan, mut bindings, input) = binding_plan();
+        let calls = Arc::new(AtomicU64::new(0));
+        bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                input,
+                7,
+                Box::new(TapRecorder(
+                    Arc::clone(&calls),
+                    Arc::new(std::sync::Mutex::new(Vec::new())),
+                )),
+            ));
+        let (mut render_plan, mut controller) = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(bound) => bound,
+            Err(failure) => panic!("activation bind failed: {}", failure.code),
+        };
+        let mut output = [0.0; 2];
+        let mut render = |sample| {
+            render_plan
+                .render(
+                    engine::realtime::RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
+                    },
+                    engine::realtime::RenderTime {
+                        absolute_sample: sample,
+                    },
+                )
+                .expect("render");
+        };
+        render(0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(controller.replace(&[7]).expect("admit").revision, 1);
+        render(1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: 1,
+                first_sample: 1,
+            })
         );
     }
 

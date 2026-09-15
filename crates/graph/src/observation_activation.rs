@@ -497,18 +497,22 @@ impl GraphObservationController {
 
 impl RealtimeObservationActivation {
     /// Apply at most the two snapshots admitted before this block entry.
+    // REALTIME_POLICY_BEGIN
     pub(crate) fn apply_boundary<F>(&mut self, first_sample: u64, mut on_changed: F)
     where
         F: FnMut(ActivationEntry, bool, u64, u64),
     {
         let pending_count = usize::from(self.pending.is_some());
-        let ordinary_count = self
-            .ordinary
+        let removal_count = self
+            .removal
             .as_ref()
             .map_or(0, Consumer::available_at_entry)
             .min(1);
-        let removal_count = self
-            .removal
+        // A removal can only be published after any ordinary candidate it supersedes. Observe its
+        // queue first, then sample ordinary availability: if removal is visible, every older
+        // ordinary publication is visible to this bounded entry snapshot as well.
+        let ordinary_count = self
+            .ordinary
             .as_ref()
             .map_or(0, Consumer::available_at_entry)
             .min(1);
@@ -556,6 +560,7 @@ impl RealtimeObservationActivation {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Borrow the currently active immutable entry slice for the executor's dispatch cursor.
     pub(crate) fn entries(&self) -> &[ActivationEntry] {
@@ -567,6 +572,7 @@ impl RealtimeObservationActivation {
         self.resources
     }
 
+    // REALTIME_POLICY_BEGIN
     fn apply_candidate<F>(
         &mut self,
         candidate: PublishedSnapshot,
@@ -603,7 +609,10 @@ impl RealtimeObservationActivation {
         }
 
         {
-            let active = self.active.as_ref().expect("active snapshot checked above");
+            let Some(active) = self.active.as_ref() else {
+                self.pending = Some(candidate);
+                return false;
+            };
             notify_changes(
                 active.entries(),
                 &candidate.entries[..candidate.len],
@@ -612,7 +621,10 @@ impl RealtimeObservationActivation {
                 on_changed,
             );
         }
-        let old = self.active.take().expect("active snapshot checked above");
+        let Some(old) = self.active.take() else {
+            self.pending = Some(candidate);
+            return false;
+        };
         let retired = RetiredSnapshot {
             kind: candidate.kind,
             revision: candidate.revision,
@@ -642,6 +654,7 @@ impl RealtimeObservationActivation {
             }
         }
     }
+    // REALTIME_POLICY_END
 }
 
 impl Drop for RealtimeObservationActivation {
@@ -650,6 +663,7 @@ impl Drop for RealtimeObservationActivation {
     }
 }
 
+// REALTIME_POLICY_BEGIN
 fn notify_changes<F>(
     old: &[ActivationEntry],
     new: &[ActivationEntry],
@@ -693,6 +707,7 @@ fn notify_changes<F>(
         }
     }
 }
+// REALTIME_POLICY_END
 
 fn snapshot_storage(capacity: usize, permanent: &[ActivationEntry]) -> Box<[ActivationEntry]> {
     let mut storage = vec![ActivationEntry::default(); capacity];
