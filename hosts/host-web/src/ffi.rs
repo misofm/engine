@@ -8202,7 +8202,7 @@ mod observation_checkpoint_a_tests {
     }
 
     #[test]
-    fn private_protected_boot_rejects_nested_headers_reserved_and_padded_ids() {
+    fn public_protected_boot_rejects_nested_headers_reserved_and_padded_ids() {
         no_live_host();
         let cases: [ProtectedBootPreparationCase; 6] = [
             ProtectedBootPreparationCase {
@@ -8248,7 +8248,7 @@ mod observation_checkpoint_a_tests {
             (case.mutate)(&mut record);
             stage_protected_boot(protected_document(), record);
             assert_eq!(
-                boot_staged_observation_demand(protected_document().len() as u32),
+                miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32),
                 0,
                 "{} must refuse without publishing a host",
                 case.name
@@ -8264,11 +8264,12 @@ mod observation_checkpoint_a_tests {
     }
 
     #[test]
-    fn private_protected_boot_retained_budget_is_inclusive() {
+    fn public_protected_boot_retained_budget_is_inclusive() {
         no_live_host();
         let mut record = protected_preparation_record();
         stage_protected_boot(protected_document(), record);
-        let first = boot_staged_observation_demand(protected_document().len() as u32);
+        let first =
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32);
         assert_ne!(first, 0, "baseline protected boot");
         let retained = LIVE_HOST.with(|slot| {
             let live = slot.borrow();
@@ -8283,14 +8284,15 @@ mod observation_checkpoint_a_tests {
 
         record.ingress_limits.maximum_retained_bytes = retained;
         stage_protected_boot(protected_document(), record);
-        let exact = boot_staged_observation_demand(protected_document().len() as u32);
+        let exact =
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32);
         assert_ne!(exact, 0, "exact retained budget must be accepted");
         assert_eq!(miso_engine_web_v1_dispose(exact), RESULT_OK);
 
         record.ingress_limits.maximum_retained_bytes = retained - 1;
         stage_protected_boot(protected_document(), record);
         assert_eq!(
-            boot_staged_observation_demand(protected_document().len() as u32),
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32),
             0,
             "one byte below retained budget must refuse"
         );
