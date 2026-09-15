@@ -12712,8 +12712,14 @@ mod tests {
         // grows from 80 to 88 bytes. The actual-layout meter projection therefore adds eight
         // bytes per request to the meter and retained caps recorded by classes 34-37. All
         // generated cases and expected outcomes remain unchanged; only their resource limits move.
+        // Issue #818 A1 adds observation generation to the Rust meter values: MeterSnapshot grows
+        // 160 -> 168 and MeterAccumulator 232 -> 240. The queue's two snapshot slots and one
+        // accumulator therefore add 24 bytes per requested meter to those same resource-derived
+        // descriptions. A2's private MeterRequestSeal policy fits existing padding and remains
+        // 56 bytes. No mutation case or expected outcome changed; only the derived resource
+        // limits changed.
         assert_eq!(
-            transcript_hash, 17_221_471_506_974_483_219,
+            transcript_hash, 9_657_103_559_552_463_871,
             "updated only through a deliberate frozen-case change"
         );
     }

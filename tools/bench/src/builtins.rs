@@ -53,7 +53,7 @@ const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANI
 /// benchmark's `main` path, which `test-builtins-benchmark.sh` (the swept, hermetic half) does not
 /// execute. That gap is a real finding about the gate, not about this feature.
 const INPUT_MANIFEST_SHA256: &str =
-    "da78dc3e49a98900b97fb69c1d37f7c81e9fe48737301927fadd7f9636fbcaef";
+    "ae83244956cccc6b1195656dfbe929fcb9cb730232193626c2cff973ba8aff7f";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 const WORKLOADS: [Workload; 5] = [

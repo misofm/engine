@@ -175,3 +175,45 @@ checks with/without test-support, formatting and diff checks PASS. Default
 no-feature test compilation still hits existing unrelated test-support cfg errors;
 feature-enabled tests are the established compiler gate. Source capability is
 ready for independent attempt1 review; resource/artifact integration remains.
+
+## Independent attempt1 verdict: PASS
+
+Fresh Astra XHIGH reviewed candidate370000e8 against a4e2d8ca and found no native
+blockers or optional changes. It independently passed builtins14 unit+10 meter
+integration tests, all57 compiler library tests excluding the separately assigned
+resource-sensitive10k transcript, allocator tracker9/9, and native/Wasm compiler
+checks with/without test-support. Source review confirmed scalar-only activation
+restart, separate reset/observation generations, preserved delivery policies,
+transactional ownership across all four bind variants, actual Layout projection,
+and actual selected-sample/PCM evidence. Full local review record:
+/tmp/observation-818-attempt1-review.md. This verdict covers native818 only; later
+host/SDK delivery and the final fresh whole-product review remain separate.
+
+## Browser integration evidence
+
+Reproducible current Wasm digest:
+01b7deece24f4ec457294fbbc56b4a3eae4160722b83a04d327992b775139343.
+The existing raw-browser directOracle matches in full, so expected.json stays
+unchanged. Independent resource checker agrees with the actual module/native
+witness and passes all26 red mutations. Actual existing qualification passes
+Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 against the exact seven shipped
+artifacts from candidate370000e85654ba6e20a01c61731f611bcd7c1470. Current matrix and
+results were generated from that run; historical published SDK records stay
+unchanged. Resource corpus integration and required CI/merge still precede closure.
+
+## Resource integration complete
+
+Fresh Luna MAX refreshed only resource rows and their manifest identity using
+measured native Snapshot168/Accumulator240; private request seal remains56 bytes.
+The compiler transcript is now9657103559552463871 with unchanged10,000 cases and
+outcomes. Manifest is ae83244956cccc6b1195656dfbe929fcb9cb730232193626c2cff973ba8aff7f.
+Scratch comparison proves PCM, meter, response, diagnostics, cases, metadata and
+benchmark payloads unchanged. Existing issue064 tests2/2 including24 corruptions,
+issue067 PDC/identity mutation1/1, exact compiler10k test, formatting/diff PASS.
+Current manifest consumers and both synthetic validator suites PASS with zero
+real timed workloads. Existing fresh-binary million-block all-TID realtime trace
+PASS with zero violations; record hash
+ dbac3f3d019ed05b079f40aad61f51e38db90257a7c2de957aae7afbe2590b53
+changes only because its accepted manifest identity changed. Native attempt1
+PASS and all browser integration evidence are complete; required PR CI and merged
+upstream delivery remain before closure.
