@@ -8490,6 +8490,193 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn protected_stream_read_reports_real_queue_gap_and_recovers_queued_window() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis(),
+            RESULT_OK,
+            "seed the worker history and committed result before the overrun"
+        );
+
+        let (ready_capture, ready_result, ready_header, ready_result_header, ready_metadata) =
+            SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let capture = staging.capture.as_ref().expect("protected capture");
+                let result = staging.result.as_ref().expect("protected result");
+                let capture_header: WebSpectrumWindow =
+                    read_live_record(capture, 0).expect("ready capture header");
+                let result_header: WebSpectrumResult =
+                    read_live_record(result, 0).expect("ready result header");
+                assert!(staging.capture_len > SPECTRUM_WINDOW_HEADER_BYTES as usize);
+                assert!(staging.result_len > SPECTRUM_RESULT_HEADER_BYTES as usize);
+                assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+                assert_eq!(staging.stream_metadata.capture_epoch, 1);
+                assert_eq!(staging.stream_metadata.sequence, 0);
+                assert_eq!(staging.stream_metadata.windows, 1);
+                assert_eq!(staging.stream_metadata.analysis_epoch, 0);
+                assert_eq!(staging.stream_metadata.history_start_sample, 0);
+                assert!(capture_header.snapshot_token != 0);
+                assert_eq!(capture_header.snapshot_token, result_header.snapshot_token);
+                assert!(
+                    capture
+                        [capture_header.left_offset as usize..capture_header.right_offset as usize]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                assert!(
+                    capture[capture_header.right_offset as usize..staging.capture_len]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                (
+                    capture[..staging.capture_len].to_vec(),
+                    result[..staging.result_len].to_vec(),
+                    capture_header,
+                    result_header,
+                    staging.stream_metadata,
+                )
+            });
+        let ready_identity = capture_identity();
+        assert_ne!(ready_identity.owner, 0);
+        assert_ne!(ready_identity.observation_generation, 0);
+        assert_ne!(ready_identity.selection_epoch, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        // The first fixture leaves block 16 as the first partial post-read window. Blocks 17..48
+        // complete two windows without a read, overflowing the native one-record queue and
+        // recording one dropped capture.
+        for block in 17..=48_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected overrun source block {block}"
+            );
+            assert_eq!(
+                miso_engine_web_v1_render(handle, 128),
+                RESULT_OK,
+                "protected overrun render block {block}"
+            );
+        }
+
+        // The admitted native Gap is itself a successful FFI operation. It resets worker history
+        // and invalidates published lengths, while committed backing bytes and identity remain
+        // authoritative until a later Ready window is actually packed.
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let gap_metadata = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_GAP);
+            assert_eq!(staging.stream_metadata.result, RESULT_OK);
+            assert_eq!(staging.stream_metadata.capture_epoch, 1);
+            assert_eq!(staging.stream_metadata.dropped_captures, 1);
+            assert_eq!(staging.stream_metadata.sequence, ready_metadata.sequence);
+            assert_eq!(staging.stream_metadata.windows, ready_metadata.windows);
+            assert_eq!(
+                staging.stream_metadata.analysis_epoch,
+                ready_metadata.analysis_epoch + 1
+            );
+            assert_eq!(staging.stream_metadata.history_start_sample, 0);
+            assert!(
+                staging.stream_history.is_some(),
+                "history remains allocated"
+            );
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+            let capture = staging.capture.as_ref().expect("retained capture bytes");
+            let result = staging.result.as_ref().expect("retained result bytes");
+            assert_eq!(&capture[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(&result[..ready_result.len()], ready_result.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(capture, 0).expect("retained capture header"),
+                ready_header
+            );
+            assert_eq!(
+                read_live_record::<WebSpectrumResult>(result, 0).expect("retained result header"),
+                ready_result_header
+            );
+            staging.stream_metadata
+        });
+        assert_eq!(gap_metadata.status, SPECTRUM_STREAM_STATUS_GAP);
+        assert_eq!(gap_metadata.result, RESULT_OK);
+        assert_eq!(gap_metadata.capture_epoch, 1);
+        assert_eq!(gap_metadata.dropped_captures, 1);
+        assert_eq!(capture_identity(), ready_identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_admission().operation,
+                OBSERVATION_OPERATION_READ_SPECTRUM
+            );
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+        });
+
+        // Gap consumed the current Ordinary credit. One contiguous render boundary replenishes
+        // it while leaving the queued post-gap window available for the next admitted read.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 49 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let (recovered_header, recovered_metadata, recovered_identity) =
+            SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let capture = staging.capture.as_ref().expect("recovered capture");
+                let header: WebSpectrumWindow =
+                    read_live_record(capture, 0).expect("recovered capture header");
+                assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+                assert_eq!(staging.stream_metadata.result, RESULT_OK);
+                assert_eq!(staging.stream_metadata.capture_epoch, 1);
+                assert_eq!(staging.stream_metadata.sequence, 1);
+                // The queued sequence-1 record was published before sequence 2 overran the
+                // one-record queue, so its own captured drop counter remains zero. The admitted
+                // Gap above reported the later native cumulative drop count of one.
+                assert_eq!(staging.stream_metadata.dropped_captures, 0);
+                assert_eq!(staging.stream_metadata.windows, 2);
+                assert_eq!(staging.stream_metadata.captured_sample, 2_048);
+                assert_eq!(staging.stream_metadata.end_sample, 4_096);
+                assert_eq!(header.snapshot_token, 2);
+                assert_eq!(header.captured_sample, 2_048);
+                assert_eq!(header.end_sample, 4_096);
+                assert_eq!(header.snapshot_token, staging.stream_metadata.windows);
+                assert_eq!(header.channels, SPECTRUM_CHANNEL_BOTH);
+                assert!(staging.capture_len > SPECTRUM_WINDOW_HEADER_BYTES as usize);
+                assert!(
+                    capture[header.left_offset as usize..header.right_offset as usize]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                assert!(
+                    capture[header.right_offset as usize..staging.capture_len]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                (header, staging.stream_metadata, capture_identity())
+            });
+        assert_eq!(recovered_header.snapshot_token, 2);
+        assert_eq!(recovered_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(recovered_metadata.dropped_captures, 0);
+        assert_eq!(recovered_identity.owner, ready_identity.owner);
+        assert_eq!(
+            recovered_identity.observation_generation,
+            ready_identity.observation_generation
+        );
+        assert_eq!(
+            recovered_identity.selection_epoch,
+            ready_identity.selection_epoch
+        );
+        assert_eq!(recovered_identity.snapshot_token, 2);
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stream_read_reports_native_pending_states_and_retains_last_ready_capture() {
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
         let handle = boot_protected();
