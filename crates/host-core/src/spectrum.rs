@@ -1677,6 +1677,7 @@ fn one_shot_capture_resident(
                 one_shot_invalidate(state);
                 return;
             };
+            probe_add(PROBE_VALIDATION_SAMPLES, 1);
             if !value.is_finite() {
                 one_shot_invalidate(state);
                 return;
@@ -1689,6 +1690,7 @@ fn one_shot_capture_resident(
                 one_shot_invalidate(state);
                 return;
             };
+            probe_add(PROBE_VALIDATION_SAMPLES, 1);
             if !value.is_finite() {
                 one_shot_invalidate(state);
                 return;
@@ -3107,6 +3109,46 @@ mod tests {
             super::test_only_spectrum_operation_counts(),
             super::SpectrumOperationCounts::default()
         );
+    }
+
+    #[test]
+    fn activation_hooks_are_allocation_free_in_both_modes() {
+        use bench_support::alloc as bench_alloc;
+
+        bench_alloc::assert_installed();
+
+        let (producer, _consumer) = bounded_spsc(
+            core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            QueueGeneration(0x5350_4543),
+        )
+        .expect("capture queue");
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::IDLE));
+        let mut one_shot = SpectrumCaptureObserver::new_one_shot_for_test(
+            producer,
+            std::sync::Arc::clone(&state),
+            SpectrumChannels::Stereo,
+        );
+        let one_shot_mark = bench_alloc::current_thread_counters();
+        one_shot.activation_changed(true, 11, 0);
+        one_shot.activation_changed(false, 11, 128);
+        one_shot.activation_changed(true, 12, 256);
+        let one_shot_delta = bench_alloc::current_thread_delta_since(one_shot_mark);
+        assert_eq!(one_shot_delta.allocations, 0);
+        assert_eq!(one_shot_delta.reallocations, 0);
+        assert_eq!(one_shot_delta.deallocations, 0);
+
+        let (mut continuous, _capture) = continuous_pair(SpectrumChannels::Stereo);
+        continuous
+            .mode
+            .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+        let continuous_mark = bench_alloc::current_thread_counters();
+        continuous.activation_changed(true, 21, 0);
+        continuous.activation_changed(false, 21, 128);
+        continuous.activation_changed(true, 22, 256);
+        let continuous_delta = bench_alloc::current_thread_delta_since(continuous_mark);
+        assert_eq!(continuous_delta.allocations, 0);
+        assert_eq!(continuous_delta.reallocations, 0);
+        assert_eq!(continuous_delta.deallocations, 0);
     }
 
     #[test]
