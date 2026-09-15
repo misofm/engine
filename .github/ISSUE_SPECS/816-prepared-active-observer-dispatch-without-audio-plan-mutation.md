@@ -88,3 +88,63 @@ The implementation worktree is /tmp/miso-observation-engine on
 codex/observation-feeds. Tranche A is a focused native primitive checkpoint only;
 tranche B must integrate it into real graph execution before issue closure.
 Root owns all commits/pushes and source/remote evidence synchronization.
+
+### Endpoint lifetime clarification (before attempt-1 verdict)
+
+Astra/root require a shared `Arc<AtomicBool>` renderer-alive flag: initialize true,
+Release-store false when the realtime endpoint is disposed OFF RENDER, and
+Acquire-load before controller admission. Add `is_closed(&self) -> bool` to the
+controller. `replace`/`remove_to` return OwnerClosed after disposal. Already
+recorded applied receipts remain recyclable; accepted-but-unapplied revisions
+become explicitly terminal owner closure, never fabricated application. A
+concurrent disposal after admission preflight is classified by this terminal
+state. Include the exact shared Arc allocation in retained/largest-byte reports.
+
+Opt-in controlled preparation rejects `maximum_active_observers == 0` with
+ActiveCapacity. Existing bind paths without controlled preparation retain zero
+activation pool and no controller; zero configured capacity is not owner death.
+The graph builder uses the additive bind methods frozen above.
+# #816 tranche B: transactional activation preflight
+
+Bounded design clarification only; append to the numbered brief before B. Do not change the audio lowering or return ownership after partial executor construction.
+
+`SequentialPlan` already freezes emitted units and members before inputs move: `run_units`, `unit_of_run`, `op_slot`, and retired fold decisions. `build_sequential` consumes exactly that plan. Therefore final activation indices can and must be derived while borrowing inputs; there is no need for a fallible catalog creation after constructing `Runtime`.
+
+Add the following crate-private helper in runtime:
+
+```rust
+pub(crate) struct PreparedObservationActivation {
+    pub(crate) controller: GraphObservationController,
+    pub(crate) realtime: RealtimeObservationActivation,
+}
+
+pub(crate) fn preflight_observation_activation(
+    plan: &PreparedGraphPlan,
+    program: &ExecutionProgram,
+    bindings: &GraphRuntimeBindings,
+    planning: &SequentialPlan,
+    config: Option<GraphObservationActivationConfig>,
+) -> Result<Option<PreparedObservationActivation>, &'static str>;
+```
+
+1. With `config=None`, reject any controlled observer from either `plan.observers` or `bindings.observers` with `graph.plan.observation_activation_required`; otherwise return `Ok(None)`. Old bind must not turn a controlled observer into an always-active one.
+2. For configured activation, construct a temporary borrowed map of all observer bindings from both inputs. Use the existing `taps_by_op(program,spec)` function and the same direct-node-first, aliases-in-existing-order sequence used by `build_op`/`take_observers`. Sort each node's borrowed observers by handle. Consume these temporary map rows once, following retained `planning.run_units` and their original op order. Do not remove/move original observer objects.
+3. `planning.op_slot[op]` supplies `(unit,member)`. Use `member=None` for a plain run (`membership.is_empty()`); use `Some(member)` for a bank run. Observer index is its index in that runtime op's concatenated direct/alias list. Assign ordinal monotonically in this exact emission order. This is the actual lowered catalog, not a guessed count or substitute layout. Check all arithmetic, referenced mappings and complete consumption; an unresolved observer or inconsistent mapping returns `graph.plan.observer`. Controlled handles must be globally unique, including different nodes; permanent and controlled dispatch ordinals are necessarily distinct.
+4. Call existing `prepare_activation(catalog, permanent, config)` during this borrowed preflight. It allocates/validates the exact pool, queues, retained layout and liveness state BEFORE any caller-owned processor/observer/source moves. Map its typed admission failures to explicit graph activation diagnostics. This is the sole fallible activation preparation. Do not call it again in `GraphExecutor::new` or after `build_sequential`.
+5. In `bind_optional_source_set`, run existing structural/source validation and `preflight_sequential` first, then the helper above. Every error still returns `(self, bindings, source_set, code)` untouched. On success split the prepared activation pair: retain the controller in the enclosing bind function and pass only `Option<RealtimeObservationActivation>` to an additive private argument of `GraphExecutor::new`/runtime construction. `GraphExecutor::new` remains infallible and returns `Self`; additive public bind returns `(PreparedRenderPlan, controller)` after sealing. Legacy bind discards no controller: its preflight returns None.
+6. Materialization consumes the same frozen `SequentialPlan` and unchanged observer bindings. No second lowering, admission decision, handle lookup, resource check or new queue allocation happens after moving inputs. A test/debug assertion may compare emitted observer coordinates to the preflight catalog as an internal invariant; it cannot replace required borrowed validation or become a normal recoverable late error.
+
+Use one shared helper for direct-node/alias enumeration if needed to prevent preflight and emission drifting. Do not introduce an alternate graph-planning algorithm. Temporary preflight maps are ordinary control-side memory, reclaimed before returning; retained pool/resource figures remain based on the actual final catalog.
+
+Tests: controlled binding through each legacy bind rejects while returning every original input; duplicate controlled handles on different nodes; zero-active-capacity and one-below byte limit; unresolved observer; source-set bind failure preserving source ownership; successful direct+alias+bank-tail preflight coordinates match materialized dispatch exactly. A drop-witness observer/processor must remain undropped inside returned failure inputs, proving no late consume-and-drop path. Existing inclusive exact resource and PCM/ordering gates remain.
+
+### Attempt 1 tranche A checkpoint
+
+Luna MAX implements the graph-specific three-buffer controller, ordinary/removal
+credits, applied receipts, renderer-lifetime flag, checked resource projection,
+controlled-binding constructor and default activation hook. Focused activation
+unit tests (3), `cargo check -p graph`, changed-file formatting and diff checks pass.
+The crate-private runtime endpoint is intentionally not yet wired, producing
+expected unused-code warnings until tranche B. This is a compiling transport
+checkpoint, not a native graph capability verdict. Tranche B must complete real
+dispatch, transactional bind, resource/PCM/realtime evidence and independent review.

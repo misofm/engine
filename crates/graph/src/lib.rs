@@ -4,8 +4,15 @@
 //! only retains the already-validated immutable result and its preallocated render state.
 #![allow(missing_docs)]
 
+mod observation_activation;
 pub mod program;
 mod runtime;
+
+pub use observation_activation::{
+    GraphObservationAccepted, GraphObservationActivationConfig,
+    GraphObservationActivationResources, GraphObservationAdmissionError, GraphObservationApplied,
+    GraphObservationController,
+};
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
@@ -1824,6 +1831,13 @@ pub struct GraphResidentObservationBlock<'a> {
 pub trait GraphRuntimeObserver: Send {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
 
+    /// Notify this observer that its controlled activation changed at a block boundary.
+    ///
+    /// The default is deliberately empty. Implementations that opt into controlled activation
+    /// must keep this hook bounded and scalar: it may invalidate a generation or reset a counter,
+    /// but it must not allocate, clear a capture buffer, drain a queue, or reset audio state.
+    fn activation_changed(&mut self, _active: bool, _generation: u64, _first_sample: u64) {}
+
     /// Observe one planar block with source validity facts from the same render boundary.
     /// Existing observers ignore the additional facts by default.
     fn observe_with_validity(
@@ -1862,6 +1876,7 @@ pub struct GraphNodeObserverBinding {
     pub node: GraphNodeId,
     pub handle: u64,
     observer: Box<dyn GraphRuntimeObserver>,
+    controlled: bool,
 }
 impl GraphNodeObserverBinding {
     pub fn new(node: GraphNodeId, handle: u64, observer: Box<dyn GraphRuntimeObserver>) -> Self {
@@ -1869,7 +1884,27 @@ impl GraphNodeObserverBinding {
             node,
             handle,
             observer,
+            controlled: false,
         }
+    }
+
+    /// Prepare an observer for host-controlled activation. Controlled bindings start inactive;
+    /// the activation snapshot owns their dispatch eligibility after binding.
+    pub fn controlled(
+        node: GraphNodeId,
+        handle: u64,
+        observer: Box<dyn GraphRuntimeObserver>,
+    ) -> Self {
+        Self {
+            node,
+            handle,
+            observer,
+            controlled: true,
+        }
+    }
+
+    pub(crate) const fn is_controlled(&self) -> bool {
+        self.controlled
     }
 }
 #[derive(Clone, Debug, PartialEq)]
