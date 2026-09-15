@@ -561,6 +561,12 @@ thread_local! {
     static OBSERVATION_STAGING: RefCell<ObservationStaging> = RefCell::new(ObservationStaging::new());
 }
 
+#[cfg(test)]
+thread_local! {
+    static LIVE_RESPONSE_CAPTURE_FAULT: Cell<Option<ResponseSnapshotError>> = const { Cell::new(None) };
+    static LIVE_RESPONSE_CAPTURE_OWNER_CALLS: Cell<u32> = const { Cell::new(0) };
+}
+
 fn next_handle() -> u32 {
     NEXT_HANDLE.with(|next| {
         let result = next.get().max(1);
@@ -1710,6 +1716,15 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
         left: &[ResponseSnapshotSection],
         right: &[ResponseSnapshotSection],
     ) -> Result<(), ResponseSnapshotError> {
+        #[cfg(test)]
+        {
+            LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(|calls| {
+                calls.set(calls.get().saturating_add(1));
+            });
+            if let Some(error) = LIVE_RESPONSE_CAPTURE_FAULT.with(Cell::take) {
+                return Err(error);
+            }
+        }
         if self.owner_count >= LIVE_RESPONSE_MAXIMUM_OWNERS
             || left.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
             || right.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
@@ -6496,6 +6511,15 @@ pub(crate) mod live_response_ffi_tests {
         });
     }
 
+    fn arm_live_response_owner_fault(error: ResponseSnapshotError) {
+        LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(|calls| calls.set(0));
+        LIVE_RESPONSE_CAPTURE_FAULT.with(|fault| fault.set(Some(error)));
+    }
+
+    fn live_response_owner_callback_calls() -> u32 {
+        LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(Cell::get)
+    }
+
     fn truncate_live_result_for_test(
         before: &ResponseMarkers,
         actual_capacity: usize,
@@ -6669,6 +6693,70 @@ pub(crate) mod live_response_ffi_tests {
             assert_eq!(token, current.live_token);
             assert!(!snapshot.owners.is_empty());
         });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_admitted_owner_failure_preserves_success_identity() {
+        let handle = boot_private_protected();
+        let previous = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        configure_live_result_capacity(packed_bound);
+        arm_live_response_owner_fault(ResponseSnapshotError::Owner);
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_INTERNAL
+        );
+        assert_eq!(live_response_owner_callback_calls(), 1);
+        assert!(
+            LIVE_RESPONSE_CAPTURE_FAULT.with(Cell::get).is_none(),
+            "the one-shot fault must be consumed by the admitted owner callback"
+        );
+
+        let expected_header = WebLiveResponseResult {
+            struct_size: LIVE_RESPONSE_RESULT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_INTERNAL,
+            mode: LIVE_RESPONSE_MODE_TARGET,
+            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+            result_bytes: u64::from(LIVE_RESPONSE_RESULT_BYTES),
+            ..WebLiveResponseResult::default()
+        };
+        let current = response_markers();
+        assert_eq!(current.live_result_header, expected_header);
+        assert_eq!(current.live_result_len, LIVE_RESPONSE_RESULT_BYTES as usize);
+        assert_eq!(current.live_token, previous.live_token);
+        assert_eq!(current.capture_identity, previous.capture_identity);
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let published: WebLiveResponseResult =
+                read_live_record(&staging.live_result, 0).expect("failure header");
+            assert_eq!(published, expected_header);
+        });
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_INTERNAL);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.flags, 0);
+            assert_eq!(admission.receipt, WebObservationReceipt::default());
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "an admitted owner failure spends the Ordinary attempt"
+            );
+            assert_eq!(host.side_records.application_len, 0);
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(host.side_records.completed_count, 0);
+            assert_eq!(host.side_records.reserved_mask, 0);
+        });
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
