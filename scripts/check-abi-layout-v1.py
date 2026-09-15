@@ -792,6 +792,12 @@ def self_test() -> int:
     def widen_preparation_nested_leaf(document: dict) -> None:
         preparation_field(document, "workLimits.maximumMeterSamplesPerBlock")["type"] = "f64"
 
+    def widen_preparation_padding(document: dict) -> None:
+        preparation_field(document, "ingressLimits.alignmentPadding")["type"] = "u32"
+
+    def shift_preparation_nested_leaf(document: dict) -> None:
+        preparation_field(document, "workLimits.maximumRetainedBytes")["offset"] += 4
+
     def hole_in_layout(document: dict) -> None:
         document["structures"]["commandReport"]["fields"][3]["offset"] = 16
 
@@ -866,6 +872,8 @@ def self_test() -> int:
         ("ingress padding changes to a same-width scalar", widen_ingress_padding),
         ("a preparation nested leaf is dropped", drop_preparation_nested_leaf),
         ("a preparation nested leaf type changes at the same width", widen_preparation_nested_leaf),
+        ("preparation padding changes to a same-width scalar", widen_preparation_padding),
+        ("a preparation nested leaf shifts by four bytes", shift_preparation_nested_leaf),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
         ("the protected observation boot export is dropped", drop_protected_boot_export),
