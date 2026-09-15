@@ -1,17 +1,22 @@
 //! Native selected-observation identity and work accounting.
 //!
-//! This module is the control-side foundation for the selected-meter owner.  The first
-//! implementation tranche deliberately contains no graph binding or render integration: it
-//! only gives later preparation and admission code one checked owner identity, one set of public
-//! records, and one pure meter-work projection.
+//! This module owns the native selected-meter preparation boundary and its checked work records.
+//! The graph endpoint and meter consumers stay private to the owner; later admission tranches add
+//! the bounded mutation and read operations without changing that ownership seam.
 
 use core::{
+    alloc::Layout,
     mem::size_of,
     num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use builtins::{MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
+use builtins_compiler::MeterConsumer;
+use graph::{
+    GraphObservationActivationConfig, GraphObservationActivationResources,
+    GraphObservationController,
+};
 
 /// The process-local identity of one prepared observation owner.
 ///
@@ -52,6 +57,113 @@ pub struct PreparedHostMeter {
     pub period_frames: NonZeroU32,
 }
 
+/// Host-owned retained storage facts for the selected observation owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostObservationResources {
+    /// Exact graph activation storage, when a nonempty controlled meter catalog was bound.
+    pub graph_activation: Option<GraphObservationActivationResources>,
+    /// Inline bytes occupied by the containing host observation owner after the graph controller's
+    /// inline bytes are excluded. The graph activation report already charges that controller.
+    pub owner_inline_bytes: u64,
+    /// New host-owned catalog, identity-string and fixed selection-array heap bytes.
+    pub metadata_heap_bytes: u64,
+    /// Largest individual new host-owned metadata allocation, including an identity string.
+    pub metadata_largest_allocation_bytes: u64,
+    /// Narrow fixed retained reservation for this prepared owner.
+    pub reserved_bytes: u64,
+}
+
+impl HostObservationResources {
+    /// No observation demand was prepared.
+    pub const ZERO: Self = Self {
+        graph_activation: None,
+        owner_inline_bytes: 0,
+        metadata_heap_bytes: 0,
+        metadata_largest_allocation_bytes: 0,
+        reserved_bytes: 0,
+    };
+}
+
+impl Default for HostObservationResources {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+/// Explicit native observation demand supplied during host preparation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostObservationPreparation<'a> {
+    /// The complete prepared meter catalog, in caller request order.
+    pub meters: &'a [crate::prepare::HostMeterRequest],
+    /// Spectrum is reserved for a later tranche. An empty collection is normalized to absent.
+    pub spectrum: Option<&'a crate::spectrum::SpectrumCaptureCollectionRequest>,
+    /// Inclusive per-owner work and retained-byte limits.
+    pub work_limits: ObservationWorkLimits,
+    /// Graph activation population and retained-byte configuration.
+    pub activation: GraphObservationActivationConfig,
+}
+
+/// One selected meter's private generation identity in a complete-set selection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MeterSelectionEntry {
+    prepared_index: usize,
+    generation: u64,
+}
+
+/// One preallocated complete-set selection array with a live prefix.
+struct MeterSelection {
+    entries: Box<[MeterSelectionEntry]>,
+    len: usize,
+}
+
+impl MeterSelection {
+    fn empty() -> Self {
+        Self {
+            entries: Box::new([]),
+            len: 0,
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Result<Self, ObservationRefusal> {
+        if capacity == 0 {
+            return Ok(Self::empty());
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(capacity)
+            .map_err(|_| allocation_failure())?;
+        entries.resize(capacity, MeterSelectionEntry::default());
+        Ok(Self {
+            entries: entries.into_boxed_slice(),
+            len: 0,
+        })
+    }
+}
+
+/// One of the two reserved graph application obligations.
+struct PendingApplication {
+    accepted: Option<ObservationAccepted>,
+    selection: MeterSelection,
+}
+
+/// Private owner of one prepared native selected-meter catalog and its graph activation transport.
+///
+/// Keeping the graph controller and meter consumers private from the preparation boundary ensures
+/// that no raw observer endpoint can bypass owner identity or its future ledger.
+pub struct HostObservationController {
+    owner: ObservationOwnerId,
+    graph: Option<GraphObservationController>,
+    meters: Box<[PreparedHostMeter]>,
+    meter_consumers: Vec<MeterConsumer>,
+    budget: ObservationBudget,
+    accepted: MeterSelection,
+    applied: MeterSelection,
+    candidate: MeterSelection,
+    pending: [PendingApplication; 2],
+    candidate_handles: Box<[u64]>,
+    terminal_closed: bool,
+}
+
 /// Inclusive limits for one prepared observation owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationWorkLimits {
@@ -63,17 +175,20 @@ pub struct ObservationWorkLimits {
     pub maximum_meter_publications_per_block: u64,
     /// Maximum meter snapshot payload bytes charged per block.
     pub maximum_meter_publication_bytes_per_block: u64,
-    /// Maximum simultaneously active spectrum captures.  Spectrum is not admitted in B1.
+    /// Maximum simultaneously active spectrum captures. Spectrum is not admitted by this native
+    /// selected-meter preparation tranche.
     pub maximum_active_spectrum_captures: u64,
-    /// Maximum selected spectrum input samples charged per block.  Spectrum is not admitted in
-    /// B1.
+    /// Maximum selected spectrum input samples charged per block. Spectrum is not admitted by
+    /// this native selected-meter preparation tranche.
     pub maximum_capture_input_samples_per_block: u64,
-    /// Maximum selected spectrum copy samples charged per block.  Spectrum is not admitted in
-    /// B1.
+    /// Maximum selected spectrum copy samples charged per block. Spectrum is not admitted by this
+    /// native selected-meter preparation tranche.
     pub maximum_capture_copy_samples_per_block: u64,
-    /// Maximum spectrum publication attempts charged per block.  Spectrum is not admitted in B1.
+    /// Maximum spectrum publication attempts charged per block. Spectrum is not admitted by this
+    /// native selected-meter preparation tranche.
     pub maximum_capture_publications_per_block: u64,
-    /// Maximum spectrum payload bytes charged per second.  Spectrum is not admitted in B1.
+    /// Maximum spectrum payload bytes charged per second. Spectrum is not admitted by this native
+    /// selected-meter preparation tranche.
     pub maximum_capture_bytes_per_second: u64,
     /// Maximum graph transition entry visits charged per block.
     pub maximum_transition_entry_visits_per_block: u64,
@@ -92,15 +207,16 @@ pub struct ObservationWorkCost {
     pub meter_publications_per_block: u64,
     /// Meter snapshot payload bytes per block.
     pub meter_publication_bytes_per_block: u64,
-    /// Active spectrum captures.  B1 keeps this zero.
+    /// Active spectrum captures. Native selected-meter preparation keeps this zero.
     pub active_spectrum_captures: u64,
-    /// Selected spectrum input samples per block.  B1 keeps this zero.
+    /// Selected spectrum input samples per block. Native selected-meter preparation keeps this
+    /// zero.
     pub capture_input_samples_per_block: u64,
-    /// Selected spectrum copy samples per block.  B1 keeps this zero.
+    /// Selected spectrum copy samples per block. Native selected-meter preparation keeps this zero.
     pub capture_copy_samples_per_block: u64,
-    /// Spectrum publication attempts per block.  B1 keeps this zero.
+    /// Spectrum publication attempts per block. Native selected-meter preparation keeps this zero.
     pub capture_publications_per_block: u64,
-    /// Spectrum payload bytes per second.  B1 keeps this zero.
+    /// Spectrum payload bytes per second. Native selected-meter preparation keeps this zero.
     pub capture_bytes_per_second: u64,
     /// Graph transition entry visits per block.
     pub transition_entry_visits_per_block: u64,
@@ -266,6 +382,15 @@ fn invalid_request() -> ObservationRefusal {
     }
 }
 
+fn allocation_failure() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::Capacity,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
 fn work_budget(limit: &'static str, requested: u64, maximum: u64) -> ObservationRefusal {
     ObservationRefusal {
         reason: ObservationRefusalReason::WorkBudget,
@@ -312,9 +437,9 @@ fn project_meter_work(
     Ok(projected)
 }
 
-/// Private control-side work owner used by later preparation and admission tranches.
+/// Private control-side work owner shared by host preparation and later admission tranches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ObservationBudget {
+pub(crate) struct ObservationBudget {
     limits: ObservationWorkLimits,
     quantum_frames: u64,
     fixed_cost: ObservationWorkCost,
@@ -322,7 +447,7 @@ struct ObservationBudget {
 }
 
 impl ObservationBudget {
-    fn new(
+    pub(crate) fn new(
         limits: ObservationWorkLimits,
         quantum_frames: NonZeroU32,
         fixed_cost: ObservationWorkCost,
@@ -429,6 +554,192 @@ impl ObservationBudget {
     fn accepted(&self) -> ObservationWorkCost {
         self.accepted
     }
+}
+
+impl HostObservationController {
+    /// Construct the owner after all graph, work and allocation caps have been checked.
+    pub(crate) fn prepare(
+        owner: ObservationOwnerId,
+        graph: Option<GraphObservationController>,
+        requests: &[crate::prepare::HostMeterRequest],
+        period_frames: Option<NonZeroU32>,
+        meter_consumers: Vec<MeterConsumer>,
+        budget: ObservationBudget,
+        capacity: usize,
+    ) -> Result<Self, ObservationRefusal> {
+        if !requests.is_empty() && period_frames.is_none() {
+            return Err(invalid_request());
+        }
+        let mut budget = budget;
+        let initial = budget.preflight_graph_demand(0, ObservationWorkCost::ZERO)?;
+        budget.commit_graph_demand(initial);
+
+        let mut meters = Vec::new();
+        meters
+            .try_reserve_exact(requests.len())
+            .map_err(|_| allocation_failure())?;
+        for (index, request) in requests.iter().enumerate() {
+            let handle = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .and_then(NonZeroU64::new)
+                .ok_or_else(arithmetic_overflow)?;
+            meters.push(PreparedHostMeter {
+                id: HostMeterId {
+                    owner,
+                    handle: MeterHandle(handle),
+                },
+                track_id: request.track_id.clone(),
+                tap: request.tap,
+                metrics: request.metrics,
+                period_frames: period_frames.ok_or_else(invalid_request)?,
+            });
+        }
+
+        let accepted = MeterSelection::with_capacity(capacity)?;
+        let applied = MeterSelection::with_capacity(capacity)?;
+        let candidate = MeterSelection::with_capacity(capacity)?;
+        let pending_ordinary = PendingApplication {
+            accepted: None,
+            selection: MeterSelection::with_capacity(capacity)?,
+        };
+        let pending_removal = PendingApplication {
+            accepted: None,
+            selection: MeterSelection::with_capacity(capacity)?,
+        };
+        let mut candidate_handles = Vec::new();
+        candidate_handles
+            .try_reserve_exact(capacity)
+            .map_err(|_| allocation_failure())?;
+        candidate_handles.resize(capacity, 0);
+
+        Ok(Self {
+            owner,
+            graph,
+            meters: meters.into_boxed_slice(),
+            meter_consumers,
+            budget,
+            accepted,
+            applied,
+            candidate,
+            pending: [pending_ordinary, pending_removal],
+            candidate_handles: candidate_handles.into_boxed_slice(),
+            terminal_closed: false,
+        })
+    }
+
+    /// Return this owner's process-local identity.
+    #[must_use]
+    pub const fn owner(&self) -> ObservationOwnerId {
+        self.owner
+    }
+
+    /// Return the immutable prepared meter catalog in caller request order.
+    #[must_use]
+    pub fn meters(&self) -> &[PreparedHostMeter] {
+        &self.meters
+    }
+
+    /// Return the currently accepted observation work cost.
+    #[must_use]
+    pub fn work(&self) -> ObservationWorkCost {
+        self.budget.accepted()
+    }
+
+    /// Whether the graph endpoint has reached terminal closure.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.terminal_closed
+            || self
+                .graph
+                .as_ref()
+                .is_some_and(GraphObservationController::is_closed)
+    }
+}
+
+/// Derive the new host-owned metadata heap rows from the concrete owner layout.
+pub(crate) fn observation_metadata_resources(
+    catalog_len: usize,
+    track_id_lengths: impl IntoIterator<Item = usize>,
+    capacity: usize,
+) -> Result<(u64, u64), ObservationRefusal> {
+    let mut total = 0_u64;
+    let mut largest = 0_u64;
+    let mut add = |bytes: u64| -> Result<(), ObservationRefusal> {
+        total = total.checked_add(bytes).ok_or_else(arithmetic_overflow)?;
+        largest = largest.max(bytes);
+        Ok(())
+    };
+
+    add(layout_bytes::<PreparedHostMeter>(catalog_len)?)?;
+    for length in track_id_lengths {
+        add(layout_bytes::<u8>(length)?)?;
+    }
+    for _ in 0..5 {
+        add(layout_bytes::<MeterSelectionEntry>(capacity)?)?;
+    }
+    add(layout_bytes::<u64>(capacity)?)?;
+    Ok((total, largest))
+}
+
+/// Derive the additive host rows and narrow retained reservation for a prepared owner.
+pub(crate) fn observation_resources(
+    catalog_len: usize,
+    track_id_lengths: impl IntoIterator<Item = usize>,
+    capacity: usize,
+    graph_activation: Option<GraphObservationActivationResources>,
+    builtin_retained_bytes: u64,
+) -> Result<HostObservationResources, ObservationRefusal> {
+    let (metadata_heap_bytes, metadata_largest_allocation_bytes) =
+        observation_metadata_resources(catalog_len, track_id_lengths, capacity)?;
+    let owner_inline_bytes = u64::try_from(size_of::<HostObservationController>())
+        .map_err(|_| arithmetic_overflow())?
+        .checked_sub(if graph_activation.is_some() {
+            u64::try_from(size_of::<GraphObservationController>())
+                .map_err(|_| arithmetic_overflow())?
+        } else {
+            0
+        })
+        .ok_or_else(arithmetic_overflow)?;
+    let reserved_bytes = match graph_activation {
+        None => 0,
+        Some(activation) => builtin_retained_bytes
+            .checked_add(activation.retained_bytes)
+            .and_then(|bytes| bytes.checked_add(owner_inline_bytes))
+            .and_then(|bytes| bytes.checked_add(metadata_heap_bytes))
+            .ok_or_else(arithmetic_overflow)?,
+    };
+    Ok(HostObservationResources {
+        graph_activation,
+        owner_inline_bytes,
+        metadata_heap_bytes,
+        metadata_largest_allocation_bytes,
+        reserved_bytes,
+    })
+}
+
+/// Return the additive bytes charged to the common graph/model admission expression.
+pub(crate) fn observation_graph_model_addition(
+    resources: HostObservationResources,
+) -> Result<u64, ObservationRefusal> {
+    let activation_without_runtime = match resources.graph_activation {
+        None => 0,
+        Some(activation) => activation
+            .retained_bytes
+            .checked_sub(activation.runtime_state_bytes)
+            .ok_or_else(arithmetic_overflow)?,
+    };
+    resources
+        .owner_inline_bytes
+        .checked_add(resources.metadata_heap_bytes)
+        .and_then(|bytes| bytes.checked_add(activation_without_runtime))
+        .ok_or_else(arithmetic_overflow)
+}
+
+/// Compute a checked standalone layout size in address-free bytes.
+fn layout_bytes<T>(length: usize) -> Result<u64, ObservationRefusal> {
+    let layout = Layout::array::<T>(length).map_err(|_| arithmetic_overflow())?;
+    u64::try_from(layout.size()).map_err(|_| arithmetic_overflow())
 }
 
 #[cfg(test)]

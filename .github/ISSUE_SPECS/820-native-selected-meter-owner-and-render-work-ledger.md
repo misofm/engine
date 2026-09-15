@@ -275,3 +275,22 @@ exact/one-below limits, checked overflow, empty/fixed costs and failed projectio
 preserving accepted work. Nine focused tests PASS with and without control-provider;
 formatting/diff PASS. Only observation_demand.rs and lib.rs exports changed.
 Host preparation and admission remain the sequential B2 tasks.
+
+## B2.1 evidence
+
+Fresh Luna MAX implemented the real owner storage and both preparation APIs through
+the existing shared transaction. It preserves explicit request order, keeps raw
+readers private, chooses the controlled concurrent/serialized compiler paths, and
+checks graph/owner overlaps and all caps before returning a host. Empty demand
+retains only its charged inline owner, with no activation pool/heap/work reservation.
+Allocation refusal is distinct from checked arithmetic overflow; reported largest
+allocation includes owner metadata; initial work includes the fixed reservation.
+Coordinator supplied four public preparation tests after a fresh test-agent spawn
+hit the thread limit. They independently check concrete owner/catalog/five-array
+storage terms, absence of reader double charging, both constructors, initial zero
+sample work, explicit unsupported-family refusals, empty normalization, and five
+inclusive/one-below cap boundaries. All four PASS with control-provider; Luna's
+existing host test suite and checks with/without control-provider PASS. Formatting
+and diff PASS. A scoped argument-count lint allowance retains the frozen shared
+preparation seam instead of introducing another preparation architecture.
+B2.2 admission and B2.3/B2.4 lifecycle/read methods remain pending.

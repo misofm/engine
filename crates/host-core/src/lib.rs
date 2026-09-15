@@ -126,7 +126,8 @@ pub use engine::realtime::{
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 pub use observation_demand::{
-    HostMeterId, ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
+    HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
+    ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
     ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
     ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
 };
@@ -137,6 +138,8 @@ pub use prepare::{
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_with_console, prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_console_and_spectrum_collection,
+    prepare_host_runtime_with_observation_demand,
+    prepare_host_runtime_with_observation_demand_between_render_calls,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_console,

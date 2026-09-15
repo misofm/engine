@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer,
-    TrackControlRequest, prepare_selected_session_builtins_between_render_calls,
+    TrackControlRequest, prepare_controlled_session_builtins_between_render_calls,
+    prepare_controlled_session_builtins_with_console,
+    prepare_selected_session_builtins_between_render_calls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
     session_structural_symmetry,
 };
@@ -22,8 +24,8 @@ use effect_compiler::{
 use effect_contract::TailSamples;
 use engine::realtime::PreparedRenderPlan;
 use graph::{
-    GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
-    TrackStage,
+    GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphObservationController,
+    GraphRuntimeBindings, StableGraphId, TrackStage,
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{CompileCaps, CompiledSession, SessionModel, compile_session, parse_session_json};
@@ -33,6 +35,11 @@ use source::{
 };
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
+use crate::observation_demand::{
+    HostObservationController, HostObservationPreparation, HostObservationResources,
+    ObservationBudget, ObservationRefusal, ObservationRefusalReason, ObservationWorkCost,
+    allocate_owner_id, observation_graph_model_addition, observation_resources,
+};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
     SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
@@ -254,6 +261,8 @@ pub struct HostPrepareReport {
     pub control_retained_bytes: u64,
     /// Native effect-control table and transferred owner payload allocations.
     pub effect_control_resources: EffectControlResources,
+    /// Host-owned selected-meter activation, owner and metadata resources.
+    pub observation_demand_resources: HostObservationResources,
     /// Engine-owned bytes the compiled plan's observation lanes and slots retain (issue #143 R7).
     ///
     /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
@@ -264,9 +273,9 @@ pub struct HostPrepareReport {
     pub spectrum_capture_retained_bytes: u64,
     /// Total source ID text bytes.
     pub source_id_bytes: u64,
-    /// Largest single engine-owned allocation: the maximum over the graph, source and builtin
-    /// reports. It deliberately excludes the compiled session model and any host-private row, so a
-    /// host folds its own rows in without double-counting.
+    /// Largest single prepared allocation: the maximum over the graph, source, builtin and
+    /// selected-observation metadata reports. It excludes the compiled session model, which has
+    /// its own row above.
     pub largest_engine_allocation_bytes: u64,
 }
 
@@ -519,6 +528,7 @@ pub fn prepare_host_runtime_with_console(
         caps,
         console,
         None,
+        None,
         false,
         Backend::current(),
     )
@@ -534,10 +544,11 @@ pub fn prepare_host_runtime_with_console_and_spectrum(
     console: &HostConsoleRequest,
     spectrum: &SpectrumCaptureRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+    let (prepared, handles, capture, _) = prepare_host_runtime_with_console_policy_and_spectrum(
         compiled,
         caps,
         console,
+        None,
         None,
         false,
         Backend::current(),
@@ -559,10 +570,11 @@ pub fn prepare_host_runtime_with_console_and_spectrum_collection(
     console: &HostConsoleRequest,
     spectrum: &SpectrumCaptureCollectionRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCaptureCollection), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+    let (prepared, handles, capture, _) = prepare_host_runtime_with_console_policy_and_spectrum(
         compiled,
         caps,
         console,
+        None,
         None,
         false,
         Backend::current(),
@@ -584,7 +596,7 @@ pub(crate) fn prepare_host_runtime_with_console_backend(
     console: &HostConsoleRequest,
     backend: Backend,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, false, backend)
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, None, false, backend)
 }
 
 /// Prepare a host whose caller retains every returned producer endpoint and admits records only
@@ -618,7 +630,7 @@ pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
     console: &HostConsoleRequest,
     backend: Backend,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, true, backend)
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, None, true, backend)
 }
 
 /// Prepare a serialized host with exactly the caller-selected meter observers.
@@ -634,9 +646,52 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         caps,
         console,
         Some(meters),
+        None,
         true,
         Backend::current(),
     )
+}
+
+/// Prepare a host with an explicit, initially idle selected-meter owner.
+pub fn prepare_host_runtime_with_observation_demand(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    observations: &HostObservationPreparation<'_>,
+) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
+    let (prepared, handles, _, owner) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        Some(observations.meters),
+        Some(observations),
+        false,
+        Backend::current(),
+        None,
+    )?;
+    let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
+    Ok((prepared, handles, owner))
+}
+
+/// Prepare a serialized host with an explicit, initially idle selected-meter owner.
+pub fn prepare_host_runtime_with_observation_demand_between_render_calls(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    observations: &HostObservationPreparation<'_>,
+) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
+    let (prepared, handles, _, owner) = prepare_host_runtime_with_console_policy_and_spectrum(
+        compiled,
+        caps,
+        console,
+        Some(observations.meters),
+        Some(observations),
+        true,
+        Backend::current(),
+        None,
+    )?;
+    let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
+    Ok((prepared, handles, owner))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -645,14 +700,16 @@ fn prepare_host_runtime_with_console_policy(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
     selected_meters: Option<&[HostMeterRequest]>,
+    observation_demand: Option<&HostObservationPreparation<'_>>,
     between_render_calls: bool,
     backend: Backend,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    let (prepared, handles, _) = prepare_host_runtime_with_console_policy_and_spectrum(
+    let (prepared, handles, _, _) = prepare_host_runtime_with_console_policy_and_spectrum(
         compiled,
         caps,
         console,
         selected_meters,
+        observation_demand,
         between_render_calls,
         backend,
         None,
@@ -666,10 +723,11 @@ pub fn prepare_host_runtime_with_spectrum(
     caps: &HostPrepareCaps,
     request: &SpectrumCaptureRequest,
 ) -> Result<(PreparedHost, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+    let (prepared, handles, capture, _) = prepare_host_runtime_with_console_policy_and_spectrum(
         compiled,
         caps,
         &HostConsoleRequest::default(),
+        None,
         None,
         false,
         Backend::current(),
@@ -700,12 +758,13 @@ pub fn prepare_host_runtime_with_spectrum_collection(
     Ok((prepared, capture))
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_host_runtime_with_console_policy_and_spectrum(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
     selected_meters: Option<&[HostMeterRequest]>,
+    observation_demand: Option<&HostObservationPreparation<'_>>,
     between_render_calls: bool,
     backend: Backend,
     spectrum_request: Option<SpectrumPreparationRequest<'_>>,
@@ -714,9 +773,40 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         PreparedHost,
         HostConsoleHandles,
         Option<PreparedSpectrumCapture>,
+        Option<HostObservationController>,
     ),
     PrepareDiagnostics,
 > {
+    // B2.1 admits only the selected meter family. Refuse unsupported resident and nonempty
+    // spectrum demand before any observer, source or effect storage is prepared. Empty spectrum is
+    // deliberately inert and normalizes to absent for this native tranche.
+    if let Some(observations) = observation_demand {
+        if console.observation_taps != 0 {
+            return Err(shape("host.observation.resident_not_supported"));
+        }
+        if observations
+            .spectrum
+            .is_some_and(|spectrum| !spectrum.entries.is_empty())
+        {
+            return Err(shape("host.observation.spectrum_not_supported"));
+        }
+        if !observations.meters.is_empty() {
+            let transition_bound = u64::try_from(observations.activation.maximum_active_observers)
+                .ok()
+                .and_then(|maximum| maximum.checked_mul(4))
+                .ok_or_else(|| resource("host.observation.transition_arithmetic"))?;
+            if transition_bound
+                > observations
+                    .work_limits
+                    .maximum_transition_entry_visits_per_block
+            {
+                return Err(resource("host.observation.transition_limit"));
+            }
+        }
+    }
+    let observation_owner = observation_demand
+        .map(|_| allocate_owner_id().map_err(|_| platform("host.observation.owner")))
+        .transpose()?;
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -935,7 +1025,23 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
-    let builtins = if selected_meters.is_some() {
+    let builtins = if let Some(_observations) = observation_demand {
+        if between_render_calls {
+            prepare_controlled_session_builtins_between_render_calls(
+                compiled,
+                &meter_requests,
+                &control_requests,
+                builtin_caps,
+            )
+        } else {
+            prepare_controlled_session_builtins_with_console(
+                compiled,
+                &meter_requests,
+                &control_requests,
+                builtin_caps,
+            )
+        }
+    } else if selected_meters.is_some() {
         prepare_selected_session_builtins_between_render_calls(
             compiled,
             &meter_requests,
@@ -1035,7 +1141,9 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                 .ok_or_else(|| resource("host.effect.resource.arithmetic"))?,
         )
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
+    if observation_demand.is_none()
+        && admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes
+    {
         return Err(resource("host.graph.resource.limit"));
     }
     if native_effect_control_resources.largest_allocation_bytes()
@@ -1124,9 +1232,23 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             .collect(),
         observers: spectrum_observers,
     };
-    let bound = artifact
-        .into_bound_with_source_set(bindings, source_set)
-        .map_err(|failure| graph_failure(failure.code))?;
+    let (bound, mut graph_controller) = if let Some(observations) =
+        observation_demand.filter(|observations| !observations.meters.is_empty())
+    {
+        let (bound, controller) = artifact
+            .into_bound_with_source_set_and_observation_activation(
+                bindings,
+                source_set,
+                observations.activation,
+            )
+            .map_err(|failure| graph_failure(failure.code))?;
+        (bound, Some(controller))
+    } else {
+        let bound = artifact
+            .into_bound_with_source_set(bindings, source_set)
+            .map_err(|failure| graph_failure(failure.code))?;
+        (bound, None)
+    };
     // Issue #137 D2: exactly the requested console halves come back, in canonical track order.
     // A session that produced a meter or control channel nobody asked for is still a hard
     // rejection -- that was the pre-#137 rule and it is what keeps an unrequested observer from
@@ -1182,6 +1304,106 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         Some(_) => return Err(shape("host.observation.master_track")),
         None => None,
     };
+
+    // The activation bind is the first point at which the graph can report its exact A/R rows.
+    // Demand preparation therefore performs the remaining owner, overlap and narrow-cap checks
+    // here, before any local result is returned to the caller. An empty explicit demand keeps an
+    // inert owner record but has no graph activation or metadata heap rows.
+    let observation_demand_resources = match observation_demand {
+        None => HostObservationResources::ZERO,
+        Some(observations) => {
+            let capacity = observations
+                .meters
+                .len()
+                .min(observations.activation.maximum_active_observers);
+            let graph_activation = graph_controller
+                .as_ref()
+                .map(GraphObservationController::resources);
+            if !observations.meters.is_empty() && graph_activation.is_none() {
+                return Err(graph_failure("host.observation.activation"));
+            }
+            let resources = observation_resources(
+                observations.meters.len(),
+                observations.meters.iter().map(|meter| meter.track_id.len()),
+                capacity,
+                graph_activation,
+                builtin_resources.engine_owned_meter_payload_bytes,
+            )
+            .map_err(observation_diagnostics)?;
+            if resources.reserved_bytes > observations.work_limits.maximum_retained_bytes {
+                return Err(resource("host.observation.retained_limit"));
+            }
+            if let Some(activation) = resources.graph_activation {
+                if activation.maximum_transition_entry_visits_per_block
+                    > observations
+                        .work_limits
+                        .maximum_transition_entry_visits_per_block
+                {
+                    return Err(resource("host.observation.transition_limit"));
+                }
+            }
+            resources
+        }
+    };
+    let observation_graph_model_bytes = if observation_demand.is_some() {
+        observation_graph_model_addition(observation_demand_resources)
+            .map_err(observation_diagnostics)?
+    } else {
+        0
+    };
+    let admitted_graph_and_model = admitted_graph_and_model
+        .checked_add(observation_graph_model_bytes)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
+        return Err(resource("host.graph.resource.limit"));
+    }
+    let largest_engine_allocation_bytes = largest_engine_allocation_bytes
+        .max(
+            observation_demand_resources
+                .graph_activation
+                .map_or(0, |resources| resources.largest_allocation_bytes),
+        )
+        .max(observation_demand_resources.metadata_largest_allocation_bytes);
+    if largest_engine_allocation_bytes.max(session_resources.single_allocation_bytes)
+        > caps.maximum_named_allocation_bytes
+    {
+        return Err(resource("host.resource.limit"));
+    }
+
+    let host_observation_controller = match (observation_owner, observation_demand) {
+        (Some(owner), Some(observations)) => {
+            let fixed_cost = ObservationWorkCost {
+                transition_entry_visits_per_block: observation_demand_resources
+                    .graph_activation
+                    .map_or(0, |resources| {
+                        resources.maximum_transition_entry_visits_per_block
+                    }),
+                retained_bytes: observation_demand_resources.reserved_bytes,
+                ..ObservationWorkCost::ZERO
+            };
+            let quantum_frames = NonZeroU32::new(compiled.quantum().0)
+                .ok_or_else(|| resource("host.observation.quantum"))?;
+            let budget =
+                ObservationBudget::new(observations.work_limits, quantum_frames, fixed_cost);
+            let capacity = observations
+                .meters
+                .len()
+                .min(observations.activation.maximum_active_observers);
+            Some(
+                HostObservationController::prepare(
+                    owner,
+                    graph_controller.take(),
+                    observations.meters,
+                    console.meter_period_frames,
+                    std::mem::take(&mut meters),
+                    budget,
+                    capacity,
+                )
+                .map_err(observation_diagnostics)?,
+            )
+        }
+        _ => None,
+    };
     // Issue #143 R7: walked over the built runtime, not derived from the request. A plan that
     // bound nothing reports zero because it *holds* nothing.
     let observation_retained_bytes = bound.plan.observation_retained_bytes();
@@ -1218,6 +1440,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
         effect_control_resources: native_effect_control_resources,
+        observation_demand_resources,
         observation_retained_bytes,
         spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
@@ -1260,6 +1483,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             master_track,
         },
         spectrum_capture,
+        host_observation_controller,
     ))
 }
 
@@ -1285,6 +1509,18 @@ fn shape(code: &str) -> PrepareDiagnostics {
 
 fn resource(code: &str) -> PrepareDiagnostics {
     PrepareDiagnostics::fixed(PrepareRejection::Resource, code)
+}
+
+fn observation_diagnostics(error: ObservationRefusal) -> PrepareDiagnostics {
+    match error.reason {
+        ObservationRefusalReason::Capacity => resource("host.observation.resource.allocation"),
+        ObservationRefusalReason::ArithmeticOverflow => {
+            resource("host.observation.resource.arithmetic")
+        }
+        ObservationRefusalReason::InvalidRequest => shape("host.observation.request"),
+        ObservationRefusalReason::WorkBudget => resource("host.observation.resource.limit"),
+        _ => resource("host.observation.resource"),
+    }
 }
 
 fn platform(code: &str) -> PrepareDiagnostics {
