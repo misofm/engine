@@ -8515,6 +8515,67 @@ mod observation_checkpoint_a_tests {
         SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
     }
 
+    #[test]
+    fn public_protected_boot_accepts_valid_spectrum_request_capture_budgets() {
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+        let document = one_track_protected_document();
+
+        no_live_host();
+        for maximum_capture_bytes in [1_048_576_u64, 2_097_152] {
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+            let mut record = protected_preparation_record();
+            record.spectrum_request.maximum_capture_bytes = maximum_capture_bytes;
+            record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+            stage_protected_boot(document.as_bytes(), record);
+            BOOT_STAGING.with(|slot| {
+                slot.borrow_mut().options.maximum_memory_bytes = GENEROUS_BUDGET_BYTES;
+            });
+            test_stage_document(document.as_bytes());
+
+            let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+            assert_ne!(handle, 0, "valid protected boot must publish a handle");
+            assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                1
+            );
+            LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let live = live.as_ref().expect("protected handle");
+                let status = live.host.observation_status();
+                assert!(status.owner > 0, "protected owner must be real");
+                let ready = live.host.ready.as_ref().expect("ready owner");
+                assert!(matches!(
+                    ready.observation,
+                    crate::PreparedObservationStorage::Protected(_)
+                ));
+            });
+
+            let (capture_len, capture_capacity, result_len, result_capacity) = SPECTRUM_STAGING
+                .with(|slot| {
+                    let staging = slot.borrow();
+                    let capture = staging.capture.as_ref().expect("capture staging");
+                    let result = staging.result.as_ref().expect("result staging");
+                    (
+                        capture.len(),
+                        capture.capacity(),
+                        result.len(),
+                        result.capacity(),
+                    )
+                });
+            assert_eq!(
+                (capture_len, capture_capacity, result_len, result_capacity),
+                (1_048_576, 1_048_576, 1_048_576, 1_048_576)
+            );
+
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+            no_live_host();
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        }
+    }
+
     struct ProtectedBootPreparationCase {
         name: &'static str,
         mutate: fn(&mut WebObservationPreparationRecord),
