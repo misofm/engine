@@ -15,6 +15,11 @@ use host_core::{
     prepare_host_runtime, prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
 };
+#[cfg(feature = "test-support")]
+use host_core::{
+    SpectrumOperationCounts, test_only_reset_spectrum_operation_counts,
+    test_only_spectrum_operation_counts,
+};
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
@@ -47,11 +52,11 @@ fn limits() -> ObservationWorkLimits {
         maximum_meter_samples_per_block: u64::MAX,
         maximum_meter_publications_per_block: u64::MAX,
         maximum_meter_publication_bytes_per_block: u64::MAX,
-        maximum_active_spectrum_captures: 0,
-        maximum_capture_input_samples_per_block: 0,
-        maximum_capture_copy_samples_per_block: 0,
-        maximum_capture_publications_per_block: 0,
-        maximum_capture_bytes_per_second: 0,
+        maximum_active_spectrum_captures: u64::MAX,
+        maximum_capture_input_samples_per_block: u64::MAX,
+        maximum_capture_copy_samples_per_block: u64::MAX,
+        maximum_capture_publications_per_block: u64::MAX,
+        maximum_capture_bytes_per_second: u64::MAX,
         maximum_transition_entry_visits_per_block: u64::MAX,
         maximum_retained_bytes: u64::MAX,
     }
@@ -110,6 +115,7 @@ fn common_admission_bytes(report: HostPrepareReport) -> u64 {
     report.graph_session_plus_plan_bytes
         + report.session_model_bytes
         + report.effect_control_resources.total_bytes().unwrap()
+        + report.spectrum_capture_retained_bytes
         + observation.owner_inline_bytes
         + observation.metadata_heap_bytes
         + observation
@@ -315,7 +321,7 @@ fn observation_and_common_caps_are_inclusive() {
 }
 
 #[test]
-fn unsupported_families_are_explicit_refusals() {
+fn resident_observation_is_refused_and_controlled_spectrum_is_prepared() {
     let compiled = compile_host_session(SESSION, &caps()).unwrap();
     let requests = meters();
     let mut demand = demand(&requests);
@@ -337,12 +343,137 @@ fn unsupported_families_are_explicit_refusals() {
         maximum_capture_bytes: u64::MAX,
     };
     demand.spectrum = Some(&spectrum);
-    let error = prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console, &demand)
-        .err()
-        .expect("spectrum demand refused");
+    let (host, handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console, &demand)
+            .expect("controlled spectrum demand is prepared");
+    assert_eq!(owner.meters().len(), requests.len());
+    assert!(handles.meters.is_empty());
+    assert!(handles.effect_observations.is_empty());
     assert!(
-        String::from_utf8_lossy(error.as_bytes())
-            .contains("host.observation.spectrum_not_supported")
+        host.report
+            .observation_demand_resources
+            .graph_activation
+            .is_some()
+    );
+    assert!(host.report.spectrum_capture_retained_bytes > 0);
+    assert_eq!(
+        owner.work(),
+        ObservationWorkCost {
+            retained_bytes: host.report.observation_demand_resources.reserved_bytes,
+            transition_entry_visits_per_block: host
+                .report
+                .observation_demand_resources
+                .graph_activation
+                .expect("spectrum graph activation")
+                .maximum_transition_entry_visits_per_block,
+            ..ObservationWorkCost::ZERO
+        }
+    );
+}
+
+#[test]
+fn controlled_spectrum_resource_cap_is_inclusive_and_prepares_exact_targets() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    prepare_host_runtime_with_observation_demand_between_render_calls(
+        &compiled,
+        &caps(),
+        &console(),
+        &demand,
+    )
+    .expect("serialized host prepares the same controlled spectrum catalog");
+    let (host, handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("spectrum catalog");
+    assert!(owner.meters().is_empty());
+    assert!(handles.meters.is_empty());
+    assert!(host.report.spectrum_capture_retained_bytes > 0);
+    let retained = host.report.spectrum_capture_retained_bytes;
+    let mut exact_caps = caps();
+    exact_caps.maximum_graph_session_plus_plan_bytes = common_admission_bytes(host.report);
+    prepare_host_runtime_with_observation_demand(&compiled, &exact_caps, &console(), &demand)
+        .expect("common graph admission is inclusive");
+    exact_caps.maximum_graph_session_plus_plan_bytes -= 1;
+    assert!(
+        prepare_host_runtime_with_observation_demand(&compiled, &exact_caps, &console(), &demand)
+            .is_err(),
+        "one below common graph admission"
+    );
+
+    let mut exact_spectrum = spectrum.clone();
+    exact_spectrum.maximum_capture_bytes = retained;
+    demand.spectrum = Some(&exact_spectrum);
+    prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+        .expect("exact paired capture budget is inclusive");
+    let mut below_spectrum = exact_spectrum.clone();
+    below_spectrum.maximum_capture_bytes = retained - 1;
+    demand.spectrum = Some(&below_spectrum);
+    let refusal =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .err()
+            .expect("one below paired capture budget");
+    assert!(String::from_utf8_lossy(refusal.as_bytes()).contains("host.spectrum.capture_budget"));
+}
+
+#[test]
+fn spectrum_catalog_with_zero_capture_limit_is_prepared_but_dormant() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Left,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    demand.work_limits.maximum_active_spectrum_captures = 0;
+    let (host, _handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("zero active capacity still prepares storage");
+    assert!(
+        host.report
+            .observation_demand_resources
+            .graph_activation
+            .is_some()
+    );
+    assert_eq!(owner.work().active_spectrum_captures, 0);
+    assert_eq!(owner.work().capture_input_samples_per_block, 0);
+    assert_eq!(owner.work().capture_copy_samples_per_block, 0);
+    assert_eq!(owner.work().capture_publications_per_block, 0);
+    assert_eq!(owner.work().capture_bytes_per_second, 0);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn dormant_controlled_spectrum_does_no_capture_work_on_render() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    let (host, _handles, _owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("controlled spectrum catalog");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    test_only_reset_spectrum_operation_counts();
+    let _ = render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(
+        test_only_spectrum_operation_counts(),
+        SpectrumOperationCounts::default()
     );
 }
 

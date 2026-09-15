@@ -184,6 +184,11 @@ pub use effect_compiler::{
 pub use effect_compiler::{
     test_only_parametric_eq_design_call_count, test_only_reset_parametric_eq_design_calls,
 };
+#[cfg(feature = "test-support")]
+pub use spectrum::{
+    SpectrumOperationCounts, test_only_reset_spectrum_operation_counts,
+    test_only_spectrum_operation_counts,
+};
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
 ///

@@ -39,12 +39,14 @@ use crate::observation_demand::{
     HostObservationController, HostObservationPreparation, HostObservationResources,
     ObservationBudget, ObservationRefusal, ObservationRefusalReason, ObservationWorkCost,
     allocate_owner_id, observation_graph_model_addition, observation_resources,
+    project_spectrum_work,
 };
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
-    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
-    SpectrumCaptureRequest, SpectrumPrepareError, prepare_capture_collection,
-    spectrum_capture_collection_resources,
+    SpectrumCadence, SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
+    SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
+    controlled_spectrum_capture_collection_resources, prepare_capture_collection,
+    prepare_controlled_capture_collection, spectrum_capture_collection_resources,
 };
 
 #[derive(Clone, Copy)]
@@ -777,20 +779,18 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
-    // B2.1 admits only the selected meter family. Refuse unsupported resident and nonempty
-    // spectrum demand before any observer, source or effect storage is prepared. Empty spectrum is
-    // deliberately inert and normalizes to absent for this native tranche.
+    // The controlled owner admits selected meters and the fixed prepared spectrum catalog. Empty
+    // spectrum is deliberately inert. Resident taps remain outside this owner and are refused
+    // before any observer, source or effect storage is prepared.
     if let Some(observations) = observation_demand {
         if console.observation_taps != 0 {
             return Err(shape("host.observation.resident_not_supported"));
         }
-        if observations
-            .spectrum
-            .is_some_and(|spectrum| !spectrum.entries.is_empty())
+        if !observations.meters.is_empty()
+            || observations
+                .spectrum
+                .is_some_and(|spectrum| !spectrum.entries.is_empty())
         {
-            return Err(shape("host.observation.spectrum_not_supported"));
-        }
-        if !observations.meters.is_empty() {
             let transition_bound = u64::try_from(observations.activation.maximum_active_observers)
                 .ok()
                 .and_then(|maximum| maximum.checked_mul(4))
@@ -801,6 +801,26 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                     .maximum_transition_entry_visits_per_block
             {
                 return Err(resource("host.observation.transition_limit"));
+            }
+        }
+    }
+    let controlled_spectrum_cadence = observation_demand
+        .filter(|observations| {
+            observations
+                .spectrum
+                .is_some_and(|spectrum| !spectrum.entries.is_empty())
+        })
+        .map(|_| {
+            SpectrumCadence::new(compiled.sample_rate().0, compiled.quantum().0)
+                .map_err(|_| shape("host.observation.spectrum_cadence"))
+        })
+        .transpose()?;
+    if let (Some(cadence), Some(observations)) = (controlled_spectrum_cadence, observation_demand) {
+        if let Some(spectrum) = observations.spectrum {
+            for entry in &spectrum.entries {
+                // Validate the frozen checked projection once during preparation. The initial
+                // owner remains dormant, so these fields are not charged until C4 admission.
+                project_spectrum_work(cadence, entry.channels).map_err(observation_diagnostics)?;
             }
         }
     }
@@ -1115,8 +1135,19 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let graph_report = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
     let session_resources = compiled.resource_estimate();
-    let spectrum_resources = match spectrum_request {
-        None => None,
+    let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
+        None => observation_demand
+            .filter(|observations| {
+                observations
+                    .spectrum
+                    .is_some_and(|spectrum| !spectrum.entries.is_empty())
+            })
+            .map(|observations| {
+                let request = observations.spectrum.expect("nonempty spectrum catalog");
+                controlled_spectrum_capture_collection_resources(&request.entries)
+                    .map_err(spectrum_diagnostics)
+            })
+            .transpose()?,
         Some(SpectrumPreparationRequest::Single(request)) => Some(
             crate::spectrum::spectrum_capture_resources_for(&request.target),
         ),
@@ -1172,44 +1203,67 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
         return Err(resource("host.resource.limit"));
     }
 
-    let (spectrum_observers, spectrum_capture) = match spectrum_request {
-        None => (Vec::new(), None),
+    let needs_spectrum_bindings = spectrum_request.is_some()
+        || observation_demand.is_some_and(|observations| {
+            observations
+                .spectrum
+                .is_some_and(|spectrum| !spectrum.entries.is_empty())
+        });
+    let graph_nodes = needs_spectrum_bindings.then(|| {
+        artifact
+            .graph()
+            .spec
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>()
+    });
+    let (spectrum_observers, spectrum_capture, controlled_spectrum) = match spectrum_request {
+        None => {
+            if let Some(observations) = observation_demand.filter(|observations| {
+                observations
+                    .spectrum
+                    .is_some_and(|spectrum| !spectrum.entries.is_empty())
+            }) {
+                let request = observations.spectrum.expect("nonempty spectrum catalog");
+                preflight_spectrum_handles(meter_requests.len(), request.entries.len())?;
+                let (observers, collection) = prepare_controlled_capture_collection(
+                    request,
+                    graph_nodes
+                        .as_deref()
+                        .expect("controlled spectrum graph nodes"),
+                    caps.maximum_named_allocation_bytes,
+                )
+                .map_err(spectrum_diagnostics)?;
+                (observers, None, Some(collection))
+            } else {
+                (Vec::new(), None, None)
+            }
+        }
         Some(SpectrumPreparationRequest::Single(request)) => {
-            let graph_nodes: Vec<GraphNodeId> = artifact
-                .graph()
-                .spec
-                .nodes
-                .iter()
-                .map(|node| node.id.clone())
-                .collect();
             let (observer, capture) = crate::spectrum::prepare_capture(
                 request,
-                &graph_nodes,
+                graph_nodes.as_deref().expect("spectrum graph nodes"),
                 caps.maximum_named_allocation_bytes,
             )
             .map_err(spectrum_diagnostics)?;
             (
                 vec![observer],
                 Some(PreparedSpectrumCapture::Single(capture)),
+                None,
             )
         }
         Some(SpectrumPreparationRequest::Collection(request)) => {
-            let graph_nodes: Vec<GraphNodeId> = artifact
-                .graph()
-                .spec
-                .nodes
-                .iter()
-                .map(|node| node.id.clone())
-                .collect();
             let (observers, capture) = prepare_capture_collection(
                 request,
-                &graph_nodes,
+                graph_nodes.as_deref().expect("spectrum graph nodes"),
                 caps.maximum_named_allocation_bytes,
             )
             .map_err(spectrum_diagnostics)?;
             (
                 observers,
                 Some(PreparedSpectrumCapture::Collection(capture)),
+                None,
             )
         }
     };
@@ -1232,14 +1286,26 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             .collect(),
         observers: spectrum_observers,
     };
-    let (bound, mut graph_controller) = if let Some(observations) =
-        observation_demand.filter(|observations| !observations.meters.is_empty())
-    {
+    let controlled_observation_present = observation_demand.is_some_and(|observations| {
+        !observations.meters.is_empty()
+            || observations
+                .spectrum
+                .is_some_and(|spectrum| !spectrum.entries.is_empty())
+    });
+    let observation_activation = observation_demand
+        .filter(|observations| {
+            !observations.meters.is_empty()
+                || observations
+                    .spectrum
+                    .is_some_and(|spectrum| !spectrum.entries.is_empty())
+        })
+        .map(|observations| observations.activation);
+    let (bound, mut graph_controller) = if controlled_observation_present {
         let (bound, controller) = artifact
             .into_bound_with_source_set_and_observation_activation(
                 bindings,
                 source_set,
-                observations.activation,
+                observation_activation.expect("controlled observation activation"),
             )
             .map_err(|failure| graph_failure(failure.code))?;
         (bound, Some(controller))
@@ -1312,22 +1378,36 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let observation_demand_resources = match observation_demand {
         None => HostObservationResources::ZERO,
         Some(observations) => {
-            let capacity = observations
+            let meter_capacity = observations
                 .meters
                 .len()
                 .min(observations.activation.maximum_active_observers);
+            let spectrum_present = controlled_spectrum.is_some();
+            let requested_handle_count = observations
+                .meters
+                .len()
+                .checked_add(usize::from(spectrum_present))
+                .ok_or_else(|| resource("host.observation.capacity_arithmetic"))?;
+            let handle_capacity =
+                requested_handle_count.min(observations.activation.maximum_active_observers);
             let graph_activation = graph_controller
                 .as_ref()
                 .map(GraphObservationController::resources);
-            if !observations.meters.is_empty() && graph_activation.is_none() {
+            if (!observations.meters.is_empty() || spectrum_present) && graph_activation.is_none() {
                 return Err(graph_failure("host.observation.activation"));
             }
             let resources = observation_resources(
                 observations.meters.len(),
                 observations.meters.iter().map(|meter| meter.track_id.len()),
-                capacity,
+                meter_capacity,
+                handle_capacity,
                 graph_activation,
                 builtin_resources.engine_owned_meter_payload_bytes,
+                if spectrum_present {
+                    spectrum_capture_retained_bytes
+                } else {
+                    0
+                },
             )
             .map_err(observation_diagnostics)?;
             if resources.reserved_bytes > observations.work_limits.maximum_retained_bytes {
@@ -1384,9 +1464,15 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                 .ok_or_else(|| resource("host.observation.quantum"))?;
             let budget =
                 ObservationBudget::new(observations.work_limits, quantum_frames, fixed_cost);
-            let capacity = observations
+            let meter_capacity = observations
                 .meters
                 .len()
+                .min(observations.activation.maximum_active_observers);
+            let handle_capacity = observations
+                .meters
+                .len()
+                .checked_add(usize::from(controlled_spectrum.is_some()))
+                .ok_or_else(|| resource("host.observation.capacity_arithmetic"))?
                 .min(observations.activation.maximum_active_observers);
             Some(
                 HostObservationController::prepare(
@@ -1395,8 +1481,11 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                     observations.meters,
                     console.meter_period_frames,
                     std::mem::take(&mut meters),
+                    controlled_spectrum,
+                    controlled_spectrum_cadence,
                     budget,
-                    capacity,
+                    meter_capacity,
+                    handle_capacity,
                 )
                 .map_err(observation_diagnostics)?,
             )
@@ -1544,6 +1633,31 @@ fn spectrum_diagnostics(error: SpectrumPrepareError) -> PrepareDiagnostics {
         SpectrumPrepareError::DuplicateEntry => shape("host.spectrum.duplicate"),
         SpectrumPrepareError::CollectionCapacity => resource("host.spectrum.collection"),
     }
+}
+
+/// Prove the rising meter handle range and descending controlled-spectrum range are disjoint
+/// before the first controlled spectrum binding is created.
+fn preflight_spectrum_handles(
+    meter_count: usize,
+    spectrum_entry_count: usize,
+) -> Result<(), PrepareDiagnostics> {
+    let slot_count = spectrum_entry_count
+        .checked_mul(2)
+        .ok_or_else(|| resource("host.spectrum.collection"))?;
+    if slot_count == 0 {
+        return Ok(());
+    }
+    let meter_high =
+        u64::try_from(meter_count).map_err(|_| resource("host.observation.handle_arithmetic"))?;
+    let slot_count =
+        u64::try_from(slot_count).map_err(|_| resource("host.observation.handle_arithmetic"))?;
+    let spectrum_low = u64::MAX
+        .checked_sub(slot_count - 1)
+        .ok_or_else(|| resource("host.observation.handle_arithmetic"))?;
+    if meter_high >= spectrum_low {
+        return Err(resource("host.observation.handle_overlap"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

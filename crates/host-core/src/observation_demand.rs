@@ -19,6 +19,11 @@ use graph::{
     GraphObservationAdmissionError, GraphObservationController,
 };
 
+use crate::spectrum::{
+    ControlledSpectrumCaptureCollection, ControlledSpectrumDescriptor, SPECTRUM_WINDOW_FRAMES,
+    SpectrumCadence, SpectrumCapturedRecord, SpectrumChannels,
+};
+
 /// The process-local identity of one prepared observation owner.
 ///
 /// The constructor is intentionally private.  Hosts obtain an identity from preparation, and
@@ -105,7 +110,7 @@ impl Default for HostObservationResources {
 pub struct HostObservationPreparation<'a> {
     /// The complete prepared meter catalog, in caller request order.
     pub meters: &'a [crate::prepare::HostMeterRequest],
-    /// Spectrum is reserved for a later tranche. An empty collection is normalized to absent.
+    /// Optional controlled fixed-spectrum catalog. An empty collection is normalized to absent.
     pub spectrum: Option<&'a crate::spectrum::SpectrumCaptureCollectionRequest>,
     /// Inclusive per-owner work and retained-byte limits.
     pub work_limits: ObservationWorkLimits,
@@ -120,10 +125,23 @@ struct MeterSelectionEntry {
     generation: u64,
 }
 
+/// One optional controlled-spectrum selection carried alongside a complete meter set.
+///
+/// The descriptor identifies the private paired slot. Generation and selection epoch are kept as
+/// separate scalar identities so later admission/read code can fence graph application and public
+/// target changes independently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SpectrumSelectionEntry {
+    descriptor: ControlledSpectrumDescriptor,
+    generation: u64,
+    selection_epoch: u64,
+}
+
 /// One preallocated complete-set selection array with a live prefix.
 struct MeterSelection {
     entries: Box<[MeterSelectionEntry]>,
     len: usize,
+    spectrum: Option<SpectrumSelectionEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +164,7 @@ impl MeterSelection {
         Self {
             entries: Box::new([]),
             len: 0,
+            spectrum: None,
         }
     }
 
@@ -161,6 +180,7 @@ impl MeterSelection {
         Ok(Self {
             entries: entries.into_boxed_slice(),
             len: 0,
+            spectrum: None,
         })
     }
 
@@ -170,6 +190,16 @@ impl MeterSelection {
 
     fn entries_mut(&mut self) -> &mut [MeterSelectionEntry] {
         &mut self.entries[..self.len]
+    }
+
+    fn total_len(&self) -> usize {
+        self.len + usize::from(self.spectrum.is_some())
+    }
+
+    fn copy_from(&mut self, source: &Self) {
+        self.entries[..source.len].copy_from_slice(&source.entries[..source.len]);
+        self.len = source.len;
+        self.spectrum = source.spectrum;
     }
 }
 
@@ -188,6 +218,8 @@ pub struct HostObservationController {
     graph: Option<GraphObservationController>,
     meters: Box<[PreparedHostMeter]>,
     meter_consumers: Vec<MeterConsumer>,
+    spectrum: Option<ControlledSpectrumCaptureCollection>,
+    pub(crate) spectrum_cadence: Option<SpectrumCadence>,
     budget: ObservationBudget,
     accepted: MeterSelection,
     applied: MeterSelection,
@@ -221,20 +253,15 @@ pub struct ObservationWorkLimits {
     pub maximum_meter_publications_per_block: u64,
     /// Maximum meter snapshot payload bytes charged per block.
     pub maximum_meter_publication_bytes_per_block: u64,
-    /// Maximum simultaneously active spectrum captures. Spectrum is not admitted by this native
-    /// selected-meter preparation tranche.
+    /// Maximum simultaneously active spectrum captures. V1 admits at most one active capture.
     pub maximum_active_spectrum_captures: u64,
-    /// Maximum selected spectrum input samples charged per block. Spectrum is not admitted by
-    /// this native selected-meter preparation tranche.
+    /// Maximum selected spectrum input samples charged per block.
     pub maximum_capture_input_samples_per_block: u64,
-    /// Maximum selected spectrum copy samples charged per block. Spectrum is not admitted by this
-    /// native selected-meter preparation tranche.
+    /// Maximum selected spectrum copy samples charged per block.
     pub maximum_capture_copy_samples_per_block: u64,
-    /// Maximum spectrum publication attempts charged per block. Spectrum is not admitted by this
-    /// native selected-meter preparation tranche.
+    /// Maximum spectrum publication attempts charged per block.
     pub maximum_capture_publications_per_block: u64,
-    /// Maximum spectrum payload bytes charged per second. Spectrum is not admitted by this native
-    /// selected-meter preparation tranche.
+    /// Maximum spectrum payload bytes charged per second.
     pub maximum_capture_bytes_per_second: u64,
     /// Maximum graph transition entry visits charged per block.
     pub maximum_transition_entry_visits_per_block: u64,
@@ -253,16 +280,15 @@ pub struct ObservationWorkCost {
     pub meter_publications_per_block: u64,
     /// Meter snapshot payload bytes per block.
     pub meter_publication_bytes_per_block: u64,
-    /// Active spectrum captures. Native selected-meter preparation keeps this zero.
+    /// Active spectrum captures. V1 admits at most one active capture.
     pub active_spectrum_captures: u64,
-    /// Selected spectrum input samples per block. Native selected-meter preparation keeps this
-    /// zero.
+    /// Selected spectrum input samples per block.
     pub capture_input_samples_per_block: u64,
-    /// Selected spectrum copy samples per block. Native selected-meter preparation keeps this zero.
+    /// Selected spectrum copy samples per block.
     pub capture_copy_samples_per_block: u64,
-    /// Spectrum publication attempts per block. Native selected-meter preparation keeps this zero.
+    /// Spectrum publication attempts per block.
     pub capture_publications_per_block: u64,
-    /// Spectrum payload bytes per second. Native selected-meter preparation keeps this zero.
+    /// Spectrum payload bytes per second.
     pub capture_bytes_per_second: u64,
     /// Graph transition entry visits per block.
     pub transition_entry_visits_per_block: u64,
@@ -518,15 +544,6 @@ fn map_graph_refusal(error: GraphObservationAdmissionError) -> ObservationRefusa
     }
 }
 
-/// Return whether a cost contains no spectrum demand.
-fn is_zero_spectrum_cost(cost: ObservationWorkCost) -> bool {
-    cost.active_spectrum_captures == 0
-        && cost.capture_input_samples_per_block == 0
-        && cost.capture_copy_samples_per_block == 0
-        && cost.capture_publications_per_block == 0
-        && cost.capture_bytes_per_second == 0
-}
-
 /// Project checked meter work and add the fixed preparation reservation.
 fn project_meter_work(
     meter_count: u64,
@@ -553,6 +570,59 @@ fn project_meter_work(
         ..ObservationWorkCost::ZERO
     };
     Ok(projected)
+}
+
+/// Derive the checked work charged by one active fixed-spectrum capture.
+///
+/// The prepared cadence fixes the launch rate and block quantum. The projection deliberately
+/// counts one active producer and one publication attempt per block; paired dormant slots are
+/// storage only and never multiply these fields.
+pub(crate) fn project_spectrum_work(
+    cadence: SpectrumCadence,
+    channels: SpectrumChannels,
+) -> Result<ObservationWorkCost, ObservationRefusal> {
+    let quantum = u64::from(cadence.quantum_frames());
+    let sample_rate = u64::from(cadence.sample_rate_hz());
+    if quantum == 0 {
+        return Err(arithmetic_overflow());
+    }
+    let window = u64::try_from(SPECTRUM_WINDOW_FRAMES).map_err(|_| arithmetic_overflow())?;
+    let channel_count: u64 = match channels {
+        SpectrumChannels::Left | SpectrumChannels::Right => 1,
+        SpectrumChannels::Stereo => 2,
+    };
+    let capture_input_samples_per_block = channel_count
+        .checked_mul(quantum)
+        .ok_or_else(arithmetic_overflow)?;
+    let capture_copy_samples_per_block = channel_count
+        .checked_mul(quantum.min(window))
+        .and_then(|samples| samples.checked_add(window.checked_mul(4)?))
+        .ok_or_else(arithmetic_overflow)?;
+    let quanta = window
+        .checked_add(quantum - 1)
+        .ok_or_else(arithmetic_overflow)?
+        / quantum;
+    let full_hop = quanta
+        .checked_mul(quantum)
+        .ok_or_else(arithmetic_overflow)?;
+    let publications_per_second = sample_rate
+        .checked_add(full_hop - 1)
+        .ok_or_else(arithmetic_overflow)?
+        / full_hop;
+    let record_bytes =
+        u64::try_from(size_of::<SpectrumCapturedRecord>()).map_err(|_| arithmetic_overflow())?;
+    let capture_bytes_per_second = publications_per_second
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(record_bytes))
+        .ok_or_else(arithmetic_overflow)?;
+    Ok(ObservationWorkCost {
+        active_spectrum_captures: 1,
+        capture_input_samples_per_block,
+        capture_copy_samples_per_block,
+        capture_publications_per_block: 1,
+        capture_bytes_per_second,
+        ..ObservationWorkCost::ZERO
+    })
 }
 
 /// Private control-side work owner shared by host preparation and later admission tranches.
@@ -583,11 +653,40 @@ impl ObservationBudget {
         meter_count: usize,
         spectrum_cost: ObservationWorkCost,
     ) -> Result<ObservationWorkCost, ObservationRefusal> {
-        if !is_zero_spectrum_cost(spectrum_cost) {
-            return Err(invalid_request());
-        }
         let meter_count = u64::try_from(meter_count).map_err(|_| arithmetic_overflow())?;
-        let projected = project_meter_work(meter_count, self.quantum_frames, self.fixed_cost)?;
+        let meter = project_meter_work(meter_count, self.quantum_frames, self.fixed_cost)?;
+        // Only the five spectrum work fields are admission demand. Fixed retained bytes and
+        // transition visits belong to the common preparation reservation and are charged once by
+        // `fixed_cost`; copying either field from a caller-supplied spectrum value would double
+        // charge the owner.
+        let projected = ObservationWorkCost {
+            active_meter_channels: meter.active_meter_channels,
+            meter_samples_per_block: meter.meter_samples_per_block,
+            meter_publications_per_block: meter.meter_publications_per_block,
+            meter_publication_bytes_per_block: meter.meter_publication_bytes_per_block,
+            active_spectrum_captures: meter
+                .active_spectrum_captures
+                .checked_add(spectrum_cost.active_spectrum_captures)
+                .ok_or_else(arithmetic_overflow)?,
+            capture_input_samples_per_block: meter
+                .capture_input_samples_per_block
+                .checked_add(spectrum_cost.capture_input_samples_per_block)
+                .ok_or_else(arithmetic_overflow)?,
+            capture_copy_samples_per_block: meter
+                .capture_copy_samples_per_block
+                .checked_add(spectrum_cost.capture_copy_samples_per_block)
+                .ok_or_else(arithmetic_overflow)?,
+            capture_publications_per_block: meter
+                .capture_publications_per_block
+                .checked_add(spectrum_cost.capture_publications_per_block)
+                .ok_or_else(arithmetic_overflow)?,
+            capture_bytes_per_second: meter
+                .capture_bytes_per_second
+                .checked_add(spectrum_cost.capture_bytes_per_second)
+                .ok_or_else(arithmetic_overflow)?,
+            transition_entry_visits_per_block: meter.transition_entry_visits_per_block,
+            retained_bytes: meter.retained_bytes,
+        };
         self.check_limits(projected)
     }
 
@@ -682,8 +781,11 @@ impl HostObservationController {
         requests: &[crate::prepare::HostMeterRequest],
         period_frames: Option<NonZeroU32>,
         meter_consumers: Vec<MeterConsumer>,
+        spectrum: Option<ControlledSpectrumCaptureCollection>,
+        spectrum_cadence: Option<SpectrumCadence>,
         budget: ObservationBudget,
-        capacity: usize,
+        meter_capacity: usize,
+        handle_capacity: usize,
     ) -> Result<Self, ObservationRefusal> {
         if !requests.is_empty() && period_frames.is_none() {
             return Err(invalid_request());
@@ -714,28 +816,30 @@ impl HostObservationController {
             });
         }
 
-        let accepted = MeterSelection::with_capacity(capacity)?;
-        let applied = MeterSelection::with_capacity(capacity)?;
-        let candidate = MeterSelection::with_capacity(capacity)?;
+        let accepted = MeterSelection::with_capacity(meter_capacity)?;
+        let applied = MeterSelection::with_capacity(meter_capacity)?;
+        let candidate = MeterSelection::with_capacity(meter_capacity)?;
         let pending_ordinary = PendingApplication {
             accepted: None,
-            selection: MeterSelection::with_capacity(capacity)?,
+            selection: MeterSelection::with_capacity(meter_capacity)?,
         };
         let pending_removal = PendingApplication {
             accepted: None,
-            selection: MeterSelection::with_capacity(capacity)?,
+            selection: MeterSelection::with_capacity(meter_capacity)?,
         };
         let mut candidate_handles = Vec::new();
         candidate_handles
-            .try_reserve_exact(capacity)
+            .try_reserve_exact(handle_capacity)
             .map_err(|_| allocation_failure())?;
-        candidate_handles.resize(capacity, 0);
+        candidate_handles.resize(handle_capacity, 0);
 
         Ok(Self {
             owner,
             graph,
             meters: meters.into_boxed_slice(),
             meter_consumers,
+            spectrum,
+            spectrum_cadence,
             budget,
             accepted,
             applied,
@@ -821,12 +925,21 @@ impl HostObservationController {
             .take()
             .expect("matching pending observation record must retain its acknowledgement");
 
+        if let Some(spectrum) = self.spectrum.as_mut() {
+            debug_assert!(
+                self.spectrum_cadence
+                    .is_some_and(|cadence| cadence.quantum_frames() != 0),
+                "controlled spectrum owners retain a valid prepared cadence"
+            );
+            spectrum.reconcile_applied(receipt.revision);
+        }
         self.cleanup_retired_readers(pending_index);
         core::mem::swap(
             &mut self.applied,
             &mut self.pending[pending_index].selection,
         );
         self.pending[pending_index].selection.len = 0;
+        self.pending[pending_index].selection.spectrum = None;
 
         Some(ObservationApplied {
             owner: self.owner,
@@ -908,7 +1021,7 @@ impl HostObservationController {
             return Ok(ObservationStop::Quiescent);
         }
 
-        if self.accepted.len == 0 {
+        if self.accepted.total_len() == 0 {
             if let Some(accepted) = self
                 .pending
                 .iter()
@@ -981,6 +1094,10 @@ impl HostObservationController {
             };
         }
         self.candidate.len = requested.len();
+        // C3 exposes no protected spectrum mutator yet. Keep the complete-set scalar explicitly
+        // empty for meter publications so a future spectrum publication cannot inherit stale
+        // candidate metadata.
+        self.candidate.spectrum = None;
 
         if matches!(kind, PublicationKind::Removal)
             && self.candidate.entries().iter().any(|entry| {
@@ -1025,10 +1142,10 @@ impl HostObservationController {
             let graph = self.graph.as_mut().expect("graph checked above");
             match kind {
                 PublicationKind::Ordinary => {
-                    graph.replace(&self.candidate_handles[..self.candidate.len])
+                    graph.replace(&self.candidate_handles[..self.candidate.total_len()])
                 }
                 PublicationKind::Removal => {
-                    graph.remove_to(&self.candidate_handles[..self.candidate.len])
+                    graph.remove_to(&self.candidate_handles[..self.candidate.total_len()])
                 }
             }
         }
@@ -1045,15 +1162,10 @@ impl HostObservationController {
             revision,
             work,
         };
-        let candidate_len = self.candidate.len;
         let pending = &mut self.pending[pending_index];
-        pending.selection.entries[..candidate_len]
-            .copy_from_slice(&self.candidate.entries[..candidate_len]);
-        pending.selection.len = candidate_len;
+        pending.selection.copy_from(&self.candidate);
         pending.accepted = Some(accepted);
-        self.accepted.entries[..candidate_len]
-            .copy_from_slice(&self.candidate.entries[..candidate_len]);
-        self.accepted.len = candidate_len;
+        self.accepted.copy_from(&self.candidate);
         self.budget.commit_graph_demand(work);
         Ok(accepted)
     }
@@ -1071,6 +1183,7 @@ impl HostObservationController {
             for pending in &mut self.pending {
                 pending.accepted = None;
                 pending.selection.len = 0;
+                pending.selection.spectrum = None;
             }
         }
         closed
@@ -1150,7 +1263,8 @@ fn read_newest_meter_generation(
 pub(crate) fn observation_metadata_resources(
     catalog_len: usize,
     track_id_lengths: impl IntoIterator<Item = usize>,
-    capacity: usize,
+    meter_capacity: usize,
+    handle_capacity: usize,
 ) -> Result<(u64, u64), ObservationRefusal> {
     let mut total = 0_u64;
     let mut largest = 0_u64;
@@ -1165,9 +1279,9 @@ pub(crate) fn observation_metadata_resources(
         add(layout_bytes::<u8>(length)?)?;
     }
     for _ in 0..5 {
-        add(layout_bytes::<MeterSelectionEntry>(capacity)?)?;
+        add(layout_bytes::<MeterSelectionEntry>(meter_capacity)?)?;
     }
-    add(layout_bytes::<u64>(capacity)?)?;
+    add(layout_bytes::<u64>(handle_capacity)?)?;
     Ok((total, largest))
 }
 
@@ -1175,12 +1289,18 @@ pub(crate) fn observation_metadata_resources(
 pub(crate) fn observation_resources(
     catalog_len: usize,
     track_id_lengths: impl IntoIterator<Item = usize>,
-    capacity: usize,
+    meter_capacity: usize,
+    handle_capacity: usize,
     graph_activation: Option<GraphObservationActivationResources>,
     builtin_retained_bytes: u64,
+    spectrum_capture_retained_bytes: u64,
 ) -> Result<HostObservationResources, ObservationRefusal> {
-    let (metadata_heap_bytes, metadata_largest_allocation_bytes) =
-        observation_metadata_resources(catalog_len, track_id_lengths, capacity)?;
+    let (metadata_heap_bytes, metadata_largest_allocation_bytes) = observation_metadata_resources(
+        catalog_len,
+        track_id_lengths,
+        meter_capacity,
+        handle_capacity,
+    )?;
     let owner_inline_bytes = u64::try_from(size_of::<HostObservationController>())
         .map_err(|_| arithmetic_overflow())?
         .checked_sub(if graph_activation.is_some() {
@@ -1193,7 +1313,8 @@ pub(crate) fn observation_resources(
     let reserved_bytes = match graph_activation {
         None => 0,
         Some(activation) => builtin_retained_bytes
-            .checked_add(activation.retained_bytes)
+            .checked_add(spectrum_capture_retained_bytes)
+            .and_then(|bytes| bytes.checked_add(activation.retained_bytes))
             .and_then(|bytes| bytes.checked_add(owner_inline_bytes))
             .and_then(|bytes| bytes.checked_add(metadata_heap_bytes))
             .ok_or_else(arithmetic_overflow)?,
@@ -1248,11 +1369,11 @@ mod tests {
             maximum_meter_samples_per_block: meter_samples_per_block,
             maximum_meter_publications_per_block: meter_publications_per_block,
             maximum_meter_publication_bytes_per_block: meter_publication_bytes_per_block,
-            maximum_active_spectrum_captures: 0,
-            maximum_capture_input_samples_per_block: 0,
-            maximum_capture_copy_samples_per_block: 0,
-            maximum_capture_publications_per_block: 0,
-            maximum_capture_bytes_per_second: 0,
+            maximum_active_spectrum_captures: u64::MAX,
+            maximum_capture_input_samples_per_block: u64::MAX,
+            maximum_capture_copy_samples_per_block: u64::MAX,
+            maximum_capture_publications_per_block: u64::MAX,
+            maximum_capture_bytes_per_second: u64::MAX,
             maximum_transition_entry_visits_per_block: transition_entry_visits_per_block,
             maximum_retained_bytes: retained_bytes,
         }
@@ -1466,20 +1587,123 @@ mod tests {
     }
 
     #[test]
-    fn b1_does_not_accept_nonzero_spectrum_cost() {
+    fn spectrum_work_composes_with_meter_and_fixed_cost() {
+        let fixed = ObservationWorkCost {
+            transition_entry_visits_per_block: 17,
+            retained_bytes: 4096,
+            ..ObservationWorkCost::ZERO
+        };
         let budget = ObservationBudget::new(
             limits_with(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX),
             NonZeroU32::new(48).expect("nonzero quantum"),
-            ObservationWorkCost::ZERO,
+            fixed,
         );
         let spectrum = ObservationWorkCost {
             active_spectrum_captures: 1,
+            capture_input_samples_per_block: 2,
+            capture_copy_samples_per_block: 3,
+            capture_publications_per_block: 1,
+            capture_bytes_per_second: 4,
+            transition_entry_visits_per_block: 999,
+            retained_bytes: 888,
             ..ObservationWorkCost::ZERO
         };
-        let refusal = budget
-            .preflight_graph_demand(0, spectrum)
-            .expect_err("spectrum is outside B1");
-        assert_eq!(refusal.reason, ObservationRefusalReason::InvalidRequest);
+        let expected = ObservationWorkCost {
+            active_meter_channels: 4,
+            meter_samples_per_block: 4 * 48,
+            meter_publications_per_block: 2,
+            meter_publication_bytes_per_block: 2 * u64::try_from(size_of::<MeterSnapshot>())
+                .expect("snapshot size"),
+            active_spectrum_captures: 1,
+            capture_input_samples_per_block: 2,
+            capture_copy_samples_per_block: 3,
+            capture_publications_per_block: 1,
+            capture_bytes_per_second: 4,
+            transition_entry_visits_per_block: fixed.transition_entry_visits_per_block,
+            retained_bytes: fixed.retained_bytes,
+        };
+        assert_eq!(
+            budget
+                .preflight_graph_demand(2, spectrum)
+                .expect("spectrum work is admitted by the checked composition"),
+            expected
+        );
+    }
+
+    #[test]
+    fn spectrum_work_uses_the_frozen_fixed_cadence_formula() {
+        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
+        let projected =
+            project_spectrum_work(cadence, SpectrumChannels::Stereo).expect("spectrum projection");
+        let record_bytes = u64::try_from(size_of::<SpectrumCapturedRecord>()).expect("record size");
+        assert_eq!(projected.active_spectrum_captures, 1);
+        assert_eq!(projected.capture_input_samples_per_block, 2 * 128);
+        assert_eq!(projected.capture_copy_samples_per_block, 2 * 128 + 4 * 2048);
+        assert_eq!(projected.capture_publications_per_block, 1);
+        assert_eq!(projected.capture_bytes_per_second, (24 + 1) * record_bytes);
+    }
+
+    #[test]
+    fn one_below_each_spectrum_work_limit_refuses_with_the_public_field_name() {
+        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
+        let expected =
+            project_spectrum_work(cadence, SpectrumChannels::Stereo).expect("spectrum projection");
+        let fields = [
+            (
+                "maximum_active_spectrum_captures",
+                expected.active_spectrum_captures,
+            ),
+            (
+                "maximum_capture_input_samples_per_block",
+                expected.capture_input_samples_per_block,
+            ),
+            (
+                "maximum_capture_copy_samples_per_block",
+                expected.capture_copy_samples_per_block,
+            ),
+            (
+                "maximum_capture_publications_per_block",
+                expected.capture_publications_per_block,
+            ),
+            (
+                "maximum_capture_bytes_per_second",
+                expected.capture_bytes_per_second,
+            ),
+        ];
+        for (field, value) in fields {
+            let mut limits =
+                limits_with(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+            match field {
+                "maximum_active_spectrum_captures" => {
+                    limits.maximum_active_spectrum_captures = value - 1
+                }
+                "maximum_capture_input_samples_per_block" => {
+                    limits.maximum_capture_input_samples_per_block = value - 1
+                }
+                "maximum_capture_copy_samples_per_block" => {
+                    limits.maximum_capture_copy_samples_per_block = value - 1
+                }
+                "maximum_capture_publications_per_block" => {
+                    limits.maximum_capture_publications_per_block = value - 1
+                }
+                "maximum_capture_bytes_per_second" => {
+                    limits.maximum_capture_bytes_per_second = value - 1
+                }
+                _ => unreachable!("field list is exhaustive"),
+            }
+            let budget = ObservationBudget::new(
+                limits,
+                NonZeroU32::new(128).expect("nonzero quantum"),
+                ObservationWorkCost::ZERO,
+            );
+            let refusal = budget
+                .preflight_graph_demand(0, expected)
+                .expect_err("one below must refuse");
+            assert_eq!(refusal.reason, ObservationRefusalReason::WorkBudget);
+            assert_eq!(refusal.limit, Some(field));
+            assert_eq!(refusal.requested, Some(value));
+            assert_eq!(refusal.maximum, Some(value - 1));
+        }
     }
 
     #[test]

@@ -307,7 +307,6 @@ pub fn spectrum_capture_collection_resources(
 /// Controlled preparation retains two complete singular captures for every public entry. The
 /// boxed entry array is the only additional collection allocation; it already contains both
 /// control-side [`SpectrumCapture`] values and their fixed lifecycle metadata.
-#[allow(dead_code)] // C2 resource projection is consumed by C3 host preparation.
 pub(crate) fn controlled_spectrum_capture_collection_resources(
     entries: &[SpectrumCaptureCollectionEntry],
 ) -> Result<SpectrumCaptureResources, SpectrumPrepareError> {
@@ -1323,7 +1322,6 @@ pub(crate) fn prepare_capture(
     )
 }
 
-#[allow(dead_code)] // The controlled variant is wired by C3 host preparation.
 #[derive(Clone, Copy)]
 enum CaptureBindingPolicy {
     Permanent,
@@ -1722,7 +1720,6 @@ impl ControlledSpectrumCaptureCollection {
 }
 
 /// Prepare two controlled observer slots for every exact public entry.
-#[allow(dead_code)] // C2 preparation is integrated at the C3 host boundary.
 pub(crate) fn prepare_controlled_capture_collection(
     request: &SpectrumCaptureCollectionRequest,
     graph_nodes: &[GraphNodeId],
