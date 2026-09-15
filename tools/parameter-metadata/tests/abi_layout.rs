@@ -555,6 +555,58 @@ fn observation_receipts_flags_and_captures_are_exactly_shared_constants() {
     }
 }
 
+/// The C2c refusal group publishes every row from the shared host-web authority in order.
+#[test]
+fn observation_refusal_reasons_are_exactly_shared_constants() {
+    let document = render();
+    assert_eq!(
+        named_constants(&document, "observationRefusalReasons"),
+        vec![
+            (host_web::OBSERVATION_REFUSAL_REASON_NONE, "none".to_owned()),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_NOT_PREPARED,
+                "notPrepared".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_WRONG_OWNER,
+                "wrongOwner".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CAPACITY,
+                "capacity".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_WORK_BUDGET,
+                "workBudget".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_BACKPRESSURE,
+                "backpressure".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CONFLICT,
+                "conflict".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CLOSED,
+                "closed".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_INVALID_REQUEST,
+                "invalidRequest".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW,
+                "arithmeticOverflow".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED,
+                "revisionExhausted".to_owned()
+            ),
+        ]
+    );
+}
+
 /// Every published struct offset is the engine's, and the document carries its whole schema.
 #[test]
 fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {

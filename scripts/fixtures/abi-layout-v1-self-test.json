@@ -806,6 +806,7 @@
     "observationStatusFlags": [{ "value": 1, "name": "ordinaryAvailable" }, { "value": 2, "name": "removalAvailable" }, { "value": 4, "name": "terminal" }, { "value": 8, "name": "renderFailed" }],
     "observationCaptureKinds": [{ "value": 1, "name": "response" }, { "value": 2, "name": "spectrum" }],
     "observationCaptureFlags": [{ "value": 1, "name": "graphGeneration" }],
+    "observationRefusalReasons": [{ "value": 0, "name": "none" }, { "value": 1, "name": "notPrepared" }, { "value": 2, "name": "wrongOwner" }, { "value": 3, "name": "capacity" }, { "value": 4, "name": "workBudget" }, { "value": 5, "name": "backpressure" }, { "value": 6, "name": "conflict" }, { "value": 7, "name": "closed" }, { "value": 8, "name": "invalidRequest" }, { "value": 9, "name": "arithmeticOverflow" }, { "value": 10, "name": "revisionExhausted" }],
     "observationChannels": [{ "value": 1, "name": "left" }, { "value": 2, "name": "right" }, { "value": 3, "name": "both" }],
     "observationStatuses": [{ "value": 1, "name": "pending" }, { "value": 2, "name": "unarmed" }, { "value": 3, "name": "ready" }],
     "responseTargets": [{ "value": 1, "name": "effect" }, { "value": 2, "name": "inputFilters" }],

@@ -641,7 +641,7 @@ def validate(document: object) -> None:
         "spectrumStreamStatuses", "spectrumStreamMetadataBytes",
         "observationProfiles", "observationOperations", "observationReceiptDomains",
         "observationReceiptStates", "observationAdmissionFlags", "observationStatusFlags",
-        "observationCaptureKinds", "observationCaptureFlags",
+        "observationCaptureKinds", "observationCaptureFlags", "observationRefusalReasons",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -684,6 +684,11 @@ def validate(document: object) -> None:
     ])
     check_named(document, "observationCaptureKinds", [(1, "response"), (2, "spectrum")])
     check_named(document, "observationCaptureFlags", [(1, "graphGeneration")])
+    check_named(document, "observationRefusalReasons", [
+        (0, "none"), (1, "notPrepared"), (2, "wrongOwner"), (3, "capacity"),
+        (4, "workBudget"), (5, "backpressure"), (6, "conflict"), (7, "closed"),
+        (8, "invalidRequest"), (9, "arithmeticOverflow"), (10, "revisionExhausted"),
+    ])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a
