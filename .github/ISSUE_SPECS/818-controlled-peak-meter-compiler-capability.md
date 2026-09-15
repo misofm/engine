@@ -103,7 +103,7 @@ to later issues under #763; no host controller or transport API is added here.
 
 ## Delivery
 
-Three bounded Luna MAX assignments A1, A2, A3, each checkpointed when focused gates pass. Coordinator owns scope and exact-path commits. One independent adversarial verdict per coherent attempt, at most five attempts. Close only after PASS, upstream evidence and GitHub synchronization. Host ownership, browser transport, SDK adoption and UI changes belong to successors.
+Bounded Luna MAX assignments A1 and A2, then A3a wrapper implementation/refusal coverage and A3b actual-render integration proof, each checkpointed when focused gates pass. Coordinator owns scope and exact-path commits. One independent adversarial verdict per coherent attempt, at most five attempts. Close only after PASS, upstream evidence and GitHub synchronization. Host ownership, browser transport, SDK adoption and UI changes belong to successors.
 
 ## Required integration at the coherent issue boundary
 
@@ -136,3 +136,18 @@ separate. Validation: builtins unit14/14, meter integration10/10, allocator trac
 Pre-change native layouts were MeterSnapshot160/MeterAccumulator232; integration
 resource/artifact pins are refreshed once at the completed issue boundary.
 A2 preparation and A3 sealed bind forwarding remain pending.
+
+## A2 evidence
+
+Fresh Luna MAX added all three preparation APIs through the shared policy path,
+with explicit controlled metrics/tap/period/ballistics refusals. Controlled
+policy is retained in request provenance; a seal mismatch is rejected. Focused
+tests verify selected concurrent, controlled concurrent and controlled serialized
+bank delivery policies. All three new tests, library checks with and without
+test-support, and formatting PASS. Only crates/builtins-compiler/src/lib.rs
+changed. The full library suite still reports the resource-sensitive 10,000-case
+transcript mismatch reproduced on clean A1; its layout refresh remains part of
+the coherent issue boundary. No transcript cases or outcomes were weakened.
+
+Coordinator subdivided A3 into wrapper/refusal implementation and a separate
+actual-render proof so each fresh Luna has one bounded ownership or test task.

@@ -348,6 +348,17 @@ pub struct PreparedBuiltinsSession {
     resources: BuiltinResourceEstimate,
 }
 
+/// Whether a prepared meter is always eligible for observation or waits for a graph activation.
+///
+/// This is intentionally private to the compiler boundary. The graph binding carries the same
+/// choice in its sealed observer, while the request seal retains it so a prepared artifact cannot
+/// conflate a permanent meter request with a controlled one during validation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum MeterBindingPolicy {
+    Permanent,
+    Controlled,
+}
+
 /// The witness of a stage that is **seam-side by design**: fader, mute, pan and matrix.
 ///
 /// Every term holds, unconditionally and without looking at a single word. That is not an
@@ -1448,6 +1459,7 @@ struct MeterRequestSeal {
     peak_decay_bits: u32,
     queue_capacity: usize,
     metrics: MeterMetricSet,
+    binding_policy: MeterBindingPolicy,
 }
 
 type ObserverSeal = (Box<str>, TrackStage, u64);
@@ -2642,6 +2654,7 @@ fn forged_request_seal() -> MeterRequestSeal {
         peak_decay_bits: 0,
         queue_capacity: 1,
         metrics: MeterMetricSet::ALL,
+        binding_policy: MeterBindingPolicy::Permanent,
     }
 }
 
@@ -3047,6 +3060,7 @@ pub fn prepare_session_builtins_with_console(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
+        MeterBindingPolicy::Permanent,
     )
 }
 
@@ -3068,18 +3082,59 @@ pub fn prepare_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        MeterBindingPolicy::Permanent,
     )
 }
 
-/// Prepare explicitly selected meter observers for hosts that serialize control with rendering.
-pub fn prepare_selected_session_builtins_between_render_calls(
+/// Prepare explicitly selected meter observers for hosts that deliver control concurrently with
+/// rendering. Selected requests retain the ordinary permanent observer binding policy.
+pub fn prepare_selected_session_builtins_with_console(
     session: &CompiledSession,
     requests: &[SelectedMeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    let plain: Vec<MeterRequest> = requests.iter().map(|item| item.request.clone()).collect();
-    let metrics: Vec<MeterMetricSet> = requests.iter().map(|item| item.metrics).collect();
+    let (plain, metrics) = split_selected_requests(requests);
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        &plain,
+        Some(&metrics),
+        controls,
+        caps,
+        BuiltinControlDelivery::Concurrent,
+        MeterBindingPolicy::Permanent,
+    )
+}
+
+/// Prepare selected peak meters for activation-controlled observation with concurrent control
+/// delivery. Controlled requests are dormant until a graph activation admits them.
+pub fn prepare_controlled_session_builtins_with_console(
+    session: &CompiledSession,
+    requests: &[SelectedMeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    let (plain, metrics) = split_selected_requests(requests);
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        &plain,
+        Some(&metrics),
+        controls,
+        caps,
+        BuiltinControlDelivery::Concurrent,
+        MeterBindingPolicy::Controlled,
+    )
+}
+
+/// Prepare selected peak meters for activation-controlled observation when all control producers
+/// are admitted only between exclusive render calls.
+pub fn prepare_controlled_session_builtins_between_render_calls(
+    session: &CompiledSession,
+    requests: &[SelectedMeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    let (plain, metrics) = split_selected_requests(requests);
     prepare_session_builtins_with_console_and_policy(
         session,
         &plain,
@@ -3087,7 +3142,42 @@ pub fn prepare_selected_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        MeterBindingPolicy::Controlled,
     )
+}
+
+/// Prepare explicitly selected meter observers for hosts that serialize control with rendering.
+///
+/// This legacy selected wrapper retains permanent observer bindings and only changes the control
+/// producer delivery contract.
+pub fn prepare_selected_session_builtins_between_render_calls(
+    session: &CompiledSession,
+    requests: &[SelectedMeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    let (plain, metrics) = split_selected_requests(requests);
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        &plain,
+        Some(&metrics),
+        controls,
+        caps,
+        BuiltinControlDelivery::BetweenRenderCalls,
+        MeterBindingPolicy::Permanent,
+    )
+}
+
+fn split_selected_requests(
+    requests: &[SelectedMeterRequest],
+) -> (Vec<MeterRequest>, Vec<MeterMetricSet>) {
+    let mut plain = Vec::with_capacity(requests.len());
+    let mut metrics = Vec::with_capacity(requests.len());
+    for request in requests {
+        plain.push(request.request.clone());
+        metrics.push(request.metrics);
+    }
+    (plain, metrics)
 }
 
 fn prepare_session_builtins_with_console_and_policy(
@@ -3097,6 +3187,7 @@ fn prepare_session_builtins_with_console_and_policy(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
+    meter_binding_policy: MeterBindingPolicy,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
@@ -3145,6 +3236,33 @@ fn prepare_session_builtins_with_console_and_policy(
         let metrics = selected_metrics.map_or(MeterMetricSet::ALL, |selections| selections[index]);
         if !metrics.is_valid() {
             diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
+        }
+        if meter_binding_policy == MeterBindingPolicy::Controlled {
+            if metrics != MeterMetricSet::SAMPLE_PEAK {
+                diagnostics.push(diag(
+                    "builtin.meter.controlled_metrics",
+                    &meter_path(request),
+                ));
+            }
+            if request.tap != MeterTap::PostMatrix {
+                diagnostics.push(diag("builtin.meter.controlled_tap", &meter_path(request)));
+            }
+            let period = request.config.period_frames.get();
+            let quantum = session.quantum().0;
+            if quantum == 0 || period < quantum || period % quantum != 0 {
+                diagnostics.push(diag(
+                    "builtin.meter.controlled_period",
+                    &meter_path(request),
+                ));
+            }
+            if request.config.peak_hold_frames != 0
+                || request.config.peak_decay_db_per_second != 0.0
+            {
+                diagnostics.push(diag(
+                    "builtin.meter.controlled_ballistics",
+                    &meter_path(request),
+                ));
+            }
         }
     }
     let known_tracks: BTreeSet<_> = session
@@ -3312,11 +3430,19 @@ fn prepare_session_builtins_with_console_and_policy(
         )
         .map_err(|error| BuiltinDiagnosticSet::sorted(vec![meter_diagnostic(request, error)]))?;
         let graph_id = StableGraphId::parse(&request.track_id).expect("known accepted session ID");
-        observers.push(GraphNodeObserverBinding::new(
-            stage_node(graph_id, stage(request.tap)),
-            handle.0.get(),
-            Box::new(MeterObserver(accumulator)),
-        ));
+        let observer = match meter_binding_policy {
+            MeterBindingPolicy::Permanent => GraphNodeObserverBinding::new(
+                stage_node(graph_id, stage(request.tap)),
+                handle.0.get(),
+                Box::new(MeterObserver(accumulator)),
+            ),
+            MeterBindingPolicy::Controlled => GraphNodeObserverBinding::controlled(
+                stage_node(graph_id, stage(request.tap)),
+                handle.0.get(),
+                Box::new(MeterObserver(accumulator)),
+            ),
+        };
+        observers.push(observer);
         meter_consumers.push(MeterConsumer {
             handle,
             track_id: request.track_id.as_str().into(),
@@ -3333,6 +3459,7 @@ fn prepare_session_builtins_with_console_and_policy(
             peak_decay_bits: request.config.peak_decay_db_per_second.to_bits(),
             queue_capacity: request.config.queue_capacity.get(),
             metrics,
+            binding_policy: meter_binding_policy,
         });
     }
     tails.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -10446,6 +10573,224 @@ mod tests {
                 && *members > 1
                 && *delivery == BuiltinControlDelivery::BetweenRenderCalls
         }));
+    }
+
+    #[test]
+    fn selected_controlled_meter_preparation_keeps_policy_and_delivery_distinct() {
+        let compiled = n_track_session(8);
+        let period = compiled.quantum().0;
+        let config = MeterConfig {
+            period_frames: NonZeroU32::new(period).expect("compiled quantum is nonzero"),
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(4).expect("meter queue"),
+            reset_generation: 0,
+        };
+        let request = SelectedMeterRequest {
+            request: MeterRequest {
+                handle: handle(1),
+                track_id: track_name(0),
+                tap: MeterTap::PostMatrix,
+                config,
+            },
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        };
+        let controls = (0..8)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(4).expect("control queue"),
+            })
+            .collect::<Vec<_>>();
+        let collect_delivery = |prepared: PreparedBuiltinsSession| {
+            let (graph, levels) = track_graph(8);
+            let classes = SessionPoolClasses::from_session(&compiled);
+            prepared
+                .into_graph_artifact_with_banks(graph, (), Backend::Simd4, &levels, &classes)
+                .prepared_builtin_banks()
+                .map(|bank| (bank.stage, bank.members.len(), bank.control_delivery))
+                .collect::<Vec<_>>()
+        };
+
+        let selected = prepare_selected_session_builtins_with_console(
+            &compiled,
+            std::slice::from_ref(&request),
+            &controls,
+            caps(),
+        )
+        .expect("selected permanent preparation");
+        assert_eq!(
+            selected.requests[0].binding_policy,
+            MeterBindingPolicy::Permanent
+        );
+        let selected_delivery = collect_delivery(selected);
+        assert!(selected_delivery.iter().any(|(stage, members, delivery)| {
+            *stage == TrackStage::PostMatrix
+                && *members > 1
+                && *delivery == BuiltinControlDelivery::Concurrent
+        }));
+
+        let controlled = prepare_controlled_session_builtins_with_console(
+            &compiled,
+            std::slice::from_ref(&request),
+            &controls,
+            caps(),
+        )
+        .expect("controlled concurrent preparation");
+        assert_eq!(
+            controlled.requests[0].binding_policy,
+            MeterBindingPolicy::Controlled
+        );
+        let controlled_delivery = collect_delivery(controlled);
+        assert!(
+            controlled_delivery
+                .iter()
+                .any(|(stage, members, delivery)| {
+                    *stage == TrackStage::PostMatrix
+                        && *members > 1
+                        && *delivery == BuiltinControlDelivery::Concurrent
+                })
+        );
+
+        let serialized = prepare_controlled_session_builtins_between_render_calls(
+            &compiled,
+            std::slice::from_ref(&request),
+            &controls,
+            caps(),
+        )
+        .expect("controlled serialized preparation");
+        assert_eq!(
+            serialized.requests[0].binding_policy,
+            MeterBindingPolicy::Controlled
+        );
+        let serialized_delivery = collect_delivery(serialized);
+        assert!(
+            serialized_delivery
+                .iter()
+                .any(|(stage, members, delivery)| {
+                    *stage == TrackStage::PostMatrix
+                        && *members > 1
+                        && *delivery == BuiltinControlDelivery::BetweenRenderCalls
+                })
+        );
+    }
+
+    #[test]
+    fn controlled_meter_preparation_rejects_non_peak_matrix_block_requests() {
+        let compiled = n_track_session(1);
+        let quantum = compiled.quantum().0;
+        let base = |metrics, tap, period, peak_hold_frames, peak_decay_db_per_second| {
+            SelectedMeterRequest {
+                request: MeterRequest {
+                    handle: handle(1),
+                    track_id: track_name(0),
+                    tap,
+                    config: MeterConfig {
+                        period_frames: NonZeroU32::new(period).expect("period"),
+                        peak_hold_frames,
+                        peak_decay_db_per_second,
+                        queue_capacity: NonZeroUsize::new(2).expect("meter queue"),
+                        reset_generation: 0,
+                    },
+                },
+                metrics,
+            }
+        };
+        let assert_code = |request: SelectedMeterRequest, code| {
+            let result = prepare_controlled_session_builtins_with_console(
+                &compiled,
+                std::slice::from_ref(&request),
+                &[],
+                caps(),
+            );
+            let Err(error) = result else {
+                panic!("invalid controlled request must be refused")
+            };
+            assert!(
+                error.0.iter().any(|diagnostic| diagnostic.code == code),
+                "expected {code} in {error:?}"
+            );
+        };
+
+        assert_code(
+            base(MeterMetricSet::ALL, MeterTap::PostMatrix, quantum, 0, 0.0),
+            "builtin.meter.controlled_metrics",
+        );
+        assert_code(
+            base(
+                MeterMetricSet::SAMPLE_PEAK,
+                MeterTap::Input,
+                quantum,
+                0,
+                0.0,
+            ),
+            "builtin.meter.controlled_tap",
+        );
+        assert_code(
+            base(
+                MeterMetricSet::SAMPLE_PEAK,
+                MeterTap::PostMatrix,
+                quantum.saturating_add(1),
+                0,
+                0.0,
+            ),
+            "builtin.meter.controlled_period",
+        );
+        assert_code(
+            base(
+                MeterMetricSet::SAMPLE_PEAK,
+                MeterTap::PostMatrix,
+                quantum,
+                1,
+                0.0,
+            ),
+            "builtin.meter.controlled_ballistics",
+        );
+        assert_code(
+            base(
+                MeterMetricSet::SAMPLE_PEAK,
+                MeterTap::PostMatrix,
+                quantum,
+                0,
+                1.0,
+            ),
+            "builtin.meter.controlled_ballistics",
+        );
+    }
+
+    #[test]
+    fn controlled_request_policy_is_part_of_prepared_request_validation() {
+        let compiled = n_track_session(1);
+        let request = SelectedMeterRequest {
+            request: MeterRequest {
+                handle: handle(1),
+                track_id: track_name(0),
+                tap: MeterTap::PostMatrix,
+                config: MeterConfig {
+                    period_frames: NonZeroU32::new(compiled.quantum().0).expect("compiled quantum"),
+                    peak_hold_frames: 0,
+                    peak_decay_db_per_second: 0.0,
+                    queue_capacity: NonZeroUsize::new(2).expect("meter queue"),
+                    reset_generation: 0,
+                },
+            },
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        };
+        let mut prepared = prepare_controlled_session_builtins_with_console(
+            &compiled,
+            std::slice::from_ref(&request),
+            &[],
+            caps(),
+        )
+        .expect("controlled preparation");
+        prepared.seal.requests[0].binding_policy = MeterBindingPolicy::Permanent;
+        let diagnostics = prepared.validate_for_session(&compiled);
+        assert!(
+            diagnostics
+                .0
+                .iter()
+                .any(|diagnostic| diagnostic.code == "builtin.prepared.request_set"),
+            "request binding policy mismatch must invalidate the prepared seal: {diagnostics:?}"
+        );
     }
 
     #[test]
