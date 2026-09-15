@@ -42,6 +42,7 @@ use host_core::{
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
+    ObservationRefusal, ObservationRefusalReason, ObservedContinuousSpectrumWindow,
     ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
     SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
@@ -334,7 +335,7 @@ pub struct WebObservationDemand {
 /// One graph or resident observation application receipt.
 #[allow(missing_docs)]
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebObservationReceipt {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -345,6 +346,22 @@ pub struct WebObservationReceipt {
     pub application_sample: u64,
     pub result: u32,
     pub reserved: u32,
+}
+
+impl Default for WebObservationReceipt {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            domain: 0,
+            state: 0,
+            owner: 0,
+            sequence: 0,
+            application_sample: 0,
+            result: 0,
+            reserved: 0,
+        }
+    }
 }
 
 /// Scalar result and refusal record for one protected observation admission.
@@ -370,8 +387,8 @@ pub struct WebObservationAdmission {
 impl Default for WebObservationAdmission {
     fn default() -> Self {
         Self {
-            struct_size: 0,
-            abi_version: 0,
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
             result: 0,
             operation: 0,
             flags: 0,
@@ -390,7 +407,7 @@ impl Default for WebObservationAdmission {
 /// Identity carried beside one successful response or spectrum capture.
 #[allow(missing_docs)]
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebObservationCaptureIdentity {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -400,6 +417,88 @@ pub struct WebObservationCaptureIdentity {
     pub observation_generation: u64,
     pub selection_epoch: u64,
     pub snapshot_token: u64,
+}
+
+impl Default for WebObservationCaptureIdentity {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            kind: 0,
+            flags: 0,
+            owner: 0,
+            observation_generation: 0,
+            selection_epoch: 0,
+            snapshot_token: 0,
+        }
+    }
+}
+
+/// Private fixed-capacity side records for the protected observation owner.
+///
+/// The arrays are deliberately inline in the outer host. They are reserved here so later receipt
+/// mediation can fill them without changing the host's allocation shape or introducing a second
+/// queue/ledger. Free receipt rows have state zero and are never exported.
+#[derive(Default)]
+#[allow(dead_code)]
+struct ObservationSideRecords {
+    admission: WebObservationAdmission,
+    capture_identity: WebObservationCaptureIdentity,
+    receipts: [WebObservationReceipt; 4],
+    applications: [WebObservationReceipt; 4],
+    application_len: usize,
+    pending_count: u8,
+    completed_count: u8,
+    reserved_mask: u8,
+    pending_stop_slot: Option<usize>,
+    terminal_finalized: bool,
+}
+
+const OBSERVATION_ADMISSION_RECEIPT: u32 = 1;
+const OBSERVATION_ADMISSION_REQUESTED: u32 = 1 << 1;
+const OBSERVATION_ADMISSION_MAXIMUM: u32 = 1 << 2;
+const OBSERVATION_ADMISSION_PENDING_BOUNDARY: u32 = 1 << 3;
+const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
+const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
+
+fn observation_not_prepared() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::NotPrepared,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn observation_refusal_reason(reason: ObservationRefusalReason) -> u32 {
+    match reason {
+        ObservationRefusalReason::NotPrepared => 1,
+        ObservationRefusalReason::WrongOwner => 2,
+        ObservationRefusalReason::Capacity => 3,
+        ObservationRefusalReason::WorkBudget => 4,
+        ObservationRefusalReason::Backpressure => 5,
+        ObservationRefusalReason::Conflict => 6,
+        ObservationRefusalReason::Closed => 7,
+        ObservationRefusalReason::InvalidRequest => 8,
+        ObservationRefusalReason::ArithmeticOverflow => 9,
+        ObservationRefusalReason::RevisionExhausted => 10,
+    }
+}
+
+#[allow(dead_code)]
+fn observation_refusal_result(reason: ObservationRefusalReason) -> u32 {
+    match reason {
+        ObservationRefusalReason::NotPrepared => RESULT_UNSUPPORTED,
+        ObservationRefusalReason::WrongOwner | ObservationRefusalReason::InvalidRequest => {
+            RESULT_INVALID_ARGUMENT
+        }
+        ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => RESULT_REFUSED_BUDGET,
+        ObservationRefusalReason::Backpressure => RESULT_BACKPRESSURE,
+        ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => RESULT_WRONG_STATE,
+    }
 }
 
 /// Rust-side protected observation preparation supplied before the host is published.
@@ -1436,6 +1535,10 @@ impl PreparedSpectrumCapture {
 struct ProtectedObservationStorage {
     controller: HostObservationController,
     ingress: ObservationIngressState,
+    /// Last native continuous history epoch observed by protected mediation.
+    history_epoch: Option<u64>,
+    /// Cumulative native windows dropped in the cached history epoch.
+    history_dropped_captures: u64,
     /// Cadence derived once from the prepared session shape for later protected reads.
     spectrum_cadence: SpectrumCadence,
     /// Maximum packed payloads proved by the immutable ingress projection.
@@ -2024,6 +2127,8 @@ pub struct AudioWorkletEngineHost {
     meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
+    /// Fixed protected-observation records retained outside the prepared ownership shell.
+    side_records: ObservationSideRecords,
     /// Checked host-scoped generation for prepared companion ownership. This token is distinct
     /// from the wrapping Wasm handle and changes on every successfully published host.
     host_generation: u64,
@@ -2231,6 +2336,7 @@ impl AudioWorkletEngineHost {
             meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
+            side_records: ObservationSideRecords::default(),
             host_generation,
             spectrum_token: 0,
             diagnostic_len: 0,
@@ -2253,6 +2359,132 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn resources(&self) -> &WebResourceReport {
         &self.resources
+    }
+
+    /// Return the last protected-observation admission/refusal record.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) const fn observation_admission(&self) -> &WebObservationAdmission {
+        &self.side_records.admission
+    }
+
+    /// Return the last successfully committed protected capture identity.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) const fn observation_capture_identity(&self) -> &WebObservationCaptureIdentity {
+        &self.side_records.capture_identity
+    }
+
+    /// Spend one protected operation credit after the owner has been prepared.
+    ///
+    /// The ingress state spends the selected class before checking the request lengths, preserving
+    /// the refusal semantics for retries in the same render epoch. No public protected operation
+    /// calls this seam yet; later mediation passes the moved permit through native helpers.
+    #[allow(dead_code)]
+    fn begin_observation(
+        &mut self,
+        class: ObservationClass,
+        lengths: ObservationLengths,
+    ) -> Result<ObservationPermit, ObservationRefusal> {
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        let owner = storage.controller.owner();
+        storage.ingress.begin_observation(owner, class, lengths)
+    }
+
+    /// Map one private refusal or native result into the fixed admission side record.
+    #[allow(dead_code)]
+    fn record_observation_admission(
+        &mut self,
+        operation: u32,
+        result: u32,
+        refusal: Option<ObservationRefusal>,
+        receipt: Option<WebObservationReceipt>,
+        pending_boundary: bool,
+    ) {
+        let ingress_epoch = self
+            .ready
+            .as_ref()
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Protected(storage) => Some(storage.ingress.epoch),
+                PreparedObservationStorage::Legacy(_) => None,
+            })
+            .unwrap_or(0);
+        let mut admission = WebObservationAdmission {
+            struct_size: size_of::<WebObservationAdmission>() as u32,
+            abi_version: ABI_VERSION,
+            result,
+            operation,
+            flags: 0,
+            reason: 0,
+            limit_bytes: 0,
+            reserved: 0,
+            ingress_epoch,
+            requested: 0,
+            maximum: 0,
+            limit: [0; 128],
+            receipt: WebObservationReceipt::default(),
+        };
+        if let Some(refusal) = refusal {
+            admission.reason = observation_refusal_reason(refusal.reason);
+            if let Some(requested) = refusal.requested {
+                admission.flags |= OBSERVATION_ADMISSION_REQUESTED;
+                admission.requested = requested;
+            }
+            if let Some(maximum) = refusal.maximum {
+                admission.flags |= OBSERVATION_ADMISSION_MAXIMUM;
+                admission.maximum = maximum;
+            }
+            if let Some(limit) = refusal.limit {
+                let bytes = limit.as_bytes();
+                let length = bytes.len().min(admission.limit.len());
+                admission.limit[..length].copy_from_slice(&bytes[..length]);
+                admission.limit_bytes = length as u32;
+            }
+        }
+        if let Some(receipt) = receipt {
+            admission.flags |= OBSERVATION_ADMISSION_RECEIPT;
+            admission.receipt = receipt;
+        }
+        if pending_boundary {
+            admission.flags |= OBSERVATION_ADMISSION_PENDING_BOUNDARY;
+        }
+        self.side_records.admission = admission;
+    }
+
+    /// Derive the checked identity accompanying one native continuous spectrum window.
+    #[allow(dead_code)]
+    fn spectrum_capture_identity(
+        window: &ObservedContinuousSpectrumWindow,
+    ) -> Result<WebObservationCaptureIdentity, u32> {
+        if window.window.end_sample().is_none() {
+            return Err(RESULT_REFUSED_BUDGET);
+        }
+        let snapshot_token = window
+            .window
+            .sequence
+            .checked_add(1)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+        Ok(WebObservationCaptureIdentity {
+            struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+            abi_version: ABI_VERSION,
+            kind: OBSERVATION_CAPTURE_KIND_SPECTRUM,
+            flags: OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION,
+            owner: window.owner.get(),
+            observation_generation: window.observation_generation,
+            selection_epoch: window.selection_epoch,
+            snapshot_token,
+        })
+    }
+
+    /// Commit a successfully derived capture identity using scalar assignment only.
+    #[allow(dead_code)]
+    fn commit_observation_capture_identity(&mut self, identity: WebObservationCaptureIdentity) {
+        self.side_records.capture_identity = identity;
     }
 
     /// Read the last live-console submission report (issue #137 D1).
@@ -3253,6 +3485,9 @@ impl AudioWorkletEngineHost {
                         ready.master_start_sample = None;
                         ready.master_end_sample = 0;
                     }
+                }
+                if let PreparedObservationStorage::Protected(storage) = &mut ready.observation {
+                    storage.ingress.on_successful_render();
                 }
                 self.record(RESULT_OK)
             }
@@ -6426,6 +6661,8 @@ fn compile_ready(
             PreparedObservationStorage::Protected(ProtectedObservationStorage {
                 controller,
                 ingress: ObservationIngressState::new(preparation.ingress, projection.bounds),
+                history_epoch: None,
+                history_dropped_captures: 0,
                 spectrum_cadence: facts.spectrum_cadence,
                 packed_response_bytes: projection.packed_response_bytes,
                 packed_spectrum_bytes: projection.packed_spectrum_bytes,
@@ -6662,7 +6899,9 @@ pub use control_targets::{
     WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
 };
 mod observation_ingress;
-pub(crate) use observation_ingress::ObservationIngressState;
+pub(crate) use observation_ingress::{
+    ObservationClass, ObservationIngressState, ObservationLengths, ObservationPermit,
+};
 mod ffi;
 
 pub use ffi::*;

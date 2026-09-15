@@ -8,7 +8,8 @@ use core::mem::size_of;
 use effect_contract::{RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS, RESPONSE_SNAPSHOT_WORDS};
 use engine::realtime::ResponseSnapshotSection;
 use host_core::{
-    HostObservationController, ObservationAccepted, ObservationApplied, ObservationWorkCost,
+    HostObservationController, ObservationAccepted, ObservationApplied, ObservationOwnerId,
+    ObservationRefusal, ObservationRefusalReason, ObservationWorkCost,
     ObservedContinuousSpectrumWindow, SPECTRUM_WINDOW_FRAMES, SpectrumContinuousWindow,
     SpectrumWindow,
 };
@@ -141,6 +142,7 @@ pub(crate) struct ObservationIngressProjection {
 #[allow(dead_code)]
 pub(crate) struct ObservationIngressState {
     pub(crate) epoch: u64,
+    pub(crate) exhausted: bool,
     pub(crate) ordinary_used: bool,
     pub(crate) removal_used: bool,
     pub(crate) limits: ObservationIngressLimits,
@@ -157,11 +159,170 @@ impl ObservationIngressState {
     ) -> Self {
         Self {
             epoch: Self::INITIAL_EPOCH,
+            exhausted: false,
             ordinary_used: false,
             removal_used: false,
             limits,
             bounds,
         }
+    }
+
+    /// Spend one bounded operation attempt and return the owner-scoped, affine permit.
+    ///
+    /// The selected class bit is consumed before any encoded length is checked. This ordering is
+    /// part of the protected ingress contract: a caller cannot retry a refused oversized request
+    /// in the same render epoch. The owner and epoch are copied into the permit only after the
+    /// class credit has been spent; no permit is ever fabricated for exhausted ingress.
+    #[allow(dead_code)]
+    pub(crate) fn begin_observation(
+        &mut self,
+        owner: ObservationOwnerId,
+        class: ObservationClass,
+        lengths: ObservationLengths,
+    ) -> Result<ObservationPermit, ObservationRefusal> {
+        if self.exhausted {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::RevisionExhausted,
+                limit: None,
+                requested: None,
+                maximum: None,
+            });
+        }
+
+        let (used, limit) = match class {
+            ObservationClass::Ordinary => {
+                (&mut self.ordinary_used, "ordinary_operations_per_boundary")
+            }
+            ObservationClass::Removal => {
+                (&mut self.removal_used, "removal_operations_per_boundary")
+            }
+        };
+        if *used {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::Backpressure,
+                limit: Some(limit),
+                requested: Some(2),
+                maximum: Some(1),
+            });
+        }
+        // Spend the class credit before checking request lengths. Every refusal after this point
+        // therefore preserves the consumed attempt until a successful render boundary.
+        *used = true;
+
+        let checks = [
+            (
+                lengths.control_bytes,
+                u64::from(self.limits.maximum_control_bytes),
+                "maximum_control_bytes",
+            ),
+            (
+                lengths.rows,
+                u64::from(self.limits.maximum_observation_rows),
+                "maximum_observation_rows",
+            ),
+            (
+                lengths.result_bytes,
+                u64::from(self.limits.maximum_result_bytes),
+                "maximum_result_bytes",
+            ),
+        ];
+        for (requested, maximum, limit) in checks {
+            if requested > maximum {
+                return Err(ObservationRefusal {
+                    reason: ObservationRefusalReason::WorkBudget,
+                    limit: Some(limit),
+                    requested: Some(requested),
+                    maximum: Some(maximum),
+                });
+            }
+        }
+
+        Ok(ObservationPermit {
+            owner,
+            epoch: self.epoch,
+            class,
+        })
+    }
+
+    /// Advance the ingress epoch after one successful render boundary.
+    ///
+    /// A checked overflow permanently closes admission instead of wrapping the epoch. Failed
+    /// renders never call this method, so they cannot replenish either operation class.
+    #[allow(dead_code)]
+    pub(crate) fn on_successful_render(&mut self) {
+        if self.exhausted {
+            return;
+        }
+        let Some(next_epoch) = self.epoch.checked_add(1) else {
+            self.exhausted = true;
+            return;
+        };
+        self.epoch = next_epoch;
+        self.ordinary_used = false;
+        self.removal_used = false;
+    }
+}
+
+/// The two independent operation-credit classes in one render epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum ObservationClass {
+    /// Ordinary capture, publication or read work.
+    Ordinary,
+    /// Removal or stop work.
+    Removal,
+}
+
+/// Encoded ingress lengths checked against one class credit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct ObservationLengths {
+    /// Encoded control/request bytes.
+    pub(crate) control_bytes: u64,
+    /// Encoded observation rows.
+    pub(crate) rows: u64,
+    /// Encoded result bytes.
+    pub(crate) result_bytes: u64,
+}
+
+/// One owner/epoch/class operation permission.
+///
+/// The fields deliberately remain private and the type is affine: callers can move it through
+/// nested admitted helpers, but cannot clone or copy it into a second native operation.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct ObservationPermit {
+    owner: ObservationOwnerId,
+    epoch: u64,
+    class: ObservationClass,
+}
+
+#[allow(dead_code)]
+impl ObservationPermit {
+    /// Validate the fixed owner/epoch/class scalars before any native operation.
+    pub(crate) fn validate(
+        &self,
+        owner: ObservationOwnerId,
+        epoch: u64,
+        class: ObservationClass,
+    ) -> Result<(), ObservationRefusal> {
+        if self.owner != owner {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::WrongOwner,
+                limit: None,
+                requested: None,
+                maximum: None,
+            });
+        }
+        if self.epoch != epoch || self.class != class {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            });
+        }
+        Ok(())
     }
 }
 
