@@ -7830,7 +7830,7 @@ mod observation_checkpoint_c1_tests {
         dispose(handle);
     }
 
-    fn wire_command(
+    struct WireCommandInput {
         kind: u32,
         rack: u8,
         channel: u8,
@@ -7839,20 +7839,22 @@ mod observation_checkpoint_c1_tests {
         parameter_id: u32,
         smoothing_samples: u32,
         values: [f32; 4],
-    ) -> [u8; COMMAND_RECORD_BYTES as usize] {
+    }
+
+    fn wire_command(input: WireCommandInput) -> [u8; COMMAND_RECORD_BYTES as usize] {
         let mut bytes = [0; COMMAND_RECORD_BYTES as usize];
-        bytes[0] = kind as u8;
-        bytes[1] = rack;
-        bytes[2] = channel;
+        bytes[0] = input.kind as u8;
+        bytes[1] = input.rack;
+        bytes[2] = input.channel;
         for (offset, value) in [
-            (4, track_index),
-            (8, effect_index),
-            (12, parameter_id),
-            (16, smoothing_samples),
+            (4, input.track_index),
+            (8, input.effect_index),
+            (12, input.parameter_id),
+            (16, input.smoothing_samples),
         ] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        for (index, value) in values.into_iter().enumerate() {
+        for (index, value) in input.values.into_iter().enumerate() {
             let offset = 24 + index * 4;
             bytes[offset..offset + 4].copy_from_slice(&value.to_bits().to_le_bytes());
         }
@@ -7894,16 +7896,34 @@ mod observation_checkpoint_c1_tests {
         })
     }
 
-    fn command_state(
-        handle: u32,
-    ) -> (
-        Vec<u32>,
-        Vec<u32>,
-        Vec<(u64, usize, u64, usize, u64, usize)>,
-        Vec<([f32; 4], [f32; 4], [bool; 4], u64)>,
-        bool,
-        WebCommandReport,
-    ) {
+    #[derive(Debug, PartialEq)]
+    struct ControlStateSnapshot {
+        producer_success_count: u64,
+        producer_available_capacity: usize,
+        fader_success_count: u64,
+        fader_available_capacity: usize,
+        input_success_count: u64,
+        input_available_capacity: usize,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct InputFilterStateSnapshot {
+        committed: [f32; 4],
+        candidate: [f32; 4],
+        dirty: [bool; 4],
+        revision: u64,
+    }
+
+    struct CommandStateSnapshot {
+        command_wanted: Vec<u32>,
+        in_flight: Vec<u32>,
+        controls: Vec<ControlStateSnapshot>,
+        input_filter_shadows: Vec<InputFilterStateSnapshot>,
+        has_in_flight_commands: bool,
+        report: WebCommandReport,
+    }
+
+    fn command_state(handle: u32) -> CommandStateSnapshot {
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live
@@ -7912,38 +7932,34 @@ mod observation_checkpoint_c1_tests {
                 .expect("protected console host")
                 .host;
             let ready = host.ready.as_ref().expect("ready ownership");
-            (
-                ready.command_wanted.to_vec(),
-                ready.in_flight.to_vec(),
-                ready
+            CommandStateSnapshot {
+                command_wanted: ready.command_wanted.to_vec(),
+                in_flight: ready.in_flight.to_vec(),
+                controls: ready
                     .controls
                     .iter()
-                    .map(|control| {
-                        (
-                            control.producer.success_count(),
-                            control.producer.available_capacity(),
-                            control.fader.success_count(),
-                            control.fader.available_capacity(),
-                            control.input.success_count(),
-                            control.input.available_capacity(),
-                        )
+                    .map(|control| ControlStateSnapshot {
+                        producer_success_count: control.producer.success_count(),
+                        producer_available_capacity: control.producer.available_capacity(),
+                        fader_success_count: control.fader.success_count(),
+                        fader_available_capacity: control.fader.available_capacity(),
+                        input_success_count: control.input.success_count(),
+                        input_available_capacity: control.input.available_capacity(),
                     })
                     .collect(),
-                ready
+                input_filter_shadows: ready
                     .input_filter_shadows
                     .iter()
-                    .map(|shadow| {
-                        (
-                            shadow.committed,
-                            shadow.candidate,
-                            shadow.dirty,
-                            shadow.revision,
-                        )
+                    .map(|shadow| InputFilterStateSnapshot {
+                        committed: shadow.committed,
+                        candidate: shadow.candidate,
+                        dirty: shadow.dirty,
+                        revision: shadow.revision,
                     })
                     .collect(),
-                ready.has_in_flight_commands,
-                *host.command_report(),
-            )
+                has_in_flight_commands: ready.has_in_flight_commands,
+                report: *host.command_report(),
+            }
         })
     }
 
@@ -7951,17 +7967,26 @@ mod observation_checkpoint_c1_tests {
         handle: u32,
         prepared: bool,
     ) -> WebCommandReport {
-        let audio = wire_command(crate::COMMAND_PAN, u8::MAX, u8::MAX, 0, 0, 0, 0, [0.0; 4]);
-        let observation = wire_command(
-            crate::COMMAND_OBSERVE_SUBSCRIBE,
-            0,
-            u8::MAX,
-            0,
-            0,
-            0,
-            0,
-            [0.0; 4],
-        );
+        let audio = wire_command(WireCommandInput {
+            kind: crate::COMMAND_PAN,
+            rack: u8::MAX,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
+        let observation = wire_command(WireCommandInput {
+            kind: crate::COMMAND_OBSERVE_SUBSCRIBE,
+            rack: 0,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
         stage_commands(handle, &[audio, observation]);
         let before = command_state(handle);
         let result = if prepared {
@@ -7973,12 +7998,24 @@ mod observation_checkpoint_c1_tests {
         };
         assert_eq!(result, RESULT_UNSUPPORTED);
         let after = command_state(handle);
-        assert_eq!(after.0, before.0, "queue room shadow changed");
-        assert_eq!(after.1, before.1, "in-flight queue shadow changed");
-        assert_eq!(after.2, before.2, "producer queue changed");
-        assert_eq!(after.3, before.3, "input-filter shadow changed");
-        assert_eq!(after.4, before.4, "in-flight flag changed");
-        let report = after.5;
+        assert_eq!(
+            after.command_wanted, before.command_wanted,
+            "queue room shadow changed"
+        );
+        assert_eq!(
+            after.in_flight, before.in_flight,
+            "in-flight queue shadow changed"
+        );
+        assert_eq!(after.controls, before.controls, "producer queue changed");
+        assert_eq!(
+            after.input_filter_shadows, before.input_filter_shadows,
+            "input-filter shadow changed"
+        );
+        assert_eq!(
+            after.has_in_flight_commands, before.has_in_flight_commands,
+            "in-flight flag changed"
+        );
+        let report = after.report;
         assert_eq!(report.result, RESULT_UNSUPPORTED);
         assert_eq!(report.reason, crate::COMMAND_REASON_UNSUPPORTED_KIND);
         assert_eq!(report.rejected_index, 1);
@@ -7990,7 +8027,16 @@ mod observation_checkpoint_c1_tests {
     fn both_command_submit_exports_refuse_mixed_observation_batches_before_mutation() {
         let handle = boot_protected_with_console();
         let _plain = assert_mixed_batch_refused_before_companion(handle, false);
-        let audio = wire_command(crate::COMMAND_PAN, u8::MAX, u8::MAX, 0, 0, 0, 0, [0.0; 4]);
+        let audio = wire_command(WireCommandInput {
+            kind: crate::COMMAND_PAN,
+            rack: u8::MAX,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
         stage_commands(handle, &[audio]);
         assert_eq!(
             miso_engine_web_v1_command_submit(handle, 1),
@@ -8003,16 +8049,16 @@ mod observation_checkpoint_c1_tests {
         let _prepared = assert_mixed_batch_refused_before_companion(handle, true);
         stage_commands(
             handle,
-            &[wire_command(
-                crate::COMMAND_PAN,
-                u8::MAX,
-                u8::MAX,
-                0,
-                0,
-                0,
-                0,
-                [0.0; 4],
-            )],
+            &[wire_command(WireCommandInput {
+                kind: crate::COMMAND_PAN,
+                rack: u8::MAX,
+                channel: u8::MAX,
+                track_index: 0,
+                effect_index: 0,
+                parameter_id: 0,
+                smoothing_samples: 0,
+                values: [0.0; 4],
+            })],
         );
         let companion_bytes = stage_empty_companion(handle);
         assert_eq!(
