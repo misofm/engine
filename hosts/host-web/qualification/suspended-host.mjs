@@ -353,17 +353,22 @@ async function qualifyBrowser(browserName, engine, origin, artifacts, preflightR
           : { outcome: "not-acquired", error: errorRecord(error) };
       }
     }
-    if (browser !== undefined) {
+    const closeBrowser = async (ownedBrowser) => {
+      row.browserCleanup = {
+        outcome: "unknown-after-loss",
+        detail: "browser.close has not acknowledged cleanup",
+      };
       try {
         await withDeadline(
           `${browserName}: browser teardown`,
-          () => browser.close(),
+          () => ownedBrowser.close(),
           TEARDOWN_TIMEOUT_MS,
         );
         row.browserCleanup = {
           outcome: "pass",
           acknowledgement: "browser.close resolved",
-          nativeHostAndContextDisposal: row.nativeCleanup === undefined ? "reported-by-page-fixture" : "UNKNOWN",
+          nativeHostAndContextDisposal: row.fixture !== undefined
+            ? "reported-by-page-fixture" : evaluationStarted ? "UNKNOWN" : "not-started",
         };
       } catch (error) {
         row.outcome = "fail";
@@ -372,6 +377,23 @@ async function qualifyBrowser(browserName, engine, origin, artifacts, preflightR
           error: errorRecord(error),
         };
       }
+    };
+    if (browser !== undefined) {
+      await closeBrowser(browser);
+    } else if (row.lateBrowserAcquisition?.outcome === "unknown-after-loss") {
+      row.browserCleanup = {
+        outcome: "unknown-after-loss",
+        detail: "browser launch unresolved; bounded teardown remains attached",
+      };
+      // Only this continuation owns a browser acquired after both acquisition deadlines.
+      // Do not assign it to `browser`: the synchronous teardown path must not close it too.
+      void launchPromise.then(async (lateBrowser) => {
+        row.lateBrowserAcquisition = { outcome: "acquired-for-teardown" };
+        await closeBrowser(lateBrowser);
+      }, (error) => {
+        row.lateBrowserAcquisition = { outcome: "not-acquired", error: errorRecord(error) };
+        row.browserCleanup = { outcome: "not-created" };
+      });
     } else {
       row.browserCleanup = { outcome: "not-created" };
     }
