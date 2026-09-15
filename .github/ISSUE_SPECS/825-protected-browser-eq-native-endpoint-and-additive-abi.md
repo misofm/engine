@@ -521,3 +521,8 @@ C2 separately wires continuous stream start/read/stop through one native admitte
 ## ABI checkpoint C1 attempt 1 adversarial evidence
 
 Checkpoint `82f87ef3` adds early Unsupported alias guards and actual raw-command export fixtures; three focused C1 tests, 143 host-web library tests, workspace locked check, format and diff pass. Astra MEDIUM returned FAIL on a concrete host-borrow path: the new helper treats a conflicting LIVE_HOST borrow as legacy absence, letting spectrum read/cancel and resident read mutate committed staging before refusal. The current tests hold only staging borrows and miss this. Attempt 2 changes only the host-borrow distinction and adds committed-marker fixtures under a held LIVE_HOST borrow. C2 cannot start before C1 passes.
+
+
+## ABI checkpoint C1 accepted evidence
+
+Checkpoint `33fe5c76` distinguishes conflicting LIVE_HOST borrow and invalid handle from a successfully inspected legacy host before any alias staging work. Held-host-borrow fixtures preserve nonzero spectrum lengths, cancel metadata and resident result markers; separate staging-borrow fixtures prove malformed fresh-credit protected inputs still refuse Unsupported. Both actual command-submit exports retain whole-batch refusal/original index with unchanged queues/shadows and audio-only admission after spent observation credit. The full locked host-web test-support library reports 145 passed and 2 existing ignored; workspace check, format and diff pass. Astra MEDIUM returned PASS on attempt 2. C2 may now wire supported continuous spectrum raw/identity packing; public protected boot remains private.
