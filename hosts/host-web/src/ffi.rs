@@ -583,17 +583,31 @@ fn with_host_mut<R>(
 
 /// Refuse an unsupported protected alias before it touches caller-owned staging or input.
 ///
-/// The native owner records the classified attempt and diagnostic. Returning `None` means that
-/// the handle is legacy (or otherwise leaves the existing alias path responsible for its normal
-/// invalid-handle result); a protected handle returns the native Unsupported/exhaustion result.
+/// The native owner records the classified attempt and diagnostic. `Ok(None)` means that a
+/// successfully inspected matching handle is legacy, so the existing alias path remains
+/// responsible for its legacy behavior. A failed live-host borrow or invalid handle is terminal
+/// and must return before any alias-owned staging is touched.
 fn refuse_protected_observation_alias(
     handle: u32,
     class: ObservationClass,
     operation: u32,
-) -> Option<u32> {
-    with_host_mut(handle, None, |host| {
-        host.protected_observation_prepared()
-            .then(|| host.refuse_unsupported_observation(class, operation))
+) -> Result<Option<u32>, u32> {
+    if handle == 0 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    LIVE_HOST.with(|slot| {
+        let mut slot = slot.try_borrow_mut().map_err(|_| RESULT_INTERNAL)?;
+        let live = slot
+            .as_mut()
+            .filter(|live| live.handle == handle)
+            .ok_or(RESULT_INVALID_ARGUMENT)?;
+        if live.host.protected_observation_prepared() {
+            Ok(Some(
+                live.host.refuse_unsupported_observation(class, operation),
+            ))
+        } else {
+            Ok(None)
+        }
     })
 }
 
@@ -2742,9 +2756,9 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
-    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11)
-    {
-        return result;
+    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
@@ -2884,9 +2898,9 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11)
-    {
-        return result;
+    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
         Ok(value) => value,
@@ -2904,9 +2918,9 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
-    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 10)
-    {
-        return result;
+    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 10) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
@@ -3279,9 +3293,9 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Removal, 10)
-    {
-        return result;
+    match refuse_protected_observation_alias(handle, ObservationClass::Removal, 10) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
@@ -4506,8 +4520,9 @@ pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u
     } else {
         ObservationClass::Ordinary
     };
-    if let Some(result) = refuse_protected_observation_alias(handle, class, 12) {
-        return result;
+    match refuse_protected_observation_alias(handle, class, 12) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         if enabled > 1 {
@@ -4698,9 +4713,9 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 14)
-    {
-        return result;
+    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 14) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
     }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
@@ -5573,19 +5588,23 @@ mod spectrum_ffi_tests {
     }
 
     #[test]
-    fn manual_spectrum_cancel_refuses_an_active_managed_stream() {
+    fn invalid_spectrum_cancel_refuses_before_touching_managed_stream() {
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.stream_active = true;
             staging.capture_len = 32;
+            staging.stream_metadata.result = RESULT_OK;
         });
-        assert_eq!(miso_engine_web_v1_spectrum_cancel(0), RESULT_WRONG_STATE);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(0),
+            RESULT_INVALID_ARGUMENT
+        );
         SPECTRUM_STAGING.with(|slot| {
             let staging = slot.borrow();
             assert!(staging.stream_active);
             assert_eq!(staging.capture_len, 32);
-            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+            assert_eq!(staging.stream_metadata.result, RESULT_OK);
         });
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
     }
@@ -6858,6 +6877,97 @@ mod observation_checkpoint_c1_tests {
                 markers.4
             );
         });
+    }
+
+    fn stage_resident_markers() -> Vec<WebObservationResult> {
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.addresses.clear();
+            staging.results.clear();
+            staging.results.extend([
+                WebObservationResult {
+                    status: OBSERVATION_STATUS_READY,
+                    track_index: 96,
+                    sequence: 17,
+                    ..WebObservationResult::default()
+                },
+                WebObservationResult {
+                    status: OBSERVATION_STATUS_PENDING,
+                    track_index: 97,
+                    sequence: 19,
+                    ..WebObservationResult::default()
+                },
+            ]);
+            staging.results.clone()
+        })
+    }
+
+    fn assert_resident_markers(markers: &[WebObservationResult]) {
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.results.as_slice(), markers);
+        });
+    }
+
+    #[test]
+    fn protected_alias_host_borrow_refusal_is_terminal_before_any_staging_work() {
+        let handle = boot_protected();
+        let spectrum_markers = stage_spectrum_markers();
+        let resident_markers = stage_resident_markers();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(miso_engine_web_v1_spectrum_cancel(handle), RESULT_INTERNAL);
+            assert_eq!(
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                ),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_observation_read(handle, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(miso_engine_web_v1_meter_lease(handle, 2), RESULT_INTERNAL);
+        });
+
+        assert_spectrum_markers(spectrum_markers);
+        assert_resident_markers(&resident_markers);
+        dispose(handle);
+    }
+
+    #[test]
+    fn invalid_alias_handle_is_terminal_before_any_staging_work() {
+        let handle = boot_protected();
+        let spectrum_markers = stage_spectrum_markers();
+        let resident_markers = stage_resident_markers();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(0, u32::MAX),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_read(0, u32::MAX),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_spectrum_markers(spectrum_markers);
+        assert_resident_markers(&resident_markers);
+        dispose(handle);
     }
 
     #[test]
