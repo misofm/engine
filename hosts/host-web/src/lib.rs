@@ -312,6 +312,90 @@ pub struct ObservationIngressLimits {
     pub maximum_retained_bytes: u64,
 }
 
+/// Scalar observation demand submitted through the protected browser endpoint.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebObservationDemand {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub operation: u32,
+    pub count: u32,
+    pub owner: u64,
+    pub reserved: [u32; 2],
+}
+
+/// One graph or resident observation application receipt.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebObservationReceipt {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub domain: u32,
+    pub state: u32,
+    pub owner: u64,
+    pub sequence: u64,
+    pub application_sample: u64,
+    pub result: u32,
+    pub reserved: u32,
+}
+
+/// Scalar result and refusal record for one protected observation admission.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationAdmission {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub operation: u32,
+    pub flags: u32,
+    pub reason: u32,
+    pub limit_bytes: u32,
+    pub reserved: u32,
+    pub ingress_epoch: u64,
+    pub requested: u64,
+    pub maximum: u64,
+    pub limit: [u8; 128],
+    pub receipt: WebObservationReceipt,
+}
+
+impl Default for WebObservationAdmission {
+    fn default() -> Self {
+        Self {
+            struct_size: 0,
+            abi_version: 0,
+            result: 0,
+            operation: 0,
+            flags: 0,
+            reason: 0,
+            limit_bytes: 0,
+            reserved: 0,
+            ingress_epoch: 0,
+            requested: 0,
+            maximum: 0,
+            limit: [0; 128],
+            receipt: WebObservationReceipt::default(),
+        }
+    }
+}
+
+/// Identity carried beside one successful response or spectrum capture.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebObservationCaptureIdentity {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub owner: u64,
+    pub observation_generation: u64,
+    pub selection_epoch: u64,
+    pub snapshot_token: u64,
+}
+
 /// Rust-side protected observation preparation supplied before the host is published.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebObservationPreparation<'a> {
@@ -1337,45 +1421,6 @@ impl PreparedSpectrumCapture {
         match self {
             Self::Single(capture) => Some(capture.channels()),
             Self::Collection(capture) => capture.selected_entry().map(|entry| entry.channels),
-        }
-    }
-}
-
-/// Checked source-derived ingress bounds cached by a protected owner.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
-struct ObservationIngressBounds {
-    admission_entry_visits: u64,
-    response_binding_visits: u64,
-    response_section_visits: u64,
-    response_copy_bytes: u64,
-    handler_copy_bytes_per_boundary: u64,
-    cleanup_entry_visits_per_boundary: u64,
-    retained_bytes: u64,
-}
-
-/// Scalar protected ingress state prepared for the later operation-mediation checkpoint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
-struct ObservationIngressState {
-    epoch: u64,
-    ordinary_used: bool,
-    removal_used: bool,
-    limits: ObservationIngressLimits,
-    bounds: ObservationIngressBounds,
-}
-
-#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
-impl ObservationIngressState {
-    const INITIAL_EPOCH: u64 = 1;
-
-    const fn new(limits: ObservationIngressLimits, bounds: ObservationIngressBounds) -> Self {
-        Self {
-            epoch: Self::INITIAL_EPOCH,
-            ordinary_used: false,
-            removal_used: false,
-            limits,
-            bounds,
         }
     }
 }
@@ -6354,6 +6399,8 @@ pub use control_targets::{
     WebEqTargetResult, WebInputFilterEdit, WebPreparedEffectCompanionHeader,
     WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
 };
+mod observation_ingress;
+pub(crate) use observation_ingress::ObservationIngressState;
 mod ffi;
 
 pub use ffi::*;

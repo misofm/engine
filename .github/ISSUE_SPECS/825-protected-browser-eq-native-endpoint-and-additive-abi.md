@@ -257,3 +257,9 @@ no universal deadline qualification. No scheduler or suppression of typed refusa
 ### Projection implementation order
 
 To use actual ABI sizes immediately, the next bounded checkpoint declares only the four scalar ABI records referenced by the projection (WebObservationDemand, WebObservationReceipt, WebObservationAdmission and WebObservationCaptureIdentity) and implements the frozen checked projection helper. No exports, FFI staging, receipt mediation or protected boot are enabled in that checkpoint. These are the final canonical record types, not mirrors or guessed byte constants. Private boot wiring follows using this exact validated projection. This further splits implementation to keep Luna tasks bounded; public protected boot still waits for complete alias mediation.
+
+## Checked projection checkpoint
+
+The four canonical demand/receipt/admission/capture-identity records are declared with their final repr(C) fields. The private observation_ingress module computes the frozen checked bounds and separate per-call facts using actual Rust sizes internally; callers cannot provide a layout-size table. Limit validation is a separate helper that must run before publishing protected preparation. The minimum control capacity covers the largest supported fixed request plus a 127-byte identity, and the minimum row capacity is four receipts. Invalid profile ceilings/counts use REFUSED_OPTIONS; insufficient supplied budgets use REFUSED_BUDGET with the named field.
+
+Root reviewed the formula translation and ran all four focused arithmetic cases: PASS, including exact/one-below limits, overflow and full-H deduplication. The implementer also reports locked host-web check, warning-denying library Clippy, formatting and diff checks passed. No FFI exports, staging allocations, protected boot or operation routing are enabled yet. Next is private boot wiring using the projection and validator.
