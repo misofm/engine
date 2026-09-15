@@ -49,12 +49,14 @@ One stateless issue record and matching GitHub issue/title/number are the allowe
 
 The following named successor work is required before adoption:
 
-1. **Aggregate observation accounting and bounded retention:** derive checked shared/transient work and storage accounting across ordinary observers, protected targets, response/spectrum copies, ingress, browser/host/SDK retention, and paused preview; prove exact-bound acceptance and one-unit-under refusal without partial mutation.
-2. **Family-isolated stop/removal admission:** prevent ordinary operations from consuming EQ removal/terminal reservations; preserve awaiting-admission, accepted/Pending, Applied, and terminal outcomes through saturation and aggregate close.
-3. **Selection identity transaction:** implement desired/accepted/applied state with owner, epoch, and application revision/boundary that survives the `A1 -> B -> A2` sequence and delayed receipts/captures; refusal preserves the prior accepted target.
-4. **Native combined qualification:** prove combined preparation, rendering, delivery, and isolation with explicitly nonzero GR and unchanged PCM, including the frozen asymmetric fixture and bounds.
-5. **Browser/SDK retention and identity:** prove bounded receipt/result retention, target identity delivery, and suspended-browser hide/disposal behavior for the exposed path.
-6. **Production trace/PCM evidence:** provide production trace and PCM comparison tooling as a separately reviewable evidence prerequisite.
+1. **Aggregate observation accounting and bounded retention — RESPONSIBLE OWNER ROLE: Engine Observation Accounting Lead:** derive checked shared/transient work and storage accounting across ordinary observers, protected targets, response/spectrum copies, ingress, browser/host/SDK retention, and paused preview; prove exact-bound acceptance and one-unit-under refusal without partial mutation.
+2. **Family-isolated stop/removal admission — RESPONSIBLE OWNER ROLE: Host-Web Ingress and Stop Lead:** prevent ordinary operations from consuming EQ removal/terminal reservations; preserve awaiting-admission, accepted/Pending, Applied, and terminal outcomes through saturation and aggregate close.
+3. **Selection identity transaction — RESPONSIBLE OWNER ROLE: Host-Web Selection and Identity Lead:** implement desired/accepted/applied state with owner, epoch, and application revision/boundary that survives the `A1 -> B -> A2` sequence and delayed receipts/captures; refusal preserves the prior accepted target.
+4. **Native combined qualification — RESPONSIBLE OWNER ROLE: Native Combined Qualification Lead:** prove combined preparation, rendering, delivery, and isolation with explicitly nonzero GR and unchanged PCM, including the frozen asymmetric fixture and bounds.
+5. **Browser/SDK retention and identity — RESPONSIBLE OWNER ROLE: Browser/SDK Integration Lead:** prove bounded receipt/result retention, target identity delivery, and suspended-browser hide/disposal behavior for the exposed path.
+6. **Production trace/PCM evidence — RESPONSIBLE OWNER ROLE: App/Production Trace Tooling Lead:** provide production trace and PCM comparison tooling as a separately reviewable evidence prerequisite.
+
+These roles are accountable for the corresponding successor evidence and handoff, not a claim that the work is complete or a separate approval gate; the issue-wide plan recheck remains required before E0 closure.
 
 **Exact closure claim:** E0 closes only as the statement “conditional coexistence preferred; adoption blocked today pending the named successors and their evidence,” after this record is reviewed and its checkpoint is upstream. It does not close native implementation, combined-host feasibility, numerical qualification, browser/SDK rollout, or production tracing. No separate human-approval gate, app ETA, or invented limit is part of this issue.
 
