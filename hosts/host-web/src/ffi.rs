@@ -6800,6 +6800,53 @@ mod observation_checkpoint_b2_tests {
         });
     }
 
+    fn render_protected_spectrum_window(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK,
+            "protected source block 0"
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle),
+            1,
+            "the first real render must apply the protected start receipt"
+        );
+        for block in 1..=16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        let read_result = miso_engine_web_v1_spectrum_stream_read(handle);
+        if read_result != RESULT_OK {
+            let (status, admission) = LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let host = &live.as_ref().expect("protected live host").host;
+                (host.observation_status(), *host.observation_admission())
+            });
+            panic!(
+                "the protected read fixture must publish one real window: result={read_result}, status={status:?}, admission={admission:?}"
+            );
+        }
+        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(metadata.capture_epoch, 1);
+        assert_eq!(metadata.sequence, 0);
+        assert_eq!(
+            metadata.end_sample - metadata.captured_sample,
+            2_048,
+            "protected read fixture must contain one complete window"
+        );
+    }
+
     #[test]
     fn application_take_transfers_real_same_boundary_rows_once() {
         let handle = boot_protected();
@@ -6827,6 +6874,59 @@ mod observation_checkpoint_b2_tests {
             miso_engine_web_v1_render(handle, 128),
             RESULT_RENDER_REJECTED
         );
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            live.as_mut()
+                .expect("live host")
+                .host
+                .reconcile_observation_applications();
+        });
+        let expected_rows = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("live host").host;
+            assert_eq!(host.side_records.pending_count, 0);
+            let rows: Vec<_> = host
+                .side_records
+                .receipts
+                .iter()
+                .copied()
+                .filter(|row| row.state == OBSERVATION_RECEIPT_STATE_APPLIED)
+                .collect();
+            assert_eq!(rows.len(), 2);
+            rows
+        });
+
+        // Once the first real render has completed, all rows are Applied and their identities
+        // belong to the native side-records. Invalid handles and both staging-owner borrow
+        // refusals must leave those completed rows untouched for a later valid take.
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("live host").host;
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(
+                host.side_records
+                    .receipts
+                    .iter()
+                    .copied()
+                    .filter(|row| row.state == OBSERVATION_RECEIPT_STATE_APPLIED)
+                    .collect::<Vec<_>>(),
+                expected_rows,
+                "refused takes must preserve completed identities"
+            );
+        });
+
         assert_eq!(
             miso_engine_web_v1_observation_application_take(handle),
             2,
@@ -6840,6 +6940,7 @@ mod observation_checkpoint_b2_tests {
                 staging.endpoint.applications[1],
             ]
         });
+        assert_eq!(rows.as_slice(), expected_rows.as_slice());
         assert!(rows.iter().all(|row| {
             row.state == OBSERVATION_RECEIPT_STATE_APPLIED && row.application_sample == 0
         }));
@@ -6926,13 +7027,40 @@ mod observation_checkpoint_b2_tests {
         });
         assert!(LIVE_HOST.with(|slot| slot.borrow().is_some()));
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        let terminal_row = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.handle, handle);
+            assert_eq!(staging.endpoint.application_count, 1);
+            assert!(staging.endpoint.terminal_application_pending);
+            staging.endpoint.applications[0]
+        });
 
         test_stage_document(b"not-json");
         assert_eq!(miso_engine_web_v1_boot(8), 0);
+        // A failed replacement boot cannot reset the sole retained terminal handoff. The
+        // original row remains unconsumed, with its complete owner/sequence/result identity.
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.handle, handle);
+            assert_eq!(staging.endpoint.application_count, 1);
+            assert!(staging.endpoint.terminal_application_pending);
+            assert_eq!(staging.endpoint.applications[0], terminal_row);
+        });
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]),
+            terminal_row
+        );
         assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
-        let retained = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]);
-        assert_eq!(retained.state, OBSERVATION_RECEIPT_STATE_CLOSED);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]),
+            terminal_row,
+            "a repeated terminal take must retain the original row bytes"
+        );
 
         let replacement = boot_protected();
         assert_ne!(replacement, 0);
@@ -6942,6 +7070,105 @@ mod observation_checkpoint_b2_tests {
             0
         );
         assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
+    }
+
+    #[test]
+    fn terminal_drop_retains_actual_status_admission_and_spectrum_identity() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_spectrum_window(handle);
+
+        let live_capture = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(
+                identity.kind, 2,
+                "protected read must publish spectrum identity"
+            );
+            assert_eq!(identity.flags, 1);
+            assert_ne!(identity.owner, 0);
+            assert_ne!(identity.observation_generation, 0);
+            assert_ne!(identity.selection_epoch, 0);
+            assert_ne!(identity.snapshot_token, 0);
+            identity
+        });
+
+        stage_stop(handle);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let live_admission = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_ne!(admission.receipt.owner, 0);
+            assert_ne!(admission.receipt.sequence, 0);
+            admission
+        });
+
+        // Apply the reserved removal at a real render boundary and consume both completed rows so
+        // terminal disposal has no hidden application work. The final status still comes from the
+        // actual native generations and selection epoch.
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+
+        let live_status = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert_ne!(status.owner, 0);
+            // The completed StopGraph removes the accepted spectrum. The zero generations here
+            // are the native terminal selection, while the successful capture identity above
+            // retains the nonzero generation that produced the window.
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_ne!(status.selection_epoch, 0);
+            assert_eq!(status.pending_count, 0);
+            status
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        // Read the actual retained TLS handoff directly. No native pointer is converted through
+        // the truncated u32 ABI address in this assertion.
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let status = staging.endpoint.status;
+            assert_eq!(status.profile, live_status.profile);
+            assert_eq!(status.owner, live_status.owner);
+            assert_eq!(status.ingress_epoch, live_status.ingress_epoch);
+            assert_eq!(status.accepted_generation, live_status.accepted_generation);
+            assert_eq!(status.applied_generation, live_status.applied_generation);
+            assert_eq!(status.selection_epoch, live_status.selection_epoch);
+            assert_eq!(status.pending_count, 0);
+            assert_ne!(status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+            assert_eq!(
+                status.flags
+                    & (crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                        | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+                0
+            );
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_RENDER_FAILED,
+                0
+            );
+            assert_eq!(staging.endpoint.admission, live_admission);
+            assert_eq!(staging.endpoint.capture_identity, live_capture);
+            assert_eq!(staging.endpoint.capture_identity.kind, 2);
+            assert_eq!(staging.endpoint.capture_identity.owner, status.owner);
+            assert_ne!(staging.endpoint.capture_identity.observation_generation, 0);
+            assert_ne!(staging.endpoint.capture_identity.selection_epoch, 0);
+            assert_ne!(staging.endpoint.capture_identity.snapshot_token, 0);
+        });
     }
 
     #[test]
