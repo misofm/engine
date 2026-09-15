@@ -316,3 +316,7 @@ Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must n
 ## SDK and source-adapter ownership handoff
 
 Issue [#796](https://github.com/misofm/engine/issues/796), **Own browser meter and render-telemetry subscriptions in the SDK engine**, is the coordination entry point. Its body links the complete spec-driven delivery map: SDK ownership → release #794 → adapter #95 → app #210. Issue [#797](https://github.com/misofm/engine/issues/797), **Provide codec-neutral PCM runway validation beside the SDK feed**, and adapter #101/#102 are independent follow-ups and do not delay plotting. These issue bodies freeze the user-requested Luna XHIGH implementation and fresh Astra MEDIUM verification workflow, overriding historical model defaults above for this work. Scope creation does not claim implementation or publication.
+
+## Demand-driven observation delivery
+
+Issue [#816](https://github.com/misofm/engine/issues/816), **Prepared active observer dispatch without audio-plan mutation**, starts the user-approved demand-driven feed delivery under #763. Astra XHIGH freezes specs; fresh, bounded Luna MAX agents implement exact tranches; root coordinates checkpoints, integration and production release. A fresh Astra XHIGH agent receives a coordinator brief for final independent verification. Model choices here supersede historical defaults for this work.
