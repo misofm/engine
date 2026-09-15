@@ -1,6 +1,6 @@
 # Controlled peak-meter compiler capability
 
-Status: Astra XHIGH design approved by coordinator for bounded Luna MAX implementation. Depends on closed #816 (PR #817, merge a4e2d8ca).
+Status: CLOSED. Native attempt1 PASS; merged through PR #819 at b568b09a79693e27fc7e6d5e3cf8ea4edd1a45b2. Depends on closed #816.
 
 ## Product slice
 
@@ -217,3 +217,10 @@ PASS with zero violations; record hash
 changes only because its accepted manifest identity changed. Native attempt1
 PASS and all browser integration evidence are complete; required PR CI and merged
 upstream delivery remain before closure.
+
+## Merged delivery
+
+Required qualification34927857723 passed all jobs on75be9540. PR #819 merged as
+b568b09a79693e27fc7e6d5e3cf8ea4edd1a45b2; GitHub #818 CLOSED verified. Native
+controlled meter preparation, activation and transactional binding are delivered.
+Host demand ownership continues in #820; parent #763 stays open.
