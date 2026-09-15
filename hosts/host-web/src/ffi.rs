@@ -3509,12 +3509,30 @@ pub extern "C" fn miso_engine_web_v1_observation_preparation_bytes() -> u32 {
 
 /// Return the fixed protected-observation demand record address.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_demand_ptr() -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
+pub extern "C" fn miso_engine_web_v1_observation_demand_ptr(handle: u32) -> u32 {
+    pointer_u32(observation_demand_ptr_for_handle(handle))
+}
+
+fn observation_demand_ptr_for_handle(handle: u32) -> *mut WebObservationDemand {
+    if handle == 0 {
+        return ptr::null_mut();
+    }
+    // The demand address is live-owner input staging. It must never be exposed for a disposed,
+    // unrelated, or otherwise invalid handle, even when the endpoint retains a terminal snapshot.
+    LIVE_HOST.with(|live_slot| {
+        let Ok(live_slot) = live_slot.try_borrow() else {
+            return ptr::null_mut();
         };
-        pointer_u32(ptr::from_mut(&mut staging.endpoint.demand))
+        let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
+            return ptr::null_mut();
+        };
+        let _ = live;
+        OBSERVATION_STAGING.with(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return ptr::null_mut();
+            };
+            ptr::from_mut(&mut staging.endpoint.demand)
+        })
     })
 }
 
@@ -3581,11 +3599,17 @@ fn apply_observation_demand(
     // wrong-owner records still spend their classified attempt below.
     if valid_stop {
         if let Some(receipt) = host.pending_stop_receipt() {
-            let mut admission = *host.observation_admission();
-            admission.operation = OBSERVATION_OPERATION_STOP_GRAPH;
-            admission.receipt = receipt;
-            host.side_records.admission = admission;
-            return admission.result;
+            // The pending receipt is authoritative, but the preceding admission may have been
+            // replaced by a refusal. Rebuild the successful pending projection and retag only
+            // its wire operation; never copy that arbitrary refusal's result or reason.
+            host.record_observation_admission(
+                OBSERVATION_OPERATION_STOP_GRAPH,
+                RESULT_OK,
+                None,
+                Some(receipt),
+                true,
+            );
+            return RESULT_OK;
         }
     }
 
@@ -3653,62 +3677,100 @@ pub extern "C" fn miso_engine_web_v1_observation_demand_apply(handle: u32) -> u3
 }
 
 fn observation_admission_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_admission_ptr_for_handle_raw(handle))
+}
+
+fn observation_admission_ptr_for_handle_raw(handle: u32) -> *mut WebObservationAdmission {
     if handle == 0 {
-        return 0;
+        return ptr::null_mut();
     }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
+            return ptr::null_mut();
         };
-        if let Some(admission) = with_host(handle, None, |host| Some(*host.observation_admission()))
-        {
-            staging.endpoint.admission = admission;
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.admission));
-        }
-        if staging.endpoint.handle == handle {
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.admission));
-        }
-        0
+        // A failed LIVE_HOST borrow is distinct from an empty slot. In either case the query
+        // refuses while a live slot exists or cannot be inspected; only a proven empty slot may
+        // fall through to the retained terminal mirror.
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.admission = *live.host.observation_admission();
+                    ptr::from_mut(&mut staging.endpoint.admission)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.admission)
+                }
+                None => ptr::null_mut(),
+            }
+        })
     })
 }
 
 fn observation_status_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_status_ptr_for_handle_raw(handle))
+}
+
+fn observation_status_ptr_for_handle_raw(handle: u32) -> *mut WebObservationStatus {
     if handle == 0 {
-        return 0;
+        return ptr::null_mut();
     }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
+            return ptr::null_mut();
         };
-        if let Some(status) = with_host(handle, None, |host| Some(host.observation_status())) {
-            staging.endpoint.status = status;
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.status));
-        }
-        if staging.endpoint.handle == handle {
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.status));
-        }
-        0
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.status = live.host.observation_status();
+                    ptr::from_mut(&mut staging.endpoint.status)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.status)
+                }
+                None => ptr::null_mut(),
+            }
+        })
     })
 }
 
 fn observation_capture_identity_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_capture_identity_ptr_for_handle_raw(handle))
+}
+
+fn observation_capture_identity_ptr_for_handle_raw(
+    handle: u32,
+) -> *mut WebObservationCaptureIdentity {
     if handle == 0 {
-        return 0;
+        return ptr::null_mut();
     }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
+            return ptr::null_mut();
         };
-        if let Some(identity) = with_host(handle, None, |host| {
-            Some(*host.observation_capture_identity())
-        }) {
-            staging.endpoint.capture_identity = identity;
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.capture_identity));
-        }
-        if staging.endpoint.handle == handle {
-            return pointer_u32(ptr::from_mut(&mut staging.endpoint.capture_identity));
-        }
-        0
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.capture_identity = *live.host.observation_capture_identity();
+                    ptr::from_mut(&mut staging.endpoint.capture_identity)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.capture_identity)
+                }
+                None => ptr::null_mut(),
+            }
+        })
     })
 }
 
@@ -6307,8 +6369,21 @@ mod observation_checkpoint_b1_tests {
         assert_eq!(first.receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
         assert_ne!(first.receipt.sequence, 0);
 
-        // The second valid StopGraph demand is a scalar identity shortcut. It must preserve the
-        // native pending receipt and must not try another native stop or spend removal credit.
+        // An intervening malformed removal is refused after the removal attempt was spent. The
+        // following valid StopGraph must still use the original native pending receipt.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        // The second valid StopGraph is a scalar identity shortcut. It must preserve the native
+        // pending receipt and must not copy the intervening refusal or spend another permit/native
+        // stop publication.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_OK
@@ -6316,6 +6391,8 @@ mod observation_checkpoint_b1_tests {
         let _ = miso_engine_web_v1_observation_admission_ptr(handle);
         let repeated = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
         assert_eq!(repeated.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(repeated.result, RESULT_OK);
+        assert_eq!(repeated.reason, 0);
         assert_eq!(repeated.receipt, first.receipt);
         assert_eq!(
             LIVE_HOST.with(|slot| slot
@@ -6422,7 +6499,7 @@ mod observation_checkpoint_b1_tests {
         let _ = miso_engine_web_v1_observation_status_ptr(second);
         let _ = miso_engine_web_v1_observation_capture_identity_ptr(second);
         let _ = miso_engine_web_v1_observation_preparation_ptr();
-        let _ = miso_engine_web_v1_observation_demand_ptr();
+        let _ = miso_engine_web_v1_observation_demand_ptr(second);
         let (pending_after, status) = LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().unwrap().host;
@@ -6434,5 +6511,49 @@ mod observation_checkpoint_b1_tests {
 
         assert_eq!(miso_engine_web_v1_dispose(second), RESULT_OK);
         no_live_host();
+    }
+
+    #[test]
+    fn demand_pointer_requires_live_matching_handle() {
+        let handle = boot_protected();
+        assert!(!observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(0).is_null());
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_ptr(handle.wrapping_add(1)),
+            0
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        assert!(observation_demand_ptr_for_handle(handle).is_null());
+    }
+
+    #[test]
+    fn scalar_queries_reject_live_host_borrow_conflicts_before_terminal_fallback() {
+        let handle = boot_protected();
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(observation_admission_ptr_for_handle(handle), 0);
+            assert_eq!(observation_status_ptr_for_handle(handle), 0);
+            assert_eq!(observation_capture_identity_ptr_for_handle(handle), 0);
+            assert_eq!(miso_engine_web_v1_observation_demand_ptr(handle), 0);
+        });
+
+        // Once the live slot is actually empty, the scalar getters may serve the matching
+        // retained endpoint mirror. An unrelated handle remains invalid.
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        assert!(!observation_admission_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_status_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+        assert_eq!(
+            observation_admission_ptr_for_handle(handle.wrapping_add(1)),
+            0
+        );
+        assert_eq!(observation_status_ptr_for_handle(handle.wrapping_add(1)), 0);
+        assert_eq!(
+            observation_capture_identity_ptr_for_handle(handle.wrapping_add(1)),
+            0
+        );
     }
 }
