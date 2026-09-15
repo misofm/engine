@@ -410,3 +410,30 @@ The raw-Wasm expected-resource checker passes actual module/native witness and
 all 26 red mutations after the three +200-byte graph pins. Formatting/diff clean.
 No production behavior, wire layout, audio digest, test case or rejection rule
 changed in these downstream corrections. Required CI is rerun on this checkpoint.
+
+CI policy integration finding: check-graph-policy.sh truncates a Rust file at
+the first standalone #[cfg(test)] attribute, so the new layout-test helper before
+the real executor hides the legitimate implementation. Correct the existing
+stripper to truncate only at a cfg(test)-marked inline test module, preserving
+standalone test helpers and all following production text. Keep checked sed
+error/partial-output handling. Add compact existing-suite controls proving a
+helper before the graph executor passes, and a foreign executor or forbidden
+graph operation after such a helper still rejects. No production code change or
+weakened graph ownership rule; no general Rust parser/tooling expansion.
+
+The completed CI graph realtime trace passes its ownership/zero-violation
+predicates, then rejects the whole-record checksum because the record embeds
+the new resource manifest identity. Refresh only that active checksum consumer
+in trace-builtins-graph-audit.sh, run the existing trace, and prove replacing
+only the manifest hash restores the exact prior record checksum. Preserve every
+runtime/trace predicate; no timed benchmark or new audit framework.
+
+Policy/trace followthrough PASS: fresh Luna narrowed both existing sed scans to
+inline cfg(test) modules. Real-tree graph policy, all existing policy/error-shim
+fixtures, three standalone-helper regression controls, bash syntax and diff
+checks pass. Root's existing million-block graph all-TID trace passes every
+ownership/realtime predicate. Its new record checksum is
+048dc7b07cdcfbb1513e4a6513bd0ca73c228bd682ffb4668021f6d74183ae11;
+replacing its single da78dc3e resource-manifest identity with the prior9161d2ca
+identity restores exact prior checksum3a5ae262. No other record byte changed.
+All other CI34923128333 jobs passed; these were its only remaining failures.
