@@ -525,7 +525,10 @@ impl BootStaging {
 
 thread_local! {
     static LIVE_HOST: RefCell<Option<LiveHost>> = const { RefCell::new(None) };
-    static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
+    // Zero is the never-issued sentinel. `next_handle` preserves the established nonzero
+    // handle contract when the first owner is published, while cold invalid lookups can avoid
+    // constructing the allocating observation staging TLS entirely.
+    static NEXT_HANDLE: Cell<u32> = const { Cell::new(0) };
     static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
     static RESPONSE_STAGING: RefCell<ResponseStaging> = RefCell::new(ResponseStaging::new());
     static SPECTRUM_STAGING: RefCell<SpectrumStaging> = RefCell::new(SpectrumStaging::new());
@@ -3810,6 +3813,109 @@ pub extern "C" fn miso_engine_web_v1_observation_capture_identity_bytes() -> u32
     u32::try_from(size_of::<WebObservationCaptureIdentity>()).unwrap_or(0)
 }
 
+fn observation_application_take_live(handle: u32, staging: &mut ObservationStaging) -> u32 {
+    LIVE_HOST.with(|live_slot| {
+        let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+            return 0;
+        };
+        let Some(live) = live_slot.as_mut().filter(|live| live.handle == handle) else {
+            return 0;
+        };
+        // The native helper performs the bounded reconciliation exactly once. Its returned slice
+        // is stable until this host borrow ends, so copy the rows before releasing LIVE_HOST.
+        let applications = live.host.take_observation_applications();
+        let count = applications.len();
+        debug_assert!(count <= staging.endpoint.applications.len());
+        staging.endpoint.applications[..count].copy_from_slice(applications);
+        staging.endpoint.application_count = u32::try_from(count).unwrap_or(0);
+        staging.endpoint.terminal_application_pending = false;
+        u32::try_from(count).unwrap_or(0)
+    })
+}
+
+/// Transfer completed protected-observation receipts into the fixed ABI staging array.
+///
+/// A matching disposed handle receives the one retained terminal handoff. Repeated takes return
+/// zero without clearing the previous rows, which keeps the fixed address stable for a caller that
+/// has already observed the terminal batch. A cold invalid handle returns before touching the
+/// allocating observation staging TLS.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_take(handle: u32) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+
+    // Distinguish a live match, a live mismatch, an empty slot, and a borrow conflict before
+    // touching OBSERVATION_STAGING. The zero NEXT_HANDLE value is the never-issued sentinel and
+    // makes a cold invalid take allocation-free.
+    let live_state = LIVE_HOST.with(|live_slot| {
+        let Ok(live_slot) = live_slot.try_borrow_mut() else {
+            return 0_u8;
+        };
+        match live_slot.as_ref() {
+            Some(live) if live.handle == handle => 1,
+            Some(_) => 2,
+            None => 3,
+        }
+    });
+    match live_state {
+        0 | 2 => return 0,
+        1 => {
+            return OBSERVATION_STAGING.with(|slot| {
+                let Ok(mut staging) = slot.try_borrow_mut() else {
+                    return 0;
+                };
+                observation_application_take_live(handle, &mut staging)
+            });
+        }
+        3 => {}
+        _ => unreachable!(),
+    }
+
+    if NEXT_HANDLE.with(Cell::get) == 0 {
+        return 0;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if staging.endpoint.handle != handle {
+            return 0;
+        }
+        if !staging.endpoint.terminal_application_pending {
+            // The terminal rows remain in the fixed bytes for stable caller inspection, while a
+            // repeated take reports an empty batch through both its return value and count.
+            staging.endpoint.application_count = 0;
+            return 0;
+        }
+        staging.endpoint.terminal_application_pending = false;
+        staging.endpoint.application_count
+    })
+}
+
+/// Return the fixed protected-observation application row staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.endpoint.applications.as_mut_ptr())
+    })
+}
+
+/// Return the actual protected-observation application row size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationReceipt>()).unwrap_or(0)
+}
+
+/// Return the fixed protected-observation application row capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_capacity() -> u32 {
+    4
+}
+
 /// Stage an exact-length document before boot. Refuses lengths above the engine bound.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
@@ -4071,29 +4177,54 @@ fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
         return 0;
     };
     let initial_status = host.observation_status();
-    let handle = LIVE_HOST.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else {
-            return 0;
+    let mut host = Some(host);
+    // Acquire endpoint staging before publishing LIVE_HOST. A conflicting borrow is a real boot
+    // failure, and the prior terminal handoff remains intact because reset_outputs runs only on a
+    // successful publication.
+    let handle = OBSERVATION_STAGING.with(|observation_slot| {
+        let Ok(mut observation) = observation_slot.try_borrow_mut() else {
+            return None;
         };
-        if slot.is_some() {
-            return 0;
-        }
-        let handle = next_handle();
-        *slot = Some(LiveHost {
-            handle,
-            host: Box::new(host),
-        });
-        handle
+        LIVE_HOST.with(|live_slot| {
+            let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+                return None;
+            };
+            if live_slot.is_some() {
+                return None;
+            }
+            let handle = next_handle();
+            observation.endpoint.reset_outputs();
+            observation.endpoint.status = initial_status;
+            observation.endpoint.handle = handle;
+            *live_slot = Some(LiveHost {
+                handle,
+                host: Box::new(
+                    host.take()
+                        .expect("boot host is present before publication"),
+                ),
+            });
+            Some(handle)
+        })
     });
-    if handle != 0 {
-        OBSERVATION_STAGING.with(|slot| {
-            if let Ok(mut staging) = slot.try_borrow_mut() {
-                staging.endpoint.reset_outputs();
-                staging.endpoint.status = initial_status;
-                staging.endpoint.handle = handle;
+    let Some(handle) = handle else {
+        if let Some(mut host) = host.take() {
+            let _ = host.dispose();
+        }
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                staging.record_failure(BootFailure::fixed(
+                    RESULT_INTERNAL,
+                    "web.observation.staging",
+                ));
             }
         });
-    }
+        SPECTRUM_STAGING.with(|slot| {
+            if let Ok(mut staging) = slot.try_borrow_mut() {
+                staging.release_capture();
+            }
+        });
+        return 0;
+    };
     handle
 }
 
@@ -4724,30 +4855,56 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
     if handle == 0 {
         return RESULT_OK;
     }
-    LIVE_HOST.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else {
+
+    // Acquire every staging owner first. A borrow refusal therefore leaves LIVE_HOST untouched,
+    // including its native ownership and pending receipt rows.
+    OBSERVATION_STAGING.with(|observation_slot| {
+        let Ok(mut observation) = observation_slot.try_borrow_mut() else {
             return RESULT_INVALID_ARGUMENT;
         };
-        let Some(live) = slot.as_ref().filter(|live| live.handle == handle) else {
-            return RESULT_INVALID_ARGUMENT;
-        };
-        let _ = live;
-        let Some(mut live) = slot.take() else {
-            return RESULT_INTERNAL;
-        };
-        let result = live.host.dispose();
-        drop(live);
-        SPECTRUM_STAGING.with(|staging| {
-            if let Ok(mut staging) = staging.try_borrow_mut() {
-                staging.release_capture();
-            }
-        });
-        BOOT_STAGING.with(|staging| {
-            if let Ok(mut staging) = staging.try_borrow_mut() {
-                staging.reset_after_dispose();
-            }
-        });
-        result
+        SPECTRUM_STAGING.with(|spectrum_slot| {
+            let Ok(mut spectrum) = spectrum_slot.try_borrow_mut() else {
+                return RESULT_INVALID_ARGUMENT;
+            };
+            BOOT_STAGING.with(|boot_slot| {
+                let Ok(mut boot) = boot_slot.try_borrow_mut() else {
+                    return RESULT_INVALID_ARGUMENT;
+                };
+                LIVE_HOST.with(|live_slot| {
+                    let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+                        return RESULT_INVALID_ARGUMENT;
+                    };
+                    let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
+                        return RESULT_INVALID_ARGUMENT;
+                    };
+                    let _ = live;
+                    let Some(mut live) = live_slot.take() else {
+                        return RESULT_INTERNAL;
+                    };
+
+                    // Native disposal performs its one reconciliation and terminalizes remaining
+                    // Pending rows. Snapshot all scalar mirrors only after that transition, then
+                    // take the resulting rows once from the now-terminal native owner.
+                    let result = live.host.dispose();
+                    observation.endpoint.status = live.host.observation_status();
+                    observation.endpoint.admission = *live.host.observation_admission();
+                    observation.endpoint.capture_identity =
+                        *live.host.observation_capture_identity();
+                    let applications = live.host.take_observation_applications();
+                    let count = applications.len();
+                    debug_assert!(count <= observation.endpoint.applications.len());
+                    observation.endpoint.applications[..count].copy_from_slice(applications);
+                    observation.endpoint.application_count = u32::try_from(count).unwrap_or(0);
+                    observation.endpoint.handle = handle;
+                    observation.endpoint.terminal_application_pending = count != 0;
+
+                    drop(live);
+                    spectrum.release_capture();
+                    boot.reset_after_dispose();
+                    result
+                })
+            })
+        })
     })
 }
 
@@ -6570,5 +6727,233 @@ mod observation_checkpoint_b1_tests {
             observation_capture_identity_ptr_for_handle(handle.wrapping_add(1)),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_b2_tests {
+    use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+    use crate::{
+        OBSERVATION_RECEIPT_STATE_APPLIED, OBSERVATION_RECEIPT_STATE_CLOSED, STATE_FAILED,
+    };
+    use builtins::Matrix2x2;
+    use builtins_compiler::TrackControlRecord;
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.console_command_queue_records = 4;
+        });
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn owner(handle: u32) -> u64 {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        })
+    }
+
+    fn stage_stop(handle: u32) {
+        let owner = owner(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation: OBSERVATION_OPERATION_STOP_GRAPH,
+                count: 0,
+                owner,
+                reserved: [0; 2],
+            };
+        });
+    }
+
+    fn inject_nan_matrix(handle: u32) {
+        LIVE_HOST.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let live = slot
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host");
+            live.host.ready.as_mut().expect("ready ownership").controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: f32::NAN,
+                        ..Matrix2x2::IDENTITY
+                    },
+                    smoothing_samples: 0,
+                })
+                .expect("documented private malformed matrix fixture");
+        });
+    }
+
+    #[test]
+    fn application_take_transfers_real_same_boundary_rows_once() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_observation_application_bytes() as usize,
+            size_of::<WebObservationReceipt>()
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_capacity(), 4);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        stage_stop(handle);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        inject_nan_matrix(handle);
+        assert_eq!(
+            miso_engine_web_v1_render(handle, 128),
+            RESULT_RENDER_REJECTED
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle),
+            2,
+            "start and stop must be applied before the same failing render returns"
+        );
+        let rows = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 2);
+            [
+                staging.endpoint.applications[0],
+                staging.endpoint.applications[1],
+            ]
+        });
+        assert!(rows.iter().all(|row| {
+            row.state == OBSERVATION_RECEIPT_STATE_APPLIED && row.application_sample == 0
+        }));
+        assert_eq!(
+            LIVE_HOST.with(|slot| slot.borrow().as_ref().unwrap().host.status().state),
+            STATE_FAILED
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn never_rendered_pending_row_is_closed_and_terminal_take_is_one_shot() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        let row = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(row.state, OBSERVATION_RECEIPT_STATE_CLOSED);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        let retained = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]);
+        assert_eq!(
+            retained, row,
+            "a repeated terminal take must not clear rows"
+        );
+    }
+
+    #[test]
+    fn application_take_borrow_and_invalid_handle_refusals_do_not_consume_pending_rows() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        let pending = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("live host retained")
+                .host
+                .side_records
+                .pending_count
+        });
+        assert_eq!(pending, 1);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn dispose_borrow_refusal_preserves_live_owner_and_failed_replacement_preserves_handoff() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_INVALID_ARGUMENT);
+        });
+        assert!(LIVE_HOST.with(|slot| slot.borrow().is_some()));
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+
+        test_stage_document(b"not-json");
+        assert_eq!(miso_engine_web_v1_boot(8), 0);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        let retained = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]);
+        assert_eq!(retained.state, OBSERVATION_RECEIPT_STATE_CLOSED);
+
+        let replacement = boot_protected();
+        assert_ne!(replacement, 0);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
+    }
+
+    #[test]
+    fn legacy_boot_fails_before_publication_when_endpoint_staging_is_borrowed() {
+        no_live_host();
+        let document = protected_document();
+        test_stage_document(document);
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_boot(document.len() as u32), 0);
+        });
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_INTERNAL);
+        no_live_host();
     }
 }
