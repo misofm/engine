@@ -8050,48 +8050,190 @@ mod observation_checkpoint_c2a_tests {
         no_live_host();
     }
 
-    fn stage_markers() -> (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>) {
+    #[derive(Clone, Debug, PartialEq)]
+    struct CommittedMarkers {
+        capture: Vec<u8>,
+        capture_len: usize,
+        capture_header: WebSpectrumWindow,
+        result: Vec<u8>,
+        result_len: usize,
+        result_header: WebSpectrumResult,
+        stream_metadata: WebSpectrumStreamMetadata,
+        stream_active: bool,
+        stream_cadence: Option<SpectrumCadence>,
+        stream_smoothing: Option<SpectrumSmoothingConfig>,
+        stream_window: Option<(u64, u64, u64)>,
+        capture_identity: WebObservationCaptureIdentity,
+    }
+
+    fn stage_markers() -> CommittedMarkers {
+        let cadence = SpectrumCadence::new(48_000, 128).expect("fixture cadence");
+        let smoothing = SpectrumSmoothingConfig::new(5.0).expect("fixture smoothing");
+        let capture_len = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + 2 * SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .expect("fixture capture length");
+        let result_len = usize::try_from(SPECTRUM_RESULT_HEADER_BYTES).expect("result header");
+        let capture_header = WebSpectrumWindow {
+            struct_size: SPECTRUM_WINDOW_HEADER_BYTES,
+            abi_version: ABI_VERSION,
+            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            channels: SPECTRUM_CHANNEL_BOTH,
+            sample_rate_hz: cadence.sample_rate_hz(),
+            frames: SPECTRUM_WINDOW_FRAMES,
+            source_underrun: 1,
+            reserved0: 0,
+            captured_sample: 10_240,
+            end_sample: 12_288,
+            snapshot_token: 44,
+            left_offset: SPECTRUM_WINDOW_HEADER_BYTES,
+            right_offset: SPECTRUM_WINDOW_HEADER_BYTES
+                + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        };
+        let result_header = WebSpectrumResult {
+            struct_size: SPECTRUM_RESULT_HEADER_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            channels: SPECTRUM_CHANNEL_BOTH,
+            sample_rate_hz: cadence.sample_rate_hz(),
+            window_frames: SPECTRUM_WINDOW_FRAMES,
+            bin_count: host_core::SPECTRUM_BIN_COUNT as u32,
+            source_underrun: 1,
+            floor_db: host_core::SPECTRUM_FLOOR_DB,
+            captured_sample: capture_header.captured_sample,
+            end_sample: capture_header.end_sample,
+            snapshot_token: capture_header.snapshot_token,
+            result_bytes: SPECTRUM_RESULT_HEADER_BYTES as u64,
+            frequencies_offset: 0,
+            left_offset: 0,
+            right_offset: 0,
+            reserved0: 0,
+        };
+
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             staging.configure_capture().expect("fixed spectrum staging");
-            staging.capture.as_mut().expect("capture bytes")[0] = 0xa5;
-            staging.result.as_mut().expect("result bytes")[0] = 0x5a;
-            staging.capture_len = 17;
-            staging.result_len = 19;
+            let capture = staging.capture.as_mut().expect("capture bytes");
+            capture[..capture_len].fill(0xa5);
+            let left_offset = capture_header.left_offset as usize;
+            let right_offset = capture_header.right_offset as usize;
+            for (index, byte) in capture[left_offset..right_offset].iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_add(0x11);
+            }
+            for (index, byte) in capture[right_offset..capture_len].iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_add(0x77);
+            }
+            assert!(copy_live_record(capture, 0, &capture_header));
+            let result = staging.result.as_mut().expect("result bytes");
+            result[..result_len].fill(0x5a);
+            assert!(copy_live_record(result, 0, &result_header));
+            staging.capture_len = capture_len;
+            staging.result_len = result_len;
             staging.stream_active = true;
-            staging.stream_smoothing = Some(SpectrumSmoothingConfig::new(5.0).unwrap());
-            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
-            staging.stream_metadata.result = RESULT_OK;
-            staging.stream_metadata.sequence = 41;
-            staging.stream_metadata.dropped_captures = 3;
-            (
-                staging.capture_len,
-                staging.result_len,
-                staging.stream_metadata,
-                staging.stream_active,
-                staging
-                    .stream_smoothing
-                    .map(SpectrumSmoothingConfig::smoothing_ms),
-            )
+            staging.stream_cadence = Some(cadence);
+            staging.stream_smoothing = Some(smoothing);
+            staging.stream_window = Some(SpectrumStreamWindowFacts {
+                stream_epoch: 17,
+                sequence: 41,
+                dropped_captures: 3,
+            });
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                status: SPECTRUM_STREAM_STATUS_READY,
+                target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                channels: SPECTRUM_CHANNEL_BOTH,
+                sample_rate_hz: cadence.sample_rate_hz(),
+                quantum_frames: cadence.quantum_frames(),
+                hop_frames: cadence.hop_frames(),
+                source_underrun: 1,
+                reserved0: 0,
+                reserved1: 0,
+                capture_epoch: 17,
+                sequence: 41,
+                dropped_captures: 3,
+                windows: 42,
+                captured_sample: capture_header.captured_sample,
+                end_sample: capture_header.end_sample,
+                analysis_epoch: 9,
+                history_start_sample: 8_192,
+                smoothing_ms: smoothing.smoothing_ms(),
+            };
+        });
+        let capture_identity = stage_capture_identity();
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            CommittedMarkers {
+                capture: staging.capture.as_ref().expect("capture bytes")[..staging.capture_len]
+                    .to_vec(),
+                capture_len: staging.capture_len,
+                capture_header,
+                result: staging.result.as_ref().expect("result bytes")[..staging.result_len]
+                    .to_vec(),
+                result_len: staging.result_len,
+                result_header,
+                stream_metadata: staging.stream_metadata,
+                stream_active: staging.stream_active,
+                stream_cadence: staging.stream_cadence,
+                stream_smoothing: staging.stream_smoothing,
+                stream_window: staging.stream_window.map(|window| {
+                    (
+                        window.stream_epoch,
+                        window.sequence,
+                        window.dropped_captures,
+                    )
+                }),
+                capture_identity,
+            }
         })
     }
 
-    fn assert_markers(markers: (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>)) {
+    fn assert_staged_markers(markers: &CommittedMarkers) {
         SPECTRUM_STAGING.with(|slot| {
             let staging = slot.borrow();
-            assert_eq!(staging.capture_len, markers.0);
-            assert_eq!(staging.result_len, markers.1);
-            assert_eq!(staging.stream_metadata, markers.2);
-            assert_eq!(staging.stream_active, markers.3);
+            assert_eq!(staging.capture_len, markers.capture_len);
+            assert_eq!(staging.result_len, markers.result_len);
+            assert_eq!(staging.stream_metadata, markers.stream_metadata);
+            assert_eq!(staging.stream_active, markers.stream_active);
+            assert_eq!(staging.stream_cadence, markers.stream_cadence);
+            assert_eq!(staging.stream_smoothing, markers.stream_smoothing);
             assert_eq!(
-                staging
-                    .stream_smoothing
-                    .map(SpectrumSmoothingConfig::smoothing_ms),
-                markers.4
+                staging.stream_window.map(|window| {
+                    (
+                        window.stream_epoch,
+                        window.sequence,
+                        window.dropped_captures,
+                    )
+                }),
+                markers.stream_window
             );
-            assert_eq!(staging.capture.as_ref().expect("capture bytes")[0], 0xa5);
-            assert_eq!(staging.result.as_ref().expect("result bytes")[0], 0x5a);
+            let capture = staging.capture.as_ref().expect("capture bytes");
+            let capture_prefix = capture.len().min(markers.capture.len());
+            assert_eq!(
+                &capture[..capture_prefix],
+                &markers.capture[..capture_prefix]
+            );
+            if capture.len() >= size_of::<WebSpectrumWindow>() {
+                assert_eq!(
+                    read_live_record::<WebSpectrumWindow>(capture, 0)
+                        .expect("committed capture header"),
+                    markers.capture_header
+                );
+            }
+            let result = staging.result.as_ref().expect("result bytes");
+            assert_eq!(&result[..markers.result.len()], markers.result.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumResult>(result, 0).expect("committed result header"),
+                markers.result_header
+            );
         });
+    }
+
+    fn assert_markers(markers: &CommittedMarkers) {
+        assert_staged_markers(markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
     }
 
     fn stage_capture_identity() -> WebObservationCaptureIdentity {
@@ -8342,7 +8484,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_read(handle),
             RESULT_REFUSED_BUDGET
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
@@ -8383,6 +8525,149 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn protected_stream_read_borrow_conflicts_preserve_complete_committed_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_read(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_staged_markers(&markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_read(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_staged_markers(&markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_zero_unrelated_and_disposed_handles_preserve_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        let unrelated = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(unrelated),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+
+        // Disposal clears the shared stream staging, so recreate a live protected owner and use
+        // the old handle as the disposed-handle refusal target.
+        dispose(handle);
+        let replacement = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(replacement, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(replacement);
+        let replacement_markers = stage_markers();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&replacement_markers);
+        dispose(replacement);
+    }
+
+    #[test]
+    fn protected_stream_read_header_short_capacity_refusal_preserves_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let header_bytes = usize::try_from(SPECTRUM_WINDOW_HEADER_BYTES).unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(header_bytes - 1);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+            assert_eq!(host.observation_admission().reason, 3);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_left_plane_only_capacity_refusal_preserves_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let left_only = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(left_only);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+            assert_eq!(host.observation_admission().reason, 3);
+        });
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stream_read_borrow_and_spent_credit_refusals_keep_queued_window() {
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
         let handle = boot_protected();
@@ -8401,7 +8686,7 @@ mod observation_checkpoint_c2a_tests {
                 RESULT_INTERNAL
             );
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         // Unsupported ordinary selection work spends the same ingress credit. The queued native
@@ -8414,7 +8699,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_read(handle),
             RESULT_BACKPRESSURE
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         assert_eq!(
@@ -8444,7 +8729,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
             RESULT_INVALID_ARGUMENT
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
@@ -8471,7 +8756,7 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(host.observation_status().accepted_generation, 0);
             assert_eq!(host.observation_status().pending_count, 0);
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
@@ -8489,7 +8774,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
             RESULT_REFUSED_BUDGET
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
@@ -8516,7 +8801,7 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(host.observation_status().accepted_generation, 0);
             assert_eq!(host.observation_status().pending_count, 0);
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
@@ -8538,7 +8823,7 @@ mod observation_checkpoint_c2a_tests {
                 RESULT_INTERNAL
             );
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         LIVE_HOST.with(|slot| {
@@ -8552,7 +8837,7 @@ mod observation_checkpoint_c2a_tests {
                 RESULT_INTERNAL
             );
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         let invalid_handle = handle.wrapping_add(1).max(1);
@@ -8564,7 +8849,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
             RESULT_INVALID_ARGUMENT
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         assert_eq!(
@@ -8575,7 +8860,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_stop(0),
             RESULT_INVALID_ARGUMENT
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
@@ -8597,7 +8882,7 @@ mod observation_checkpoint_c2a_tests {
                 RESULT_INTERNAL
             );
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         LIVE_HOST.with(|slot| {
@@ -8611,7 +8896,7 @@ mod observation_checkpoint_c2a_tests {
                 RESULT_INTERNAL
             );
         });
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         let invalid_handle = handle.wrapping_add(1).max(1);
@@ -8623,7 +8908,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
             RESULT_INVALID_ARGUMENT
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         dispose(handle);
     }
@@ -8682,7 +8967,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
             RESULT_INVALID_ARGUMENT
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
@@ -8702,8 +8987,14 @@ mod observation_checkpoint_c2a_tests {
         assert_eq!(capture_identity(), identity);
         SPECTRUM_STAGING.with(|slot| {
             let staging = slot.borrow();
-            assert_eq!(staging.capture.as_ref().expect("capture bytes")[0], 0xa5);
-            assert_eq!(staging.result.as_ref().expect("result bytes")[0], 0x5a);
+            assert_eq!(
+                &staging.capture.as_ref().expect("capture bytes")[..markers.capture.len()],
+                markers.capture.as_slice()
+            );
+            assert_eq!(
+                &staging.result.as_ref().expect("result bytes")[..markers.result.len()],
+                markers.result.as_slice()
+            );
         });
 
         // Spend removal credit through an unrelated protected refusal. The valid repeated stop
@@ -8725,6 +9016,65 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn protected_removal_stop_remains_admissible_after_spent_ordinary_read_credit() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let required = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + 2 * SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(required - 1);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(handle),
+            RESULT_OK,
+            "Removal must remain available after an Ordinary read refusal"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(
+                host.observation_admission().operation,
+                OBSERVATION_OPERATION_STOP
+            );
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+            assert_eq!(
+                host.observation_admission().receipt.state,
+                OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(host.side_records.pending_count, 1);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(!staging.stream_active);
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_STOPPED
+            );
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+        });
+        assert_eq!(capture_identity(), markers.capture_identity);
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stop_refusal_preserves_all_committed_output_markers() {
         let handle = boot_protected();
         let markers = stage_markers();
@@ -8737,7 +9087,7 @@ mod observation_checkpoint_c2a_tests {
             miso_engine_web_v1_spectrum_stream_stop(handle),
             RESULT_BACKPRESSURE
         );
-        assert_markers(markers);
+        assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
