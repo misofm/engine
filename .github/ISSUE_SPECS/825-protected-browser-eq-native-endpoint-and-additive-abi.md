@@ -504,3 +504,8 @@ Fixture checkpoint `d5f57446` directly asserts raw pointer nullness during LIVE_
 ## ABI checkpoint B2 attempt 1 adversarial evidence
 
 Checkpoint `11d28e8d` adds application transfer, final FFI disposal handoff, guarded boot publication, and cold-invalid take sentinel. Five focused B2 tests, 136 host-web library tests, workspace locked check, format and diff pass. Astra MEDIUM returned FAIL on three evidence gaps without finding a concrete source defect: failed replacement boot test had already consumed its terminal handoff; invalid/borrow-refusal test used unrendered Pending rows rather than actual Applied rows; and no whole-host-drop fixture inspected final status/admission/nonzero capture identity values. Attempt 2 is fixture-only for those discriminating cases. C/D cannot start before B2 passes.
+
+
+## ABI checkpoint B2 accepted evidence
+
+Fixture checkpoint `1f312da4` proves an unconsumed terminal batch survives failed replacement boot and transfers once with original identities; actual Applied rows survive invalid-handle and staging/LIVE_HOST borrow refusals before valid take; and a real successful spectrum capture leaves nonzero owner/generation/selection/token plus actual final status/admission/capture mirrors after complete LiveHost destruction. Six focused B2 tests, the full locked host-web library suite, check, format and diff pass. Astra MEDIUM returned PASS on attempt 2 and found the single native reconciliation/handoff-only take, pre-removal/publication borrows and cold-invalid sentinel consistent with the frozen contract. B is accepted; protected boot remains private until C/D alias closure.
