@@ -246,3 +246,10 @@ without retry; failure invalidation including later active observers; and queued
 ordinary/removal receipts with a stalled reader. The original fixture regressions
 also pass. Formatting and diff checks pass. No new benchmark or allocator harness
 was introduced. Native implementation/evidence is ready for independent verdict.
+
+Root final native source gates: workspace policy and realtime policy pass.
+Clippy for graph --all-targets --features test-support with -D warnings passes
+(/tmp/observation-816-all-target-clippy-final.log). The reused fixture explicitly
+expects the argument-count style lint: its existing seven audio parameters gain
+one observer-options argument; no runtime check or correctness gate is suppressed.
+Independent Astra XHIGH attempt-1 review is in progress.

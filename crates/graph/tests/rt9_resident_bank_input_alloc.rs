@@ -349,6 +349,10 @@ fn prepared(
     (plan, probe)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "extends the existing seven-parameter audio fixture with observer-only options"
+)]
 fn prepared_with_options(
     width: BankWidth,
     population: usize,
