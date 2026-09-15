@@ -106,3 +106,154 @@ Root's eight existing spectrum ABI cases passed, including continuous and collec
 Source-derived overlap ruling: project_buffers charges the full AudioWorkletEngineHost shell, now containing the full native owner H. Native graph_session_plus_plan_bytes already includes H through (H-C)+(A-R), where A contains C. Protected bridge metadata/retained accounting must deduct full sizeof(HostObservationController) exactly once, not just the native owner_inline_bytes H-C. Largest allocation retains full actual shell size; the browser target identity allocation is separate and charged once. Legacy has no owner deduction.
 
 The remaining preparation work is split into exact checked ingress projection, private boot wiring, then protected operation mediation. Astra XHIGH is supplying the missing code-ready projection arithmetic so fresh Luna tasks do not have to discover architectural budget rules while implementing. This refines execution order; the frozen endpoint contract is unchanged.
+
+## Frozen source-derived ingress projection
+
+
+Scope: one prepared TrackPostMatrix/Stereo target, zero meters/resident taps/permanent
+observers, one active observer, two internal slots, one ordinary plus one removal
+attempt per ingress epoch, four retained browser receipt rows. This is a source-derived
+logical work reservation, not a compiler instruction/memcpy count or a deadline claim.
+All arithmetic below is checked u64 arithmetic; conversion, subtraction, multiplication,
+addition, or Layout overflow refuses preparation. No saturating arithmetic or defaults.
+
+## Inputs and literal helper arithmetic
+
+Use `project_observation_ingress(shape, sizes, bridge, native_reserved)` returning
+`ObservationIngressBounds` plus packed result maxima and the separate per-call facts.
+`sizes` is an explicit private argument until the ABI types land, then fill it with
+their real `size_of`/`Layout` values. Do not substitute assumed numeric ABI sizes.
+Names below denote bytes: H=sizeof(HostObservationController), NR=sizeof(ResponseSnapshotSection),
+AR=sizeof(WebLiveResponseSection), OR=sizeof(WebLiveResponseOwner), HR=sizeof(WebLiveResponseResult),
+LR=sizeof(WebLiveResponseRequest), SR=sizeof(WebSpectrumRequest), SH=sizeof(WebSpectrumWindow),
+SM=sizeof(WebSpectrumStreamMetadata), SW=sizeof(SpectrumWindow), CW=sizeof(SpectrumContinuousWindow),
+Z=sizeof(ObservedContinuousSpectrumWindow), AC=sizeof(ObservationAccepted),
+AP=sizeof(ObservationApplied), WC=sizeof(ObservationWorkCost), DR=sizeof(WebObservationDemand),
+RR=sizeof(WebObservationReceipt), CI=sizeof(WebObservationCaptureIdentity),
+DA=sizeof(WebObservationAdmission). The future ABI names are explicit size parameters.
+Z safely bounds a private SpectrumCapturedRecord copy: the same planes/channel/underrun
+fields plus seven u64 identity/timing words in Z versus five in the private queue record.
+
+```text
+E=1; S=2; A=1; P=2; R=4; Q=1; O=2; F=4; L=127; K=S+1;
+B=all_compiled_tracks + all_compiled_effect_instances;
+U=1 + selected_track_effect_instances; require U<=256;
+N=RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS;
+W=RESPONSE_SNAPSHOT_WORDS * sizeof(u32);
+PCM=2 * SPECTRUM_WINDOW_FRAMES * sizeof(f32);
+packed_response=HR + 256*OR + U*(3*L + 2*N*AR);
+packed_spectrum=SH + PCM;
+
+admission_entry_visits=O*(3*R + 4*P + E + 5*S + A*(8+2*K) + 2*Q); // 94
+response_binding_visits=B;
+response_section_visits=8*U*N;
+response_copy_bytes=2*LR + 2*(B+2)*L + 8*U*N*(NR+W+AR)
+                    + 2*U*OR + 3*U*L + 2*HR + 2*packed_response + 4*CI;
+
+spectrum_copy=6*Z + 2*CW + 2*SW + 2*PCM + 2*SH + 4*SM
+              + 2*packed_spectrum + 4*CI + 2*SR + 2*L;
+control_copy=4*H + 8*AC + 8*WC + 4*RR + 2*(SR+DR+L) + 2*Z;
+receipt_copy=F*(2*H + 4*AP + 4*RR) + 4*(R+F)*RR;
+retirement_copy=(F*S*Q + S*Q)*Z;
+handler_copy_bytes_per_boundary=response_copy_bytes + spectrum_copy
+                                + O*control_copy + receipt_copy + retirement_copy;
+cleanup_entry_visits_per_boundary=F*(1+P+2*S+S*Q+R) + 2*R*(R+F)
+                                  + (P+R+2*S+S*Q) + 2*Q+S; // 132
+
+corrected_bridge=bridge.projected_full_retained + bridge.additive_staging_bytes
+                 + bridge.private_target_allocation_bytes - H;
+retained_bytes=native_reserved + corrected_bridge;
+```
+
+The handler sum deliberately reserves response, spectrum read, both control attempts,
+receipt handoff, and retirement together although ordinary credit excludes several
+combinations. This avoids a max-of-mutually-exclusive-branches implementation choice.
+Both packed maxima must fit the supplied maximum_result_bytes (itself <=65536).
+Require explicit W2 counts 1/1, control/row ceilings <=8192/32, and compare every seven
+derived bounds to its corresponding inclusive supplied limit before publishing ownership.
+Validate fixed request byte lengths against maximum_control_bytes at operation entry.
+
+## Actual-loop justification and required small helper behavior
+
+Admission: allow at most two R-row receipt-reservation passes and one R-row pending-stop
+identity pass per permitted operation. Four P passes over-reserve native terminal/pending
+stop searches. E is the exact prepared-entry lookup. Five S passes cover staged-slot
+search, free-slot search, touch membership, debug previous membership, and rollback
+compaction (success and rollback are both reserved). Native handles have length <=A;
+duplicate inner scans are empty, sorts of length <=1 have no comparisons, and each of
+the two catalog binary searches has <=K comparisons, including its final comparison.
+Eight A visits cover outer validation/writes/copies and these trivial sort boundaries.
+Two Q pops cover stage reset and failed-publication rollback. Meter loops visit zero.
+Unsupported meter/collection/one-shot requests refuse before any supplied-row traversal.
+
+Response: graph runtime filters the entire prepared binding array, including missing
+target/error paths. Identity work reserves two operands for every bounded comparison,
+two additional target checks, and three copied IDs per emitted owner. Reject length>L
+before UTF-8/identity work, after obtaining the common permit. The 8*U*N passes cover
+two-plane initialization, extraction, validation and packing; every pass reserves a
+native section, its fixed word construction, and a wire section, conservatively even
+when that pass uses fewer bytes. Owner/header construction and writes are separate.
+The sink constructor reserves 256 owner rows but clears none: their space is charged
+in packed size/outgoing copies, not fictitious initialization. Reserve two full outgoing
+payload copies and identity construction/publication/handoff. Generic caller sink work
+is outside qualification; the existing concrete ABI sink is the qualified path.
+
+Spectrum: Q=1 comes from continuous_available_at_entry().min(1), stage reset's one pop,
+and retire_controlled_after_receipt's one pop. Six Z copies conservatively cover queue
+extraction, native return wrappers, observed-window construction and host/ABI handoff;
+CW/SW cover continuous/as_window projections; 2*PCM covers f32 byte construction and
+packing. Header/metadata/identity construction and two outgoing payload copies are
+reserved explicitly. Control's four H copies bound the graph publication entry/record
+construction and transfer payloads without exposing private graph layouts; eight AC/WC
+copies cover candidate/pending/accepted/work-return records. Four RR covers receipt
+construction, storage and acknowledgements. This counts record payload, not scalar
+register arithmetic. Two Z reserves reset plus rollback queue extraction.
+
+Cleanup: F=4 allows two carried native receipts from the preceding successful boundary
+plus two current-credit publications applied by a failed render before epoch advance.
+No render success means no new operation credit; later successful render starts a new
+epoch. Each successful reconciliation visits one graph receipt, P pending matches,
+S touched and S compaction entries, at most S*Q retired queue items, and R browser
+receipt matches. Receipt-copy's H bound covers native retirement record ownership moves.
+At most R+F distinct handoff rows exist when carried rows and current obligations are
+over-reserved together; each nonempty take may scan R rows and clear R staging rows.
+Use cached pending/completed scalars: empty calls must not repeat R-row scans or clears.
+Call C.try_applied at most twice per take; a missing receipt performs only fixed scalar
+queue/closure work and no matching/retirement scan. Terminal processing is one-shot;
+reserve P native pending clears, R browser closures, two S slot passes, and S*Q pops.
+The final 2*Q+S additionally reserves admission reset/rollback/compaction in cleanup.
+Never poll receipts in admission. Preserve graph Applied even when audio later failed.
+
+## Ownership overlap and costs outside the payload reservation
+
+`projected_full_retained` is project_buffers with the actual final host shell and
+configured spectrum staging (collection-entry/ID arrays remain zero). `additive_staging_bytes`
+is only actual new allocation payloads plus actual containing-layout deltas not already
+included by that projection: preparation/demand/admission/status/identity, four receipt
+slots and persistent application staging as actually placed. Inline shell records are
+already in sizeof(host); do not add them again. Use real Box/Vec capacities and final
+TLS/container deltas. Charge the private browser target allocation exactly once; it may
+be owned by a retained HostSpectrumDemand whose target is also borrowed for response.
+The broad ingress retained ceiling intentionally includes existing bridge/audio/document
+staging. Native reserved already includes H through (H-C)+activation; deduct full H,
+not H-C. Full aggregate host admission separately adds its native graph/runtime model
+to corrected_bridge; do not additionally add native_reserved to that full host total.
+Largest allocation stays max(actual full host shell, existing staging maxima, each new
+actual allocation, private ID allocation); never deduct H from an allocation maximum.
+
+Exhausted attempts still return typed refusals. Fixed scalar checks and fixed admission
+diagnostic writes are outside per-boundary payload-copy limits: report DA bytes per
+diagnostic record write, with <=2*DA for construction plus publication per call. Likewise
+report raw-command classification separately: <=existing staging record capacity kind
+visits and sizeof(kind)*record_count bytes per call. Scan only bounded kind words before
+ordinary admission/prepared-companion parsing/shadow mutation, including when observation
+credit is exhausted; preserve audio-only admission and first offending original index.
+An observation-bearing refusal consumes its classified attempt once, then does no deep
+work without credit. Scalar getters and repeated-stop receipt identity checks are also
+fixed per-call work; repeated pending stop returns its existing receipt without credit.
+Owned sender/receiver throttling bounds entry frequency; arbitrary caller floods have
+no universal deadline qualification. No scheduler or suppression of typed refusals.
+
+### Projection implementation order
+
+To use actual ABI sizes immediately, the next bounded checkpoint declares only the four scalar ABI records referenced by the projection (WebObservationDemand, WebObservationReceipt, WebObservationAdmission and WebObservationCaptureIdentity) and implements the frozen checked projection helper. No exports, FFI staging, receipt mediation or protected boot are enabled in that checkpoint. These are the final canonical record types, not mirrors or guessed byte constants. Private boot wiring follows using this exact validated projection. This further splits implementation to keep Luna tasks bounded; public protected boot still waits for complete alias mediation.
