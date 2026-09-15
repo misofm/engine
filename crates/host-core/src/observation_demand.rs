@@ -871,6 +871,8 @@ impl ObservationBudget {
 
 impl HostObservationController {
     /// Construct the owner after all graph, work and allocation caps have been checked.
+    // Preparation transfers independently owned, prevalidated resources without another wrapper.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         owner: ObservationOwnerId,
         graph: Option<GraphObservationController>,

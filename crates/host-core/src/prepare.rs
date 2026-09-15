@@ -815,13 +815,13 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                 .map_err(|_| shape("host.observation.spectrum_cadence"))
         })
         .transpose()?;
-    if let (Some(cadence), Some(observations)) = (controlled_spectrum_cadence, observation_demand) {
-        if let Some(spectrum) = observations.spectrum {
-            for entry in &spectrum.entries {
-                // Validate the frozen checked projection once during preparation. The initial
-                // owner remains dormant, so these fields are not charged until C4 admission.
-                project_spectrum_work(cadence, entry.channels).map_err(observation_diagnostics)?;
-            }
+    if let (Some(cadence), Some(observations)) = (controlled_spectrum_cadence, observation_demand)
+        && let Some(spectrum) = observations.spectrum
+    {
+        for entry in &spectrum.entries {
+            // Validate the frozen checked projection once during preparation. The initial
+            // owner remains dormant, so these fields are charged only on admission.
+            project_spectrum_work(cadence, entry.channels).map_err(observation_diagnostics)?;
         }
     }
     let observation_owner = observation_demand
