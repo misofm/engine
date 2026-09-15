@@ -127,9 +127,9 @@ pub use engine::realtime::{
 };
 pub use observation_demand::{
     HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
-    ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
-    ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
-    ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
+    HostSpectrumMode, ObservationAccepted, ObservationApplied, ObservationOwnerId,
+    ObservationReadError, ObservationRefusal, ObservationRefusalReason, ObservationStop,
+    ObservationWorkCost, ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
 };
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,

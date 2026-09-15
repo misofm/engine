@@ -43,6 +43,15 @@ pub struct HostMeterId {
     pub handle: MeterHandle,
 }
 
+/// The capture mode selected for one host-owned spectrum demand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostSpectrumMode {
+    /// Capture one complete fixed-size window.
+    OneShot,
+    /// Continue publishing fixed-size windows at the prepared cadence.
+    Continuous,
+}
+
 /// One meter in the prepared, immutable observation catalog.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedHostMeter {
