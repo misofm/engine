@@ -6518,6 +6518,7 @@ mod observation_checkpoint_b1_tests {
         let handle = boot_protected();
         assert!(!observation_demand_ptr_for_handle(handle).is_null());
         assert!(observation_demand_ptr_for_handle(0).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
         assert_eq!(
             miso_engine_web_v1_observation_demand_ptr(handle.wrapping_add(1)),
             0
@@ -6526,13 +6527,22 @@ mod observation_checkpoint_b1_tests {
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
         no_live_host();
         assert!(observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
     }
 
     #[test]
     fn scalar_queries_reject_live_host_borrow_conflicts_before_terminal_fallback() {
         let handle = boot_protected();
+        assert!(!observation_admission_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_status_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_demand_ptr_for_handle(handle).is_null());
         LIVE_HOST.with(|slot| {
             let _borrow = slot.borrow_mut();
+            assert!(observation_admission_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_status_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_demand_ptr_for_handle(handle).is_null());
             assert_eq!(observation_admission_ptr_for_handle(handle), 0);
             assert_eq!(observation_status_ptr_for_handle(handle), 0);
             assert_eq!(observation_capture_identity_ptr_for_handle(handle), 0);
@@ -6546,6 +6556,11 @@ mod observation_checkpoint_b1_tests {
         assert!(!observation_admission_ptr_for_handle_raw(handle).is_null());
         assert!(!observation_status_ptr_for_handle_raw(handle).is_null());
         assert!(!observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_admission_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_status_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_capture_identity_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
         assert_eq!(
             observation_admission_ptr_for_handle(handle.wrapping_add(1)),
             0
