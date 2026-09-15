@@ -1,6 +1,7 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
+use engine::realtime::{ResponseSnapshotOwnerInfo, ResponseSnapshotSection};
 use host_core::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, InputFilterPreparer,
 };
@@ -8339,6 +8340,149 @@ fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
         storage.ingress.ordinary_used,
         storage.ingress.removal_used,
     )
+}
+
+struct CountingResponseSink {
+    calls: usize,
+    error: Option<ResponseSnapshotError>,
+}
+
+impl CountingResponseSink {
+    fn accepting() -> Self {
+        Self {
+            calls: 0,
+            error: None,
+        }
+    }
+
+    fn failing(error: ResponseSnapshotError) -> Self {
+        Self {
+            calls: 0,
+            error: Some(error),
+        }
+    }
+}
+
+impl engine::realtime::ResponseSnapshotSink for CountingResponseSink {
+    fn copy_owner(
+        &mut self,
+        _owner: ResponseSnapshotOwnerInfo<'_>,
+        _left: &[ResponseSnapshotSection],
+        _right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError> {
+        self.calls += 1;
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+#[test]
+fn protected_response_admission_captures_once_without_side_records() {
+    let mut host = protected_eq_console_host();
+    let identity_before = *host.observation_capture_identity();
+    let receipts_before = host.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+
+    let capture = host
+        .copy_response_snapshot("eq0", &mut sink)
+        .expect("selected protected response");
+    assert_eq!(capture.captured_sample, 0);
+    assert!(capture.owners > 0);
+    assert!(sink.calls > 0);
+    assert_eq!(
+        host.observation_admission().operation,
+        OBSERVATION_OPERATION_RESPONSE
+    );
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_eq!(host.observation_admission().flags, 0);
+    assert_eq!(host.side_records.receipts, receipts_before);
+    assert_eq!(*host.observation_capture_identity(), identity_before);
+    assert_eq!(protected_ingress_state(&host).1, true);
+}
+
+#[test]
+fn protected_response_rejections_call_sink_zero_times_and_preserve_identity() {
+    let mut invalid = protected_eq_console_host();
+    let identity_before = *invalid.observation_capture_identity();
+    let receipts_before = invalid.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+    assert_eq!(
+        invalid.copy_response_snapshot("", &mut sink),
+        Err(ResponseSnapshotError::InvalidShape)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        invalid.observation_admission().operation,
+        OBSERVATION_OPERATION_RESPONSE
+    );
+    assert_eq!(
+        invalid.observation_admission().result,
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(invalid.observation_admission().reason, 8);
+    assert_eq!(invalid.side_records.receipts, receipts_before);
+    assert_eq!(*invalid.observation_capture_identity(), identity_before);
+
+    let mut mismatched = protected_eq_console_host();
+    let identity_before = *mismatched.observation_capture_identity();
+    let receipts_before = mismatched.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+    assert_eq!(
+        mismatched.copy_response_snapshot("missing", &mut sink),
+        Err(ResponseSnapshotError::MissingTrack)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        mismatched.observation_admission().result,
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(mismatched.observation_admission().reason, 0);
+    assert_eq!(mismatched.side_records.receipts, receipts_before);
+    assert_eq!(*mismatched.observation_capture_identity(), identity_before);
+
+    let mut exhausted = protected_eq_console_host();
+    let mut sink = CountingResponseSink::accepting();
+    assert!(
+        exhausted
+            .copy_response_snapshot("missing", &mut sink)
+            .is_err()
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        exhausted.copy_response_snapshot("eq0", &mut sink),
+        Err(ResponseSnapshotError::Capacity)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        exhausted.observation_admission().result,
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(exhausted.observation_admission().reason, 5);
+}
+
+#[test]
+fn protected_response_preserves_sink_error_and_shares_ordinary_credit_with_spectrum() {
+    let mut failing = protected_eq_console_host();
+    let identity_before = *failing.observation_capture_identity();
+    let mut sink = CountingResponseSink::failing(ResponseSnapshotError::Owner);
+    assert_eq!(
+        failing.copy_response_snapshot("eq0", &mut sink),
+        Err(ResponseSnapshotError::Owner)
+    );
+    assert_eq!(sink.calls, 1);
+    assert_eq!(failing.observation_admission().result, RESULT_INTERNAL);
+    assert_eq!(*failing.observation_capture_identity(), identity_before);
+
+    let mut shared = protected_eq_console_host();
+    let mut sink = CountingResponseSink::accepting();
+    shared
+        .copy_response_snapshot("eq0", &mut sink)
+        .expect("response admission");
+    assert_eq!(
+        shared.start_spectrum_stream(),
+        Err(RESULT_BACKPRESSURE),
+        "response and spectrum consume the same ordinary credit"
+    );
+    assert_eq!(sink.calls, 1);
 }
 
 #[test]

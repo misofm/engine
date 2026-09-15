@@ -457,3 +457,8 @@ The [ABI handoff](https://github.com/misofm/engine/blob/codex/observation-browse
 ## Native guard checkpoint evidence
 
 Protected readonly resident/catalog/meter paths now return immediate Unsupported or honest empty values without traversal or credit mutation. Mutating unsupported aliases consume their classified attempt. Shared command ingress classifies bounded kind bytes before companion parsing/lowering and rejects whole observation-bearing batches, preserving audio-only admission when observation credit is spent. Thirteen focused protected tests pass with test-support, including ordinary/prepared routes, mixed-batch mutation preservation and removal classification. The implementer reports 118 lib tests, locked check, strict Clippy and formatting/diff passing. The frozen ABI handoff is retained in docs/rulings. Native response admission and all ABI integration remain next.
+
+
+## Native response checkpoint evidence
+
+Protected response capture now uses the shared ordinary permit, cached result bound and exact prepared-target preflight before invoking the existing sink. Typed admission refusals remain distinct from actual provider/sink errors; no receipt or capture identity is invented. Three focused response tests pass with test-support, proving actual success, zero sink calls on rejected/exhausted requests, real sink error preservation, shared spectrum credit and unchanged side records. The implementer reports 121 lib tests, locked check, strict Clippy and formatting/diff passing. Native-only mediation is complete; ABI checkpoints A–D and qualification remain. The ABI handoff permits a narrow host-core re-export of its existing graph activation field type for wire conversion, without a new host-web production dependency.

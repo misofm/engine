@@ -469,6 +469,7 @@ const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
 const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
 const OBSERVATION_OPERATION_STOP: u32 = 7;
 const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
+const OBSERVATION_OPERATION_RESPONSE: u32 = 8;
 
 /// A protected continuous-spectrum read preserves either its exact admission refusal or the
 /// complete native availability outcome. The public Rust compatibility facade maps this typed
@@ -477,6 +478,16 @@ const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
 enum ProtectedSpectrumReadError {
     Refused(ObservationRefusal),
     Native(HostSpectrumReadError),
+}
+
+/// A protected response capture keeps admission refusals distinct from native capture failures.
+///
+/// The public Rust facade retains its existing [`ResponseSnapshotError`] signature, while this
+/// private seam preserves the typed observation refusal for the protected admission diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedResponseCaptureError {
+    Refused(ObservationRefusal),
+    Capture(ResponseSnapshotError),
 }
 
 fn observation_not_prepared() -> ObservationRefusal {
@@ -516,6 +527,34 @@ fn observation_refusal_result(reason: ObservationRefusalReason) -> u32 {
         | ObservationRefusalReason::RevisionExhausted => RESULT_REFUSED_BUDGET,
         ObservationRefusalReason::Backpressure => RESULT_BACKPRESSURE,
         ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => RESULT_WRONG_STATE,
+    }
+}
+
+fn legacy_response_refusal(refusal: ObservationRefusal) -> ResponseSnapshotError {
+    match refusal.reason {
+        ObservationRefusalReason::NotPrepared => ResponseSnapshotError::Unsupported,
+        ObservationRefusalReason::WrongOwner | ObservationRefusalReason::InvalidRequest => {
+            ResponseSnapshotError::InvalidShape
+        }
+        ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::Backpressure
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => ResponseSnapshotError::Capacity,
+        ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => {
+            ResponseSnapshotError::Owner
+        }
+    }
+}
+
+fn response_snapshot_result(error: ResponseSnapshotError) -> u32 {
+    match error {
+        ResponseSnapshotError::Unsupported => RESULT_UNSUPPORTED,
+        ResponseSnapshotError::MissingTrack | ResponseSnapshotError::InvalidShape => {
+            RESULT_INVALID_ARGUMENT
+        }
+        ResponseSnapshotError::Capacity => RESULT_REFUSED_BUDGET,
+        ResponseSnapshotError::Owner => RESULT_INTERNAL,
     }
 }
 
@@ -3183,6 +3222,109 @@ impl AudioWorkletEngineHost {
         self.side_records.capture_identity = identity;
     }
 
+    /// Execute one admitted protected response capture through the existing native sink.
+    ///
+    /// The permit is validated before any target comparison or provider call. The prepared
+    /// spectrum target is the exact response-track identity for this private profile, so the
+    /// preflight is bounded to the prepared target and does not scan response bindings. Admission
+    /// never creates a graph receipt or commits a capture identity; those belong to later
+    /// transport-specific output handling.
+    fn copy_response_snapshot_admitted(
+        &mut self,
+        permit: ObservationPermit,
+        track_id: &str,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<engine::realtime::ResponseSnapshotCapture, ProtectedResponseCaptureError> {
+        const OPERATION: u32 = OBSERVATION_OPERATION_RESPONSE;
+
+        let (owner, epoch) = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => {
+                self.record_observation_refusal(OPERATION, refusal);
+                return Err(ProtectedResponseCaptureError::Refused(refusal));
+            }
+        };
+        if let Err(refusal) = permit.validate(owner, epoch, ObservationClass::Ordinary) {
+            self.record_observation_refusal(OPERATION, refusal);
+            return Err(ProtectedResponseCaptureError::Refused(refusal));
+        }
+
+        if track_id.is_empty() || track_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            self.record_observation_refusal(OPERATION, refusal);
+            return Err(ProtectedResponseCaptureError::Refused(refusal));
+        }
+
+        let selected_track = self.ready.as_ref().and_then(|ready| {
+            let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                return None;
+            };
+            match &storage.spectrum_demand.target {
+                SpectrumTarget::TrackPostMatrix(track_id) => Some(track_id.as_ref()),
+                _ => None,
+            }
+        });
+        if selected_track != Some(track_id) {
+            let error = ResponseSnapshotError::MissingTrack;
+            self.record_observation_admission(
+                OPERATION,
+                response_snapshot_result(error),
+                None,
+                None,
+                false,
+            );
+            return Err(ProtectedResponseCaptureError::Capture(error));
+        }
+
+        if self.status.state != STATE_READY {
+            let error = ResponseSnapshotError::Owner;
+            self.record_observation_admission(
+                OPERATION,
+                response_snapshot_result(error),
+                None,
+                None,
+                false,
+            );
+            return Err(ProtectedResponseCaptureError::Capture(error));
+        }
+
+        let capture = {
+            let Some(ready) = self.ready.as_mut() else {
+                let error = ResponseSnapshotError::Owner;
+                self.record_observation_admission(
+                    OPERATION,
+                    response_snapshot_result(error),
+                    None,
+                    None,
+                    false,
+                );
+                return Err(ProtectedResponseCaptureError::Capture(error));
+            };
+            ready.host.copy_response_snapshot(track_id, sink)
+        };
+        match capture {
+            Ok(capture) => {
+                self.record_observation_admission(OPERATION, RESULT_OK, None, None, false);
+                Ok(capture)
+            }
+            Err(error) => {
+                self.record_observation_admission(
+                    OPERATION,
+                    response_snapshot_result(error),
+                    None,
+                    None,
+                    false,
+                );
+                Err(ProtectedResponseCaptureError::Capture(error))
+            }
+        }
+    }
+
     /// Read the last live-console submission report (issue #137 D1).
     #[must_use]
     pub const fn command_report(&self) -> &WebCommandReport {
@@ -3301,6 +3443,58 @@ impl AudioWorkletEngineHost {
         track_id: &str,
         sink: &mut dyn ResponseSnapshotSink,
     ) -> Result<engine::realtime::ResponseSnapshotCapture, ResponseSnapshotError> {
+        if self.protected_observation_prepared() {
+            let control_bytes = match u64::try_from(size_of::<WebLiveResponseRequest>())
+                .ok()
+                .and_then(|header| {
+                    u64::try_from(track_id.len())
+                        .ok()
+                        .and_then(|id_bytes| header.checked_add(id_bytes))
+                }) {
+                Some(control_bytes) => control_bytes,
+                None => {
+                    let refusal = ObservationRefusal {
+                        reason: ObservationRefusalReason::ArithmeticOverflow,
+                        limit: None,
+                        requested: None,
+                        maximum: None,
+                    };
+                    self.record_observation_refusal(OBSERVATION_OPERATION_RESPONSE, refusal);
+                    return Err(legacy_response_refusal(refusal));
+                }
+            };
+            let result_bytes = self
+                .ready
+                .as_ref()
+                .and_then(|ready| match &ready.observation {
+                    PreparedObservationStorage::Protected(storage) => {
+                        Some(storage.packed_response_bytes)
+                    }
+                    PreparedObservationStorage::Legacy(_) => None,
+                })
+                .unwrap_or(0);
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                ObservationLengths {
+                    control_bytes,
+                    rows: 1,
+                    result_bytes,
+                },
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    self.record_observation_refusal(OBSERVATION_OPERATION_RESPONSE, refusal);
+                    return Err(legacy_response_refusal(refusal));
+                }
+            };
+            return match self.copy_response_snapshot_admitted(permit, track_id, sink) {
+                Ok(capture) => Ok(capture),
+                Err(ProtectedResponseCaptureError::Refused(refusal)) => {
+                    Err(legacy_response_refusal(refusal))
+                }
+                Err(ProtectedResponseCaptureError::Capture(error)) => Err(error),
+            };
+        }
         if self.status.state != STATE_READY {
             return Err(ResponseSnapshotError::Owner);
         }
