@@ -95,6 +95,7 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod observation_demand;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -124,6 +125,12 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+pub use observation_demand::{
+    HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
+    ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
+    ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
+    ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
+};
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
     HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
@@ -131,6 +138,8 @@ pub use prepare::{
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_with_console, prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_console_and_spectrum_collection,
+    prepare_host_runtime_with_observation_demand,
+    prepare_host_runtime_with_observation_demand_between_render_calls,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_console,
