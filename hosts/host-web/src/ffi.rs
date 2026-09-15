@@ -5211,6 +5211,12 @@ pub(crate) fn boot_staged_observation_demand(len: u32) -> u32 {
     boot_staged(len, StagedBootMode::ProtectedObservation)
 }
 
+/// Boot the exact staged document with the protected observation preparation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_with_observation_demand(len: u32) -> u32 {
+    boot_staged_observation_demand(len)
+}
+
 /// Boot the exact staged document and atomically publish the sole running handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
@@ -8140,6 +8146,53 @@ mod observation_checkpoint_a_tests {
             "native preparation must receive the supplied transition limit"
         );
         assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        no_live_host();
+    }
+
+    #[test]
+    fn public_protected_boot_forwards_owner_and_refuses_under_budget() {
+        no_live_host();
+        let document = protected_document();
+        let record = protected_preparation_record();
+        stage_protected_boot(document, record);
+
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "public protected boot must publish a handle");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+
+        let retained = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("public protected handle");
+            assert_eq!(live.host.status().state, STATE_READY);
+            let status = live.host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert_ne!(status.owner, 0);
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("public protected boot fell back to legacy storage");
+            };
+            assert_eq!(status.owner, storage.controller.owner().get());
+            storage.ingress.bounds.retained_bytes
+        });
+        assert!(retained > 0);
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        let mut too_low = record;
+        too_low.ingress_limits.maximum_retained_bytes = retained - 1;
+        stage_protected_boot(document, too_low);
+        assert_eq!(
+            miso_engine_web_v1_boot_with_observation_demand(document.len() as u32),
+            0,
+            "public protected boot must refuse one byte below retained budget"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        let diagnostic_bytes = miso_engine_web_v1_boot_diagnostic_bytes();
+        assert!(
+            diagnostic_bytes > 0,
+            "budget refusal must publish a boot diagnostic"
+        );
         no_live_host();
     }
 
