@@ -180,11 +180,13 @@ impl SpectrumStaging {
         capture
             .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
             .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        validate_spectrum_capture_capacity(capture.capacity())?;
         capture.resize(SPECTRUM_CAPTURE_BYTES, 0);
         let mut result = Vec::new();
         result
             .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
             .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        validate_spectrum_capture_capacity(result.capacity())?;
         result.resize(SPECTRUM_CAPTURE_BYTES, 0);
         self.capture = Some(capture);
         self.result = Some(result);
@@ -265,6 +267,14 @@ impl SpectrumStaging {
         self.stream_history
             .as_ref()
             .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+    }
+}
+
+fn validate_spectrum_capture_capacity(capacity: usize) -> Result<(), u32> {
+    if capacity > SPECTRUM_CAPTURE_BYTES {
+        Err(RESULT_REFUSED_BUDGET)
+    } else {
+        Ok(())
     }
 }
 
@@ -430,6 +440,14 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right { left } else { right }
 }
 
+const fn spectrum_capture_payload_bytes() -> u64 {
+    (SPECTRUM_CAPTURE_BYTES as u64)
+        .checked_mul(2)
+        .expect("spectrum capture payload size overflow")
+}
+
+pub(crate) const SPECTRUM_CAPTURE_PAYLOAD_BYTES: u64 = spectrum_capture_payload_bytes();
+
 /// Heap payload retained by the one-shot spectrum staging area.
 ///
 /// Request and target-ID staging are always available for the pre-boot write. The two PCM byte
@@ -446,7 +464,7 @@ pub(crate) const fn spectrum_staging_retained_bytes(
         + collection_entry_bytes
         + collection_target_id_bytes
         + if configured {
-            SPECTRUM_CAPTURE_BYTES as u64 * 2 + SPECTRUM_STREAM_METADATA_BYTES as u64
+            SPECTRUM_CAPTURE_PAYLOAD_BYTES + SPECTRUM_STREAM_METADATA_BYTES as u64
         } else {
             0
         }
@@ -7247,6 +7265,33 @@ pub(crate) mod live_response_ffi_tests {
 #[cfg(test)]
 mod spectrum_ffi_tests {
     use super::*;
+
+    #[test]
+    fn spectrum_capture_capacity_validator_rejects_explicit_surplus() {
+        let oversized: Vec<u8> = Vec::with_capacity(SPECTRUM_CAPTURE_BYTES + 1);
+        assert!(
+            oversized.capacity() > SPECTRUM_CAPTURE_BYTES,
+            "fixture must supply an explicitly oversized Vec"
+        );
+        assert_eq!(
+            validate_spectrum_capture_capacity(oversized.capacity()),
+            Err(RESULT_REFUSED_BUDGET)
+        );
+
+        let mut normal: Vec<u8> = Vec::new();
+        if normal.try_reserve_exact(SPECTRUM_CAPTURE_BYTES).is_ok() {
+            let expected = if normal.capacity() > SPECTRUM_CAPTURE_BYTES {
+                Err(RESULT_REFUSED_BUDGET)
+            } else {
+                Ok(())
+            };
+            assert_eq!(
+                validate_spectrum_capture_capacity(normal.capacity()),
+                expected,
+                "validator must follow the actual Vec capacity"
+            );
+        }
+    }
 
     fn stage_left_output_request() {
         SPECTRUM_STAGING.with(|slot| {
