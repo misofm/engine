@@ -8315,6 +8315,317 @@ fn protected_eq_request() -> SpectrumCaptureCollectionRequest {
     }
 }
 
+fn protected_eq_console_host() -> AudioWorkletEngineHost {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        WebBootOptions {
+            console_command_queue_records: 4,
+            ..boot_options(128)
+        },
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected console boot")
+}
+
+fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    (
+        storage.ingress.epoch,
+        storage.ingress.ordinary_used,
+        storage.ingress.removal_used,
+    )
+}
+
+#[test]
+fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
+    let mut host = protected_eq_console_host();
+    let admission_before = *host.observation_admission();
+    let ingress_before = protected_ingress_state(&host);
+
+    assert_eq!(
+        host.read_observations(&[]),
+        Err(ObservationReadError::Unsupported)
+    );
+    let malformed = [ObservationSelection {
+        track_id: "missing",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "missing",
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    }];
+    assert_eq!(
+        host.read_observations(&malformed),
+        Err(ObservationReadError::Unsupported)
+    );
+    let oversized = vec![malformed[0]; MAXIMUM_OBSERVATION_READS + 1];
+    assert_eq!(
+        host.read_observations(&oversized),
+        Err(ObservationReadError::Unsupported)
+    );
+    let address = ObservationAddress {
+        track_index: u32::MAX,
+        rack: EffectRack::Dynamic,
+        effect_index: u32::MAX,
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    };
+    assert_eq!(
+        host.read_observation_addresses(&[address]),
+        Err(ObservationReadError::Unsupported)
+    );
+    let sentinel = ObservationReadValues {
+        status: ObservationReadStatus::Ready,
+        sample_rate_hz: 48_000,
+        left: Some(3.5),
+        right: Some(-2.0),
+        ..ObservationReadValues::default()
+    };
+    let mut output = [sentinel];
+    assert_eq!(
+        host.read_observation_addresses_into(&[address], &mut output[..0]),
+        Err(ObservationReadError::Unsupported)
+    );
+    assert_eq!(output, [sentinel]);
+    assert_eq!(
+        host.spectrum_selection_would_change(
+            &SpectrumTarget::TrackPostMatrix("missing".into()),
+            SpectrumChannels::Stereo,
+        ),
+        Err(RESULT_UNSUPPORTED)
+    );
+    assert_eq!(host.observation_binding_count(), 0);
+    assert_eq!(host.observation_binding(u32::MAX), None);
+    assert_eq!(host.observation_armed_taps(), 0);
+    assert!(!host.observation_attached());
+    assert!(host.meter_frame().is_empty());
+    assert_eq!(host.meter_header(), &EMPTY_METER_HEADER);
+    assert_eq!(host.meter_windows(), 0);
+    assert!(!host.meters_attached());
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(protected_ingress_state(&host), ingress_before);
+    assert_eq!(host.observation_admission(), &admission_before);
+
+    assert_eq!(host.arm_spectrum(), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().reason, 8);
+    assert!(protected_ingress_state(&host).1);
+    assert_eq!(host.status().last_result, RESULT_OK);
+    assert!(
+        matches!(host.read_spectrum(), Err(RESULT_BACKPRESSURE)),
+        "a second ordinary alias spends no second permit"
+    );
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+
+    assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(protected_ingress_state(&host).2);
+    assert_eq!(host.render_next(), RESULT_OK);
+
+    assert_eq!(
+        host.select_spectrum(
+            &SpectrumTarget::TrackPostMatrix("missing".into()),
+            SpectrumChannels::Stereo,
+        ),
+        RESULT_UNSUPPORTED
+    );
+    assert_eq!(host.observation_admission().operation, 11);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 12);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 12);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+}
+
+#[test]
+fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
+    let mut host = protected_eq_console_host();
+    let before = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let solo = host.console_solo().expect("solo state");
+        (
+            ready.controls[0].producer.success_count(),
+            ready
+                .command_decoded
+                .iter()
+                .map(|entry| (entry.queue_slot, entry.original_wire_index))
+                .collect::<Vec<_>>(),
+            ready
+                .input_filter_shadows
+                .iter()
+                .map(|shadow| {
+                    (
+                        shadow.committed.map(f32::to_bits),
+                        shadow.candidate.map(f32::to_bits),
+                        shadow.dirty,
+                        shadow.revision,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            (
+                solo.solo(0),
+                solo.user_mute(0, 0),
+                solo.emitted_mute(0, 0),
+                solo.transaction_open(),
+            ),
+        )
+    };
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_SOLO,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(3), RESULT_UNSUPPORTED);
+    assert_eq!(host.command_report().result, RESULT_UNSUPPORTED);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(host.command_report().rejected_index, 1);
+    assert_eq!(host.command_report().admitted, 0);
+    assert_eq!(host.observation_admission().operation, 9);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().reason, 8);
+    assert!(protected_ingress_state(&host).1);
+    let after = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let solo = host.console_solo().expect("solo state");
+        (
+            ready.controls[0].producer.success_count(),
+            ready
+                .command_decoded
+                .iter()
+                .map(|entry| (entry.queue_slot, entry.original_wire_index))
+                .collect::<Vec<_>>(),
+            ready
+                .input_filter_shadows
+                .iter()
+                .map(|shadow| {
+                    (
+                        shadow.committed.map(f32::to_bits),
+                        shadow.candidate.map(f32::to_bits),
+                        shadow.dirty,
+                        shadow.revision,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            (
+                solo.solo(0),
+                solo.user_mute(0, 0),
+                solo.emitted_mute(0, 0),
+                solo.transaction_open(),
+            ),
+        )
+    };
+    assert_eq!(after, before);
+
+    let mut prepared = protected_eq_console_host();
+    stage_command(
+        &mut prepared,
+        0,
+        COMMAND_OBSERVE_UNSUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(
+        prepared.submit_prepared_commands(1, 1),
+        RESULT_UNSUPPORTED,
+        "raw observation refusal precedes malformed companion parsing"
+    );
+    assert_eq!(
+        prepared.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(prepared.command_report().rejected_index, 0);
+    assert_eq!(prepared.observation_admission().operation, 9);
+    assert_eq!(prepared.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&prepared).1);
+    assert!(protected_ingress_state(&prepared).2);
+}
+
+#[test]
+fn protected_audio_only_commands_skip_observation_credit_after_refusal() {
+    let mut host = protected_eq_console_host();
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
+    let admission = *host.observation_admission();
+    assert!(protected_ingress_state(&host).1);
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+    assert_eq!(host.command_report().admitted, 1);
+    assert_eq!(host.observation_admission(), &admission);
+}
+
 #[test]
 fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
     let document = one_track_resource_session(128);

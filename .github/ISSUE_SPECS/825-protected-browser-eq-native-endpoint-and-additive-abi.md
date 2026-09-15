@@ -447,3 +447,13 @@ Protected start/restart/stop now use the unique native owner, shared affine perm
 ## Continuous-read checkpoint evidence
 
 Typed protected reads now acquire one ordinary permit and call the native controller once, retaining full availability/refusal details and native history updates. The existing Rust facade publishes checked native owner/generation/selection identity with sequence+1 only on success. Root added and ran a permanent real-PCM fixture: PendingApplication and spent credit preserve the queued window; direct and typed reads return nonzero PCM with real identity; actual queue overrun yields Gap and a source-generation seek yields Failed without replacing committed identity. The focused fixture, all-target warning-denying Clippy, formatting/diff pass. The implementer also reports native check and the previous 114 tests passing. Native alias guards/response and ABI integration remain required before public protected boot.
+
+
+## Frozen ABI implementation handoff
+
+The [ABI handoff](https://github.com/misofm/engine/blob/codex/observation-browser-eq/docs/rulings/825-browser-observation-abi-handoff.md) is part of this issue contract. It fixes nested record headers, existing TLS staging ownership, retained terminal status/application handoff, and four compiling checkpoints: records/private staged boot; exports/disposal; spectrum and unsupported aliases; response and public protected boot. The existing staging helper charges its unchanged heap payload plus full actual RefCell<ObservationStaging> containing storage once; this conservatively corrects an old omission, needs no mirror baseline or extra TLS, and leaves additive_staging_bytes0. Public protected boot remains unavailable until all guards pass. Metadata and artifact qualification follow separately.
+
+
+## Native guard checkpoint evidence
+
+Protected readonly resident/catalog/meter paths now return immediate Unsupported or honest empty values without traversal or credit mutation. Mutating unsupported aliases consume their classified attempt. Shared command ingress classifies bounded kind bytes before companion parsing/lowering and rejects whole observation-bearing batches, preserving audio-only admission when observation credit is spent. Thirteen focused protected tests pass with test-support, including ordinary/prepared routes, mixed-batch mutation preservation and removal classification. The implementer reports 118 lib tests, locked check, strict Clippy and formatting/diff passing. The frozen ABI handoff is retained in docs/rulings. Native response admission and all ABI integration remain next.

@@ -2435,6 +2435,12 @@ impl AudioWorkletEngineHost {
         &self.side_records.capture_identity
     }
 
+    fn protected_observation_prepared(&self) -> bool {
+        self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        })
+    }
+
     /// Spend one protected operation credit after the owner has been prepared.
     ///
     /// The ingress state spends the selected class before checking the request lengths, preserving
@@ -2531,6 +2537,30 @@ impl AudioWorkletEngineHost {
         let result = observation_refusal_result(refusal.reason);
         self.record_observation_admission(operation, result, Some(refusal), None, false);
         result
+    }
+
+    fn refuse_unsupported_observation(&mut self, class: ObservationClass, operation: u32) -> u32 {
+        let lengths = ObservationLengths {
+            control_bytes: 0,
+            rows: 0,
+            result_bytes: 0,
+        };
+        if let Err(refusal) = self.begin_observation(class, lengths) {
+            return self.record_observation_refusal(operation, refusal);
+        }
+        self.record_observation_admission(
+            operation,
+            RESULT_UNSUPPORTED,
+            Some(ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            }),
+            None,
+            false,
+        );
+        RESULT_UNSUPPORTED
     }
 
     fn pending_stop_receipt(&self) -> Option<WebObservationReceipt> {
@@ -3216,12 +3246,18 @@ impl AudioWorkletEngineHost {
     /// aged effect observation and does not share the peak interval in [`WebMeterHeader`].
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
+        if self.protected_observation_prepared() {
+            return &[];
+        }
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
     }
 
     /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
     #[must_use]
     pub fn meter_header(&self) -> &WebMeterHeader {
+        if self.protected_observation_prepared() {
+            return &EMPTY_METER_HEADER;
+        }
         self.ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
@@ -3230,6 +3266,9 @@ impl AudioWorkletEngineHost {
     /// Armed taps, in the dense effect-slot order. Off-ABI introspection for the tests.
     #[must_use]
     pub fn observation_armed_taps(&self) -> u32 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| {
             ready
                 .observation_armed
@@ -3242,6 +3281,9 @@ impl AudioWorkletEngineHost {
     /// Whether preparation bound any observation taps at all (issue #143 D3, level 1).
     #[must_use]
     pub fn observation_attached(&self) -> bool {
+        if self.protected_observation_prepared() {
+            return false;
+        }
         self.ready.as_ref().is_some_and(|ready| {
             ready
                 .effect_observations
@@ -3270,6 +3312,9 @@ impl AudioWorkletEngineHost {
 
     /// Arm the prepared one-shot spectrum observer for its next complete window.
     pub fn arm_spectrum(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 10);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -3287,6 +3332,9 @@ impl AudioWorkletEngineHost {
 
     /// Read the completed spectrum window, if the observer has finished its fixed capture.
     pub fn read_spectrum(&mut self) -> Result<Option<(SpectrumWindow, u64)>, u32> {
+        if self.protected_observation_prepared() {
+            return Err(self.refuse_unsupported_observation(ObservationClass::Ordinary, 10));
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
@@ -3515,6 +3563,9 @@ impl AudioWorkletEngineHost {
 
     /// Cancel a pending spectrum capture and discard any completed window.
     pub fn cancel_spectrum(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Removal, 10);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -3567,6 +3618,9 @@ impl AudioWorkletEngineHost {
     /// The collection performs all fallible admission before retiring its current capture. A
     /// refusal therefore leaves the old stream, queued window and effective configuration intact.
     pub fn select_spectrum(&mut self, target: &SpectrumTarget, channels: SpectrumChannels) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 11);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -3593,6 +3647,9 @@ impl AudioWorkletEngineHost {
         target: &SpectrumTarget,
         channels: SpectrumChannels,
     ) -> Result<bool, u32> {
+        if self.protected_observation_prepared() {
+            return Err(RESULT_UNSUPPORTED);
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
@@ -3645,6 +3702,9 @@ impl AudioWorkletEngineHost {
         &self,
         selections: &[ObservationSelection<'_>],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if self.status.state != STATE_READY {
             return Err(ObservationReadError::WrongState);
         }
@@ -3704,6 +3764,9 @@ impl AudioWorkletEngineHost {
     /// Number of currently bound resident observation effects in dense owner order.
     #[must_use]
     pub fn observation_binding_count(&self) -> usize {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| {
             ready
                 .effect_observations
@@ -3716,6 +3779,9 @@ impl AudioWorkletEngineHost {
     /// One current-owner observation binding for the read-only session map.
     #[must_use]
     pub fn observation_binding(&self, index: u32) -> Option<ObservationBinding<'_>> {
+        if self.protected_observation_prepared() {
+            return None;
+        }
         let ready = self.ready.as_ref()?;
         let mut observed_index = 0_u32;
         for (effect, handle) in ready.effect_observations.iter().enumerate() {
@@ -3750,6 +3816,9 @@ impl AudioWorkletEngineHost {
         &self,
         addresses: &[ObservationAddress],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if addresses.len() > MAXIMUM_OBSERVATION_READS {
             return Err(ObservationReadError::BufferTooSmall);
         }
@@ -3769,6 +3838,9 @@ impl AudioWorkletEngineHost {
         addresses: &[ObservationAddress],
         output: &mut [ObservationReadValues],
     ) -> Result<(), ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if self.status.state != STATE_READY {
             return Err(ObservationReadError::WrongState);
         }
@@ -3795,6 +3867,9 @@ impl AudioWorkletEngineHost {
     /// Number of complete meter windows folded since compilation.
     #[must_use]
     pub fn meter_windows(&self) -> u64 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| ready.meter_windows)
     }
 
@@ -3822,6 +3897,9 @@ impl AudioWorkletEngineHost {
     /// Whether meter observers were attached at preparation (issue #137 D2).
     #[must_use]
     pub fn meters_attached(&self) -> bool {
+        if self.protected_observation_prepared() {
+            return false;
+        }
         self.ready
             .as_ref()
             .is_some_and(|ready| !ready.meters.is_empty())
@@ -3833,6 +3911,14 @@ impl AudioWorkletEngineHost {
     /// caller asked for numbers this preparation cannot produce, and silently reporting zeros
     /// would be worse than saying so.
     pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
+        if self.protected_observation_prepared() {
+            let class = if enabled {
+                ObservationClass::Ordinary
+            } else {
+                ObservationClass::Removal
+            };
+            return self.refuse_unsupported_observation(class, 12);
+        }
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -4322,6 +4408,72 @@ impl AudioWorkletEngineHost {
         if self.ready.is_none() {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         }
+        let protected = self.protected_observation_prepared();
+        let observation = {
+            let Some(buffers) = self.buffers.as_ref() else {
+                return self.fail(RESULT_INTERNAL, b"web.internal.console\t$\n");
+            };
+            let Some(bytes) = buffers.command.get(..staged) else {
+                return self.finish_commands(
+                    RESULT_INVALID_ARGUMENT,
+                    COMMAND_REASON_MALFORMED,
+                    0,
+                    0,
+                );
+            };
+            if protected {
+                classify_raw_observation_commands(bytes)
+            } else {
+                None
+            }
+        };
+        if let Some((class, index)) = observation {
+            const OPERATION: u32 = 9;
+            let control_bytes = u64::from(count)
+                .checked_mul(u64::from(COMMAND_RECORD_BYTES))
+                .and_then(|bytes| bytes.checked_add(u64::from(companion_bytes.unwrap_or(0))));
+            let Some(control_bytes) = control_bytes else {
+                return self.finish_commands(
+                    RESULT_REFUSED_BUDGET,
+                    COMMAND_REASON_BACKPRESSURE,
+                    index,
+                    0,
+                );
+            };
+            let permit = match self.begin_observation(
+                class,
+                ObservationLengths {
+                    control_bytes,
+                    rows: u64::from(count),
+                    result_bytes: 0,
+                },
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    let result = self.record_observation_refusal(OPERATION, refusal);
+                    return self.finish_commands(result, COMMAND_REASON_BACKPRESSURE, index, 0);
+                }
+            };
+            let _permit = permit;
+            self.record_observation_admission(
+                OPERATION,
+                RESULT_UNSUPPORTED,
+                Some(ObservationRefusal {
+                    reason: ObservationRefusalReason::InvalidRequest,
+                    limit: None,
+                    requested: None,
+                    maximum: None,
+                }),
+                None,
+                false,
+            );
+            return self.finish_commands(
+                RESULT_UNSUPPORTED,
+                COMMAND_REASON_UNSUPPORTED_KIND,
+                index,
+                0,
+            );
+        }
         // Disjoint borrows: the staged bytes live in `buffers`, the console lives in `ready`.
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.console\t$\n");
@@ -4408,6 +4560,9 @@ impl AudioWorkletEngineHost {
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
     /// buffer allocated at compilation.
     pub fn poll_meters(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         if !self.meter_lease || self.status.state != STATE_READY {
             return 0;
         }
@@ -5130,6 +5285,40 @@ struct CommandRecord {
     parameter_id: u32,
     smoothing_samples: u32,
     values: [f32; 4],
+}
+
+fn classify_raw_observation_commands(bytes: &[u8]) -> Option<(ObservationClass, u32)> {
+    const SUBSCRIBE: u8 = COMMAND_OBSERVE_SUBSCRIBE as u8;
+    const UNSUBSCRIBE: u8 = COMMAND_OBSERVE_UNSUBSCRIBE as u8;
+    let mut first_observation_index = None;
+    let mut all_unsubscribe = true;
+    for (index, record) in bytes
+        .chunks_exact(COMMAND_RECORD_BYTES as usize)
+        .enumerate()
+    {
+        match record[0] {
+            SUBSCRIBE => {
+                first_observation_index.get_or_insert(index as u32);
+                all_unsubscribe = false;
+            }
+            UNSUBSCRIBE => {
+                first_observation_index.get_or_insert(index as u32);
+            }
+            _ => {
+                all_unsubscribe = false;
+            }
+        }
+    }
+    first_observation_index.map(|index| {
+        (
+            if all_unsubscribe {
+                ObservationClass::Removal
+            } else {
+                ObservationClass::Ordinary
+            },
+            index,
+        )
+    })
 }
 
 impl CommandRecord {
