@@ -161,3 +161,17 @@ probes cover source/no-source refusal and successful retry. Compiler checks with
 and without test-support, five focused controlled tests, two existing source
 ownership tests, formatting and diff checks PASS. Only compiler lib source changed.
 A3b actual-render selected-work/PCM/window proof remains pending.
+
+## A3b evidence
+
+Fresh Luna MAX added the actual bank/tail controlled-meter fixture using the
+existing harness. Empty/single/maximum/removal/reactivation transitions preserve
+PCM bits against a no-meter baseline and visit exactly 2*selected*render_frames
+sample-peak sites. Windows prove unchanged-live generation/history, stale queued
+records and fresh reactivation. Additional ownership probes cover duplicate
+controlled observer handles, active capacity and retained-byte refusal through
+the no-source wrapper. Six focused controlled tests PASS. Native and Wasm library
+checks with/without test-support, formatting and diff checks PASS. Default
+no-feature test compilation still hits existing unrelated test-support cfg errors;
+feature-enabled tests are the established compiler gate. Source capability is
+ready for independent attempt1 review; resource/artifact integration remains.
