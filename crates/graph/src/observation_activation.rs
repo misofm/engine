@@ -79,7 +79,7 @@ pub struct GraphObservationApplied {
 ///
 /// The indices are intentionally `Copy`: the realtime snapshot carries no observer trait objects,
 /// reference counts, or other resources. `member` is absent for a plain runtime operation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ActivationEntry {
     pub(crate) unit: usize,
     pub(crate) member: Option<usize>,
@@ -533,10 +533,10 @@ impl RealtimeObservationActivation {
         // present, is always the lower revision and can be applied before reading the removal
         // queue. Keeping the second queue unread until the first succeeds preserves its box if a
         // defensive retirement check ever defers the first candidate.
-        if let Some(candidate) = self.pending.take() {
-            if !self.apply_candidate(candidate, first_sample, &mut on_changed) {
-                return;
-            }
+        if let Some(candidate) = self.pending.take()
+            && !self.apply_candidate(candidate, first_sample, &mut on_changed)
+        {
+            return;
         }
         if ordinary_count != 0 {
             let Some(candidate) = self
@@ -555,9 +555,7 @@ impl RealtimeObservationActivation {
             else {
                 return;
             };
-            if !self.apply_candidate(candidate, first_sample, &mut on_changed) {
-                return;
-            }
+            self.apply_candidate(candidate, first_sample, &mut on_changed);
         }
     }
     // REALTIME_POLICY_END
@@ -816,17 +814,6 @@ fn layout_array<T>(length: usize) -> Result<u64, GraphObservationAdmissionError>
     Layout::array::<T>(length)
         .map(|layout| u64::try_from(layout.size()).unwrap_or(u64::MAX))
         .map_err(|_: LayoutError| GraphObservationAdmissionError::RetainedBytes)
-}
-
-impl Default for ActivationEntry {
-    fn default() -> Self {
-        Self {
-            unit: 0,
-            member: None,
-            observer: 0,
-            ordinal: 0,
-        }
-    }
 }
 
 #[cfg(test)]

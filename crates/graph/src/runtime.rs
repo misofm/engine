@@ -1505,6 +1505,7 @@ impl Runtime {
         self.folds
     }
 
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
@@ -3334,6 +3335,7 @@ pub(crate) fn preflight_observation_activation(
     }
     let (controller, realtime) = prepare_activation(catalog.into_boxed_slice(), &permanent, config)
         .map_err(observation_activation_error_code)?;
+    debug_assert_eq!(controller.resources(), realtime.resources());
     Ok(Some(PreparedObservationActivation {
         controller,
         realtime,

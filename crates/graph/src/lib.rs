@@ -941,6 +941,16 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         false
     }
 }
+type OptionalSourceBindResult = Result<
+    (PreparedRenderPlan, Option<GraphObservationController>),
+    (
+        PreparedGraphPlan,
+        GraphRuntimeBindings,
+        Option<GraphPreparedSourceSet>,
+        &'static str,
+    ),
+>;
+
 impl PreparedGraphPlan {
     /// The input-side track delays this plan lowers, in normalized track order (#210 phase 2).
     ///
@@ -1270,11 +1280,11 @@ impl PreparedGraphPlan {
                     code,
                 },
             )
-            .and_then(|(plan, activation)| {
+            .map(|(plan, activation)| {
                 if activation.is_some() {
                     unreachable!("legacy source bind cannot prepare activation")
                 }
-                Ok(plan)
+                plan
             })
     }
 
@@ -1324,15 +1334,7 @@ impl PreparedGraphPlan {
         mut bindings: GraphRuntimeBindings,
         mut source_set: Option<GraphPreparedSourceSet>,
         activation_config: Option<GraphObservationActivationConfig>,
-    ) -> Result<
-        (PreparedRenderPlan, Option<GraphObservationController>),
-        (
-            Self,
-            GraphRuntimeBindings,
-            Option<GraphPreparedSourceSet>,
-            &'static str,
-        ),
-    > {
+    ) -> OptionalSourceBindResult {
         let (
             duplicate_binding,
             coverage_matches,
@@ -2204,21 +2206,20 @@ impl PreparedPlanExecutor for GraphExecutor {
                     runtime.complete_pending(time.absolute_sample);
                     return Err(error);
                 }
-            } else if active_observation {
-                if let Err(error) =
+            } else if active_observation
+                && let Err(error) =
                     runtime.observe_active_unit(unit, time.absolute_sample, source_validity)
-                {
-                    runtime.invalidate_observers_after_failure(time.absolute_sample);
-                    #[cfg(any(test, feature = "test-support"))]
-                    if !runtime::test_only_completion_disabled() {
-                        runtime.complete_pending(time.absolute_sample);
-                    }
-                    #[cfg(any(test, feature = "test-support"))]
-                    runtime.test_only_capture_failed_buffer();
-                    #[cfg(not(any(test, feature = "test-support")))]
+            {
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
+                #[cfg(any(test, feature = "test-support"))]
+                if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
-                    return Err(error);
                 }
+                #[cfg(any(test, feature = "test-support"))]
+                runtime.test_only_capture_failed_buffer();
+                #[cfg(not(any(test, feature = "test-support")))]
+                runtime.complete_pending(time.absolute_sample);
+                return Err(error);
             }
         }
         let (left, right) = runtime.buffer(*output_buffer);

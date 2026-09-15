@@ -212,3 +212,14 @@ bounded evidence tranche must exercise allocator-guarded active audio, PCM acros
 empty/single/maximum/churn sets, bank/tail and failure behavior, input-operation
 counters, and transactional source ownership. Root owns Wasm and independent
 review. No host/SDK/browser adoption or deadline qualification is claimed yet.
+
+### Coordinator gate cleanup
+
+Wasm graph compilation passes (/tmp/observation-816-wasm.log). Root resolved the
+new-code Clippy findings mechanically: derive the zero entry, simplify equivalent
+branches/map, name the private bind result, restrict the fixture constructor to
+tests and check endpoint resource agreement during control-side preflight. No
+behavioral contract changed. Graph library Clippy with -D warnings now passes
+(/tmp/observation-816-clippy-final.log); existing unrelated clippy.toml unreachable
+path notices remain informational. Graph library tests remain 75/75 and realtime
+policy passes. The separate allocator/PCM fixture assignment remains active.
