@@ -3450,6 +3450,41 @@ impl AudioWorkletEngineHost {
         self.side_records.capture_identity = identity;
     }
 
+    /// Validate the protected response target and return its cached packed-response bound.
+    ///
+    /// This read-only preflight is shared with the FFI capture transaction before it creates a
+    /// sink. The target must remain the exact prepared post-matrix track and the host must still
+    /// be ready; all failures retain the native response error mapping.
+    pub(crate) fn response_capture_preflight(
+        &self,
+        track_id: &str,
+    ) -> Result<u64, ResponseSnapshotError> {
+        let selected_track = self.ready.as_ref().and_then(|ready| {
+            let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                return None;
+            };
+            match &storage.spectrum_demand.target {
+                SpectrumTarget::TrackPostMatrix(track_id) => Some(track_id.as_ref()),
+                _ => None,
+            }
+        });
+        if selected_track != Some(track_id) {
+            return Err(ResponseSnapshotError::MissingTrack);
+        }
+
+        if self.status.state != STATE_READY {
+            return Err(ResponseSnapshotError::Owner);
+        }
+
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(ResponseSnapshotError::Owner);
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(ResponseSnapshotError::Owner);
+        };
+        Ok(storage.packed_response_bytes)
+    }
+
     /// Execute one admitted protected response capture through the existing native sink.
     ///
     /// The permit is validated before any target comparison or provider call. The prepared
@@ -3488,29 +3523,7 @@ impl AudioWorkletEngineHost {
             return Err(ProtectedResponseCaptureError::Refused(refusal));
         }
 
-        let selected_track = self.ready.as_ref().and_then(|ready| {
-            let PreparedObservationStorage::Protected(storage) = &ready.observation else {
-                return None;
-            };
-            match &storage.spectrum_demand.target {
-                SpectrumTarget::TrackPostMatrix(track_id) => Some(track_id.as_ref()),
-                _ => None,
-            }
-        });
-        if selected_track != Some(track_id) {
-            let error = ResponseSnapshotError::MissingTrack;
-            self.record_observation_admission(
-                OPERATION,
-                response_snapshot_result(error),
-                None,
-                None,
-                false,
-            );
-            return Err(ProtectedResponseCaptureError::Capture(error));
-        }
-
-        if self.status.state != STATE_READY {
-            let error = ResponseSnapshotError::Owner;
+        if let Err(error) = self.response_capture_preflight(track_id) {
             self.record_observation_admission(
                 OPERATION,
                 response_snapshot_result(error),
