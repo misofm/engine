@@ -6361,6 +6361,148 @@ pub(crate) mod live_response_ffi_tests {
     }
 
     #[test]
+    fn ffi_protected_response_token_exhaustion_preserves_markers_and_admission() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        let _ = seed_response_markers();
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
+        let markers = response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_response_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "token exhaustion spends the Ordinary attempt"
+            );
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: RESULT_REFUSED_BUDGET,
+                    operation: 8,
+                    ingress_epoch: 1,
+                    ..WebObservationAdmission::default()
+                }
+            );
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    fn render_one_protected_boundary(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_shares_ordinary_credit_with_spectrum_and_replenishes_at_render() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        let markers = seed_response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(handle, 0, 0, 0),
+            RESULT_UNSUPPORTED
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: RESULT_UNSUPPORTED,
+                    operation: 11,
+                    reason: 8,
+                    ingress_epoch: 1,
+                    ..WebObservationAdmission::default()
+                }
+            );
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_response_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.reason, 5);
+            assert_eq!(admission.requested, 2);
+            assert_eq!(admission.maximum, 1);
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+        });
+
+        render_one_protected_boundary(handle);
+        assert_ne!(
+            LIVE_HOST.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("protected live host")
+                    .host
+                    .observation_status()
+                    .flags
+            }) & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+            0,
+            "a successful render replenishes the Ordinary attempt"
+        );
+
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_OK
+        );
+        assert_eq!(captured_header().snapshot_token, markers.live_token + 1);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_success_creates_no_observation_application_receipt() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.side_records.application_len, 0);
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(host.side_records.completed_count, 0);
+            assert_eq!(host.side_records.reserved_mask, 0);
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_OK);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.flags & crate::OBSERVATION_ADMISSION_RECEIPT, 0);
+            assert_eq!(admission.receipt, WebObservationReceipt::default());
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
     fn ffi_live_capture_analysis_is_prewarmed_and_token_exhaustion_is_typed() {
         let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         let options = WebBootOptions {
