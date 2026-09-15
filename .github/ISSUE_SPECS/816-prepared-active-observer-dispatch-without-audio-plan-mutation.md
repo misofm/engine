@@ -148,3 +148,34 @@ The crate-private runtime endpoint is intentionally not yet wired, producing
 expected unused-code warnings until tranche B. This is a compiling transport
 checkpoint, not a native graph capability verdict. Tranche B must complete real
 dispatch, transactional bind, resource/PCM/realtime evidence and independent review.
+
+### Bounded tranche B assignments
+
+Split B without changing its contract: B1 implements only borrowed activation
+preflight/catalog mapping and focused coordinate/refusal tests in runtime.rs plus
+minimal lib.rs visibility glue; it does not expose new public bind methods or
+change render dispatch. B2 then wires transactional public bind and active-only
+runtime dispatch/activation/failure handling and runs the real PCM/realtime gates.
+Each compiling slice is committed before the next fresh Luna MAX agent starts.
+
+B1 edge-case ruling: opt-in activation bind requires at least one controlled
+binding. A configured activation with an empty controlled catalog returns
+`graph.plan.observation_activation_capacity` during borrowed preflight. Ordinary
+bind with permanent observers only retains its existing dispatch and no activation
+pool. Do not return an unusable empty controller or suppress permanent observers
+by attaching an empty activation snapshot.
+
+Root also ran the unchanged-dispatch graph library suite at tranche-A source
+checkpoint d39d9cf5: 73/73 tests pass, including existing graph PCM/layout/resource
+regressions. Evidence: /tmp/observation-816-a-graph-suite.log. This supplements the
+primitive checkpoint; it does not establish the pending active-dispatch behavior.
+
+### Attempt 1 tranche B1 checkpoint
+
+Fresh Luna MAX implemented borrowed activation preparation from the frozen
+SequentialPlan, shared direct/alias enumeration, and compact real-plan mapping
+and refusal tests. Caller-owned processor/observer inputs remain borrowed during
+all fallible activation preparation. Focused preflight and existing alias tests,
+cargo check -p graph, formatting and diff checks pass. Public bind and render
+dispatch integration remain B2; no native active-dispatch capability is claimed
+from this checkpoint alone.

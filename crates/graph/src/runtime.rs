@@ -193,6 +193,11 @@ use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
+use crate::observation_activation::{
+    ActivationBinding, ActivationEntry, GraphObservationActivationConfig,
+    GraphObservationAdmissionError, GraphObservationController, RealtimeObservationActivation,
+    prepare_activation,
+};
 use crate::{
     GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
     GraphObservationValidity, GraphPreparedEffect, GraphRuntimeProcessor,
@@ -2820,6 +2825,249 @@ fn taps_by_op(program: &ExecutionProgram, spec: &GraphSpec) -> BTreeMap<u32, Vec
     by_op
 }
 
+/// Enumerate the observer rows at one op in the same order as [`build_op`].
+///
+/// A direct node's rows are followed by each elided alias's rows.  Each individual node is sorted
+/// by stable handle by [`take_observers`] and by [`preflight_observation_activation`] before this
+/// helper is used, so this function is only responsible for preserving the direct/alias layout.
+fn observer_nodes<'a>(
+    node: GraphNodeId,
+    aliases: &'a [GraphNodeId],
+) -> impl Iterator<Item = GraphNodeId> + 'a {
+    core::iter::once(node).chain(aliases.iter().cloned())
+}
+
+/// The two owners created by borrowed activation preflight.
+///
+/// Both pieces are prepared while the caller still owns every processor, observer and source.
+/// The controller remains on the control side; the realtime half is passed to the executor by the
+/// transactional bind tranche that follows this one.
+pub(crate) struct PreparedObservationActivation {
+    pub(crate) controller: GraphObservationController,
+    pub(crate) realtime: RealtimeObservationActivation,
+}
+
+/// Resolve the exact lowered observer coordinates before any caller-owned input is moved.
+///
+/// This is deliberately a borrowed walk over the immutable observer bindings and the already
+/// frozen sequential plan.  It must remain the sole fallible activation preparation step: once it
+/// succeeds, materialisation can consume the same plan without doing another lookup or allocation
+/// that could fail after ownership has started moving.
+pub(crate) fn preflight_observation_activation(
+    plan: &crate::PreparedGraphPlan,
+    program: &ExecutionProgram,
+    bindings: &crate::GraphRuntimeBindings,
+    planning: &SequentialPlan,
+    config: Option<GraphObservationActivationConfig>,
+) -> Result<Option<PreparedObservationActivation>, &'static str> {
+    let has_controlled = plan
+        .observers
+        .iter()
+        .chain(bindings.observers.iter())
+        .any(GraphNodeObserverBinding::is_controlled);
+
+    let Some(config) = config else {
+        return if has_controlled {
+            Err("graph.plan.observation_activation_required")
+        } else {
+            Ok(None)
+        };
+    };
+
+    // A configured endpoint with no controlled row cannot ever admit a replacement.  Refuse it
+    // before prepare_activation so a permanent-only graph does not acquire an unusable controller.
+    if !has_controlled {
+        return Err("graph.plan.observation_activation_capacity");
+    }
+
+    if planning.unit_of_run.len() != planning.run_units.len()
+        || planning.op_slot.len() != program.ops.len()
+    {
+        return Err("graph.plan.observer");
+    }
+    if program.ops.iter().any(|op| {
+        usize::try_from(op.node)
+            .ok()
+            .is_none_or(|node| node >= plan.spec.nodes.len())
+    }) || program.taps.iter().any(|tap| {
+        usize::try_from(tap.node)
+            .ok()
+            .is_none_or(|node| node >= plan.spec.nodes.len())
+            || usize::try_from(tap.after_op)
+                .ok()
+                .is_none_or(|op| op >= program.ops.len())
+    }) {
+        return Err("graph.plan.observer");
+    }
+
+    // Keep only borrowed rows in this temporary map.  Clearing one node after it is emitted is
+    // equivalent to take_observers' remove, while retaining the caller-owned bindings untouched.
+    let mut observers_by_node: BTreeMap<GraphNodeId, Vec<&GraphNodeObserverBinding>> =
+        BTreeMap::new();
+    for observer in plan.observers.iter().chain(bindings.observers.iter()) {
+        observers_by_node
+            .entry(observer.node.clone())
+            .or_default()
+            .push(observer);
+    }
+    for observers in observers_by_node.values_mut() {
+        observers.sort_unstable_by_key(|observer| observer.handle);
+    }
+
+    let taps = taps_by_op(program, &plan.spec);
+    let mut catalog = Vec::new();
+    let mut permanent = Vec::new();
+    let mut ordinal = 0_usize;
+    let mut expected_unit = 0_usize;
+    let mut seen_ops = vec![false; program.ops.len()];
+    let mut emitted_ops = vec![false; program.ops.len()];
+
+    for (run, (membership, ops)) in planning.run_units.iter().enumerate() {
+        let unit = planning
+            .unit_of_run
+            .get(run)
+            .copied()
+            .ok_or("graph.plan.observer")?;
+        let Some(unit) = unit else {
+            // A retired run has no RuntimeUnit and therefore no observer dispatch boundary.  Its
+            // observer rows remain in the map and make the final complete-consumption check fail.
+            for op in ops {
+                let Some(seen) = seen_ops.get_mut(*op) else {
+                    return Err("graph.plan.observer");
+                };
+                if *seen {
+                    return Err("graph.plan.observer");
+                }
+                *seen = true;
+                if planning
+                    .op_slot
+                    .get(*op)
+                    .ok_or("graph.plan.observer")?
+                    .is_some()
+                {
+                    return Err("graph.plan.observer");
+                }
+            }
+            continue;
+        };
+        if unit != expected_unit {
+            return Err("graph.plan.observer");
+        }
+        expected_unit = expected_unit.checked_add(1).ok_or("graph.plan.observer")?;
+        if membership.is_empty() && ops.len() != 1 {
+            return Err("graph.plan.observer");
+        }
+
+        for (member, op) in ops.iter().copied().enumerate() {
+            let Some(seen) = seen_ops.get_mut(op) else {
+                return Err("graph.plan.observer");
+            };
+            if *seen {
+                return Err("graph.plan.observer");
+            }
+            *seen = true;
+            emitted_ops[op] = true;
+
+            let Some((mapped_unit, mapped_member)) = planning.op_slot.get(op).copied().flatten()
+            else {
+                return Err("graph.plan.observer");
+            };
+            if mapped_unit != unit || mapped_member != member {
+                return Err("graph.plan.observer");
+            }
+            let runtime_member = (!membership.is_empty()).then_some(member);
+            let node = plan
+                .spec
+                .nodes
+                .get(program.ops[op].node as usize)
+                .ok_or("graph.plan.observer")?
+                .id
+                .clone();
+            let aliases = taps
+                .get(&u32::try_from(op).map_err(|_| "graph.plan.observer")?)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut observer_index = 0_usize;
+            for observed_node in observer_nodes(node, aliases) {
+                let Some(observers) = observers_by_node.get_mut(&observed_node) else {
+                    continue;
+                };
+                for observer in observers.iter().copied() {
+                    let entry = ActivationEntry {
+                        unit,
+                        member: runtime_member,
+                        observer: observer_index,
+                        ordinal,
+                    };
+                    ordinal = ordinal.checked_add(1).ok_or("graph.plan.observer")?;
+                    observer_index = observer_index.checked_add(1).ok_or("graph.plan.observer")?;
+                    if observer.is_controlled() {
+                        catalog.push(ActivationBinding {
+                            handle: observer.handle,
+                            entry,
+                        });
+                    } else {
+                        permanent.push(entry);
+                    }
+                }
+                // A direct node or alias can appear only once in the lowered sequence.  Clearing
+                // here mirrors take_observers if malformed taps repeat the same node.
+                observers.clear();
+            }
+        }
+    }
+
+    if seen_ops.iter().any(|seen| !seen)
+        || planning
+            .op_slot
+            .iter()
+            .enumerate()
+            .any(|(op, slot)| slot.is_some() != emitted_ops[op])
+        || observers_by_node
+            .values()
+            .any(|observers| !observers.is_empty())
+    {
+        return Err("graph.plan.observer");
+    }
+
+    if catalog.is_empty() {
+        return Err("graph.plan.observation_activation_capacity");
+    }
+    let (controller, realtime) = prepare_activation(catalog.into_boxed_slice(), &permanent, config)
+        .map_err(observation_activation_error_code)?;
+    Ok(Some(PreparedObservationActivation {
+        controller,
+        realtime,
+    }))
+}
+
+fn observation_activation_error_code(error: GraphObservationAdmissionError) -> &'static str {
+    match error {
+        GraphObservationAdmissionError::UnknownHandle => {
+            "graph.plan.observation_activation_unknown"
+        }
+        GraphObservationAdmissionError::DuplicateHandle => {
+            "graph.plan.observation_activation_duplicate"
+        }
+        GraphObservationAdmissionError::ActiveCapacity => {
+            "graph.plan.observation_activation_capacity"
+        }
+        GraphObservationAdmissionError::RetainedBytes => {
+            "graph.plan.observation_activation_retained"
+        }
+        GraphObservationAdmissionError::InvalidRemoval => {
+            "graph.plan.observation_activation_removal"
+        }
+        GraphObservationAdmissionError::Backpressure => {
+            "graph.plan.observation_activation_backpressure"
+        }
+        GraphObservationAdmissionError::RevisionExhausted => {
+            "graph.plan.observation_activation_revision"
+        }
+        GraphObservationAdmissionError::OwnerClosed => "graph.plan.observation_activation_owner",
+    }
+}
+
 /// The buffer-identity half of serialized scalar fader/matrix admission.
 ///
 /// The composite receives one in-place block at the fader slot. It can preserve the later matrix
@@ -4473,7 +4721,7 @@ fn build_op(
     let kind = parts.node_kind(&node, op.node);
     let observers = take_observers(
         &mut parts.observers,
-        core::iter::once(node).chain(aliases.unwrap_or(&[]).iter().cloned()),
+        observer_nodes(node, aliases.unwrap_or(&[])),
     );
     RuntimeOp {
         inputs: inputs.into_boxed_slice(),

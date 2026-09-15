@@ -4512,6 +4512,214 @@ mod tests {
         }
     }
 
+    fn activation_error<T>(result: Result<T, &'static str>) -> &'static str {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("activation unexpectedly succeeded"),
+        }
+    }
+
+    fn test_observer() -> Box<dyn GraphRuntimeObserver> {
+        Box::new(TapRecorder(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        ))
+    }
+
+    #[test]
+    fn observation_activation_preflight_is_borrowed_and_maps_plain_and_bank_rows() {
+        let (mut plan, bindings, input) = binding_plan();
+        let calls = Arc::new(AtomicU64::new(0));
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        plan.observers.push(GraphNodeObserverBinding::controlled(
+            input,
+            7,
+            Box::new(TapRecorder(Arc::clone(&calls), Arc::clone(&sink))),
+        ));
+        let program = plan.program().cloned().expect("lowered");
+        let planning = runtime::preflight_sequential(&plan, &program, &bindings, None)
+            .expect("sequential plan");
+        let observer_count = plan.observers.len();
+        let node_count = bindings.nodes.len();
+        let config = GraphObservationActivationConfig {
+            maximum_active_observers: 1,
+            maximum_retained_bytes: u64::MAX,
+        };
+        let mut prepared = runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(config),
+        )
+        .expect("activation preflight")
+        .expect("configured activation");
+        assert_eq!(plan.observers.len(), observer_count);
+        assert_eq!(bindings.nodes.len(), node_count);
+
+        prepared
+            .controller
+            .replace(&[7])
+            .expect("controlled replacement");
+        prepared
+            .realtime
+            .apply_boundary(19, |_entry, _active, _revision, _first_sample| {});
+        let entries = prepared.realtime.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].unit, 0);
+        assert_eq!(entries[0].member, None);
+        assert_eq!(entries[0].observer, 0);
+        assert_eq!(entries[0].ordinal, 0);
+
+        let required = activation_error(runtime::preflight_observation_activation(
+            &plan, &program, &bindings, &planning, None,
+        ));
+        assert_eq!(required, "graph.plan.observation_activation_required");
+        let capacity = activation_error(runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 0,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        ));
+        assert_eq!(capacity, "graph.plan.observation_activation_capacity");
+        let retained = activation_error(runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: 0,
+            }),
+        ));
+        assert_eq!(retained, "graph.plan.observation_activation_retained");
+        assert_eq!(plan.observers.len(), observer_count);
+        assert_eq!(bindings.nodes.len(), node_count);
+
+        let (mut duplicate_plan, duplicate_bindings, input) = binding_plan();
+        let output = duplicate_plan
+            .spec
+            .nodes
+            .iter()
+            .find_map(|node| matches!(node.id, GraphNodeId::Output { .. }).then(|| node.id.clone()))
+            .expect("output");
+        duplicate_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                input,
+                55,
+                test_observer(),
+            ));
+        duplicate_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                output,
+                55,
+                test_observer(),
+            ));
+        let duplicate_program = duplicate_plan.program().cloned().expect("lowered");
+        let duplicate_planning = runtime::preflight_sequential(
+            &duplicate_plan,
+            &duplicate_program,
+            &duplicate_bindings,
+            None,
+        )
+        .expect("sequential plan");
+        let duplicate = activation_error(runtime::preflight_observation_activation(
+            &duplicate_plan,
+            &duplicate_program,
+            &duplicate_bindings,
+            &duplicate_planning,
+            Some(config),
+        ));
+        assert_eq!(duplicate, "graph.plan.observation_activation_duplicate");
+
+        let (mut unresolved_plan, unresolved_bindings, _) = binding_plan();
+        unresolved_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse("missing").expect("ID"),
+                    stage: TrackStage::PostDynamic,
+                },
+                81,
+                test_observer(),
+            ));
+        let unresolved_program = unresolved_plan.program().cloned().expect("lowered");
+        let unresolved_planning = runtime::preflight_sequential(
+            &unresolved_plan,
+            &unresolved_program,
+            &unresolved_bindings,
+            None,
+        )
+        .expect("sequential plan");
+        let unresolved = activation_error(runtime::preflight_observation_activation(
+            &unresolved_plan,
+            &unresolved_program,
+            &unresolved_bindings,
+            &unresolved_planning,
+            Some(config),
+        ));
+        assert_eq!(unresolved, "graph.plan.observer");
+
+        let (bank_plan, mut bank_bindings, _) = four_track_builtin_plan(8_160, true, false);
+        let bank_tail = bank_plan
+            .required_bindings
+            .iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        track_id,
+                        stage: TrackStage::PostInputBuiltins,
+                    } if track_id.as_str() == "track3"
+                )
+            })
+            .cloned()
+            .expect("bank tail");
+        bank_bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                bank_tail,
+                99,
+                test_observer(),
+            ));
+        let bank_program = bank_plan.program().cloned().expect("lowered");
+        let bank_planning =
+            runtime::preflight_sequential(&bank_plan, &bank_program, &bank_bindings, None)
+                .expect("sequential bank plan");
+        let mut bank_activation = runtime::preflight_observation_activation(
+            &bank_plan,
+            &bank_program,
+            &bank_bindings,
+            &bank_planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        )
+        .expect("bank activation preflight")
+        .expect("configured bank activation");
+        bank_activation
+            .controller
+            .replace(&[99])
+            .expect("bank replacement");
+        bank_activation
+            .realtime
+            .apply_boundary(0, |_entry, _active, _revision, _first_sample| {});
+        assert!(
+            bank_activation
+                .realtime
+                .entries()
+                .iter()
+                .any(|entry| entry.member == Some(3) && entry.observer == 1)
+        );
+    }
+
     /// E9. The three internal rack boundaries are pure aliases, so the lowering elides them and
     /// the executors never copy through them -- and the audio is bit-identical to the same plan
     /// with those stages materialised by a copy-through processor. An observer on an elided stage
@@ -4700,6 +4908,51 @@ mod tests {
         // sees exactly what the producing op wrote.
         let calls = Arc::new(AtomicU64::new(0));
         let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (alias_plan, mut alias_bindings) = build(
+            true,
+            Some((
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            )),
+        );
+        alias_bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                node(TrackStage::PostInputBuiltins),
+                101,
+                test_observer(),
+            ));
+        let alias_program = alias_plan.program().cloned().expect("lowered aliases");
+        let alias_planning =
+            runtime::preflight_sequential(&alias_plan, &alias_program, &alias_bindings, None)
+                .expect("sequential alias plan");
+        let mut alias_activation = runtime::preflight_observation_activation(
+            &alias_plan,
+            &alias_program,
+            &alias_bindings,
+            &alias_planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        )
+        .expect("alias activation preflight")
+        .expect("configured alias activation");
+        alias_activation
+            .controller
+            .replace(&[101])
+            .expect("alias replacement");
+        alias_activation
+            .realtime
+            .apply_boundary(0, |_entry, _active, _revision, _first_sample| {});
+        let alias_entries = alias_activation.realtime.entries();
+        assert_eq!(alias_entries.len(), 2);
+        assert_eq!(alias_entries[0].unit, alias_entries[1].unit);
+        assert_eq!(alias_entries[0].member, None);
+        assert_eq!(alias_entries[1].member, None);
+        assert_eq!(alias_entries[0].observer, 0);
+        assert_eq!(alias_entries[1].observer, 1);
+
         let (observed, observed_bindings) =
             build(true, Some((Arc::clone(&calls), Arc::clone(&sink))));
         let mut observed_plan = observed
