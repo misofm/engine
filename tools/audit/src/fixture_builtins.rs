@@ -350,7 +350,7 @@ const INPUT_PROCESSOR_BYTES: u64 = 688;
 const STRIP_PREPARATION_BYTES: u64 = 1072;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
-const GRAPH_OBSERVER_BINDING_BYTES: u64 = 80;
+const GRAPH_OBSERVER_BINDING_BYTES: u64 = 88;
 const METER_CONSUMER_BYTES: u64 = 72;
 const METER_REQUEST_SEAL_BYTES: u64 = 56;
 const OBSERVER_SEAL_BYTES: u64 = 32;
@@ -5245,7 +5245,10 @@ mod tests {
             // payload lengths and every render-bearing fixture remain unchanged.
             // Re-pinned by issue #519: the metric-selection field grows `MeterAccumulator` by 8
             // bytes after alignment while `MeterSnapshot` remains 160 by using existing padding.
-            "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3",
+            // Re-pinned by issue #816: `GraphNodeObserverBinding` grows from 80 to 88 bytes after
+            // the controlled-activation flag is added; only the resource rows and this joined
+            // manifest identity move, while PCM, meter, response and benchmark payloads remain.
+            "da78dc3e49a98900b97fb69c1d37f7c81e9fe48737301927fadd7f9636fbcaef",
             "accepted joined-corpus manifest identity"
         );
 

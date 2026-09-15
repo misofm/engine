@@ -13,11 +13,23 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
 };
 
+static ALLOCATOR_MODE_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn allocator_mode_guard() -> &'static std::sync::Mutex<()> {
+    ALLOCATOR_MODE_GUARD.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[derive(Default)]
 struct Probe {
     trace: AtomicU64,
     command: AtomicU32,
-    observed: [[AtomicU32; 17]; 4],
+    observation_order: [AtomicU32; 16],
+    observation_order_len: AtomicU32,
+    observed: [[AtomicU32; 17]; 16],
+    visits: [AtomicU32; 16],
+    activation_on: [AtomicU32; 16],
+    activation_off: [AtomicU32; 16],
+    invalidations: [AtomicU32; 16],
 }
 impl Probe {
     fn event(&self, event: u64) {
@@ -33,10 +45,56 @@ impl Probe {
         (
             self.trace.load(Relaxed),
             self.command.load(Relaxed),
-            self.observed
-                .each_ref()
-                .map(|row| row.each_ref().map(|v| v.load(Relaxed))),
+            std::array::from_fn(|row| {
+                std::array::from_fn(|frame| self.observed[row][frame].load(Relaxed))
+            }),
         )
+    }
+    fn reset_observation_order(&self) {
+        self.observation_order_len.store(0, Relaxed);
+    }
+    fn record_observation_order(&self, ordinal: usize) {
+        let index = self.observation_order_len.fetch_add(1, Relaxed) as usize;
+        if let Some(destination) = self.observation_order.get(index) {
+            destination.store(ordinal as u32, Relaxed);
+        }
+    }
+    fn observation_order(&self) -> ([u32; 16], usize) {
+        let len = (self.observation_order_len.load(Relaxed) as usize).min(16);
+        (
+            self.observation_order
+                .each_ref()
+                .map(|value| value.load(Relaxed)),
+            len,
+        )
+    }
+    fn observation_snapshot(&self) -> [[u32; 17]; 16] {
+        std::array::from_fn(|row| {
+            std::array::from_fn(|frame| self.observed[row][frame].load(Relaxed))
+        })
+    }
+    fn visits(&self) -> [u32; 16] {
+        self.visits.each_ref().map(|value| value.load(Relaxed))
+    }
+    fn reset_visits(&self) {
+        for visit in &self.visits {
+            visit.store(0, Relaxed);
+        }
+    }
+    fn activation_changes(&self) -> ([u32; 16], [u32; 16]) {
+        (
+            self.activation_on
+                .each_ref()
+                .map(|value| value.load(Relaxed)),
+            self.activation_off
+                .each_ref()
+                .map(|value| value.load(Relaxed)),
+        )
+    }
+    fn invalidations(&self) -> [u32; 16] {
+        self.invalidations
+            .each_ref()
+            .map(|value| value.load(Relaxed))
     }
 }
 
@@ -169,10 +227,19 @@ struct Observer {
     command_mask: u32,
     ordinal: usize,
     fail: bool,
+    resident: ResidentMode,
     probe: Arc<Probe>,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum ResidentMode {
+    Decline,
+    Accept,
+    Error,
 }
 impl GraphRuntimeObserver for Observer {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+        self.probe.record_observation_order(self.ordinal);
+        self.probe.visits[self.ordinal].fetch_add(1, Relaxed);
         self.probe.event(3 + self.ordinal as u64);
         for (channel, plane) in [block.left, block.right].into_iter().enumerate() {
             for (destination, word) in self.probe.observed[self.ordinal * 2 + channel]
@@ -188,6 +255,44 @@ impl GraphRuntimeObserver for Observer {
         } else {
             Ok(())
         }
+    }
+    fn activation_changed(&mut self, active: bool, _generation: u64, _first_sample: u64) {
+        let counters = if active {
+            &self.probe.activation_on
+        } else {
+            &self.probe.activation_off
+        };
+        counters[self.ordinal].fetch_add(1, Relaxed);
+    }
+    fn observe_resident(
+        &mut self,
+        block: GraphResidentObservationBlock<'_>,
+    ) -> Option<Result<(), RenderError>> {
+        match self.resident {
+            ResidentMode::Decline => None,
+            ResidentMode::Accept | ResidentMode::Error => {
+                self.probe.record_observation_order(self.ordinal);
+                self.probe.visits[self.ordinal].fetch_add(1, Relaxed);
+                self.probe.event(3 + self.ordinal as u64);
+                let width = block.lane.width().lanes() as usize;
+                let lane = block.lane.lane();
+                for frame in 0..(block.lane.frames() as usize).min(17) {
+                    let source = frame * width + lane;
+                    self.probe.observed[self.ordinal * 2][frame]
+                        .store(block.lane.left()[source].to_bits(), Relaxed);
+                    self.probe.observed[self.ordinal * 2 + 1][frame]
+                        .store(block.lane.right()[source].to_bits(), Relaxed);
+                }
+                if self.resident == ResidentMode::Accept {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(RenderError::InvalidEnvelope))
+                }
+            }
+        }
+    }
+    fn invalidate_after_failure(&mut self, _failed_sample: u64) {
+        self.probe.invalidations[self.ordinal].fetch_add(1, Relaxed);
     }
 }
 
@@ -227,6 +332,78 @@ enum Control {
     Incompatible,
 }
 
+#[derive(Clone, Copy)]
+struct MixedObserverDescriptor {
+    group: usize,
+    lane: usize,
+    ordinal: usize,
+    handle: u64,
+    controlled: bool,
+}
+
+const MIXED_OBSERVER_DESCRIPTORS: &[MixedObserverDescriptor] = &[
+    MixedObserverDescriptor {
+        group: 1,
+        lane: 0,
+        ordinal: 0,
+        handle: 20,
+        controlled: true,
+    },
+    MixedObserverDescriptor {
+        group: 1,
+        lane: 0,
+        ordinal: 1,
+        handle: 10,
+        controlled: false,
+    },
+    MixedObserverDescriptor {
+        group: 2,
+        lane: 0,
+        ordinal: 2,
+        handle: 1,
+        controlled: true,
+    },
+    MixedObserverDescriptor {
+        group: 2,
+        lane: 0,
+        ordinal: 3,
+        handle: 30,
+        controlled: false,
+    },
+    MixedObserverDescriptor {
+        group: 1,
+        lane: 2,
+        ordinal: 4,
+        handle: 40,
+        controlled: true,
+    },
+];
+
+#[derive(Clone, Copy)]
+struct FixtureOptions {
+    observer_count: usize,
+    controlled: bool,
+    command_mask: u32,
+    split_observers: bool,
+    failing_observer: Option<usize>,
+    resident: ResidentMode,
+    mixed_observers: Option<&'static [MixedObserverDescriptor]>,
+}
+
+impl FixtureOptions {
+    fn legacy(population: usize) -> Self {
+        Self {
+            observer_count: 2,
+            controlled: false,
+            command_mask: (1 << population) - 1,
+            split_observers: false,
+            failing_observer: None,
+            resident: ResidentMode::Decline,
+            mixed_observers: None,
+        }
+    }
+}
+
 fn prepared(
     width: BankWidth,
     population: usize,
@@ -236,6 +413,37 @@ fn prepared(
     fail: u32,
     control: Control,
 ) -> (PreparedRenderPlan, Arc<Probe>) {
+    let (plan, probe, _) = prepared_with_options(
+        width,
+        population,
+        frames,
+        alias,
+        mono,
+        fail,
+        control,
+        FixtureOptions::legacy(population),
+    );
+    (plan, probe)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "extends the existing seven-parameter audio fixture with observer-only options"
+)]
+fn prepared_with_options(
+    width: BankWidth,
+    population: usize,
+    frames: u32,
+    alias: bool,
+    mono: u8,
+    fail: u32,
+    control: Control,
+    options: FixtureOptions,
+) -> (
+    PreparedRenderPlan,
+    Arc<Probe>,
+    Option<GraphObservationController>,
+) {
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
         quantum: QuantumFrames(frames),
@@ -466,29 +674,87 @@ fn prepared(
         }
     }
     bindings.push(GraphNodeBinding::identity(output));
-    let observers = (0..2)
-        .map(|ordinal| {
-            GraphNodeObserverBinding::new(
-                groups[if alias { 2 } else { 1 }][0].clone(),
-                (2 - ordinal) as u64,
-                Box::new(Observer {
-                    command_mask: (1 << population) - 1,
-                    ordinal,
-                    fail: fail == 5,
+    let observers = if let Some(descriptors) = options.mixed_observers {
+        descriptors
+            .iter()
+            .map(|descriptor| {
+                let observer = Box::new(Observer {
+                    command_mask: options.command_mask,
+                    ordinal: descriptor.ordinal,
+                    fail: fail == 5 || options.failing_observer == Some(descriptor.ordinal),
+                    resident: options.resident,
                     probe: Arc::clone(&probe),
-                }),
+                });
+                let node = groups[descriptor.group][descriptor.lane].clone();
+                if options.controlled && descriptor.controlled {
+                    GraphNodeObserverBinding::controlled(node, descriptor.handle, observer)
+                } else {
+                    GraphNodeObserverBinding::new(node, descriptor.handle, observer)
+                }
+            })
+            .collect()
+    } else {
+        (0..options.observer_count)
+            .map(|ordinal| {
+                let observed_group =
+                    if options.split_observers && ordinal >= options.observer_count / 2 {
+                        3
+                    } else if alias {
+                        2
+                    } else {
+                        1
+                    };
+                let observer = Box::new(Observer {
+                    command_mask: options.command_mask,
+                    ordinal,
+                    fail: fail == 5 || options.failing_observer == Some(ordinal),
+                    resident: options.resident,
+                    probe: Arc::clone(&probe),
+                });
+                if options.controlled {
+                    GraphNodeObserverBinding::controlled(
+                        groups[observed_group][0].clone(),
+                        (ordinal + 1) as u64,
+                        observer,
+                    )
+                } else {
+                    GraphNodeObserverBinding::new(
+                        groups[observed_group][0].clone(),
+                        (options.observer_count - ordinal) as u64,
+                        observer,
+                    )
+                }
+            })
+            .collect()
+    };
+    let runtime_bindings = GraphRuntimeBindings {
+        envelope,
+        nodes: bindings,
+        observers,
+    };
+    let (mut plan, controller) = if options.controlled {
+        let (plan, controller) = graph
+            .bind_with_observation_activation(
+                runtime_bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: if options.mixed_observers.is_some() {
+                        3
+                    } else {
+                        options.observer_count
+                    },
+                    maximum_retained_bytes: u64::MAX,
+                },
             )
-        })
-        .collect();
-    let mut plan = graph
-        .bind(GraphRuntimeBindings {
-            envelope,
-            nodes: bindings,
-            observers,
-        })
-        .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+            .unwrap_or_else(|failure| panic!("controlled bind {}", failure.code));
+        (plan, Some(controller))
+    } else {
+        let plan = graph
+            .bind(runtime_bindings)
+            .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+        (plan, None)
+    };
     plan.arm_mono_collapse(&|_| mono != 0);
-    (plan, probe)
+    (plan, probe, controller)
 }
 
 fn render(
@@ -631,7 +897,516 @@ fn rt9_crossfeed_delayed_send_matches_scalar_and_admission_controls() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
+fn rt9_controlled_observation_sets_match_fixed_bank_audio_and_visit_only_active_rows() {
+    let _mode_guard = allocator_mode_guard().lock().expect("allocator mode guard");
+    struct Restore(Mode);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = Restore(mode());
+    set_mode(Mode::Count);
+    realtime::audit::warm_up();
+    realtime::audit::reset();
+    realtime::audit::in_render_scope(|| {
+        let live = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        core::hint::black_box(&live);
+        drop(live);
+    });
+    let live = realtime::audit::snapshot();
+    assert!(live.allocations > 0 && live.deallocations > 0);
+
+    let options = FixtureOptions {
+        observer_count: 6,
+        controlled: false,
+        command_mask: 0,
+        split_observers: true,
+        failing_observer: None,
+        resident: ResidentMode::Decline,
+        mixed_observers: None,
+    };
+    let (mut baseline, baseline_probe, baseline_controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        false,
+        0,
+        0,
+        Control::Resident,
+        options,
+    );
+    assert!(baseline_controller.is_none());
+    let (mut candidate, candidate_probe, mut controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        false,
+        0,
+        0,
+        Control::Resident,
+        FixtureOptions {
+            controlled: true,
+            ..options
+        },
+    );
+    let mut controller = controller.take().expect("controlled fixture controller");
+    assert_eq!(baseline.bank_shape(), candidate.bank_shape());
+    assert_eq!(controller.resources().maximum_active_observers, 6);
+    assert_eq!(
+        controller
+            .resources()
+            .maximum_transition_entry_visits_per_block,
+        24
+    );
+
+    let empty: &[u64] = &[];
+    let one = [1];
+    let all = [1, 2, 3, 4, 5, 6];
+    let reactivate = [2];
+    let churn_a = [1, 3, 5];
+    let churn_b = [2, 4, 6];
+    let selections: [&[u64]; 7] = [empty, &one, &all, empty, &reactivate, &churn_a, &churn_b];
+    let expected_changes = [0, 1, 6, 12, 13, 17, 23];
+    let mut baseline_pcm = [f32::from_bits(0x7fc0_aaaa); 34];
+    let mut candidate_pcm = [f32::from_bits(0x7fc0_bbbb); 34];
+    let mut saw_nonzero = false;
+
+    for (block, selection) in selections.into_iter().enumerate() {
+        baseline_probe.reset_visits();
+        candidate_probe.reset_visits();
+        test_only_meter_input_reset(false);
+        let baseline_result = render(&mut baseline, &mut baseline_pcm, 17, block as u64);
+        assert!(baseline_result.is_ok());
+        test_only_meter_input_reset(false);
+        realtime::audit::reset();
+        test_only_observation_dispatch_reset();
+        let (accepted, candidate_result, applied) = realtime::audit::in_render_scope(|| {
+            let accepted = controller
+                .replace(selection)
+                .expect("controlled selection admission");
+            let result = render(&mut candidate, &mut candidate_pcm, 17, block as u64);
+            let applied = controller.try_applied();
+            (accepted, result, applied)
+        });
+        assert_eq!(candidate_result, baseline_result);
+        assert_eq!(
+            applied,
+            Some(GraphObservationApplied {
+                revision: accepted.revision,
+                first_sample: block as u64 * 17,
+            })
+        );
+        let audit = realtime::audit::snapshot();
+        assert_eq!((audit.allocations, audit.deallocations), (0, 0));
+        assert_eq!(
+            candidate_pcm.map(f32::to_bits),
+            baseline_pcm.map(f32::to_bits)
+        );
+        saw_nonzero |= candidate_pcm.iter().any(|sample| *sample != 0.0);
+        assert_eq!(
+            candidate.qualification_counters(),
+            baseline.qualification_counters(),
+            "activation must not reset bank DSP state"
+        );
+        assert_eq!(
+            test_only_observation_dispatch_counts(),
+            [selection.len() as u64, selection.len() as u64],
+            "only active observer and member objects are looked up"
+        );
+        assert_eq!(
+            candidate.bank_collapse_counters(),
+            baseline.bank_collapse_counters()
+        );
+        assert_eq!(
+            candidate.bank_collapse_transitions(),
+            baseline.bank_collapse_transitions()
+        );
+
+        let visits = candidate_probe.visits();
+        assert_eq!(
+            visits.iter().map(|count| *count as usize).sum::<usize>(),
+            selection.len()
+        );
+        for handle in selection {
+            let ordinal = (*handle - 1) as usize;
+            assert_eq!(visits[ordinal], 1, "selected observer must be visited once");
+            let baseline_observed = baseline_probe.observation_snapshot();
+            let candidate_observed = candidate_probe.observation_snapshot();
+            assert_eq!(
+                candidate_observed[ordinal * 2],
+                baseline_observed[ordinal * 2],
+                "selected left observer output"
+            );
+            assert_eq!(
+                candidate_observed[ordinal * 2 + 1],
+                baseline_observed[ordinal * 2 + 1],
+                "selected right observer output"
+            );
+        }
+        let counts = test_only_meter_input_counts();
+        if selection.is_empty() {
+            assert_eq!(
+                counts,
+                [0, 0, 0],
+                "dormant catalog rows must not acquire audio"
+            );
+        } else {
+            assert!(counts[0] <= selection.len() as u64);
+            assert!(counts[1] <= selection.len() as u64);
+            assert_eq!(
+                counts[2], 0,
+                "declining resident observers use planar fallback"
+            );
+        }
+        let (on, off) = candidate_probe.activation_changes();
+        let changed = on
+            .iter()
+            .zip(off.iter())
+            .map(|(on, off)| (*on + *off) as usize)
+            .sum::<usize>();
+        assert_eq!(
+            changed, expected_changes[block],
+            "activation transitions at block {block}"
+        );
+    }
+    assert!(saw_nonzero, "fixture must render nonzero PCM");
+    test_only_meter_input_reset(false);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn rt9_mixed_permanent_controlled_alias_dispatch_order_and_audio_match() {
+    let options = FixtureOptions {
+        observer_count: MIXED_OBSERVER_DESCRIPTORS.len(),
+        controlled: false,
+        command_mask: 0,
+        split_observers: false,
+        failing_observer: None,
+        resident: ResidentMode::Decline,
+        mixed_observers: Some(MIXED_OBSERVER_DESCRIPTORS),
+    };
+    let (mut baseline, baseline_probe, baseline_controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        true,
+        0,
+        0,
+        Control::Resident,
+        options,
+    );
+    assert!(baseline_controller.is_none());
+    let (mut candidate, candidate_probe, mut controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        true,
+        0,
+        0,
+        Control::Resident,
+        FixtureOptions {
+            controlled: true,
+            ..options
+        },
+    );
+    let mut controller = controller.take().expect("controlled fixture controller");
+    assert_eq!(controller.resources().maximum_active_observers, 3);
+    assert_eq!(baseline.bank_shape(), candidate.bank_shape());
+
+    let empty: &[u64] = &[];
+    let all = [1, 20, 40];
+    let controls_20_40 = [20, 40];
+    let controls_1 = [1];
+    let selections: [(&[u64], &[u32]); 4] = [
+        (&all, &[1, 0, 2, 3, 4]),
+        (empty, &[1, 3]),
+        (&controls_20_40, &[1, 0, 3, 4]),
+        (&controls_1, &[1, 2, 3]),
+    ];
+    let mut baseline_pcm = [f32::from_bits(0x7fc0_aaaa); 34];
+    let mut candidate_pcm = [f32::from_bits(0x7fc0_bbbb); 34];
+    for (block, (selection, expected_order)) in selections.into_iter().enumerate() {
+        baseline_probe.reset_observation_order();
+        candidate_probe.reset_observation_order();
+        let baseline_result = render(&mut baseline, &mut baseline_pcm, 17, block as u64);
+        assert!(baseline_result.is_ok());
+        test_only_observation_dispatch_reset();
+        let accepted = controller.replace(selection).expect("selection admission");
+        let candidate_result = render(&mut candidate, &mut candidate_pcm, 17, block as u64);
+        assert_eq!(candidate_result, baseline_result);
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: accepted.revision,
+                first_sample: block as u64 * 17,
+            })
+        );
+        assert_eq!(
+            candidate_pcm.map(f32::to_bits),
+            baseline_pcm.map(f32::to_bits),
+            "controlled observer selection must preserve PCM"
+        );
+
+        let (baseline_order, baseline_len) = baseline_probe.observation_order();
+        let (candidate_order, candidate_len) = candidate_probe.observation_order();
+        assert_eq!(
+            &baseline_order[..baseline_len],
+            &[1, 0, 2, 3, 4],
+            "fixed baseline observer order"
+        );
+        assert_eq!(
+            &candidate_order[..candidate_len],
+            expected_order,
+            "active dispatch observer order"
+        );
+        for ordinal in [1, 3] {
+            let baseline_observed = baseline_probe.observation_snapshot();
+            let candidate_observed = candidate_probe.observation_snapshot();
+            assert_eq!(
+                candidate_observed[ordinal * 2],
+                baseline_observed[ordinal * 2],
+                "permanent left output remains stable"
+            );
+            assert_eq!(
+                candidate_observed[ordinal * 2 + 1],
+                baseline_observed[ordinal * 2 + 1],
+                "permanent right output remains stable"
+            );
+        }
+        let [observer_accesses, member_accesses] = test_only_observation_dispatch_counts();
+        assert_eq!(observer_accesses as usize, expected_order.len());
+        assert_eq!(member_accesses, expected_order.len() as u64);
+    }
+    test_only_observation_dispatch_reset();
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn rt9_controlled_observation_preserves_resident_acceptance_fallback_and_error_once() {
+    for resident in [
+        ResidentMode::Accept,
+        ResidentMode::Decline,
+        ResidentMode::Error,
+    ] {
+        let (mut plan, probe, mut controller) = prepared_with_options(
+            BankWidth::Four,
+            3,
+            17,
+            false,
+            0,
+            0,
+            Control::Resident,
+            FixtureOptions {
+                observer_count: 1,
+                controlled: true,
+                command_mask: 0,
+                split_observers: false,
+                failing_observer: None,
+                resident,
+                mixed_observers: None,
+            },
+        );
+        let mut controller = controller.take().expect("controlled fixture controller");
+        let accepted = controller.replace(&[1]).expect("one observer admission");
+        let mut pcm = [f32::from_bits(0x7fc0_cccc); 34];
+        test_only_meter_input_reset(false);
+        let result = render(&mut plan, &mut pcm, 17, 0);
+        let counts = test_only_meter_input_counts();
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: accepted.revision,
+                first_sample: 0,
+            })
+        );
+        assert_eq!(
+            probe.visits()[0],
+            1,
+            "resident error must not retry planar input"
+        );
+        match resident {
+            ResidentMode::Accept => {
+                assert!(result.is_ok());
+                assert_eq!(counts, [0, 1, 1]);
+            }
+            ResidentMode::Decline => {
+                assert!(result.is_ok());
+                assert_eq!(counts, [1, 1, 0]);
+            }
+            ResidentMode::Error => {
+                assert_eq!(result, Err(RenderError::InvalidEnvelope));
+                assert_eq!(counts, [0, 1, 1]);
+                assert_eq!(probe.invalidations()[0], 1);
+            }
+        }
+        test_only_meter_input_reset(false);
+    }
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn rt9_controlled_observation_failure_invalidates_active_later_rows_only() {
+    let _mode_guard = allocator_mode_guard().lock().expect("allocator mode guard");
+    struct Restore(Mode);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = Restore(mode());
+    set_mode(Mode::Count);
+    realtime::audit::warm_up();
+    realtime::audit::reset();
+    realtime::audit::in_render_scope(|| {
+        let live = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        core::hint::black_box(&live);
+        drop(live);
+    });
+    let live = realtime::audit::snapshot();
+    assert!(live.allocations > 0 && live.deallocations > 0);
+
+    let (mut plan, probe, mut controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        false,
+        0,
+        0,
+        Control::Resident,
+        FixtureOptions {
+            observer_count: 4,
+            controlled: true,
+            command_mask: 0,
+            split_observers: true,
+            failing_observer: Some(0),
+            resident: ResidentMode::Decline,
+            mixed_observers: None,
+        },
+    );
+    let mut controller = controller.take().expect("controlled fixture controller");
+    let accepted = controller.replace(&[1, 3]).expect("active failure rows");
+    let before = plan.qualification_counters();
+    let mut pcm = [f32::from_bits(0x7fc0_dddd); 34];
+    test_only_meter_input_reset(false);
+    realtime::audit::reset();
+    let result = realtime::audit::in_render_scope(|| render(&mut plan, &mut pcm, 17, 0));
+    let audit = realtime::audit::snapshot();
+    assert_eq!((audit.allocations, audit.deallocations), (0, 0));
+    assert_eq!(result, Err(RenderError::InvalidEnvelope));
+    assert_eq!(
+        controller.try_applied(),
+        Some(GraphObservationApplied {
+            revision: accepted.revision,
+            first_sample: 0,
+        })
+    );
+    assert_ne!(
+        plan.qualification_counters(),
+        before,
+        "observer failure must not reset executed DSP state"
+    );
+    let visits = probe.visits();
+    assert_eq!(visits[0], 1, "the failing observer is reached");
+    assert_eq!(visits[2], 0, "a later active observer is after the failure");
+    let invalidations = probe.invalidations();
+    assert_eq!(invalidations[0], 1, "failed observer is invalidated once");
+    assert_eq!(
+        invalidations[2], 1,
+        "later active observer is invalidated once"
+    );
+    assert_eq!(
+        invalidations[1], 0,
+        "inactive observer is never invalidated"
+    );
+    assert_eq!(
+        invalidations[3], 0,
+        "inactive observer is never invalidated"
+    );
+    assert_eq!(test_only_meter_input_counts(), [1, 1, 0]);
+    test_only_meter_input_reset(false);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn rt9_controlled_observation_queued_revisions_preserve_order_while_reader_stalls() {
+    let (mut plan, probe, mut controller) = prepared_with_options(
+        BankWidth::Four,
+        3,
+        17,
+        false,
+        0,
+        0,
+        Control::Resident,
+        FixtureOptions {
+            observer_count: 2,
+            controlled: true,
+            command_mask: 0,
+            split_observers: false,
+            failing_observer: None,
+            resident: ResidentMode::Decline,
+            mixed_observers: None,
+        },
+    );
+    let mut controller = controller.take().expect("controlled fixture controller");
+    let ordinary = controller.replace(&[1]).expect("ordinary admission");
+    let removal = controller.remove_to(&[]).expect("removal admission");
+    assert_eq!(ordinary.revision + 1, removal.revision);
+    assert_eq!(
+        controller.replace(&[2]),
+        Err(GraphObservationAdmissionError::Backpressure)
+    );
+
+    let mut pcm = [f32::from_bits(0x7fc0_eeee); 34];
+    for block in 0..3 {
+        test_only_meter_input_reset(false);
+        render(&mut plan, &mut pcm, 17, block).expect("queued boundary render");
+        assert_eq!(test_only_meter_input_counts(), [0, 0, 0]);
+        assert_eq!(probe.visits().iter().sum::<u32>(), 0);
+        if block == 0 {
+            assert_eq!(
+                controller.remove_to(&[]),
+                Err(GraphObservationAdmissionError::Backpressure),
+                "retirement reader is deliberately stalled"
+            );
+        }
+    }
+    assert_eq!(
+        controller.try_applied(),
+        Some(GraphObservationApplied {
+            revision: ordinary.revision,
+            first_sample: 0,
+        })
+    );
+    assert_eq!(
+        controller.try_applied(),
+        Some(GraphObservationApplied {
+            revision: removal.revision,
+            first_sample: 0,
+        })
+    );
+    assert_eq!(controller.try_applied(), None);
+    let next = controller.replace(&[2]).expect("credits recycle in order");
+    test_only_meter_input_reset(false);
+    render(&mut plan, &mut pcm, 17, 3).expect("reactivation render");
+    assert_eq!(test_only_meter_input_counts()[2], 0);
+    assert_eq!(probe.visits()[1], 1);
+    assert_eq!(
+        controller.try_applied(),
+        Some(GraphObservationApplied {
+            revision: next.revision,
+            first_sample: 51,
+        })
+    );
+    test_only_meter_input_reset(false);
+}
+
+#[test]
 fn rt9_resident_prepared_plan_render_allocates_and_frees_nothing() {
+    let _mode_guard = allocator_mode_guard().lock().expect("allocator mode guard");
     struct Restore(Mode);
     impl Drop for Restore {
         fn drop(&mut self) {

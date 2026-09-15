@@ -31,7 +31,12 @@ production_sources=$(mktemp)
 trap 'rm -f -- "$production_sources"' EXIT
 while IFS= read -r source; do
   [[ -n "$source" ]] || continue
-  stripped="$(sed '/^#\[cfg(test)\]/,$d' "$source")" || fail "graph source read failed: $source"
+  stripped="$(sed -n '
+    $!N
+    /^#\[cfg(test)\]\nmod [A-Za-z_][A-Za-z0-9_]* [{].*$/,$d
+    P
+    D
+  ' "$source")" || fail "graph source read failed: $source"
   printf '%s\n' "$stripped" >>"$production_sources"
 done <<<"$graph_sources"
 publication_matches="$(gate_scan_collect 'graph publication predicate' \
@@ -53,7 +58,12 @@ implementations_raw=''
 while IFS= read -r source; do
     # No pipeline here: `rg -q` exits on its first match, and under `pipefail` sed's SIGPIPE
     # would make the whole condition read as false.
-    stripped=$(sed '/^#\[cfg(test)\]/,$d' "$source") || fail "workspace source read failed: $source"
+    stripped=$(sed -n '
+      $!N
+      /^#\[cfg(test)\]\nmod [A-Za-z_][A-Za-z0-9_]* [{].*$/,$d
+      P
+      D
+    ' "$source") || fail "workspace source read failed: $source"
     executor_matches="$(gate_scan_text_collect "prepared-plan executor predicate for $source" \
       'impl PreparedPlanExecutor for' "$stripped")" || exit $?
     [[ -z "$executor_matches" ]] || implementations_raw+="$source"$'\n'

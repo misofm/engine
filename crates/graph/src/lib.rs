@@ -4,8 +4,15 @@
 //! only retains the already-validated immutable result and its preallocated render state.
 #![allow(missing_docs)]
 
+mod observation_activation;
 pub mod program;
 mod runtime;
+
+pub use observation_activation::{
+    GraphObservationAccepted, GraphObservationActivationConfig,
+    GraphObservationActivationResources, GraphObservationAdmissionError, GraphObservationApplied,
+    GraphObservationController,
+};
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
@@ -21,11 +28,16 @@ pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
     test_only_arm_failed_buffer_capture, test_only_completion_disabled,
     test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
     test_only_split_pair_table_witness,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use observation_activation::test_only_observation_transition_entries;
 
 use core::cell::Cell;
 use std::any::Any;
@@ -267,6 +279,10 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
     pub runtime_owner_field_bytes: u64,
     pub runtime_owner_allocation_bytes: u64,
+    /// The actual containing `GraphExecutor` layout delta occupied by observation activation
+    /// state. This inline runtime term is charged for every graph, including graphs without an
+    /// activation controller, and overlaps the activation report's `runtime_state_bytes` field.
+    pub observation_runtime_state_bytes: u64,
     /// Boxed response-owner binding table retained by the prepared runtime.
     pub response_binding_table_bytes: u64,
     /// Payload bytes retained by the per-owner stable-id and track-id strings.
@@ -297,6 +313,7 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime::scalar_split_op_layout();
         let (runtime_owner_field_bytes, runtime_owner_allocation_bytes) =
             scalar_split_runtime_owner_layout();
+        let (_, observation_runtime_state_bytes) = observation_runtime_layout()?;
         let runtime_op_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeOp>())
             .expect("runtime op layout fits u64");
         let runtime_unit_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>())
@@ -311,7 +328,9 @@ impl GraphRuntimeMetadataResourceEstimate {
                 .expect("response binding layout fits u64");
         let response_binding_table_bytes =
             response_binding_entry_bytes.checked_mul(response_binding_count)?;
-        let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
+        let total_bytes = runtime_field_bytes
+            .checked_add(emitted_op_delta_bytes)?
+            .checked_add(observation_runtime_state_bytes)?;
         let total_bytes = total_bytes
             .checked_add(response_binding_table_bytes)?
             .checked_add(response_binding_string_bytes)?;
@@ -325,6 +344,7 @@ impl GraphRuntimeMetadataResourceEstimate {
             runtime_unit_containing_bytes,
             runtime_owner_field_bytes,
             runtime_owner_allocation_bytes,
+            observation_runtime_state_bytes,
             response_binding_table_bytes,
             response_binding_string_bytes,
             largest_response_binding_string_bytes,
@@ -934,6 +954,16 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         false
     }
 }
+type OptionalSourceBindResult = Result<
+    (PreparedRenderPlan, Option<GraphObservationController>),
+    (
+        PreparedGraphPlan,
+        GraphRuntimeBindings,
+        Option<GraphPreparedSourceSet>,
+        &'static str,
+    ),
+>;
+
 impl PreparedGraphPlan {
     /// The input-side track delays this plan lowers, in normalized track order (#210 phase 2).
     ///
@@ -1236,8 +1266,9 @@ impl PreparedGraphPlan {
         self,
         bindings: GraphRuntimeBindings,
     ) -> Result<PreparedRenderPlan, GraphBindFailure> {
-        match self.bind_optional_source_set(bindings, None) {
-            Ok(plan) => Ok(plan),
+        match self.bind_optional_source_set(bindings, None, None) {
+            Ok((plan, None)) => Ok(plan),
+            Ok((_, Some(_))) => unreachable!("legacy bind cannot prepare activation"),
             Err((plan, bindings, _, code)) => Err(GraphBindFailure {
                 plan: Box::new(plan),
                 bindings,
@@ -1253,7 +1284,7 @@ impl PreparedGraphPlan {
         bindings: GraphRuntimeBindings,
         source_set: GraphPreparedSourceSet,
     ) -> Result<PreparedRenderPlan, GraphSourceBindFailure> {
-        self.bind_optional_source_set(bindings, Some(source_set))
+        self.bind_optional_source_set(bindings, Some(source_set), None)
             .map_err(
                 |(plan, bindings, source_set, code)| GraphSourceBindFailure {
                     plan: Box::new(plan),
@@ -1262,6 +1293,52 @@ impl PreparedGraphPlan {
                     code,
                 },
             )
+            .map(|(plan, activation)| {
+                if activation.is_some() {
+                    unreachable!("legacy source bind cannot prepare activation")
+                }
+                plan
+            })
+    }
+
+    /// Bind with a prepared, host-controlled observer activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_observation_activation(
+        self,
+        bindings: GraphRuntimeBindings,
+        config: GraphObservationActivationConfig,
+    ) -> Result<(PreparedRenderPlan, GraphObservationController), GraphBindFailure> {
+        match self.bind_optional_source_set(bindings, None, Some(config)) {
+            Ok((plan, Some(controller))) => Ok((plan, controller)),
+            Ok((_, None)) => unreachable!("configured bind must prepare an activation controller"),
+            Err((plan, bindings, _, code)) => Err(GraphBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                code,
+            }),
+        }
+    }
+
+    /// Bind one sealed source set with a prepared observer activation endpoint.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_source_set_and_observation_activation(
+        self,
+        bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+        config: GraphObservationActivationConfig,
+    ) -> Result<(PreparedRenderPlan, GraphObservationController), GraphSourceBindFailure> {
+        match self.bind_optional_source_set(bindings, Some(source_set), Some(config)) {
+            Ok((plan, Some(controller))) => Ok((plan, controller)),
+            Ok((_, None)) => {
+                unreachable!("configured source bind must prepare an activation controller")
+            }
+            Err((plan, bindings, source_set, code)) => Err(GraphSourceBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                source_set: source_set.expect("source-set bind retains source set"),
+                code,
+            }),
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -1269,15 +1346,8 @@ impl PreparedGraphPlan {
         self,
         mut bindings: GraphRuntimeBindings,
         mut source_set: Option<GraphPreparedSourceSet>,
-    ) -> Result<
-        PreparedRenderPlan,
-        (
-            Self,
-            GraphRuntimeBindings,
-            Option<GraphPreparedSourceSet>,
-            &'static str,
-        ),
-    > {
+        activation_config: Option<GraphObservationActivationConfig>,
+    ) -> OptionalSourceBindResult {
         let (
             duplicate_binding,
             coverage_matches,
@@ -1443,6 +1513,20 @@ impl PreparedGraphPlan {
                 Ok(planning) => planning,
                 Err(code) => return Err((self, bindings, source_set, code)),
             };
+        let prepared_activation = match runtime::preflight_observation_activation(
+            &self,
+            &program,
+            &bindings,
+            &planning,
+            activation_config,
+        ) {
+            Ok(prepared) => prepared,
+            Err(code) => return Err((self, bindings, source_set, code)),
+        };
+        let (controller, realtime_activation) = prepared_activation
+            .map_or((None, None), |prepared| {
+                (Some(prepared.controller), Some(prepared.realtime))
+            });
         let envelope = self.envelope;
         let plan_id = self.plan_id;
         let mut plan = self;
@@ -1458,8 +1542,9 @@ impl PreparedGraphPlan {
             observers,
             source_set.take(),
             planning,
+            realtime_activation,
         );
-        Ok(PreparedRenderPlan::prepare_with_executor(
+        let render_plan = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
                 envelope,
@@ -1467,7 +1552,8 @@ impl PreparedGraphPlan {
             },
             Box::new(executor),
         )
-        .expect("prevalidated graph plan"))
+        .expect("prevalidated graph plan");
+        Ok((render_plan, controller))
     }
 }
 
@@ -1824,6 +1910,13 @@ pub struct GraphResidentObservationBlock<'a> {
 pub trait GraphRuntimeObserver: Send {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
 
+    /// Notify this observer that its controlled activation changed at a block boundary.
+    ///
+    /// The default is deliberately empty. Implementations that opt into controlled activation
+    /// must keep this hook bounded and scalar: it may invalidate a generation or reset a counter,
+    /// but it must not allocate, clear a capture buffer, drain a queue, or reset audio state.
+    fn activation_changed(&mut self, _active: bool, _generation: u64, _first_sample: u64) {}
+
     /// Observe one planar block with source validity facts from the same render boundary.
     /// Existing observers ignore the additional facts by default.
     fn observe_with_validity(
@@ -1862,6 +1955,7 @@ pub struct GraphNodeObserverBinding {
     pub node: GraphNodeId,
     pub handle: u64,
     observer: Box<dyn GraphRuntimeObserver>,
+    controlled: bool,
 }
 impl GraphNodeObserverBinding {
     pub fn new(node: GraphNodeId, handle: u64, observer: Box<dyn GraphRuntimeObserver>) -> Self {
@@ -1869,7 +1963,27 @@ impl GraphNodeObserverBinding {
             node,
             handle,
             observer,
+            controlled: false,
         }
+    }
+
+    /// Prepare an observer for host-controlled activation. Controlled bindings start inactive;
+    /// the activation snapshot owns their dispatch eligibility after binding.
+    pub fn controlled(
+        node: GraphNodeId,
+        handle: u64,
+        observer: Box<dyn GraphRuntimeObserver>,
+    ) -> Self {
+        Self {
+            node,
+            handle,
+            observer,
+            controlled: true,
+        }
+    }
+
+    pub(crate) const fn is_controlled(&self) -> bool {
+        self.controlled
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -1925,6 +2039,48 @@ struct GraphExecutorWithoutSplitPairTable {
     source_input_buffers: Box<[(usize, u32)]>,
 }
 
+/// Same retained executor owner with observation activation state removed from its embedded
+/// runtime. The difference from [`GraphExecutor`] is the exact inline runtime contribution used
+/// by activation accounting; all other fields stay identical so owner padding is included.
+#[allow(dead_code)]
+struct GraphExecutorWithoutObservationActivation {
+    runtime: runtime::RuntimeWithoutObservationActivation,
+    output: u32,
+    sample_rate_hz: u32,
+    source_set: Option<GraphPreparedSourceSet>,
+    source_input_buffers: Box<[(usize, u32)]>,
+}
+
+pub(crate) fn observation_runtime_layout() -> Option<(u64, u64)> {
+    let runtime_state_bytes = runtime::observation_runtime_layout()?;
+    let owner_state_bytes = u64::try_from(core::mem::size_of::<GraphExecutor>().checked_sub(
+        core::mem::size_of::<GraphExecutorWithoutObservationActivation>(),
+    )?)
+    .ok()?;
+    Some((runtime_state_bytes, owner_state_bytes))
+}
+
+#[cfg(test)]
+pub(crate) fn test_only_observation_runtime_layout() -> (u64, u64) {
+    let runtime_state_bytes = u64::try_from(
+        core::mem::size_of::<runtime::Runtime>()
+            .checked_sub(core::mem::size_of::<
+                runtime::RuntimeWithoutObservationActivation,
+            >())
+            .expect("observation runtime witness layout"),
+    )
+    .expect("observation runtime witness fits u64");
+    let owner_state_bytes = u64::try_from(
+        core::mem::size_of::<GraphExecutor>()
+            .checked_sub(core::mem::size_of::<
+                GraphExecutorWithoutObservationActivation,
+            >())
+            .expect("observation executor witness layout"),
+    )
+    .expect("observation executor witness fits u64");
+    (runtime_state_bytes, owner_state_bytes)
+}
+
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
     let field_delta = core::mem::size_of::<GraphExecutor>()
         .checked_sub(core::mem::size_of::<GraphExecutorWithoutSplitPairTable>())
@@ -1944,6 +2100,9 @@ impl GraphExecutor {
         observers: Vec<GraphNodeObserverBinding>,
         source_set: Option<GraphPreparedSourceSet>,
         planning: runtime::SequentialPlan,
+        observation_activation: Option<
+            crate::observation_activation::RealtimeObservationActivation,
+        >,
     ) -> Self {
         let frames = plan.envelope.quantum.0 as usize;
         let sample_rate_hz = plan.envelope.sample_rate.0;
@@ -1989,7 +2148,14 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames, planning);
+        let runtime = runtime::build_sequential(
+            program,
+            &plan.spec,
+            parts,
+            frames,
+            planning,
+            observation_activation,
+        );
         Self {
             runtime,
             output,
@@ -2044,6 +2210,11 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
         } = self;
+        // Snapshot publication is the only activation state transition, and it occurs before any
+        // source work so observer hooks and the block's source facts share one boundary.
+        runtime.begin_observation_block(time.absolute_sample);
+        let selective_observation = runtime.has_observation_activation();
+        let active_observation = runtime.has_active_observation();
         let source_validity = if let Some(source_set) = source_set.as_mut() {
             if let Err(error) =
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
@@ -2075,7 +2246,25 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
-            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity) {
+            if !selective_observation {
+                if let Err(error) =
+                    runtime.observe_unit(unit, time.absolute_sample, source_validity)
+                {
+                    runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    #[cfg(any(test, feature = "test-support"))]
+                    if !runtime::test_only_completion_disabled() {
+                        runtime.complete_pending(time.absolute_sample);
+                    }
+                    #[cfg(any(test, feature = "test-support"))]
+                    runtime.test_only_capture_failed_buffer();
+                    #[cfg(not(any(test, feature = "test-support")))]
+                    runtime.complete_pending(time.absolute_sample);
+                    return Err(error);
+                }
+            } else if active_observation
+                && let Err(error) =
+                    runtime.observe_active_unit(unit, time.absolute_sample, source_validity)
+            {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
@@ -2563,10 +2752,28 @@ mod tests {
         );
         let (_, runtime_field) = runtime::scalar_split_runtime_layout();
         let (executor_field, executor_size) = scalar_split_runtime_owner_layout();
+        let runtime_state = u64::try_from(
+            core::mem::size_of::<runtime::Runtime>()
+                .checked_sub(core::mem::size_of::<
+                    runtime::RuntimeWithoutObservationActivation,
+                >())
+                .expect("observation runtime witness layout"),
+        )
+        .expect("observation runtime witness fits u64");
+        let owner_state = u64::try_from(
+            core::mem::size_of::<GraphExecutor>()
+                .checked_sub(core::mem::size_of::<
+                    GraphExecutorWithoutObservationActivation,
+                >())
+                .expect("observation executor witness layout"),
+        )
+        .expect("observation executor witness fits u64");
         assert_eq!(resource.runtime_field_bytes, runtime_field);
         assert_eq!(resource.runtime_op_layout_delta_bytes, op_delta);
         assert_eq!(resource.runtime_unit_layout_delta_bytes, unit_delta);
         assert_eq!(resource.runtime_owner_field_bytes, executor_field);
+        assert_eq!(resource.observation_runtime_state_bytes, owner_state);
+        assert_eq!(runtime::observation_runtime_layout(), Some(runtime_state));
         assert_eq!(
             resource.emitted_op_layout_delta_bytes,
             op_delta.max(unit_delta)
@@ -2575,7 +2782,7 @@ mod tests {
         assert_eq!(resource.runtime_unit_containing_bytes, unit_size * emitted);
         assert_eq!(
             resource.total_bytes,
-            runtime_field + op_delta.max(unit_delta) * emitted
+            runtime_field + op_delta.max(unit_delta) * emitted + owner_state
         );
         assert_eq!(
             resource.largest_allocation_bytes,
@@ -2607,6 +2814,64 @@ mod tests {
         assert!(estimate.checked_add_runtime_metadata(resource).is_none());
         assert_eq!(estimate, overflow_before);
         assert_ne!(overflow_before, before);
+    }
+
+    #[test]
+    fn observation_runtime_state_is_charged_for_empty_graph_and_overlaps_activation_once() {
+        let baseline =
+            GraphRuntimeMetadataResourceEstimate::checked_for(0).expect("zero-op runtime metadata");
+        let runtime_state = u64::try_from(
+            core::mem::size_of::<runtime::Runtime>()
+                .checked_sub(core::mem::size_of::<
+                    runtime::RuntimeWithoutObservationActivation,
+                >())
+                .expect("observation runtime witness layout"),
+        )
+        .expect("observation runtime witness fits u64");
+        let owner_state = u64::try_from(
+            core::mem::size_of::<GraphExecutor>()
+                .checked_sub(core::mem::size_of::<
+                    GraphExecutorWithoutObservationActivation,
+                >())
+                .expect("observation executor witness layout"),
+        )
+        .expect("observation executor witness fits u64");
+        assert_eq!(baseline.observation_runtime_state_bytes, owner_state);
+        assert_eq!(runtime::observation_runtime_layout(), Some(runtime_state));
+        assert_eq!(
+            baseline.total_bytes,
+            baseline.runtime_field_bytes + owner_state
+        );
+
+        let catalog = vec![observation_activation::ActivationBinding {
+            handle: 1,
+            entry: observation_activation::ActivationEntry {
+                unit: 0,
+                member: None,
+                observer: 0,
+                ordinal: 1,
+            },
+        }]
+        .into_boxed_slice();
+        let (controller, _realtime) = observation_activation::prepare_activation(
+            catalog,
+            &[],
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        )
+        .expect("activation resource report");
+        let activation = controller.resources();
+        let combined = baseline
+            .total_bytes
+            .checked_add(activation.retained_bytes)
+            .and_then(|total| total.checked_sub(owner_state))
+            .expect("combined runtime accounting");
+        assert_eq!(
+            combined,
+            baseline.total_bytes + activation.retained_bytes - activation.runtime_state_bytes
+        );
     }
 
     #[test]
@@ -4477,6 +4742,642 @@ mod tests {
         }
     }
 
+    struct DropWitnessObserver {
+        drops: Arc<AtomicU64>,
+        calls: Arc<AtomicU64>,
+    }
+    impl Drop for DropWitnessObserver {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl GraphRuntimeObserver for DropWitnessObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn activation_error<T>(result: Result<T, &'static str>) -> &'static str {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("activation unexpectedly succeeded"),
+        }
+    }
+
+    fn test_observer() -> Box<dyn GraphRuntimeObserver> {
+        Box::new(TapRecorder(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        ))
+    }
+
+    #[test]
+    fn observation_activation_preflight_is_borrowed_and_maps_plain_and_bank_rows() {
+        let (mut plan, bindings, input) = binding_plan();
+        let calls = Arc::new(AtomicU64::new(0));
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        plan.observers.push(GraphNodeObserverBinding::controlled(
+            input,
+            7,
+            Box::new(TapRecorder(Arc::clone(&calls), Arc::clone(&sink))),
+        ));
+        let program = plan.program().cloned().expect("lowered");
+        let planning = runtime::preflight_sequential(&plan, &program, &bindings, None)
+            .expect("sequential plan");
+        let observer_count = plan.observers.len();
+        let node_count = bindings.nodes.len();
+        let config = GraphObservationActivationConfig {
+            maximum_active_observers: 1,
+            maximum_retained_bytes: u64::MAX,
+        };
+        let mut prepared = runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(config),
+        )
+        .expect("activation preflight")
+        .expect("configured activation");
+        assert_eq!(plan.observers.len(), observer_count);
+        assert_eq!(bindings.nodes.len(), node_count);
+
+        prepared
+            .controller
+            .replace(&[7])
+            .expect("controlled replacement");
+        prepared
+            .realtime
+            .apply_boundary(19, |_entry, _active, _revision, _first_sample| {});
+        let entries = prepared.realtime.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].unit, 0);
+        assert_eq!(entries[0].member, None);
+        assert_eq!(entries[0].observer, 0);
+        assert_eq!(entries[0].ordinal, 0);
+
+        let required = activation_error(runtime::preflight_observation_activation(
+            &plan, &program, &bindings, &planning, None,
+        ));
+        assert_eq!(required, "graph.plan.observation_activation_required");
+        let capacity = activation_error(runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 0,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        ));
+        assert_eq!(capacity, "graph.plan.observation_activation_capacity");
+        let retained = activation_error(runtime::preflight_observation_activation(
+            &plan,
+            &program,
+            &bindings,
+            &planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: 0,
+            }),
+        ));
+        assert_eq!(retained, "graph.plan.observation_activation_retained");
+        assert_eq!(plan.observers.len(), observer_count);
+        assert_eq!(bindings.nodes.len(), node_count);
+
+        let (mut duplicate_plan, duplicate_bindings, input) = binding_plan();
+        let output = duplicate_plan
+            .spec
+            .nodes
+            .iter()
+            .find_map(|node| matches!(node.id, GraphNodeId::Output { .. }).then(|| node.id.clone()))
+            .expect("output");
+        duplicate_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                input,
+                55,
+                test_observer(),
+            ));
+        duplicate_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                output,
+                55,
+                test_observer(),
+            ));
+        let duplicate_program = duplicate_plan.program().cloned().expect("lowered");
+        let duplicate_planning = runtime::preflight_sequential(
+            &duplicate_plan,
+            &duplicate_program,
+            &duplicate_bindings,
+            None,
+        )
+        .expect("sequential plan");
+        let duplicate = activation_error(runtime::preflight_observation_activation(
+            &duplicate_plan,
+            &duplicate_program,
+            &duplicate_bindings,
+            &duplicate_planning,
+            Some(config),
+        ));
+        assert_eq!(duplicate, "graph.plan.observation_activation_duplicate");
+
+        let (mut unresolved_plan, unresolved_bindings, _) = binding_plan();
+        unresolved_plan
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse("missing").expect("ID"),
+                    stage: TrackStage::PostDynamic,
+                },
+                81,
+                test_observer(),
+            ));
+        let unresolved_program = unresolved_plan.program().cloned().expect("lowered");
+        let unresolved_planning = runtime::preflight_sequential(
+            &unresolved_plan,
+            &unresolved_program,
+            &unresolved_bindings,
+            None,
+        )
+        .expect("sequential plan");
+        let unresolved = activation_error(runtime::preflight_observation_activation(
+            &unresolved_plan,
+            &unresolved_program,
+            &unresolved_bindings,
+            &unresolved_planning,
+            Some(config),
+        ));
+        assert_eq!(unresolved, "graph.plan.observer");
+
+        let (bank_plan, mut bank_bindings, _) = four_track_builtin_plan(8_160, true, false);
+        let bank_tail = bank_plan
+            .required_bindings
+            .iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        track_id,
+                        stage: TrackStage::PostInputBuiltins,
+                    } if track_id.as_str() == "track3"
+                )
+            })
+            .cloned()
+            .expect("bank tail");
+        bank_bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                bank_tail,
+                99,
+                test_observer(),
+            ));
+        let bank_program = bank_plan.program().cloned().expect("lowered");
+        let bank_planning =
+            runtime::preflight_sequential(&bank_plan, &bank_program, &bank_bindings, None)
+                .expect("sequential bank plan");
+        let mut bank_activation = runtime::preflight_observation_activation(
+            &bank_plan,
+            &bank_program,
+            &bank_bindings,
+            &bank_planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        )
+        .expect("bank activation preflight")
+        .expect("configured bank activation");
+        bank_activation
+            .controller
+            .replace(&[99])
+            .expect("bank replacement");
+        bank_activation
+            .realtime
+            .apply_boundary(0, |_entry, _active, _revision, _first_sample| {});
+        assert!(
+            bank_activation
+                .realtime
+                .entries()
+                .iter()
+                .any(|entry| entry.member == Some(3) && entry.observer == 1)
+        );
+    }
+
+    #[test]
+    fn public_observation_activation_bind_dispatches_only_after_boundary_admission() {
+        let (plan, mut bindings, input) = binding_plan();
+        let calls = Arc::new(AtomicU64::new(0));
+        bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                input,
+                7,
+                Box::new(TapRecorder(
+                    Arc::clone(&calls),
+                    Arc::new(std::sync::Mutex::new(Vec::new())),
+                )),
+            ));
+        let (mut render_plan, mut controller) = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(bound) => bound,
+            Err(failure) => panic!("activation bind failed: {}", failure.code),
+        };
+        let mut output = [0.0; 2];
+        let mut render = |sample| {
+            render_plan
+                .render(
+                    engine::realtime::RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
+                    },
+                    engine::realtime::RenderTime {
+                        absolute_sample: sample,
+                    },
+                )
+                .expect("render");
+        };
+        render(0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(controller.replace(&[7]).expect("admit").revision, 1);
+        render(1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: 1,
+                first_sample: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry() {
+        let processor_addresses = |bindings: &GraphRuntimeBindings| {
+            bindings
+                .nodes
+                .iter()
+                .filter_map(|binding| binding.processor.as_ref())
+                .map(|processor| core::ptr::from_ref(&**processor).cast::<()>() as usize)
+                .collect::<Vec<_>>()
+        };
+        let render_one = |plan: &mut PreparedRenderPlan, sample| {
+            let mut output = [0.0; 2];
+            plan.render(
+                engine::realtime::RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
+                },
+                engine::realtime::RenderTime {
+                    absolute_sample: sample,
+                },
+            )
+            .expect("render");
+        };
+        let config = GraphObservationActivationConfig {
+            maximum_active_observers: 1,
+            maximum_retained_bytes: u64::MAX,
+        };
+
+        // A legacy bind must refuse a controlled observer before consuming any caller object.
+        let (plan, mut bindings, input) = binding_plan();
+        let drops = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let observer = GraphNodeObserverBinding::controlled(
+            input,
+            7,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&drops),
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let observer_address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+        bindings.observers.push(observer);
+        let processor_before = processor_addresses(&bindings);
+        let failure = match plan.bind(bindings) {
+            Ok(_) => panic!("legacy bind accepted a controlled observer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_required");
+        assert_eq!(processor_addresses(&failure.bindings), processor_before);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_observer = &failure.bindings.observers[0];
+        assert!(returned_observer.is_controlled());
+        assert_eq!(returned_observer.handle, 7);
+        assert_eq!(
+            core::ptr::from_ref(&*returned_observer.observer).cast::<()>() as usize,
+            observer_address
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let (mut render_plan, mut controller) = failure
+            .plan
+            .bind_with_observation_activation(failure.bindings, config)
+            .unwrap_or_else(|failure| panic!("configured retry rejected: {}", failure.code));
+        controller
+            .replace(&[7])
+            .expect("controlled retry admission");
+        render_one(&mut render_plan, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        // The source-set variant returns the source driver and every other caller owner as well.
+        let (plan, mut bindings, input) = binding_plan();
+        let processor_before = {
+            bindings.nodes.retain(|binding| binding.node != input);
+            processor_addresses(&bindings)
+        };
+        let drops = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let observer = GraphNodeObserverBinding::controlled(
+            input.clone(),
+            17,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&drops),
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let observer_address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+        bindings.observers.push(observer);
+        let begins = Arc::new(AtomicU64::new(0));
+        let copies = Arc::new(AtomicU64::new(0));
+        let source_drops = Arc::new(AtomicU64::new(0));
+        let source = GraphPreparedSourceSet::new(
+            plan.envelope,
+            vec![GraphSourceInputClaim { node: input }],
+            GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(RecoverySource {
+                sample: 0,
+                begins: Arc::clone(&begins),
+                copies: Arc::clone(&copies),
+                drops: Arc::clone(&source_drops),
+            }),
+        );
+        let source_address = core::ptr::from_ref(&*source.driver).cast::<()>() as usize;
+        let failure = match plan.bind_with_source_set(bindings, source) {
+            Ok(_) => panic!("legacy source bind accepted a controlled observer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_required");
+        assert_eq!(processor_addresses(&failure.bindings), processor_before);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_observer = &failure.bindings.observers[0];
+        assert!(returned_observer.is_controlled());
+        assert_eq!(returned_observer.handle, 17);
+        assert_eq!(
+            core::ptr::from_ref(&*returned_observer.observer).cast::<()>() as usize,
+            observer_address
+        );
+        assert_eq!(
+            core::ptr::from_ref(&*failure.source_set.driver).cast::<()>() as usize,
+            source_address
+        );
+        assert_eq!(begins.load(Ordering::SeqCst), 0);
+        assert_eq!(copies.load(Ordering::SeqCst), 0);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let (mut render_plan, mut controller) = failure
+            .plan
+            .bind_with_source_set_and_observation_activation(
+                failure.bindings,
+                failure.source_set,
+                config,
+            )
+            .unwrap_or_else(|failure| panic!("configured source retry rejected: {}", failure.code));
+        controller
+            .replace(&[17])
+            .expect("controlled source retry admission");
+        render_one(&mut render_plan, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(begins.load(Ordering::SeqCst), 1);
+        assert_eq!(copies.load(Ordering::SeqCst), 1);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn configured_activation_refusals_preserve_inputs_and_exact_budget() {
+        let fixture = |handle| {
+            let (plan, mut bindings, input) = binding_plan();
+            let drops = Arc::new(AtomicU64::new(0));
+            let calls = Arc::new(AtomicU64::new(0));
+            let observer = GraphNodeObserverBinding::controlled(
+                input,
+                handle,
+                Box::new(DropWitnessObserver {
+                    drops: Arc::clone(&drops),
+                    calls: Arc::clone(&calls),
+                }),
+            );
+            let address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+            bindings.observers.push(observer);
+            (plan, bindings, drops, calls, address)
+        };
+        let assert_refusal = |failure: GraphBindFailure,
+                              expected: &'static str,
+                              drops: &Arc<AtomicU64>,
+                              calls: &Arc<AtomicU64>,
+                              address: usize| {
+            assert_eq!(failure.code, expected);
+            assert_eq!(failure.bindings.observers.len(), 1);
+            let observer = &failure.bindings.observers[0];
+            assert!(observer.is_controlled());
+            assert_eq!(observer.handle, 7);
+            assert_eq!(
+                core::ptr::from_ref(&*observer.observer).cast::<()>() as usize,
+                address
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            failure
+        };
+
+        let (plan, bindings, drops, calls, address) = fixture(7);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 0,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("zero-capacity activation bind accepted"),
+            Err(failure) => failure,
+        };
+        let failure = assert_refusal(
+            failure,
+            "graph.plan.observation_activation_capacity",
+            &drops,
+            &calls,
+            address,
+        );
+        drop(failure);
+
+        let (plan, bindings, drops, _calls, _address) = fixture(7);
+        let (render_plan, controller) = plan
+            .bind_with_observation_activation(
+                bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("unlimited activation bind: {}", failure.code));
+        let retained_bytes = controller.resources().retained_bytes;
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let (plan, bindings, drops, calls, address) = fixture(7);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: retained_bytes - 1,
+            },
+        ) {
+            Ok(_) => panic!("one-below retained-byte activation bind accepted"),
+            Err(failure) => failure,
+        };
+        let failure = assert_refusal(
+            failure,
+            "graph.plan.observation_activation_retained",
+            &drops,
+            &calls,
+            address,
+        );
+        drop(failure);
+
+        let (plan, bindings, drops, _calls, _address) = fixture(7);
+        let (render_plan, controller) = plan
+            .bind_with_observation_activation(
+                bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: retained_bytes,
+                },
+            )
+            .unwrap_or_else(|failure| {
+                panic!("inclusive retained-byte activation bind: {}", failure.code)
+            });
+        assert_eq!(controller.resources().retained_bytes, retained_bytes);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let (mut plan, mut bindings, input) = binding_plan();
+        let output = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::Output { .. }))
+            .cloned()
+            .expect("output");
+        let input_drops = Arc::new(AtomicU64::new(0));
+        let output_drops = Arc::new(AtomicU64::new(0));
+        let input_observer = GraphNodeObserverBinding::controlled(
+            input,
+            55,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&input_drops),
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let output_observer = GraphNodeObserverBinding::controlled(
+            output,
+            55,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&output_drops),
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let input_address = core::ptr::from_ref(&*input_observer.observer).cast::<()>() as usize;
+        let output_address = core::ptr::from_ref(&*output_observer.observer).cast::<()>() as usize;
+        plan.observers.push(input_observer);
+        bindings.observers.push(output_observer);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 2,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("duplicate controlled handles accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_duplicate");
+        assert_eq!(failure.plan.observers.len(), 1);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        assert!(failure.plan.observers[0].is_controlled());
+        assert!(failure.bindings.observers[0].is_controlled());
+        assert_eq!(failure.plan.observers[0].handle, 55);
+        assert_eq!(failure.bindings.observers[0].handle, 55);
+        assert_eq!(
+            core::ptr::from_ref(&*failure.plan.observers[0].observer).cast::<()>() as usize,
+            input_address
+        );
+        assert_eq!(
+            core::ptr::from_ref(&*failure.bindings.observers[0].observer).cast::<()>() as usize,
+            output_address
+        );
+        assert_eq!(input_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(output_drops.load(Ordering::SeqCst), 0);
+        let mut repaired_plan = *failure.plan;
+        let repaired_bindings = failure.bindings;
+        drop(
+            repaired_plan
+                .observers
+                .pop()
+                .expect("duplicate repair observer"),
+        );
+        let (render_plan, controller) = repaired_plan
+            .bind_with_observation_activation(
+                repaired_bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("duplicate repair bind: {}", failure.code));
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(input_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(output_drops.load(Ordering::SeqCst), 1);
+
+        let (plan, bindings, _) = binding_plan();
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("empty controlled catalog accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_capacity");
+        assert!(failure.plan.observers.is_empty());
+        assert!(failure.bindings.observers.is_empty());
+        drop(failure);
+    }
+
     /// E9. The three internal rack boundaries are pure aliases, so the lowering elides them and
     /// the executors never copy through them -- and the audio is bit-identical to the same plan
     /// with those stages materialised by a copy-through processor. An observer on an elided stage
@@ -4665,6 +5566,51 @@ mod tests {
         // sees exactly what the producing op wrote.
         let calls = Arc::new(AtomicU64::new(0));
         let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (alias_plan, mut alias_bindings) = build(
+            true,
+            Some((
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            )),
+        );
+        alias_bindings
+            .observers
+            .push(GraphNodeObserverBinding::controlled(
+                node(TrackStage::PostInputBuiltins),
+                101,
+                test_observer(),
+            ));
+        let alias_program = alias_plan.program().cloned().expect("lowered aliases");
+        let alias_planning =
+            runtime::preflight_sequential(&alias_plan, &alias_program, &alias_bindings, None)
+                .expect("sequential alias plan");
+        let mut alias_activation = runtime::preflight_observation_activation(
+            &alias_plan,
+            &alias_program,
+            &alias_bindings,
+            &alias_planning,
+            Some(GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            }),
+        )
+        .expect("alias activation preflight")
+        .expect("configured alias activation");
+        alias_activation
+            .controller
+            .replace(&[101])
+            .expect("alias replacement");
+        alias_activation
+            .realtime
+            .apply_boundary(0, |_entry, _active, _revision, _first_sample| {});
+        let alias_entries = alias_activation.realtime.entries();
+        assert_eq!(alias_entries.len(), 2);
+        assert_eq!(alias_entries[0].unit, alias_entries[1].unit);
+        assert_eq!(alias_entries[0].member, None);
+        assert_eq!(alias_entries[1].member, None);
+        assert_eq!(alias_entries[0].observer, 0);
+        assert_eq!(alias_entries[1].observer, 1);
+
         let (observed, observed_bindings) =
             build(true, Some((Arc::clone(&calls), Arc::clone(&sink))));
         let mut observed_plan = observed

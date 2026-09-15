@@ -1,0 +1,439 @@
+# Prepared active observer dispatch without audio-plan mutation
+
+Engine issue #816, child of #763. Root approved and synchronized the brief before implementation. Baseline engine `8e524194cdb945c5337bf81b3f209c5d4ae15984`. Design author: Astra XHIGH. Implementation: bounded Luna MAX tranches. One independent adversarial verdict per coherent attempt; maximum five attempts. This issue is a native product capability, not a new generic telemetry framework.
+
+## Smallest closable result
+
+A host prepares a finite catalog of graph observer bindings, then selects an admitted subset at block boundaries without changing graph topology, run units, audio buffers, bank cohorts, or DSP state. With the subset empty, graph observation dispatch visits no catalog entries and acquires no observation audio input. Existing unconditionally active observer constructors retain their semantics. Selective meters and spectrum adopt this seam in the dependent issue; this issue must demonstrate the contract with real graph observers and PCM, not just transport unit tests.
+
+## Frozen architecture
+
+1. Keep `GraphNodeObserverBinding` and every `RuntimeOp.observers` allocation structurally immutable. During lowering build a control-side catalog mapping stable observer handle to `(unit_index, member_index, observer_index, ordinal)`. `member_index` is absent for `RuntimeUnit::Op`. `ordinal` is the existing unit/member/direct/alias observer order. Opaque handles are already stable `u64`, not positional public identity.
+2. Add an opt-in controlled binding constructor. Existing `GraphNodeObserverBinding::new` makes an always-active binding; add `GraphNodeObserverBinding::controlled(node, handle, observer)`. Controlled bindings start inactive. Duplicate controlled handles are preparation errors. Permanent observers remain in the dispatch base; they are accounted separately and may not be used by host-owned meters/spectrum after their migration. A permanent user observer deliberately continues its independently requested work.
+3. Runtime owns a prepared, fixed-capacity active dispatch snapshot: boxed storage, a live length, revision and catalog-owner identity. Dispatch entries contain only validated `Copy` indices, never trait objects, `Arc`s or resources. Storage capacity is a caller-configured maximum active controlled bindings plus permanent bindings. All active entries are sorted off render by ordinal. The graph executor's existing audio-unit loop advances a cursor through this snapshot and calls only entries whose unit is the just-completed unit. Empty snapshot means one block-level gate; do not invoke `observe_unit` or walk bank members merely to find no observers. Preserve resident bank output handling and existing direct/alias order, including errors that accept resident input exactly once.
+4. Snapshot switching is explicitly observation activation state. No mutation to `units`, op observer bindings, execution order, graph schedule, bank membership, alias analysis or arena allocation is permitted. Prepared observer-induced layout/optimization costs remain part of baseline preparation and are reported honestly.
+5. Use the existing `bounded_spsc_move` ownership machinery, following `plan_exchange`'s ownership rules; no new unsafe transport. Prepare exactly three equal-capacity snapshot backing arrays: active, ordinary replacement, reserved removal replacement. Ordinary publication queue capacity is one, removal publication queue capacity is one, retirement queue capacity is two. A single control-side owner owns both producers, recycled arrays and monotonic revisions. At most one ordinary and one removal publication can be outstanding. A removal candidate must be a subset of the last accepted controlled set and must retain all permanent entries. While a removal publication is outstanding, ordinary publication refuses with `Backpressure`. A second removal returns `Backpressure` and is reconciled ahead of new starts by the host owner; this does not consume the ordinary credit. Closing all consumers uses the same empty-controlled-set removal.
+6. At each block entry consume at most the two already-admitted snapshots, in monotonic revision order. An ordinary update admitted before a removal is applied first and the removal second at the same sample boundary; BOTH revisions receive an applied receipt with that exact sample. This is explicit successive state at one boundary, not cancellation of an accepted operation. No measurement runs between those two changes. Never poll/drain an unbounded queue. Switching swaps the active box; the displaced box is moved to retirement carrying the applied candidate's receipt. Queue capacity plus the three-buffer ownership invariant guarantees retirement space for each admitted publication. If defensive checks find no retirement space, retain the candidate in a prepared pending slot and defer; never drop/free a box on render, never overwrite a reader's storage, and never claim application before it happened.
+7. All validation, handle lookup, sorting, duplicate rejection and desired-set construction happen control-side before publication. At activation, merge old/new sorted active entries to call the new optional observer hook `activation_changed(active: bool, generation: u64, first_sample: u64)` exactly for changed activation identities. This hook defaults to no-op; implementors must perform O(1) scalar reset/generation invalidation, no buffer clearing, queue draining, allocation or audio-state reset. Same live identity does not reset. One ordinary update may replace at most `maximum_active_observers` entries; two transitions cost no more than `4 * (maximum_active_observers + permanent_count)` old/new entry visits (checked arithmetic) plus fixed queue operations. This explicit configurable transition ceiling is part of preparation acceptance, not a performance claim.
+8. Render failure invalidates only the currently dispatched observers, once each, preserving existing completed-before-failure semantics. Do not fall back to scanning all dormant prepared bindings on this error path. Transport-owner/catalog lifetime must outlive pending snapshot use. Teardown/drop is control-side after the render owner stops.
+
+## Frozen public Rust surface
+
+Place graph-specific implementation in `crates/graph/src/observation_activation.rs`, expose through `graph` (do not put graph identities in `engine`). Exact names below are the intended contract; ordinary derives/internal helper spellings are implementor choices.
+
+```rust
+pub struct GraphObservationActivationConfig {
+    pub maximum_active_observers: usize,
+    pub maximum_retained_bytes: u64,
+}
+pub struct GraphObservationActivationResources {
+    pub retained_bytes: u64,
+    pub largest_allocation_bytes: u64,
+    pub maximum_active_observers: usize,
+    pub maximum_transition_entry_visits_per_block: u64,
+}
+pub enum GraphObservationAdmissionError {
+    UnknownHandle, DuplicateHandle, ActiveCapacity, RetainedBytes,
+    InvalidRemoval, Backpressure, RevisionExhausted, OwnerClosed,
+}
+pub struct GraphObservationAccepted { pub revision: u64 }
+pub struct GraphObservationApplied { pub revision: u64, pub first_sample: u64 }
+pub struct GraphObservationController { /* unique control owner */ }
+impl GraphObservationController {
+    pub fn replace(&mut self, handles: &[u64])
+        -> Result<GraphObservationAccepted, GraphObservationAdmissionError>;
+    pub fn remove_to(&mut self, remaining_handles: &[u64])
+        -> Result<GraphObservationAccepted, GraphObservationAdmissionError>;
+    pub fn try_applied(&mut self) -> Option<GraphObservationApplied>;
+    pub fn resources(&self) -> GraphObservationActivationResources;
+}
+```
+
+`replace`/`remove_to` are complete sets of controlled handles; permanent observers are included automatically. Refusal preserves the complete last admitted set. `try_applied` recycles one retired backing array and returns one receipt; callers may invoke it in a bounded control-side loop. Application receipts never borrow native snapshot memory. Accepted means reserved and pending; it does not require a render call and must not claim an applied sample. Use the existing `PreparedGraphPlan::bind_optional_source_set` seam. Add `PreparedGraphPlan::bind_with_observation_activation(self, bindings: GraphRuntimeBindings, config: GraphObservationActivationConfig) -> Result<(PreparedRenderPlan, GraphObservationController), GraphBindFailure>` and `bind_with_source_set_and_observation_activation(self, bindings, source_set, config) -> Result<(PreparedRenderPlan, GraphObservationController), GraphSourceBindFailure>`. Preserve old `bind` / `bind_with_source_set` signatures by delegating to the shared internal implementation with activation disabled. Existing public struct literals gain no required fields. Controller/pool creation occurs after preflight resolves immutable runtime indices and before executor sealing. Private transport API for tranche A is `prepare_activation(catalog: Box<[ActivationBinding]>, permanent: &[ActivationEntry], config) -> Result<(GraphObservationController, RealtimeObservationActivation), GraphObservationAdmissionError>`; `ActivationEntry { unit: usize, member: Option<usize>, observer: usize, ordinal: usize }` is Copy; `ActivationBinding { handle: u64, entry: ActivationEntry }` is immutable; `RealtimeObservationActivation::apply_boundary(first_sample, on_changed)` applies at most two snapshots and invokes `on_changed(entry, active, revision, first_sample)`, with `entries() -> &[ActivationEntry]` for the current immutable borrowed dispatch and `resources()` for accounting. Graph lowering constructs the catalog, never the SDK. All these transport types/helpers except the specified public controller records remain crate-private.
+
+For this primitive, cap admission by active count and exact retained bytes. Per-family sample/copy/worker work admission is REQUIRED in the next issue before hosts expose activation. No claim that this count alone qualifies audio deadline headroom.
+
+## Exact implementation tranches
+
+A. `crates/graph/src/observation_activation.rs`, `crates/graph/src/lib.rs`: types, three-buffer ownership, preparation/resource projection, controlled binding constructor and optional default activation hook; bounded tests for ownership and refusal. No runtime dispatch rewrite in this tranche. It must compile; notify root for exact-path checkpoint before B.
+
+B. `crates/graph/src/runtime.rs`, `crates/graph/src/lib.rs`, focused graph tests in the existing module or `crates/graph/tests/observation_activation.rs`: lower static catalog, active-only dispatch at the existing post-unit seam, boundary application/hooks/failure invalidation. Preserve resident planar-fallback contracts; update structural tests to discriminate the new seam rather than deleting their protection. Notify root for checkpoint.
+
+No host, SDK, app, effect DSP, audio scheduler or ABI mutation in this issue. Changes to `engine` SPSC are not authorized: its existing move queues suffice; a demonstrated obstacle returns to coordinator before widening files.
+
+## Discriminating acceptance
+
+- Real active-audio graph with direct observer, alias observer, resident bank output and non-multiple SIMD tail: selected observations match old always-active outputs and PCM is bit-identical across empty/single/max/churn sets.
+- Operation-site test counters: no-active dispatch visits zero observers, zero bank members for observation and zero planar/resident observation acquisitions. One active observer among a large prepared catalog visits only that observer. Existing per-audio-unit loop comparisons are reported as fixed integration overhead, not measurements.
+- Acceptance/reservation race tests: ordinary full; reserved removal while ordinary outstanding; second removal refusal; no new starts ahead of pending removal; both admitted revisions applied in order at the same boundary; reader stalled for multiple blocks; delayed recycle; close during pending admission; old state survives all refusals. No accepted revision disappears.
+- Count transition entry visits and enforce the declared bound; no arrays are cleared on start/stop. No allocations/frees/locks/syscalls across render and boundary application, including failure paths. No plan preparation/swap or DSP reset under churn.
+- Resource projection exactly includes three snapshot arrays, catalog, two publication queues, retirement queue, permanent-base data and endpoint/shared state. Inclusive and one-below limits discriminate admission. Zero controlled preparation has no activation pool; existing no-observer graph path stays valid.
+- Focused native graph suite and existing realtime policy/call-graph/allocation gates, plus Wasm graph compilation. Root owns broad exact-asset qualification at a coherent delivery boundary. No descriptive benchmark is needed for this primitive.
+
+## Closure limit
+
+Close only for the native prepared-dispatch capability. Parent #763 and selected host feed issue remain open. This does not yet make current browser meters or legacy spectrum idle; dependent migration and browser ingress qualification are mandatory before claiming the full product behavior.
+
+## Coordinator freeze before attempt 1
+
+Three buffers have one active role and two distinct free-credit roles: ordinary
+and reserved removal. Ordinary admission never borrows the removal credit. A
+publication carries its kind; retirement returns the displaced allocation tagged
+with the applied candidate's kind, replenishing that credit regardless of the
+physical buffer's previous role. Each retired record carries the newly applied
+candidate revision/sample, never the displaced revision. Transition bounds include
+permanent entries: checked 4*(maximum_active_observers+permanent_count).
+
+The implementation worktree is /tmp/miso-observation-engine on
+codex/observation-feeds. Tranche A is a focused native primitive checkpoint only;
+tranche B must integrate it into real graph execution before issue closure.
+Root owns all commits/pushes and source/remote evidence synchronization.
+
+### Endpoint lifetime clarification (before attempt-1 verdict)
+
+Astra/root require a shared `Arc<AtomicBool>` renderer-alive flag: initialize true,
+Release-store false when the realtime endpoint is disposed OFF RENDER, and
+Acquire-load before controller admission. Add `is_closed(&self) -> bool` to the
+controller. `replace`/`remove_to` return OwnerClosed after disposal. Already
+recorded applied receipts remain recyclable; accepted-but-unapplied revisions
+become explicitly terminal owner closure, never fabricated application. A
+concurrent disposal after admission preflight is classified by this terminal
+state. Include the exact shared Arc allocation in retained/largest-byte reports.
+
+Opt-in controlled preparation rejects `maximum_active_observers == 0` with
+ActiveCapacity. Existing bind paths without controlled preparation retain zero
+activation pool and no controller; zero configured capacity is not owner death.
+The graph builder uses the additive bind methods frozen above.
+# #816 tranche B: transactional activation preflight
+
+Bounded design clarification only; append to the numbered brief before B. Do not change the audio lowering or return ownership after partial executor construction.
+
+`SequentialPlan` already freezes emitted units and members before inputs move: `run_units`, `unit_of_run`, `op_slot`, and retired fold decisions. `build_sequential` consumes exactly that plan. Therefore final activation indices can and must be derived while borrowing inputs; there is no need for a fallible catalog creation after constructing `Runtime`.
+
+Add the following crate-private helper in runtime:
+
+```rust
+pub(crate) struct PreparedObservationActivation {
+    pub(crate) controller: GraphObservationController,
+    pub(crate) realtime: RealtimeObservationActivation,
+}
+
+pub(crate) fn preflight_observation_activation(
+    plan: &PreparedGraphPlan,
+    program: &ExecutionProgram,
+    bindings: &GraphRuntimeBindings,
+    planning: &SequentialPlan,
+    config: Option<GraphObservationActivationConfig>,
+) -> Result<Option<PreparedObservationActivation>, &'static str>;
+```
+
+1. With `config=None`, reject any controlled observer from either `plan.observers` or `bindings.observers` with `graph.plan.observation_activation_required`; otherwise return `Ok(None)`. Old bind must not turn a controlled observer into an always-active one.
+2. For configured activation, construct a temporary borrowed map of all observer bindings from both inputs. Use the existing `taps_by_op(program,spec)` function and the same direct-node-first, aliases-in-existing-order sequence used by `build_op`/`take_observers`. Sort each node's borrowed observers by handle. Consume these temporary map rows once, following retained `planning.run_units` and their original op order. Do not remove/move original observer objects.
+3. `planning.op_slot[op]` supplies `(unit,member)`. Use `member=None` for a plain run (`membership.is_empty()`); use `Some(member)` for a bank run. Observer index is its index in that runtime op's concatenated direct/alias list. Assign ordinal monotonically in this exact emission order. This is the actual lowered catalog, not a guessed count or substitute layout. Check all arithmetic, referenced mappings and complete consumption; an unresolved observer or inconsistent mapping returns `graph.plan.observer`. Controlled handles must be globally unique, including different nodes; permanent and controlled dispatch ordinals are necessarily distinct.
+4. Call existing `prepare_activation(catalog, permanent, config)` during this borrowed preflight. It allocates/validates the exact pool, queues, retained layout and liveness state BEFORE any caller-owned processor/observer/source moves. Map its typed admission failures to explicit graph activation diagnostics. This is the sole fallible activation preparation. Do not call it again in `GraphExecutor::new` or after `build_sequential`.
+5. In `bind_optional_source_set`, run existing structural/source validation and `preflight_sequential` first, then the helper above. Every error still returns `(self, bindings, source_set, code)` untouched. On success split the prepared activation pair: retain the controller in the enclosing bind function and pass only `Option<RealtimeObservationActivation>` to an additive private argument of `GraphExecutor::new`/runtime construction. `GraphExecutor::new` remains infallible and returns `Self`; additive public bind returns `(PreparedRenderPlan, controller)` after sealing. Legacy bind discards no controller: its preflight returns None.
+6. Materialization consumes the same frozen `SequentialPlan` and unchanged observer bindings. No second lowering, admission decision, handle lookup, resource check or new queue allocation happens after moving inputs. A test/debug assertion may compare emitted observer coordinates to the preflight catalog as an internal invariant; it cannot replace required borrowed validation or become a normal recoverable late error.
+
+Use one shared helper for direct-node/alias enumeration if needed to prevent preflight and emission drifting. Do not introduce an alternate graph-planning algorithm. Temporary preflight maps are ordinary control-side memory, reclaimed before returning; retained pool/resource figures remain based on the actual final catalog.
+
+Tests: controlled binding through each legacy bind rejects while returning every original input; duplicate controlled handles on different nodes; zero-active-capacity and one-below byte limit; unresolved observer; source-set bind failure preserving source ownership; successful direct+alias+bank-tail preflight coordinates match materialized dispatch exactly. A drop-witness observer/processor must remain undropped inside returned failure inputs, proving no late consume-and-drop path. Existing inclusive exact resource and PCM/ordering gates remain.
+
+### Attempt 1 tranche A checkpoint
+
+Luna MAX implements the graph-specific three-buffer controller, ordinary/removal
+credits, applied receipts, renderer-lifetime flag, checked resource projection,
+controlled-binding constructor and default activation hook. Focused activation
+unit tests (3), `cargo check -p graph`, changed-file formatting and diff checks pass.
+The crate-private runtime endpoint is intentionally not yet wired, producing
+expected unused-code warnings until tranche B. This is a compiling transport
+checkpoint, not a native graph capability verdict. Tranche B must complete real
+dispatch, transactional bind, resource/PCM/realtime evidence and independent review.
+
+### Bounded tranche B assignments
+
+Split B without changing its contract: B1 implements only borrowed activation
+preflight/catalog mapping and focused coordinate/refusal tests in runtime.rs plus
+minimal lib.rs visibility glue; it does not expose new public bind methods or
+change render dispatch. B2 then wires transactional public bind and active-only
+runtime dispatch/activation/failure handling and runs the real PCM/realtime gates.
+Each compiling slice is committed before the next fresh Luna MAX agent starts.
+
+B1 edge-case ruling: opt-in activation bind requires at least one controlled
+binding. A configured activation with an empty controlled catalog returns
+`graph.plan.observation_activation_capacity` during borrowed preflight. Ordinary
+bind with permanent observers only retains its existing dispatch and no activation
+pool. Do not return an unusable empty controller or suppress permanent observers
+by attaching an empty activation snapshot.
+
+Root also ran the unchanged-dispatch graph library suite at tranche-A source
+checkpoint d39d9cf5: 73/73 tests pass, including existing graph PCM/layout/resource
+regressions. Evidence: /tmp/observation-816-a-graph-suite.log. This supplements the
+primitive checkpoint; it does not establish the pending active-dispatch behavior.
+
+### Attempt 1 tranche B1 checkpoint
+
+Fresh Luna MAX implemented borrowed activation preparation from the frozen
+SequentialPlan, shared direct/alias enumeration, and compact real-plan mapping
+and refusal tests. Caller-owned processor/observer inputs remain borrowed during
+all fallible activation preparation. Focused preflight and existing alias tests,
+cargo check -p graph, formatting and diff checks pass. Public bind and render
+dispatch integration remain B2; no native active-dispatch capability is claimed
+from this checkpoint alone.
+
+### Coordinator concurrency ruling during B2
+
+The realtime endpoint must sample removal-queue availability before ordinary-queue
+availability. The unique producer publishes an ordinary revision before its
+subsequent removal revision; acquiring the removal publication first guarantees
+the subsequent ordinary availability read includes that earlier publication.
+Reading ordinary first could observe zero, race both publications, then observe
+one removal and apply revisions out of order. Counts remain bounded and frozen
+for this boundary. Include all newly render-reachable activation helper bodies
+in existing realtime-policy coverage.
+
+B2 consistency rulings: preflight and materialization must both use stable
+per-node handle sorting, preserving equal-handle legacy permanent rows. Failure
+invalidation covers the entire currently active snapshot, including active
+observers not reached in the failed block; each observer decides which completed
+window remains valid. It never scans dormant bindings. Existing realtime policy
+continues to prohibit panic/expect/unwrap in marked activation helpers.
+
+### Attempt 1 tranche B2 checkpoint
+
+Fresh Luna MAX wired additive transactional bind APIs, block-entry activation,
+active-only dispatch, selected failure invalidation, runtime layout witnesses and
+the concurrency/ordering rulings above. The existing graph library suite plus
+a public controlled-bind activation test passes: 75/75. cargo check -p graph and
+diff checks pass. Root realtime-policy gate passes with 50 marked regions in
+14 files (local log /tmp/observation-816-b2-realtime-policy.log).
+
+This is a working native dispatch checkpoint. Before the issue verdict, a fresh
+bounded evidence tranche must exercise allocator-guarded active audio, PCM across
+empty/single/maximum/churn sets, bank/tail and failure behavior, input-operation
+counters, and transactional source ownership. Root owns Wasm and independent
+review. No host/SDK/browser adoption or deadline qualification is claimed yet.
+
+### Coordinator gate cleanup
+
+Wasm graph compilation passes (/tmp/observation-816-wasm.log). Root resolved the
+new-code Clippy findings mechanically: derive the zero entry, simplify equivalent
+branches/map, name the private bind result, restrict the fixture constructor to
+tests and check endpoint resource agreement during control-side preflight. No
+behavioral contract changed. Graph library Clippy with -D warnings now passes
+(/tmp/observation-816-clippy-final.log); existing unrelated clippy.toml unreachable
+path notices remain informational. Graph library tests remain 75/75 and realtime
+policy passes. The separate allocator/PCM fixture assignment remains active.
+
+### Public ownership evidence
+
+Fresh Luna MAX added two passing public-boundary tests:
+`controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry`
+and `configured_activation_refusals_preserve_inputs_and_exact_budget`. They prove
+legacy controlled refusal preserves processor/observer/source identity and drop
+counters, controlled metadata survives, and additive retries work. Capacity zero,
+exact/one-below retained bytes, duplicate handles on different nodes and an empty
+controlled catalog are exercised through public bind. Changed-file formatting and
+diff checks pass. Audio fixture qualification remains the other bounded task.
+
+### Active-audio evidence
+
+Fresh Luna MAX extended the existing rt9 fixture only. All 7 integration tests
+pass with graph/test-support: fixed versus controlled PCM across empty, single,
+maximum, stop/reactivate and churn on a non-multiple SIMD population; zero idle
+observer callbacks/acquisitions; selected-only observations; allocator-guarded
+activation/render/recycle with zero allocations/frees; resident accept/decline/error
+without retry; failure invalidation including later active observers; and queued
+ordinary/removal receipts with a stalled reader. The original fixture regressions
+also pass. Formatting and diff checks pass. No new benchmark or allocator harness
+was introduced. Native implementation/evidence is ready for independent verdict.
+
+Root final native source gates: workspace policy and realtime policy pass.
+Clippy for graph --all-targets --features test-support with -D warnings passes
+(/tmp/observation-816-all-target-clippy-final.log). The reused fixture explicitly
+expects the argument-count style lint: its existing seven audio parameters gain
+one observer-options argument; no runtime check or correctness gate is suppressed.
+Independent Astra XHIGH attempt-1 review is in progress.
+
+## Attempt 1 independent verdict: FAIL
+
+Fresh Astra XHIGH reviewed source through cf975cbe and independently ran the
+complete graph library plus rt9 integration evidence: 77/77 and 7/7 pass. Queue
+ownership, revision ordering, resident dispatch and active failure handling are
+coherent, but the frozen contract is not yet met:
+
+- Retained-byte admission omits endpoint-owner storage. A one-controlled-row
+  native layout probe reports 1,248 bytes while controller/realtime values occupy
+  another 264/232 bytes, plus runtime cursor/flag layout. The current budget test
+  derives its oracle from that incomplete report. Runtime metadata's split-table
+  subtraction witness cancels the new activation fields rather than charging them.
+- Actual controlled direct/alias order and mixed permanent/controlled dispatch
+  are not exercised. Callback/acquisition counts do not measure dormant traversal,
+  and activation hooks do not measure unchanged-entry transition work. Add the
+  frozen operation-site counters, mixed ordering case, selected-failure allocation
+  guard and pending-owner-close/receipt case using existing fixtures.
+
+Full coordinator-local review: /tmp/observation-816-attempt1-review.md. This is
+attempt 1's sole adversarial verdict. Issue remains open; no native closure or
+production readiness is claimed. Attempt 2 is bounded to these corrections:
+first exact endpoint/runtime accounting, then the missing focused discriminators,
+using fresh Luna MAX agents with a checkpoint between source tranches. No host,
+SDK, transport redesign or benchmark framework is authorized by this correction.
+
+## Attempt 2 frozen correction
+
+Issue #816 attempt-2 accounting and transition-counter ruling — design clarification, not another verdict.
+
+Use the proposed layout witnesses; keep the transport and three backing arrays unchanged. `RuntimeWithoutObservationActivation` mirrors every current Runtime field except `observation_activation`, `observation_cursor`, and `observation_failure_invalidated`. `GraphExecutorWithoutObservationActivation` mirrors GraphExecutor, substituting that Runtime witness. Preserve the existing split-table witnesses and charges.
+
+Define checked, target-derived quantities:
+
+- `R = size_of::<GraphExecutor>() - size_of::<GraphExecutorWithoutObservationActivation>()`. This is the retained contribution in the actual containing allocation, including its padding; do not substitute the naked realtime endpoint size. Also derive the Runtime-level difference for the focused layout test. Use the containing-owner difference if padding makes the two differ.
+- `C = size_of::<GraphObservationController>()`, including its inline endpoint, pointer, ledger, and resource-report fields. Compute this after adding the report field below; do not pin the attempt-1 native sizes.
+- `H = sum(existing activation heap-allocation rows)`: three snapshot arrays, catalog, permanent array, accepted-handle array, liveness Arc allocation, and the six queue ring/slot allocations. Each shared allocation appears once. Existing zero-capacity row behavior remains unchanged.
+
+Add just `pub runtime_state_bytes: u64` to `GraphObservationActivationResources`, set it to R, and document that it overlaps the baseline graph runtime metadata. A public controller-size field is unnecessary. Set activation `retained_bytes = H + C + R` using checked additions and apply the inclusive configured byte budget to that total. Layout/conversion/overflow failure remains RetainedBytes before caller objects move.
+
+Add `pub observation_runtime_state_bytes: u64` to `GraphRuntimeMetadataResourceEstimate`, also R. Its `total_bytes` becomes its existing checked total plus R, exactly once, for every graph—including activation None. Those fields occupy the executor allocation even when no controller/pool exists. Keep the existing `runtime_field_bytes`/`runtime_owner_field_bytes` meanings as split-table accounting; do not silently redefine them. The existing compiler aggregation automatically picks up the new total; no compiler or host redesign is needed.
+
+Keep activation `largest_allocation_bytes = max(existing heap-allocation rows)`: C and R are inline storage, not standalone heap allocations. Clarify that this is the largest activation-owned standalone allocation. The graph metadata's largest-allocation projection already includes the complete real GraphExecutor allocation and must continue doing so. A future aggregate whose graph estimate already includes graph runtime metadata adds `activation.retained_bytes - activation.runtime_state_bytes`, with checked arithmetic, and takes the maximum of the graph and activation allocation maxima. This documents the exact overlap; do not implement a speculative host aggregator here.
+
+Required focused tests: derive the two witness differences and C independently using actual types; assert both reports' R and the baseline total with zero emitted ops. With a nonempty controlled catalog and nonzero permanent population, independently sum three capacity-sized entry arrays, catalog/permanent/accepted arrays, the three queue layouts (including sentinel slots and Arc headers), liveness layout, C, and R. Assert retained total and the separate heap maximum, then retain public inclusive/one-below refusal/ownership checks. Also assert `graph_total + activation_total - R` contains the runtime contribution once. Existing no-controller/no-pool behavior remains valid; baseline R is not a pool allocation. Reuse existing graph tests and policy/Wasm checks; no new harness.
+
+Freeze the transition probe as **old/new snapshot entries consumed by the merge**, including unchanged and permanent entries. Increment at the index advances in `notify_changes`: Less consumes one old entry; Greater one new entry; Equal consumes two entries; either one-sided tail consumes one. Count regardless of whether hooks run. Reset once at `apply_boundary` entry and accumulate across both applied candidates. Do not count only activation hooks or pretend this measures repeated head lookups.
+
+Each merge consumes exactly `old.len() + new.len()` entries. Each snapshot is bounded by `maximum_active_observers + permanent_count`, so two merges consume at most the frozen `4 * (maximum_active_observers + permanent_count)`. Every loop iteration consumes at least one entry and performs at most one ordinal comparison, so comparisons are also bounded by the consumed-entry ceiling; a separate comparison counter is unnecessary. Repeated head inspections are at most twice the iteration count and are not the published consumed-entry metric. Test the counter on two transitions with nonzero permanent entries and unchanged controlled entries. No merge algorithm change is required for this defined, meaningful bound.
+
+
+Coordinator assignment order: fresh Luna A2-accounting implements ONLY the layout
+witnesses/report arithmetic/documentation and independent resource tests. After
+that green checkpoint is committed and pushed, a fresh Luna A2-discriminators
+implements the defined test-only work counters, mixed controlled direct/alias/
+permanent order case, failure allocation guard and pending-close receipt case.
+Keep one uncommitted source tranche. Attempt 2 receives one adversarial verdict
+after both corrections and focused gates are complete.
+
+Attempt-2 discriminator seam: hidden test-only runtime counters record observer
+object accesses and bank-member accesses at the actual legacy-loop/selected-lookup
+sites, independently of callbacks. The transition counter resets at boundary
+entry and counts consumed old/new entries at every index advance. A mixed five-row
+fixture uses controlled direct handle20, permanent direct10, controlled alias1,
+permanent alias30 on the first bank lane, plus controlled direct40 on tail lane2;
+fixed/candidate bindings keep identical handle/node order. Expected all-active
+ordinals are [1,0,2,3,4], stopped controlled ordinals [1,3]. Two unchanged admitted
+transitions consume20 entries with zero hooks at maxcontrolled3/permanent2. Reuse
+the existing allocator fixture on failure and serialize mode-changing tests only
+with a control-side test mutex because allocator mode is process-global. A pending
+owner-close test retains a prior applied receipt without inventing one for the
+unapplied removal. Full bounded handoff: /tmp/observation-816-discriminator-brief.md.
+
+Attempt 2 accounting checkpoint: checked containing-layout witnesses now charge
+the controller and runtime state in activation retained bytes, while preserving
+a heap-only largest-allocation report. Baseline graph metadata charges runtime
+state and documents the overlap. Independent layout/resource tests cover the
+combined accounting. Luna accounting validation: graph library 79/79,
+graph-compiler library 73/73, graph check, all-target Clippy with warnings denied,
+formatting and diff checks passed. Dispatch discriminators and the independent
+attempt-2 verdict remain pending; this is not an issue completion claim.
+
+Attempt 2 discriminator checkpoint: test-only operation-site counters now cover
+observer/member accesses and consumed transition entries. The mixed direct/alias
+fixture preserves identical fixed/candidate handles, verifies permanent output
+and PCM, and asserts callback order under stop/reactivation. Two unchanged
+transitions consume exactly 20 entries with no hooks. Selected failure runs under
+the existing allocator guard; pending owner close preserves prior applied receipts
+without inventing a removal receipt. Luna validation: graph library 81/81, rt9
+8/8, strict all-target Clippy, graph check, formatting/diff, realtime policy and
+its mutation tests passed. Root also passed Wasm graph compilation after the
+accounting change. Independent attempt-2 review remains pending.
+
+Attempt 2 native adversarial review: fresh Astra XHIGH records PASS for b7b0a1ce
+(81 library + 8 rt9 independently passed; realtime policy and diff clean).
+CI integration remains pending. Its first run found a stale source-worklet pin,
+a private rustdoc link and layout-sensitive builtin fixtures. The independent
+old/current observer-binding layout probe is 80/88 native bytes. The existing
+10,000-case builtin compiler matrix now records the additional eight bytes in
+its meter/retained resource caps; cases and expected outcomes are unchanged and
+the focused matrix passes. Strict graph rustdoc passes after plain-text wording.
+A reproducible rebuild matches CI worklet digest
+a4a4171fe175caa3f2445b9118d022696ed4a1e30a7834c8ff8c590065b76b51.
+The required audit corpus still pins the old observer-binding ABI; authorize a
+bounded mechanical refresh of tools/audit/src/fixture_builtins.rs and only the
+existing resource corpus rows/dependent manifest identity affected by that layout.
+No DSP fixtures, test cases, outcomes, or checker acceptance rules may be weakened.
+Native PASS is not yet whole-issue CI completion.
+
+Final integration checkpoint: the audit observer-binding ABI is now 88 bytes.
+Only the existing resource grid's meter/retained totals, its manifest row and
+joined-manifest identity changed. Fresh Luna verified the two issue064 tests
+(including all 24 corruptions) and issue067 PDC/dependent identity test; generated
+scratch parity confirms only resources.jsonl/MANIFEST.tsv changed. No audio
+fixture or checker acceptance rule changed. Formatting/diff checks passed.
+
+Root ran the existing all-browser qualification with mutation gates against the
+exact CI-built a4a4171f artifact from candidate78d5d65b: Chromium151.0.7922.34,
+Firefox153.0 and WebKit26.5 all PASS. The current matrix/results were generated
+by that actual run; only candidate and artifact lineage changed. Native review
+PASS plus focused integration gates are complete. Required PR qualification
+and merged GitHub synchronization are the remaining closure steps. Parent763
+and production host/SDK/frontend observation migration remain open.
+
+Further required CI integration: the C API external primitive resource oracle
+still omits the newly charged 256-byte native inline observation runtime state.
+Authorize a test-only correction in crates/capi/tests/resource_lifecycle.rs:
+independently restate the endpoint/snapshot/resource layout from primitive fields
+and existing endpoint mirrors, append one graph-owner row per live plan, update
+single-plan graph report and double-live expectations by that derived term.
+Preserve exact/one-below caps and effective-owner omission mutations; no production
+report getters may be used as the oracle. No C API runtime or wire layout changes.
+
+The existing manifest-consumer gate also requires the resource manifest's new
+identity in current benchmark preflights/validators/synthetic tests and audit/bench
+consumer constants. Refresh those constants only, preserving recorded historical
+benchmark evidence and every validator rule. Run their existing synthetic checks,
+not timed benchmark workloads.
+
+The existing raw-Wasm browser resource oracle also needs its actual containing
+layout delta: 200 bytes on wasm32, versus 256 on native64. Re-derived against the
+exact CI artifact with MISO_ENGINE_WEB_ORACLE_PRINT=1; only graph metadata and
+the two containing graph totals changed (+200 each). Native-parity PCM/command/
+observation digests and all other resource rows remain identical. Update only
+those three expected.json resource fields and run the existing resource checker
+including its native/wide-target distinction and red mutations.
+
+Integration followthrough PASS: fresh Luna's independent C API endpoint/runtime
+mirrors derive 240/256 native bytes, append the graph owner row without changing
+the allocation-index oracle, and preserve exact/one-below and omission mutation
+checks. resource_lifecycle passes 4/4 in both debug and release. Root's manifest
+consumer check passes all seven declarations/stale controls; both synthetic
+benchmark validator/lifecycle suites pass with zero real workload invocations.
+The raw-Wasm expected-resource checker passes actual module/native witness and
+all 26 red mutations after the three +200-byte graph pins. Formatting/diff clean.
+No production behavior, wire layout, audio digest, test case or rejection rule
+changed in these downstream corrections. Required CI is rerun on this checkpoint.
+
+CI policy integration finding: check-graph-policy.sh truncates a Rust file at
+the first standalone #[cfg(test)] attribute, so the new layout-test helper before
+the real executor hides the legitimate implementation. Correct the existing
+stripper to truncate only at a cfg(test)-marked inline test module, preserving
+standalone test helpers and all following production text. Keep checked sed
+error/partial-output handling. Add compact existing-suite controls proving a
+helper before the graph executor passes, and a foreign executor or forbidden
+graph operation after such a helper still rejects. No production code change or
+weakened graph ownership rule; no general Rust parser/tooling expansion.
+
+The completed CI graph realtime trace passes its ownership/zero-violation
+predicates, then rejects the whole-record checksum because the record embeds
+the new resource manifest identity. Refresh only that active checksum consumer
+in trace-builtins-graph-audit.sh, run the existing trace, and prove replacing
+only the manifest hash restores the exact prior record checksum. Preserve every
+runtime/trace predicate; no timed benchmark or new audit framework.
+
+Policy/trace followthrough PASS: fresh Luna narrowed both existing sed scans to
+inline cfg(test) modules. Real-tree graph policy, all existing policy/error-shim
+fixtures, three standalone-helper regression controls, bash syntax and diff
+checks pass. Root's existing million-block graph all-TID trace passes every
+ownership/realtime predicate. Its new record checksum is
+048dc7b07cdcfbb1513e4a6513bd0ca73c228bd682ffb4668021f6d74183ae11;
+replacing its single da78dc3e resource-manifest identity with the prior9161d2ca
+identity restores exact prior checksum3a5ae262. No other record byte changed.
+All other CI34923128333 jobs passed; these were its only remaining failures.

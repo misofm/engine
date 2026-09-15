@@ -475,6 +475,7 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         response_owner_metadata_rows();
     let response_owner_metadata_bytes =
         response_binding_table_bytes + response_binding_string_bytes;
+    let observation_runtime_state_bytes = observation_runtime_owner_bytes();
     assert_eq!(
         (effect_bank_descriptor_delta, response_owner_metadata_bytes),
         (24, 1_908),
@@ -545,21 +546,26 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // effect-bank descriptor; both are retained by this plan and therefore belong in all
         // three graph totals. The independent rows are restated below in `graph_owners`.
         // #808: two banks each retain 3 x 4 x 6 x 32 coefficient bytes + 128 countdown bytes.
+        // #816 charges the inline observation endpoint, cursor and failure flag in the graph
+        // owner. Its independent primitive mirror is appended to `graph_owners` below.
         graph_session_plus_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
-            + effect_bank_descriptor_delta,
+            + effect_bank_descriptor_delta
+            + observation_runtime_state_bytes,
         graph_incremental_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
-            + effect_bank_descriptor_delta,
+            + effect_bank_descriptor_delta
+            + observation_runtime_state_bytes,
         graph_metadata_bytes: 50_295
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
-            + effect_bank_descriptor_delta,
+            + effect_bank_descriptor_delta
+            + observation_runtime_state_bytes,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
@@ -1105,6 +1111,80 @@ struct ConsumerMirror {
     empty: u64,
 }
 
+/// `Producer<T>`: the producer half of a retained SPSC endpoint.
+#[allow(dead_code)]
+struct ProducerMirror {
+    /// `Arc<Ring<T>>` is one non-null word in the endpoint.
+    ring: core::ptr::NonNull<()>,
+    local: usize,
+    cached_consumer: usize,
+    successes: u64,
+    full: u64,
+}
+
+/// The copy-only location carried by an activation snapshot. The boxed slice header is the
+/// retained endpoint field; its entry payload is charged by the activation resource rows.
+#[allow(dead_code)]
+struct ObservationActivationEntryMirror {
+    unit: usize,
+    member: Option<usize>,
+    observer: usize,
+    ordinal: usize,
+}
+
+#[allow(dead_code)]
+enum ObservationPublicationKindMirror {
+    Ordinary,
+    Removal,
+}
+
+#[allow(dead_code)]
+struct ObservationActiveSnapshotMirror {
+    revision: u64,
+    len: usize,
+    entries: Box<[ObservationActivationEntryMirror]>,
+}
+
+#[allow(dead_code)]
+struct ObservationPublishedSnapshotMirror {
+    kind: ObservationPublicationKindMirror,
+    revision: u64,
+    len: usize,
+    entries: Box<[ObservationActivationEntryMirror]>,
+}
+
+/// Primitive restatement of `GraphObservationActivationResources`. This stays independent of the
+/// production report getter so the graph owner row cannot be made to agree by copying a report.
+#[allow(dead_code)]
+struct ObservationActivationResourcesMirror {
+    retained_bytes: u64,
+    largest_allocation_bytes: u64,
+    runtime_state_bytes: u64,
+    maximum_active_observers: usize,
+    maximum_transition_entry_visits_per_block: u64,
+}
+
+/// Primitive restatement of the realtime endpoint retained by a graph runtime.
+#[allow(dead_code)]
+struct RealtimeObservationActivationMirror {
+    active: Option<ObservationActiveSnapshotMirror>,
+    ordinary: Option<ConsumerMirror>,
+    removal: Option<ConsumerMirror>,
+    retirement: Option<ProducerMirror>,
+    pending: Option<ObservationPublishedSnapshotMirror>,
+    renderer_alive: core::ptr::NonNull<AtomicBool>,
+    resources: ObservationActivationResourcesMirror,
+}
+
+/// The runtime fields added for observation activation, including the cursor and failure flag.
+/// The default Rust layout deliberately retains the trailing padding of the containing fields.
+#[allow(dead_code)]
+struct ObservationRuntimeStateMirror {
+    observation_activation: Option<RealtimeObservationActivationMirror>,
+    observation_cursor: usize,
+    observation_failure_invalidated: bool,
+}
+
 /// `ChannelParameters`: one dual-mono side of a track's declared builtin parameters.
 #[allow(dead_code)]
 struct ChannelParametersMirror {
@@ -1193,6 +1273,26 @@ struct PrimitiveOwner {
 
 fn bytes<T>(count: usize) -> u64 {
     Layout::array::<T>(count).expect("primitive layout").size() as u64
+}
+
+fn checked_size<T>() -> u64 {
+    u64::try_from(size_of::<T>()).expect("primitive size fits u64")
+}
+
+fn observation_runtime_owner_bytes() -> u64 {
+    let endpoint_bytes = checked_size::<RealtimeObservationActivationMirror>();
+    let runtime_bytes = checked_size::<ObservationRuntimeStateMirror>();
+    let field_bytes = endpoint_bytes
+        .checked_add(checked_size::<usize>())
+        .and_then(|bytes| bytes.checked_add(checked_size::<bool>()))
+        .expect("observation runtime primitive fields fit u64");
+    assert_eq!(endpoint_bytes, 240, "primitive observation endpoint layout");
+    assert!(
+        runtime_bytes >= field_bytes,
+        "observation runtime layout includes its primitive fields"
+    );
+    assert_eq!(runtime_bytes, 256, "primitive observation runtime layout");
+    runtime_bytes
 }
 
 fn response_owner_metadata_rows() -> (u64, u64) {
@@ -1774,6 +1874,7 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let split_runtime_op_unit_reservation = bytes::<[usize; 2]>(82);
     let (response_binding_table_bytes, response_binding_string_bytes) =
         response_owner_metadata_rows();
+    let observation_runtime_state_bytes = observation_runtime_owner_bytes();
     assert_eq!(
         (split_owner_table_field, split_runtime_op_unit_reservation),
         (16, 1_312),
@@ -1914,6 +2015,10 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "response-owner identity strings",
             bytes: response_binding_string_bytes,
+        },
+        PrimitiveOwner {
+            name: "observation runtime owner state",
+            bytes: observation_runtime_state_bytes,
         },
     ]
 }
@@ -2102,13 +2207,18 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     let response_owner_graph_delta = effect_bank_descriptor_layout_delta()
         + response_owner_metadata_rows().0
         + response_owner_metadata_rows().1;
+    let observation_runtime_state_bytes = observation_runtime_owner_bytes();
     assert_eq!(
         response_owner_graph_delta, 1_932,
         "#779 graph response delta"
     );
     assert_effective_owner_mutations(
         &graph,
-        511_956 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta,
+        511_956
+            + 2 * scratch_slot_reservation().0
+            + 2_656
+            + 2 * response_owner_graph_delta
+            + 2 * observation_runtime_state_bytes,
         "double-live graph/model",
     );
 
@@ -2518,10 +2628,15 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744. #470 adds
     // 2,656 bytes to the double-live graph peak: the runtime owner-table field and the accepted
     // 82 emitted-op/unit reservation are both live for each of the two plans. #779 adds the
-    // independently mirrored response-owner graph delta to each live plan.
+    // independently mirrored response-owner graph delta to each live plan. #816 adds the
+    // independently mirrored observation runtime owner state to each live plan.
     assert_eq!(
         oracle.graph,
-        511_956 + 2 * scratch_slot_reservation().0 + 2_656 + 2 * response_owner_graph_delta
+        511_956
+            + 2 * scratch_slot_reservation().0
+            + 2_656
+            + 2 * response_owner_graph_delta
+            + 2 * observation_runtime_owner_bytes()
     );
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
