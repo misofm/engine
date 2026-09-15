@@ -4611,6 +4611,22 @@ mod tests {
         }
     }
 
+    struct DropWitnessObserver {
+        drops: Arc<AtomicU64>,
+        calls: Arc<AtomicU64>,
+    }
+    impl Drop for DropWitnessObserver {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl GraphRuntimeObserver for DropWitnessObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     fn activation_error<T>(result: Result<T, &'static str>) -> &'static str {
         match result {
             Err(error) => error,
@@ -4869,6 +4885,366 @@ mod tests {
                 first_sample: 1,
             })
         );
+    }
+
+    #[test]
+    fn controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry() {
+        let processor_addresses = |bindings: &GraphRuntimeBindings| {
+            bindings
+                .nodes
+                .iter()
+                .filter_map(|binding| binding.processor.as_ref())
+                .map(|processor| core::ptr::from_ref(&**processor).cast::<()>() as usize)
+                .collect::<Vec<_>>()
+        };
+        let render_one = |plan: &mut PreparedRenderPlan, sample| {
+            let mut output = [0.0; 2];
+            plan.render(
+                engine::realtime::RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
+                },
+                engine::realtime::RenderTime {
+                    absolute_sample: sample,
+                },
+            )
+            .expect("render");
+        };
+        let config = GraphObservationActivationConfig {
+            maximum_active_observers: 1,
+            maximum_retained_bytes: u64::MAX,
+        };
+
+        // A legacy bind must refuse a controlled observer before consuming any caller object.
+        let (plan, mut bindings, input) = binding_plan();
+        let drops = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let observer = GraphNodeObserverBinding::controlled(
+            input,
+            7,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&drops),
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let observer_address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+        bindings.observers.push(observer);
+        let processor_before = processor_addresses(&bindings);
+        let failure = match plan.bind(bindings) {
+            Ok(_) => panic!("legacy bind accepted a controlled observer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_required");
+        assert_eq!(processor_addresses(&failure.bindings), processor_before);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_observer = &failure.bindings.observers[0];
+        assert!(returned_observer.is_controlled());
+        assert_eq!(returned_observer.handle, 7);
+        assert_eq!(
+            core::ptr::from_ref(&*returned_observer.observer).cast::<()>() as usize,
+            observer_address
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let (mut render_plan, mut controller) = failure
+            .plan
+            .bind_with_observation_activation(failure.bindings, config)
+            .unwrap_or_else(|failure| panic!("configured retry rejected: {}", failure.code));
+        controller
+            .replace(&[7])
+            .expect("controlled retry admission");
+        render_one(&mut render_plan, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        // The source-set variant returns the source driver and every other caller owner as well.
+        let (plan, mut bindings, input) = binding_plan();
+        let processor_before = {
+            bindings.nodes.retain(|binding| binding.node != input);
+            processor_addresses(&bindings)
+        };
+        let drops = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let observer = GraphNodeObserverBinding::controlled(
+            input.clone(),
+            17,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&drops),
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let observer_address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+        bindings.observers.push(observer);
+        let begins = Arc::new(AtomicU64::new(0));
+        let copies = Arc::new(AtomicU64::new(0));
+        let source_drops = Arc::new(AtomicU64::new(0));
+        let source = GraphPreparedSourceSet::new(
+            plan.envelope,
+            vec![GraphSourceInputClaim { node: input }],
+            GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(RecoverySource {
+                sample: 0,
+                begins: Arc::clone(&begins),
+                copies: Arc::clone(&copies),
+                drops: Arc::clone(&source_drops),
+            }),
+        );
+        let source_address = core::ptr::from_ref(&*source.driver).cast::<()>() as usize;
+        let failure = match plan.bind_with_source_set(bindings, source) {
+            Ok(_) => panic!("legacy source bind accepted a controlled observer"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_required");
+        assert_eq!(processor_addresses(&failure.bindings), processor_before);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_observer = &failure.bindings.observers[0];
+        assert!(returned_observer.is_controlled());
+        assert_eq!(returned_observer.handle, 17);
+        assert_eq!(
+            core::ptr::from_ref(&*returned_observer.observer).cast::<()>() as usize,
+            observer_address
+        );
+        assert_eq!(
+            core::ptr::from_ref(&*failure.source_set.driver).cast::<()>() as usize,
+            source_address
+        );
+        assert_eq!(begins.load(Ordering::SeqCst), 0);
+        assert_eq!(copies.load(Ordering::SeqCst), 0);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let (mut render_plan, mut controller) = failure
+            .plan
+            .bind_with_source_set_and_observation_activation(
+                failure.bindings,
+                failure.source_set,
+                config,
+            )
+            .unwrap_or_else(|failure| panic!("configured source retry rejected: {}", failure.code));
+        controller
+            .replace(&[17])
+            .expect("controlled source retry admission");
+        render_one(&mut render_plan, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(begins.load(Ordering::SeqCst), 1);
+        assert_eq!(copies.load(Ordering::SeqCst), 1);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn configured_activation_refusals_preserve_inputs_and_exact_budget() {
+        let fixture = |handle| {
+            let (plan, mut bindings, input) = binding_plan();
+            let drops = Arc::new(AtomicU64::new(0));
+            let calls = Arc::new(AtomicU64::new(0));
+            let observer = GraphNodeObserverBinding::controlled(
+                input,
+                handle,
+                Box::new(DropWitnessObserver {
+                    drops: Arc::clone(&drops),
+                    calls: Arc::clone(&calls),
+                }),
+            );
+            let address = core::ptr::from_ref(&*observer.observer).cast::<()>() as usize;
+            bindings.observers.push(observer);
+            (plan, bindings, drops, calls, address)
+        };
+        let assert_refusal = |failure: GraphBindFailure,
+                              expected: &'static str,
+                              drops: &Arc<AtomicU64>,
+                              calls: &Arc<AtomicU64>,
+                              address: usize| {
+            assert_eq!(failure.code, expected);
+            assert_eq!(failure.bindings.observers.len(), 1);
+            let observer = &failure.bindings.observers[0];
+            assert!(observer.is_controlled());
+            assert_eq!(observer.handle, 7);
+            assert_eq!(
+                core::ptr::from_ref(&*observer.observer).cast::<()>() as usize,
+                address
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            failure
+        };
+
+        let (plan, bindings, drops, calls, address) = fixture(7);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 0,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("zero-capacity activation bind accepted"),
+            Err(failure) => failure,
+        };
+        let failure = assert_refusal(
+            failure,
+            "graph.plan.observation_activation_capacity",
+            &drops,
+            &calls,
+            address,
+        );
+        drop(failure);
+
+        let (plan, bindings, drops, _calls, _address) = fixture(7);
+        let (render_plan, controller) = plan
+            .bind_with_observation_activation(
+                bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("unlimited activation bind: {}", failure.code));
+        let retained_bytes = controller.resources().retained_bytes;
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let (plan, bindings, drops, calls, address) = fixture(7);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: retained_bytes - 1,
+            },
+        ) {
+            Ok(_) => panic!("one-below retained-byte activation bind accepted"),
+            Err(failure) => failure,
+        };
+        let failure = assert_refusal(
+            failure,
+            "graph.plan.observation_activation_retained",
+            &drops,
+            &calls,
+            address,
+        );
+        drop(failure);
+
+        let (plan, bindings, drops, _calls, _address) = fixture(7);
+        let (render_plan, controller) = plan
+            .bind_with_observation_activation(
+                bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: retained_bytes,
+                },
+            )
+            .unwrap_or_else(|failure| {
+                panic!("inclusive retained-byte activation bind: {}", failure.code)
+            });
+        assert_eq!(controller.resources().retained_bytes, retained_bytes);
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let (mut plan, mut bindings, input) = binding_plan();
+        let output = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::Output { .. }))
+            .cloned()
+            .expect("output");
+        let input_drops = Arc::new(AtomicU64::new(0));
+        let output_drops = Arc::new(AtomicU64::new(0));
+        let input_observer = GraphNodeObserverBinding::controlled(
+            input,
+            55,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&input_drops),
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let output_observer = GraphNodeObserverBinding::controlled(
+            output,
+            55,
+            Box::new(DropWitnessObserver {
+                drops: Arc::clone(&output_drops),
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let input_address = core::ptr::from_ref(&*input_observer.observer).cast::<()>() as usize;
+        let output_address = core::ptr::from_ref(&*output_observer.observer).cast::<()>() as usize;
+        plan.observers.push(input_observer);
+        bindings.observers.push(output_observer);
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 2,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("duplicate controlled handles accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_duplicate");
+        assert_eq!(failure.plan.observers.len(), 1);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        assert!(failure.plan.observers[0].is_controlled());
+        assert!(failure.bindings.observers[0].is_controlled());
+        assert_eq!(failure.plan.observers[0].handle, 55);
+        assert_eq!(failure.bindings.observers[0].handle, 55);
+        assert_eq!(
+            core::ptr::from_ref(&*failure.plan.observers[0].observer).cast::<()>() as usize,
+            input_address
+        );
+        assert_eq!(
+            core::ptr::from_ref(&*failure.bindings.observers[0].observer).cast::<()>() as usize,
+            output_address
+        );
+        assert_eq!(input_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(output_drops.load(Ordering::SeqCst), 0);
+        let mut repaired_plan = *failure.plan;
+        let repaired_bindings = failure.bindings;
+        drop(
+            repaired_plan
+                .observers
+                .pop()
+                .expect("duplicate repair observer"),
+        );
+        let (render_plan, controller) = repaired_plan
+            .bind_with_observation_activation(
+                repaired_bindings,
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("duplicate repair bind: {}", failure.code));
+        drop(render_plan);
+        drop(controller);
+        assert_eq!(input_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(output_drops.load(Ordering::SeqCst), 1);
+
+        let (plan, bindings, _) = binding_plan();
+        let failure = match plan.bind_with_observation_activation(
+            bindings,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+        ) {
+            Ok(_) => panic!("empty controlled catalog accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observation_activation_capacity");
+        assert!(failure.plan.observers.is_empty());
+        assert!(failure.bindings.observers.is_empty());
+        drop(failure);
     }
 
     /// E9. The three internal rack boundaries are pure aliases, so the lowering elides them and

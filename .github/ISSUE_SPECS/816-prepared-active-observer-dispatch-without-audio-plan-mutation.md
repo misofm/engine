@@ -223,3 +223,14 @@ behavioral contract changed. Graph library Clippy with -D warnings now passes
 (/tmp/observation-816-clippy-final.log); existing unrelated clippy.toml unreachable
 path notices remain informational. Graph library tests remain 75/75 and realtime
 policy passes. The separate allocator/PCM fixture assignment remains active.
+
+### Public ownership evidence
+
+Fresh Luna MAX added two passing public-boundary tests:
+`controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry`
+and `configured_activation_refusals_preserve_inputs_and_exact_budget`. They prove
+legacy controlled refusal preserves processor/observer/source identity and drop
+counters, controlled metadata survives, and additive retries work. Capacity zero,
+exact/one-below retained bytes, duplicate handles on different nodes and an empty
+controlled catalog are exercised through public bind. Changed-file formatting and
+diff checks pass. Audio fixture qualification remains the other bounded task.
