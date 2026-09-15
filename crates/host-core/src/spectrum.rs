@@ -842,6 +842,11 @@ impl SpectrumCapture {
         }
     }
 
+    /// Freeze the number of queue records visible to a protected owner read.
+    pub(crate) fn continuous_available_at_entry(&self) -> usize {
+        self.consumer.available_at_entry().min(1)
+    }
+
     /// The selected graph boundary for this capture.
     #[must_use]
     pub fn target(&self) -> &SpectrumTarget {
@@ -1586,6 +1591,38 @@ impl ControlledSpectrumCaptureCollection {
         self.entries
             .get(entry_index)
             .map(|entry| entry.slots[0].capture.channels())
+    }
+
+    /// Return the bounded queue availability for one immutable controlled descriptor.
+    pub(crate) fn continuous_available_at_entry(
+        &self,
+        descriptor: ControlledSpectrumDescriptor,
+    ) -> Option<usize> {
+        if descriptor.mode != HostSpectrumMode::Continuous {
+            return None;
+        }
+        let flat_slot = Self::flat_slot(descriptor.entry_index, descriptor.slot_index)?;
+        let slot = self.slot(flat_slot);
+        (slot.handle == descriptor.observer_handle)
+            .then(|| slot.capture.continuous_available_at_entry())
+    }
+
+    /// Read one bounded continuous record from an immutable controlled descriptor.
+    pub(crate) fn try_read_continuous_record(
+        &mut self,
+        descriptor: ControlledSpectrumDescriptor,
+        maximum_pops: Option<usize>,
+    ) -> Result<SpectrumCapturedRecord, SpectrumContinuousReadError> {
+        if descriptor.mode != HostSpectrumMode::Continuous {
+            return Err(SpectrumContinuousReadError::NotActive);
+        }
+        let flat_slot = Self::flat_slot(descriptor.entry_index, descriptor.slot_index)
+            .ok_or(SpectrumContinuousReadError::NotActive)?;
+        let slot = self.slot_mut(flat_slot);
+        if slot.handle != descriptor.observer_handle {
+            return Err(SpectrumContinuousReadError::NotActive);
+        }
+        slot.capture.try_read_continuous_record(maximum_pops)
     }
 
     fn free_slot(&self, entry_index: usize) -> Option<usize> {

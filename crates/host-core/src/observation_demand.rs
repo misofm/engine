@@ -442,6 +442,42 @@ pub enum ObservationReadError {
     Closed,
 }
 
+/// Why a protected continuous spectrum read could not be served from the owner-scoped active
+/// selection.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum HostSpectrumReadError {
+    /// No spectrum demand is currently accepted by this owner.
+    Inactive,
+    /// A new spectrum demand was accepted but has not reached the render application boundary.
+    PendingApplication,
+    /// The active stream has not observed a complete window yet.
+    Warming,
+    /// The active stream has no completed window queued.
+    Pending,
+    /// The render endpoint reached terminal closure.
+    Closed,
+    /// The active stream reported a discontinuity or failed render.
+    Failed {
+        /// The owner that owns the failed stream.
+        owner: ObservationOwnerId,
+        /// The applied graph observation generation for the failed stream.
+        observation_generation: u64,
+        /// The native continuous history epoch reported after the failure.
+        stream_epoch: u64,
+    },
+    /// The bounded native result queue dropped one or more completed windows.
+    Gap {
+        /// The owner that owns the gapped stream.
+        owner: ObservationOwnerId,
+        /// The applied graph observation generation for the gapped stream.
+        observation_generation: u64,
+        /// The native continuous stream epoch that dropped windows.
+        stream_epoch: u64,
+        /// Cumulative windows dropped in that native stream epoch.
+        dropped_captures: u64,
+    },
+}
+
 /// A meter snapshot paired with its owner-scoped meter identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObservedMeterSnapshot {
@@ -1183,6 +1219,85 @@ impl HostObservationController {
         self.stale_generation_discards = self.stale_generation_discards.saturating_add(stale_count);
         self.superseded_snapshots = self.superseded_snapshots.saturating_add(superseded_count);
         Ok(newest.map(|snapshot| ObservedMeterSnapshot { meter, snapshot }))
+    }
+
+    /// Read one generation-fenced continuous spectrum window from the applied selection.
+    ///
+    /// The owner validates terminal, accepted and applied state before borrowing the private
+    /// capture queue. Once that state is live, the queue availability is frozen at the read entry
+    /// and capped at one native record. A stale record is rejected before it is projected into the
+    /// public window, and it consumes the same single pop budget without chasing a producer refill.
+    /// Reads only advance the private capture consumer; they never publish a graph mutation or
+    /// consume an application receipt.
+    pub fn try_read_continuous_spectrum(
+        &mut self,
+    ) -> Result<ObservedContinuousSpectrumWindow, HostSpectrumReadError> {
+        if self.observe_terminal_closure() {
+            return Err(HostSpectrumReadError::Closed);
+        }
+        let Some(accepted) = self.accepted.spectrum else {
+            return Err(HostSpectrumReadError::Inactive);
+        };
+        if accepted.descriptor.mode != HostSpectrumMode::Continuous {
+            return Err(HostSpectrumReadError::Inactive);
+        }
+        let Some(applied) = self.applied.spectrum else {
+            return Err(HostSpectrumReadError::PendingApplication);
+        };
+        if applied.descriptor != accepted.descriptor || applied.generation != accepted.generation {
+            return Err(HostSpectrumReadError::PendingApplication);
+        }
+
+        let record = {
+            let spectrum = self
+                .spectrum
+                .as_mut()
+                .ok_or(HostSpectrumReadError::Inactive)?;
+            let available = spectrum
+                .continuous_available_at_entry(accepted.descriptor)
+                .ok_or(HostSpectrumReadError::Inactive)?;
+            spectrum
+                .try_read_continuous_record(accepted.descriptor, Some(available))
+                .map_err(|error| match error {
+                    crate::spectrum::SpectrumContinuousReadError::NotActive => {
+                        HostSpectrumReadError::Inactive
+                    }
+                    crate::spectrum::SpectrumContinuousReadError::Warming => {
+                        HostSpectrumReadError::Warming
+                    }
+                    crate::spectrum::SpectrumContinuousReadError::Pending => {
+                        HostSpectrumReadError::Pending
+                    }
+                    crate::spectrum::SpectrumContinuousReadError::Failed { stream_epoch } => {
+                        HostSpectrumReadError::Failed {
+                            owner: self.owner,
+                            observation_generation: applied.generation,
+                            stream_epoch,
+                        }
+                    }
+                    crate::spectrum::SpectrumContinuousReadError::Gap {
+                        stream_epoch,
+                        dropped_captures,
+                    } => HostSpectrumReadError::Gap {
+                        owner: self.owner,
+                        observation_generation: applied.generation,
+                        stream_epoch,
+                        dropped_captures,
+                    },
+                })?
+        };
+
+        // Keep the generation check ahead of `continuous_window`: a record from a retired graph
+        // activation must never be projected as if it belonged to the current public stream.
+        if record.observation_generation() != applied.generation {
+            return Err(HostSpectrumReadError::Pending);
+        }
+        Ok(ObservedContinuousSpectrumWindow {
+            owner: self.owner,
+            observation_generation: applied.generation,
+            selection_epoch: accepted.selection_epoch,
+            window: record.continuous_window(),
+        })
     }
 
     /// Request removal of every selected meter and spectrum family, or report quiescence.
@@ -1956,6 +2071,133 @@ mod tests {
         assert_eq!(projected.capture_copy_samples_per_block, 2 * 128 + 4 * 2048);
         assert_eq!(projected.capture_publications_per_block, 1);
         assert_eq!(projected.capture_bytes_per_second, (24 + 1) * record_bytes);
+    }
+
+    #[test]
+    fn graph_refusal_cancels_staged_restart_and_preserves_queued_window() {
+        use crate::{
+            HostConsoleRequest, HostObservationPreparation, HostPrepareCaps, HostShapePolicy,
+            HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, SourceSubmission,
+            SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumChannels,
+            SpectrumTarget, compile_host_session, prepare_host_runtime_with_observation_demand,
+        };
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let caps = HostPrepareCaps {
+            shape: HostShapePolicy::AnyLaunchRate,
+            source_ring_frames: 1_024,
+            maximum_source_channels: None,
+            maximum_automation_spans_per_block: 128,
+            maximum_tracks: 100,
+            maximum_sources: 100,
+            maximum_routes: 100,
+            maximum_effects: 100,
+            maximum_graph_session_plus_plan_bytes: 100_000_000,
+            maximum_source_total_bytes: 10_000_000,
+            maximum_source_overhead_bytes: 10_000_000,
+            maximum_effect_state_bytes: 100_000_000,
+            maximum_effect_scratch_bytes: 100_000_000,
+            maximum_builtin_retained_bytes: 100_000_000,
+            maximum_named_allocation_bytes: 100_000_000,
+            maximum_meter_streams: 100,
+            maximum_meter_items: 1_000,
+            maximum_meter_bytes: 10_000_000,
+        };
+        let compiled = compile_host_session(SESSION, &caps).expect("fixture session");
+        let request = SpectrumCaptureCollectionRequest {
+            entries: vec![SpectrumCaptureCollectionEntry {
+                target: SpectrumTarget::Output("main-out".into()),
+                channels: SpectrumChannels::Stereo,
+            }],
+            maximum_capture_bytes: u64::MAX,
+        };
+        let observations = HostObservationPreparation {
+            meters: &[],
+            spectrum: Some(&request),
+            work_limits: ObservationWorkLimits {
+                maximum_active_meter_channels: u64::MAX,
+                maximum_meter_samples_per_block: u64::MAX,
+                maximum_meter_publications_per_block: u64::MAX,
+                maximum_meter_publication_bytes_per_block: u64::MAX,
+                maximum_active_spectrum_captures: u64::MAX,
+                maximum_capture_input_samples_per_block: u64::MAX,
+                maximum_capture_copy_samples_per_block: u64::MAX,
+                maximum_capture_publications_per_block: u64::MAX,
+                maximum_capture_bytes_per_second: u64::MAX,
+                maximum_transition_entry_visits_per_block: u64::MAX,
+                maximum_retained_bytes: u64::MAX,
+            },
+            activation: GraphObservationActivationConfig {
+                maximum_active_observers: 3,
+                maximum_retained_bytes: u64::MAX,
+            },
+        };
+        let console = HostConsoleRequest::default();
+        let (host, _, mut owner) =
+            prepare_host_runtime_with_observation_demand(&compiled, &caps, &console, &observations)
+                .expect("spectrum owner");
+        let demand = HostSpectrumDemand {
+            target: SpectrumTarget::Output("main-out".into()),
+            channels: SpectrumChannels::Stereo,
+            mode: HostSpectrumMode::Continuous,
+        };
+        let accepted = owner.replace_spectrum(&demand).expect("initial admission");
+        let (mut render, mut sources, _) = host.start_render_session().expect("render session");
+        for block in 0..16 {
+            let left = [0.25_f32; 128];
+            let right = [-0.25_f32; 128];
+            sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: (block * 128) as u64,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: 128,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+            let mut output = [0.0_f32; 128 * 2];
+            render
+                .render_planar(&mut output, 2, 128, 128, (block * 128) as u64)
+                .expect("render block");
+        }
+        assert_eq!(owner.try_applied().expect("initial receipt").revision, 1);
+
+        // This is intentionally a private, module-local fault seam. It consumes the underlying
+        // ordinary graph credit without creating a host receipt, so restart must cancel its staged
+        // candidate and leave the accepted capture and its queued window untouched.
+        owner
+            .graph
+            .as_mut()
+            .expect("prepared graph")
+            .replace(&[])
+            .expect("injected ordinary graph publication");
+        assert_eq!(
+            owner
+                .restart_spectrum()
+                .expect_err("ordinary credit is occupied")
+                .reason,
+            ObservationRefusalReason::Backpressure
+        );
+        let preserved = owner
+            .try_read_continuous_spectrum()
+            .expect("queued window survives refusal");
+        assert_eq!(preserved.owner, owner.owner());
+        assert_eq!(preserved.observation_generation, accepted.revision);
+        assert_eq!(preserved.selection_epoch, 1);
+        assert_eq!(preserved.window.stream_epoch, 1);
+        assert_eq!(preserved.window.sequence, 0);
+        assert_eq!(preserved.window.first_sample, 0);
+
+        drop(render);
+        assert_eq!(
+            owner.try_read_continuous_spectrum().err(),
+            Some(HostSpectrumReadError::Closed)
+        );
     }
 
     #[test]
