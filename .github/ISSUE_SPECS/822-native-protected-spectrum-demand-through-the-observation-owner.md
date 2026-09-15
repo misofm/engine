@@ -168,7 +168,7 @@ Controlled resources charge two actual observer/queue/shared-state/binding/ident
 
 Paths: `src/spectrum.rs`, its existing unit tests, minimal test-support exports if needed. Implement generation stamping through the common buffer/finish family, constant-size activation hooks, private record-returning read helpers, the approved resident extraction correction and local counters. Existing preparations still bind permanently and old records use generation zero; protected host methods do not exist yet.
 
-Focused gates: both planar/resident finish records stamp the hook generation; scalar reset discards partial history without clearing arrays; old queued record retains its generation; inactive controlled graph does no capture work; legacy one-shot/continuous/drop/failure tests retain their behavior. Direct helper tests verify resident final-partial and `Q>2048` sample/copy counts. Existing allocation guard around hooks. Compile/test this family and checkpoint; do not run a target matrix.
+Focused gates: both planar/resident finish records stamp the hook generation; scalar reset discards partial history without clearing arrays; old queued record retains its generation; inactive hook state performs no capture work; legacy one-shot/continuous/drop/failure tests retain their behavior. Actual controlled graph zero-dispatch proof follows with controlled preparation in C2/C4; C1 must not invent a temporary binding path. Direct helper tests verify resident final-partial and `Q>2048` sample/copy counts. Existing allocation guard around hooks. Compile/test this family and checkpoint; do not run a target matrix.
 
 ### C2 — Two-slot preparation and lifecycle ownership
 
@@ -237,3 +237,7 @@ This issue closes for native controlled fixed-spectrum support only, after fresh
 ## Next visible product milestone
 
 After this native slice, the approved next milestone is an additive opt-in protected browser EQ path in the existing packed browser fixture, before the full resident migration: empty meter catalog, zero resident taps, one exact dual-mono trackPostMatrix spectrum entry, bounded live-response capture, atomically refused raw Observe/Unobserve batches. Existing boot remains explicitly legacy/unprotected during that intermediate milestone; eventual complete browser/SDK/adapter/app migration still remains required. This ordering does not add browser implementation to the present native issue.
+
+## Implementation evidence — C1 checkpoint
+
+Generation-stamped capture records, scalar activation hooks, bounded private raw readers, local operation probes, and the resident `0..count` extraction correction are implemented. Root reran the focused spectrum unit filter: 26 passed (`/tmp/observation-822-c1-unit.log`); the implementer also reported the nine existing spectrum integration cases, both feature checks, and realtime policy passing. This checkpoint is not issue completion. Direct resident final-partial/large-quantum operation assertions and an actual allocation guard around activation hooks remain to be added before C2; controlled graph dispatch proof remains in the later integration slice. The inactive planar continuous path now returns before finite validation, matching the dormant no-work contract.
