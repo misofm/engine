@@ -127,9 +127,10 @@ pub use engine::realtime::{
 };
 pub use observation_demand::{
     HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
-    ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
-    ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
-    ObservationWorkLimits, ObservedMeterSnapshot, PreparedHostMeter,
+    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationAccepted,
+    ObservationApplied, ObservationOwnerId, ObservationReadError, ObservationRefusal,
+    ObservationRefusalReason, ObservationStop, ObservationWorkCost, ObservationWorkLimits,
+    ObservedContinuousSpectrumWindow, ObservedMeterSnapshot, PreparedHostMeter,
 };
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
@@ -183,6 +184,11 @@ pub use effect_compiler::{
 #[cfg(feature = "test-support")]
 pub use effect_compiler::{
     test_only_parametric_eq_design_call_count, test_only_reset_parametric_eq_design_calls,
+};
+#[cfg(feature = "test-support")]
+pub use spectrum::{
+    SpectrumOperationCounts, test_only_reset_spectrum_operation_counts,
+    test_only_spectrum_operation_counts,
 };
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.

@@ -9,11 +9,17 @@ use graph::{GraphObservationActivationConfig, GraphObservationController};
 use host_core::{
     HostConsoleRequest, HostMeterId, HostMeterRequest, HostObservationController,
     HostObservationPreparation, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    ObservationRefusalReason, ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter,
+    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationRefusalReason,
+    ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter, SPECTRUM_WINDOW_FRAMES,
     SourceSubmission, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
     SpectrumChannels, SpectrumTarget, StartedRenderSession, compile_host_session,
     prepare_host_runtime, prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
+};
+#[cfg(feature = "test-support")]
+use host_core::{
+    SpectrumOperationCounts, test_only_reset_spectrum_operation_counts,
+    test_only_spectrum_operation_counts,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -47,11 +53,11 @@ fn limits() -> ObservationWorkLimits {
         maximum_meter_samples_per_block: u64::MAX,
         maximum_meter_publications_per_block: u64::MAX,
         maximum_meter_publication_bytes_per_block: u64::MAX,
-        maximum_active_spectrum_captures: 0,
-        maximum_capture_input_samples_per_block: 0,
-        maximum_capture_copy_samples_per_block: 0,
-        maximum_capture_publications_per_block: 0,
-        maximum_capture_bytes_per_second: 0,
+        maximum_active_spectrum_captures: u64::MAX,
+        maximum_capture_input_samples_per_block: u64::MAX,
+        maximum_capture_copy_samples_per_block: u64::MAX,
+        maximum_capture_publications_per_block: u64::MAX,
+        maximum_capture_bytes_per_second: u64::MAX,
         maximum_transition_entry_visits_per_block: u64::MAX,
         maximum_retained_bytes: u64::MAX,
     }
@@ -110,6 +116,7 @@ fn common_admission_bytes(report: HostPrepareReport) -> u64 {
     report.graph_session_plus_plan_bytes
         + report.session_model_bytes
         + report.effect_control_resources.total_bytes().unwrap()
+        + report.spectrum_capture_retained_bytes
         + observation.owner_inline_bytes
         + observation.metadata_heap_bytes
         + observation
@@ -315,7 +322,7 @@ fn observation_and_common_caps_are_inclusive() {
 }
 
 #[test]
-fn unsupported_families_are_explicit_refusals() {
+fn resident_observation_is_refused_and_controlled_spectrum_is_prepared() {
     let compiled = compile_host_session(SESSION, &caps()).unwrap();
     let requests = meters();
     let mut demand = demand(&requests);
@@ -337,12 +344,137 @@ fn unsupported_families_are_explicit_refusals() {
         maximum_capture_bytes: u64::MAX,
     };
     demand.spectrum = Some(&spectrum);
-    let error = prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console, &demand)
-        .err()
-        .expect("spectrum demand refused");
+    let (host, handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console, &demand)
+            .expect("controlled spectrum demand is prepared");
+    assert_eq!(owner.meters().len(), requests.len());
+    assert!(handles.meters.is_empty());
+    assert!(handles.effect_observations.is_empty());
     assert!(
-        String::from_utf8_lossy(error.as_bytes())
-            .contains("host.observation.spectrum_not_supported")
+        host.report
+            .observation_demand_resources
+            .graph_activation
+            .is_some()
+    );
+    assert!(host.report.spectrum_capture_retained_bytes > 0);
+    assert_eq!(
+        owner.work(),
+        ObservationWorkCost {
+            retained_bytes: host.report.observation_demand_resources.reserved_bytes,
+            transition_entry_visits_per_block: host
+                .report
+                .observation_demand_resources
+                .graph_activation
+                .expect("spectrum graph activation")
+                .maximum_transition_entry_visits_per_block,
+            ..ObservationWorkCost::ZERO
+        }
+    );
+}
+
+#[test]
+fn controlled_spectrum_resource_cap_is_inclusive_and_prepares_exact_targets() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    prepare_host_runtime_with_observation_demand_between_render_calls(
+        &compiled,
+        &caps(),
+        &console(),
+        &demand,
+    )
+    .expect("serialized host prepares the same controlled spectrum catalog");
+    let (host, handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("spectrum catalog");
+    assert!(owner.meters().is_empty());
+    assert!(handles.meters.is_empty());
+    assert!(host.report.spectrum_capture_retained_bytes > 0);
+    let retained = host.report.spectrum_capture_retained_bytes;
+    let mut exact_caps = caps();
+    exact_caps.maximum_graph_session_plus_plan_bytes = common_admission_bytes(host.report);
+    prepare_host_runtime_with_observation_demand(&compiled, &exact_caps, &console(), &demand)
+        .expect("common graph admission is inclusive");
+    exact_caps.maximum_graph_session_plus_plan_bytes -= 1;
+    assert!(
+        prepare_host_runtime_with_observation_demand(&compiled, &exact_caps, &console(), &demand)
+            .is_err(),
+        "one below common graph admission"
+    );
+
+    let mut exact_spectrum = spectrum.clone();
+    exact_spectrum.maximum_capture_bytes = retained;
+    demand.spectrum = Some(&exact_spectrum);
+    prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+        .expect("exact paired capture budget is inclusive");
+    let mut below_spectrum = exact_spectrum.clone();
+    below_spectrum.maximum_capture_bytes = retained - 1;
+    demand.spectrum = Some(&below_spectrum);
+    let refusal =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .err()
+            .expect("one below paired capture budget");
+    assert!(String::from_utf8_lossy(refusal.as_bytes()).contains("host.spectrum.capture_budget"));
+}
+
+#[test]
+fn spectrum_catalog_with_zero_capture_limit_is_prepared_but_dormant() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Left,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    demand.work_limits.maximum_active_spectrum_captures = 0;
+    let (host, _handles, owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("zero active capacity still prepares storage");
+    assert!(
+        host.report
+            .observation_demand_resources
+            .graph_activation
+            .is_some()
+    );
+    assert_eq!(owner.work().active_spectrum_captures, 0);
+    assert_eq!(owner.work().capture_input_samples_per_block, 0);
+    assert_eq!(owner.work().capture_copy_samples_per_block, 0);
+    assert_eq!(owner.work().capture_publications_per_block, 0);
+    assert_eq!(owner.work().capture_bytes_per_second, 0);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn dormant_controlled_spectrum_does_no_capture_work_on_render() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let spectrum = SpectrumCaptureCollectionRequest {
+        entries: vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    };
+    let mut demand = demand(&[]);
+    demand.spectrum = Some(&spectrum);
+    let (host, _handles, _owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .expect("controlled spectrum catalog");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    test_only_reset_spectrum_operation_counts();
+    let _ = render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(
+        test_only_spectrum_operation_counts(),
+        SpectrumOperationCounts::default()
     );
 }
 
@@ -871,4 +1003,578 @@ fn dropping_the_renderer_closes_pending_observation_without_a_fake_receipt() {
         })
     );
     assert_eq!(accepted.revision, 1);
+}
+
+fn controlled_spectrum_request(
+    entries: Vec<SpectrumCaptureCollectionEntry>,
+) -> SpectrumCaptureCollectionRequest {
+    SpectrumCaptureCollectionRequest {
+        entries,
+        maximum_capture_bytes: u64::MAX,
+    }
+}
+
+#[test]
+fn continuous_spectrum_replaces_restarts_and_refuses_protected_one_shot_atomically() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+    }]);
+    let mut observation = demand(&[]);
+    observation.spectrum = Some(&request);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("controlled spectrum owner");
+    let target = SpectrumTarget::TrackPostMatrix("eq1".into());
+    let continuous = HostSpectrumDemand {
+        target: target.clone(),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let first = owner
+        .replace_spectrum(&continuous)
+        .expect("first continuous admission");
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.work.active_spectrum_captures, 1);
+
+    let one_shot = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("unknown".into()),
+        channels: SpectrumChannels::Left,
+        mode: HostSpectrumMode::OneShot,
+    };
+    assert_eq!(
+        owner.replace_spectrum(&one_shot),
+        Err(host_core::ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        })
+    );
+    assert_eq!(owner.work(), first.work);
+
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(owner.try_applied().expect("first application").revision, 1);
+
+    let restart = owner
+        .restart_spectrum()
+        .expect("same-target restart admission");
+    assert_eq!(restart.revision, 2);
+    assert_eq!(restart.work, first.work);
+    let removal = match owner.stop_spectrum().expect("reserved spectrum stop") {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("active spectrum requires a stop"),
+    };
+    assert_eq!(removal.revision, 3);
+    assert_eq!(
+        owner.stop_spectrum(),
+        Ok(host_core::ObservationStop::Pending(removal))
+    );
+    render_source_block(&mut render, &mut sources, 1);
+    assert_eq!(
+        owner.try_applied().expect("restart application").revision,
+        2
+    );
+    assert_eq!(owner.try_applied().expect("stop application").revision, 3);
+    assert_eq!(
+        owner.stop_spectrum(),
+        Ok(host_core::ObservationStop::Quiescent)
+    );
+
+    #[cfg(feature = "test-support")]
+    {
+        test_only_reset_spectrum_operation_counts();
+        render_source_block(&mut render, &mut sources, 2);
+        assert_eq!(
+            test_only_spectrum_operation_counts(),
+            SpectrumOperationCounts::default(),
+            "applied spectrum stop must remove graph dispatch"
+        );
+    }
+}
+
+#[test]
+fn spectrum_and_meter_complete_sets_preserve_the_sibling_family() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Left,
+    }]);
+    let mut observation = demand(&requests);
+    observation.spectrum = Some(&request);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("meter-plus-spectrum owner");
+    let ids = owner_ids(&owner);
+    let target = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Left,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let spectrum = owner.replace_spectrum(&target).expect("spectrum admission");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(owner.try_applied().expect("spectrum receipt").revision, 1);
+
+    let meter_only = owner
+        .replace_meters(&ids[..1])
+        .expect("meter replacement retains spectrum");
+    assert_eq!(meter_only.work.active_spectrum_captures, 1);
+    assert_eq!(meter_only.work.active_meter_channels, 2);
+    render_source_block(&mut render, &mut sources, 1);
+    assert_eq!(owner.try_applied().expect("meter receipt").revision, 2);
+
+    let spectrum_stop = match owner.stop_spectrum().expect("spectrum-only stop") {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("spectrum remains active"),
+    };
+    assert_eq!(spectrum_stop.work.active_spectrum_captures, 0);
+    assert_eq!(spectrum_stop.work.active_meter_channels, 2);
+    render_source_block(&mut render, &mut sources, 2);
+    assert_eq!(
+        owner.try_applied().expect("spectrum stop receipt").revision,
+        spectrum_stop.revision
+    );
+    assert_eq!(owner.work().active_spectrum_captures, 0);
+    assert_eq!(owner.work().active_meter_channels, 2);
+    assert_ne!(spectrum.work.active_spectrum_captures, 0);
+}
+
+#[test]
+fn pending_spectrum_start_and_reserved_stop_reconcile_both_receipts() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+    }]);
+    let mut observation = demand(&[]);
+    observation.spectrum = Some(&request);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("spectrum owner");
+    let demand = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let start = owner.replace_spectrum(&demand).expect("spectrum start");
+    let stop = match owner.stop_spectrum().expect("reserved stop") {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("pending spectrum start must be stopped"),
+    };
+    assert_eq!(stop.revision, start.revision + 1);
+    assert_eq!(
+        owner.stop_spectrum(),
+        Ok(host_core::ObservationStop::Pending(stop))
+    );
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(
+        owner.try_applied().expect("start receipt").revision,
+        start.revision
+    );
+    assert_eq!(
+        owner.try_applied().expect("stop receipt").revision,
+        stop.revision
+    );
+    assert_eq!(
+        owner.stop_spectrum(),
+        Ok(host_core::ObservationStop::Quiescent)
+    );
+}
+
+#[test]
+fn one_shot_refusal_precedes_inert_owner_lookup() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let observation = demand(&[]);
+    let (_host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("inert owner");
+    let demand = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("unknown".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::OneShot,
+    };
+    assert_eq!(
+        owner.replace_spectrum(&demand),
+        Err(host_core::ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        })
+    );
+    assert_eq!(
+        owner.stop_spectrum(),
+        Ok(host_core::ObservationStop::Quiescent)
+    );
+}
+
+#[test]
+fn continuous_reads_fence_pending_and_preserve_generation_selection_and_sibling_identity() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![
+        SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        },
+        SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::Output("main-out".into()),
+            channels: SpectrumChannels::Stereo,
+        },
+    ]);
+    let meter_requests = meters();
+    let mut observation = demand(&meter_requests);
+    observation.spectrum = Some(&request);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("controlled spectrum owner");
+    let meter_ids = owner_ids(&owner);
+    let target_a = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let first = owner
+        .replace_spectrum(&target_a)
+        .expect("first spectrum admission");
+    assert_eq!(first.revision, 1);
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::PendingApplication)
+    );
+
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    for block in 0..16 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    // The completed queue item is still present while its graph application receipt is pending.
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::PendingApplication)
+    );
+    assert_eq!(
+        owner.try_applied().expect("first receipt").revision,
+        first.revision
+    );
+    let first_window = owner
+        .try_read_continuous_spectrum()
+        .expect("first continuous window");
+    assert_eq!(first_window.owner, owner.owner());
+    assert_eq!(first_window.observation_generation, first.revision);
+    assert_eq!(first_window.selection_epoch, 1);
+    assert_eq!(first_window.window.stream_epoch, 1);
+    assert_eq!(first_window.window.sequence, 0);
+    assert_eq!(first_window.window.first_sample, 0);
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::Pending)
+    );
+
+    // A meter-only publication keeps the spectrum observer in the complete set. With no new
+    // complete window yet, the applied sibling publication leaves its reader pending.
+    let sibling = owner
+        .replace_meters(&meter_ids[..1])
+        .expect("sibling meter admission");
+    assert_eq!(sibling.revision, 2);
+    for block in 16..17 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    assert_eq!(
+        owner.try_applied().expect("sibling receipt").revision,
+        sibling.revision
+    );
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::Pending)
+    );
+
+    let target_b = HostSpectrumDemand {
+        target: SpectrumTarget::Output("main-out".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let second = owner
+        .replace_spectrum(&target_b)
+        .expect("target replacement admission");
+    assert_eq!(second.revision, 3);
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::PendingApplication)
+    );
+    for block in 17..33 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    assert_eq!(
+        owner
+            .try_applied()
+            .expect("target replacement receipt")
+            .revision,
+        second.revision
+    );
+    let second_window = owner
+        .try_read_continuous_spectrum()
+        .expect("replacement continuous window");
+    assert_eq!(second_window.observation_generation, second.revision);
+    assert_eq!(second_window.selection_epoch, 2);
+    assert_eq!(second_window.window.stream_epoch, 1);
+    assert_eq!(second_window.window.sequence, 0);
+    assert_eq!(second_window.window.first_sample, 2_176);
+
+    let restart = owner.restart_spectrum().expect("same-target restart");
+    assert_eq!(restart.revision, 4);
+    assert_eq!(restart.work, second.work);
+    for block in 33..49 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    assert_eq!(
+        owner.try_applied().expect("restart receipt").revision,
+        restart.revision
+    );
+    let restarted_window = owner
+        .try_read_continuous_spectrum()
+        .expect("restarted continuous window");
+    assert_eq!(restarted_window.observation_generation, restart.revision);
+    assert_eq!(restarted_window.selection_epoch, 2);
+    assert_eq!(restarted_window.window.stream_epoch, 1);
+    assert_eq!(restarted_window.window.sequence, 0);
+    assert_eq!(restarted_window.window.first_sample, 4_224);
+}
+
+#[test]
+fn continuous_reads_wrap_failure_and_gap_epochs_and_close_with_renderer() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::Output("main-out".into()),
+        channels: SpectrumChannels::Stereo,
+    }]);
+    let mut observation = demand(&[]);
+    observation.spectrum = Some(&request);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &observation)
+            .expect("controlled spectrum owner");
+    let demand = HostSpectrumDemand {
+        target: SpectrumTarget::Output("main-out".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let accepted = owner.replace_spectrum(&demand).expect("spectrum admission");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    for block in 0..16 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    assert_eq!(
+        owner.try_applied().expect("spectrum receipt").revision,
+        accepted.revision
+    );
+    let _ = owner
+        .try_read_continuous_spectrum()
+        .expect("initial window");
+
+    // A real source generation boundary invalidates a partial continuous window while keeping
+    // the render owner usable for the next epoch. Input NaNs are sanitized by the audio contract,
+    // so use the existing generation-tagged seek seam for this fault fixture.
+    for block in 16..24 {
+        render_source_block(&mut render, &mut sources, block);
+    }
+    sources
+        .seek(b"fixture-source", 2, 2_048)
+        .expect("queue generation change");
+    assert!(render.prepare_source_seek(0, 2, 2_048));
+    let fresh_left = [0.75_f32; 128];
+    let fresh_right = [-0.25_f32; 128];
+    sources
+        .submit(
+            b"fixture-source",
+            SourceSubmission {
+                generation: 2,
+                start_frame: 2_048,
+                sample_rate_hz: 48_000,
+                planes: &[&fresh_left, &fresh_right],
+                frames: 128,
+                end_of_region: false,
+            },
+        )
+        .expect("fresh generation block");
+    let mut output = [0.0_f32; 128 * 2];
+    render
+        .render_planar(&mut output, 2, 128, 128, 3_072)
+        .expect("render after seek");
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::Failed {
+            owner: owner.owner(),
+            observation_generation: accepted.revision,
+            stream_epoch: 2,
+        })
+    );
+
+    // Two complete post-failure windows overfill the one-record queue. The first read reports the
+    // native gap and leaves the one queued record for the next read.
+    for block in 25..57 {
+        let first_sample = (block * 128) as u64;
+        let source_start = 2_176 + ((block - 25) * 128) as u64;
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        sources
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 2,
+                    start_frame: source_start,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .expect("post-failure source block");
+        let mut output = [0.0_f32; 128 * 2];
+        render
+            .render_planar(&mut output, 2, 128, 128, first_sample)
+            .expect("post-failure render block");
+    }
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::Gap {
+            owner: owner.owner(),
+            observation_generation: accepted.revision,
+            stream_epoch: 2,
+            dropped_captures: 1,
+        })
+    );
+    let recovered = owner
+        .try_read_continuous_spectrum()
+        .expect("queued post-gap window remains available");
+    assert_eq!(recovered.observation_generation, accepted.revision);
+    assert_eq!(recovered.window.stream_epoch, 2);
+    assert_eq!(recovered.window.sequence, 0);
+
+    drop(render);
+    assert_eq!(
+        owner.try_read_continuous_spectrum().err(),
+        Some(HostSpectrumReadError::Closed)
+    );
+}
+
+#[test]
+fn protected_track_spectrum_preserves_pcm_and_counts_planar_final_partial_and_large_quantum() {
+    use engine::realtime::audit;
+
+    for (quantum, source_ring_frames) in [(192_usize, 1_152_u32), (4_096, 8_192)] {
+        let document = SESSION.replace(
+            "\"quantum_frames\": 128",
+            &format!("\"quantum_frames\": {quantum}"),
+        );
+        let mut test_caps = caps();
+        test_caps.source_ring_frames = source_ring_frames;
+        let compiled = compile_host_session(&document, &test_caps).expect("quantum fixture");
+        let baseline_host = prepare_host_runtime(&compiled, &test_caps).expect("baseline host");
+        let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        }]);
+        let mut observation = demand(&[]);
+        observation.spectrum = Some(&request);
+        let (selected_host, _, mut owner) = prepare_host_runtime_with_observation_demand(
+            &compiled,
+            &test_caps,
+            &console(),
+            &observation,
+        )
+        .expect("protected track spectrum host");
+        let selected = HostSpectrumDemand {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+            mode: HostSpectrumMode::Continuous,
+        };
+        let accepted = owner
+            .replace_spectrum(&selected)
+            .expect("spectrum admission");
+        let (mut baseline_render, mut baseline_sources, _) = baseline_host
+            .start_render_session()
+            .expect("baseline render");
+        let (mut render, mut sources, _) = selected_host
+            .start_render_session()
+            .expect("selected render");
+        let blocks = SPECTRUM_WINDOW_FRAMES.div_ceil(quantum);
+        #[cfg(feature = "test-support")]
+        test_only_reset_spectrum_operation_counts();
+        for block in 0..blocks {
+            let first_sample = (block * quantum) as u64;
+            let left = vec![0.25_f32; quantum];
+            let right = vec![-0.5_f32; quantum];
+            for sources in [&mut baseline_sources, &mut sources] {
+                sources
+                    .submit(
+                        b"fixture-source",
+                        SourceSubmission {
+                            generation: 1,
+                            start_frame: first_sample,
+                            sample_rate_hz: 48_000,
+                            planes: &[&left, &right],
+                            frames: quantum as u32,
+                            end_of_region: false,
+                        },
+                    )
+                    .expect("source block");
+            }
+            let mut baseline_pcm = vec![f32::from_bits(0x7fc0_3990); quantum * 2];
+            let mut selected_pcm = vec![f32::from_bits(0x7fc0_3990); quantum * 2];
+            let reports = audit::in_render_scope(|| {
+                let baseline_report = baseline_render.render_planar(
+                    &mut baseline_pcm,
+                    2,
+                    quantum,
+                    quantum,
+                    first_sample,
+                );
+                let selected_report =
+                    render.render_planar(&mut selected_pcm, 2, quantum, quantum, first_sample);
+                (baseline_report, selected_report, audit::snapshot())
+            });
+            assert!(reports.0.is_ok(), "baseline render: {:?}", reports.0);
+            assert!(reports.1.is_ok(), "selected render: {:?}", reports.1);
+            assert_eq!(reports.2.allocations, 0, "spectrum render allocated");
+            assert_eq!(reports.2.deallocations, 0, "spectrum render freed");
+            assert_eq!(
+                baseline_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                selected_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "protected spectrum changed PCM at quantum {quantum} block {block}"
+            );
+            if block == 0 {
+                assert_eq!(
+                    owner.try_applied().expect("spectrum receipt").revision,
+                    accepted.revision
+                );
+            }
+        }
+        let window = owner
+            .try_read_continuous_spectrum()
+            .expect("protected window");
+        assert_eq!(window.observation_generation, accepted.revision);
+        assert_eq!(window.window.first_sample, 0);
+        assert!(window.window.left.iter().any(|value| *value != 0.0));
+        assert!(window.window.right.iter().any(|value| *value != 0.0));
+        #[cfg(feature = "test-support")]
+        {
+            let counts = test_only_spectrum_operation_counts();
+            assert_eq!(counts.validation_samples, (2 * blocks * quantum) as u64);
+            assert_eq!(
+                counts.selected_storage_writes,
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
+            assert_eq!(counts.payload_constructions, 1);
+            assert_eq!(counts.publication_attempts, 1);
+        }
+    }
 }
