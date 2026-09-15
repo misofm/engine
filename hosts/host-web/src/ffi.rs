@@ -11306,13 +11306,141 @@ mod observation_checkpoint_b2_tests {
             assert_eq!(identity.observation_generation, 0);
             assert_eq!(identity.selection_epoch, 0);
             assert_eq!(identity.snapshot_token, response_header.snapshot_token);
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the response capture spends the replenished Ordinary credit"
+            );
+            assert_ne!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                0,
+                "the reserved removal credit remains available for stop"
+            );
             identity
         });
         assert_eq!(response_identity.owner, applied_status.owner);
         assert_eq!(response_identity.snapshot_token, 1);
 
-        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        let retired_handle = handle;
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(retired_handle),
+            RESULT_OK
+        );
+        let (stop_status, stop_admission, stop_receipt) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_STOP);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_ne!(admission.flags & crate::OBSERVATION_ADMISSION_RECEIPT, 0);
+            assert_ne!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0
+            );
+            assert_eq!(
+                admission.receipt.state,
+                crate::OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(admission.receipt.owner, response_identity.owner);
+            assert_eq!(status.owner, response_identity.owner);
+            assert_eq!(status.pending_count, 1);
+            assert_eq!(host.side_records.pending_count, 1);
+            (status, admission, admission.receipt)
+        });
+
+        // A repeated stop is the pending identity shortcut: it must not publish another native
+        // removal or replace the authoritative Pending receipt.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(retired_handle),
+            RESULT_OK
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status(), stop_status);
+            assert_eq!(*host.observation_admission(), stop_admission);
+            assert_eq!(host.side_records.pending_count, 1);
+        });
+
+        assert_eq!(
+            test_copy_staging(retired_handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(retired_handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(retired_handle, 14, 1, 18 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(retired_handle, 128), RESULT_OK);
+
+        let (native_terminal_status, native_terminal_admission, native_response_identity) =
+            LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let host = &live.as_ref().expect("protected live host").host;
+                let status = host.observation_status();
+                assert_eq!(status.owner, response_identity.owner);
+                assert_eq!(status.accepted_generation, 0);
+                assert_eq!(status.applied_generation, applied_status.applied_generation);
+                assert_eq!(status.selection_epoch, applied_status.selection_epoch);
+                assert_eq!(status.pending_count, 1);
+                assert_eq!(host.side_records.pending_count, 1);
+                (
+                    status,
+                    *host.observation_admission(),
+                    *host.observation_capture_identity(),
+                )
+            });
+        assert_eq!(native_terminal_admission, stop_admission);
+        assert_eq!(native_response_identity, response_identity);
+        assert_eq!(miso_engine_web_v1_dispose(retired_handle), RESULT_OK);
         no_live_host();
+
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let status = staging.endpoint.status;
+            assert_eq!(status.profile, native_terminal_status.profile);
+            assert_eq!(status.owner, native_terminal_status.owner);
+            assert_eq!(status.ingress_epoch, native_terminal_status.ingress_epoch);
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_eq!(status.selection_epoch, stop_status.selection_epoch);
+            assert_ne!(status.selection_epoch, 0);
+            assert_eq!(status.pending_count, 0);
+            assert_ne!(status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+            assert_eq!(
+                status.flags
+                    & (crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                        | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+                0
+            );
+            assert_eq!(staging.endpoint.admission, native_terminal_admission);
+            assert_eq!(staging.endpoint.capture_identity, native_response_identity);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(retired_handle),
+            1
+        );
+        let stop_application = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(stop_application.state, OBSERVATION_RECEIPT_STATE_APPLIED);
+        assert_eq!(stop_application.result, RESULT_OK);
+        assert_eq!(stop_application.domain, stop_receipt.domain);
+        assert_eq!(stop_application.owner, stop_receipt.owner);
+        assert_eq!(stop_application.sequence, stop_receipt.sequence);
+        assert_eq!(stop_application.application_sample, 18 * 128);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(retired_handle),
+            0
+        );
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
     }
 
     #[test]
