@@ -234,3 +234,15 @@ counters, controlled metadata survives, and additive retries work. Capacity zero
 exact/one-below retained bytes, duplicate handles on different nodes and an empty
 controlled catalog are exercised through public bind. Changed-file formatting and
 diff checks pass. Audio fixture qualification remains the other bounded task.
+
+### Active-audio evidence
+
+Fresh Luna MAX extended the existing rt9 fixture only. All 7 integration tests
+pass with graph/test-support: fixed versus controlled PCM across empty, single,
+maximum, stop/reactivate and churn on a non-multiple SIMD population; zero idle
+observer callbacks/acquisitions; selected-only observations; allocator-guarded
+activation/render/recycle with zero allocations/frees; resident accept/decline/error
+without retry; failure invalidation including later active observers; and queued
+ordinary/removal receipts with a stalled reader. The original fixture regressions
+also pass. Formatting and diff checks pass. No new benchmark or allocator harness
+was introduced. Native implementation/evidence is ready for independent verdict.
