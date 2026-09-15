@@ -272,7 +272,57 @@ test("protected observation shipped Wasm ABI and boot", async () => {
       const currentDocumentPointer = exports.miso_engine_web_v1_document_ptr(document.length);
       range("document", currentDocumentPointer, document.length);
       new Uint8Array(exports.memory.buffer, currentDocumentPointer, document.length).set(document);
+      return currentDocumentPointer;
     };
+
+    const budgetCases = [
+      {
+        name: "host-only",
+        maximumMemoryBytes: 2_097_152n,
+        maximumRetainedBytes: budget,
+        diagnostic: "host.budget.retained_projection\t",
+      },
+      {
+        name: "ingress-only",
+        maximumMemoryBytes: budget,
+        maximumRetainedBytes: 2_097_152n,
+        diagnostic: "web.observation.ingress.maximum_retained_bytes\t",
+      },
+      {
+        name: "both-low",
+        maximumMemoryBytes: 2_097_152n,
+        maximumRetainedBytes: 2_097_152n,
+        diagnostic: "host.budget.retained_projection\t",
+      },
+    ];
+    const budgetOutcomes = [];
+    for (const budgetCase of budgetCases) {
+      const diagnosticPointer = restageProtectedBoot(
+        budgetCase.maximumMemoryBytes,
+        budgetCase.maximumRetainedBytes,
+      );
+      const budgetHandle = exports.miso_engine_web_v1_boot_with_observation_demand(
+        document.length,
+      );
+      const result = Number(exports.miso_engine_web_v1_boot_result());
+      const diagnosticBytes = Number(exports.miso_engine_web_v1_boot_diagnostic_bytes());
+      const boundedDiagnosticBytes = Math.min(diagnosticBytes, document.length);
+      const diagnostic = new TextDecoder().decode(
+        new Uint8Array(exports.memory.buffer, diagnosticPointer, boundedDiagnosticBytes),
+      );
+      let cleanupResult = null;
+      if (budgetHandle !== 0) {
+        cleanupResult = exports.miso_engine_web_v1_dispose(budgetHandle);
+      }
+      budgetOutcomes.push({
+        name: budgetCase.name,
+        handle: budgetHandle,
+        result,
+        diagnosticBytes,
+        diagnostic,
+        cleanupResult,
+      });
+    }
 
     restageProtectedBoot(budget, budget);
 
@@ -373,6 +423,26 @@ test("protected observation shipped Wasm ABI and boot", async () => {
       );
       assertHeader(application, "observationReceipt");
     }
+
+    assert.deepEqual(
+      budgetOutcomes.map((outcome, index) => ({
+        name: outcome.name,
+        handle: outcome.handle,
+        result: outcome.result,
+        diagnosticBytesWithinDocument: outcome.diagnosticBytes <= document.length,
+        diagnostic: outcome.diagnostic.slice(0, budgetCases[index].diagnostic.length),
+        cleanupResult: outcome.cleanupResult,
+      })),
+      budgetCases.map((budgetCase) => ({
+        name: budgetCase.name,
+        handle: 0,
+        result: constant("resultCodes", "refusedBudget"),
+        diagnosticBytesWithinDocument: true,
+        diagnostic: budgetCase.diagnostic,
+        cleanupResult: null,
+      })),
+      "protected budget refusals",
+    );
   } finally {
     assert.equal(exports.miso_engine_web_v1_dispose(handle), 0, "dispose protected boot");
   }
