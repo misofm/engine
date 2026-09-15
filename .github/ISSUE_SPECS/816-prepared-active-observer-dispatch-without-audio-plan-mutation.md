@@ -376,3 +376,37 @@ by that actual run; only candidate and artifact lineage changed. Native review
 PASS plus focused integration gates are complete. Required PR qualification
 and merged GitHub synchronization are the remaining closure steps. Parent763
 and production host/SDK/frontend observation migration remain open.
+
+Further required CI integration: the C API external primitive resource oracle
+still omits the newly charged 256-byte native inline observation runtime state.
+Authorize a test-only correction in crates/capi/tests/resource_lifecycle.rs:
+independently restate the endpoint/snapshot/resource layout from primitive fields
+and existing endpoint mirrors, append one graph-owner row per live plan, update
+single-plan graph report and double-live expectations by that derived term.
+Preserve exact/one-below caps and effective-owner omission mutations; no production
+report getters may be used as the oracle. No C API runtime or wire layout changes.
+
+The existing manifest-consumer gate also requires the resource manifest's new
+identity in current benchmark preflights/validators/synthetic tests and audit/bench
+consumer constants. Refresh those constants only, preserving recorded historical
+benchmark evidence and every validator rule. Run their existing synthetic checks,
+not timed benchmark workloads.
+
+The existing raw-Wasm browser resource oracle also needs its actual containing
+layout delta: 200 bytes on wasm32, versus 256 on native64. Re-derived against the
+exact CI artifact with MISO_ENGINE_WEB_ORACLE_PRINT=1; only graph metadata and
+the two containing graph totals changed (+200 each). Native-parity PCM/command/
+observation digests and all other resource rows remain identical. Update only
+those three expected.json resource fields and run the existing resource checker
+including its native/wide-target distinction and red mutations.
+
+Integration followthrough PASS: fresh Luna's independent C API endpoint/runtime
+mirrors derive 240/256 native bytes, append the graph owner row without changing
+the allocation-index oracle, and preserve exact/one-below and omission mutation
+checks. resource_lifecycle passes 4/4 in both debug and release. Root's manifest
+consumer check passes all seven declarations/stale controls; both synthetic
+benchmark validator/lifecycle suites pass with zero real workload invocations.
+The raw-Wasm expected-resource checker passes actual module/native witness and
+all 26 red mutations after the three +200-byte graph pins. Formatting/diff clean.
+No production behavior, wire layout, audio digest, test case or rejection rule
+changed in these downstream corrections. Required CI is rerun on this checkpoint.

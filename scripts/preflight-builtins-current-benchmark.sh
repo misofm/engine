@@ -114,7 +114,7 @@ while IFS= read -r relative; do
     printf '%s  %s\n' "$(hash_file "$path")" "$relative" >>"$input_rows"
 done <"$input_list"
 input_tree_sha256=$(hash_file "$input_rows")
-[[ "$(hash_file "$fixture_manifest")" == 9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3 ]] ||
+[[ "$(hash_file "$fixture_manifest")" == da78dc3e49a98900b97fb69c1d37f7c81e9fe48737301927fadd7f9636fbcaef ]] ||
     fail 'current fixture manifest identity mismatch'
 
 rm -rf -- "$build_directory"
