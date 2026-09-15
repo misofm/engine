@@ -3473,164 +3473,176 @@ fn protected_spectrum_stream_read(handle: u32) -> u32 {
                 }
             };
 
-            let expected_end = match window.window.end_sample() {
-                Some(end_sample) => end_sample,
-                None => {
-                    let refusal = ObservationRefusal {
-                        reason: ObservationRefusalReason::ArithmeticOverflow,
-                        limit: None,
-                        requested: None,
-                        maximum: None,
-                    };
-                    host.record_observation_admission(
-                        OPERATION,
-                        RESULT_REFUSED_BUDGET,
-                        Some(refusal),
-                        None,
-                        false,
-                    );
-                    return RESULT_REFUSED_BUDGET;
-                }
-            };
-            if window.window.channels as u32 != SPECTRUM_CHANNEL_BOTH
-                || window.window.left.len() != SPECTRUM_WINDOW_FRAMES as usize
-                || window.window.right.len() != SPECTRUM_WINDOW_FRAMES as usize
-            {
-                let refusal = ObservationRefusal {
-                    reason: ObservationRefusalReason::InvalidRequest,
-                    limit: None,
-                    requested: None,
-                    maximum: None,
-                };
-                host.record_observation_admission(
-                    OPERATION,
-                    RESULT_INVALID_ARGUMENT,
-                    Some(refusal),
-                    None,
-                    false,
-                );
-                return RESULT_INVALID_ARGUMENT;
-            }
-            let snapshot_token = match window.window.sequence.checked_add(1) {
-                Some(token) => token,
-                None => {
-                    let refusal = ObservationRefusal {
-                        reason: ObservationRefusalReason::ArithmeticOverflow,
-                        limit: None,
-                        requested: None,
-                        maximum: None,
-                    };
-                    host.record_observation_admission(
-                        OPERATION,
-                        RESULT_REFUSED_BUDGET,
-                        Some(refusal),
-                        None,
-                        false,
-                    );
-                    return RESULT_REFUSED_BUDGET;
-                }
-            };
-            if expected_end
-                != window
-                    .window
-                    .first_sample
-                    .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
-                    .expect("end sample was checked")
-            {
-                let refusal = ObservationRefusal {
-                    reason: ObservationRefusalReason::InvalidRequest,
-                    limit: None,
-                    requested: None,
-                    maximum: None,
-                };
-                host.record_observation_admission(
-                    OPERATION,
-                    RESULT_INVALID_ARGUMENT,
-                    Some(refusal),
-                    None,
-                    false,
-                );
-                return RESULT_INVALID_ARGUMENT;
-            }
-
-            let identity = match AudioWorkletEngineHost::spectrum_capture_identity(&window) {
-                Ok(identity) => identity,
-                Err(result) => {
-                    let reason = if result == RESULT_REFUSED_BUDGET {
-                        ObservationRefusalReason::ArithmeticOverflow
-                    } else {
-                        ObservationRefusalReason::InvalidRequest
-                    };
-                    let refusal = ObservationRefusal {
-                        reason,
-                        limit: None,
-                        requested: None,
-                        maximum: None,
-                    };
-                    host.record_observation_admission(
-                        OPERATION,
-                        result,
-                        Some(refusal),
-                        None,
-                        false,
-                    );
-                    return result;
-                }
-            };
-            let status = host.observation_status();
-            if identity.owner != owner.get()
-                || identity.observation_generation == 0
-                || identity.selection_epoch == 0
-                || identity.observation_generation != status.applied_generation
-                || identity.selection_epoch != status.selection_epoch
-                || identity.snapshot_token != snapshot_token
-            {
-                let refusal = ObservationRefusal {
-                    reason: ObservationRefusalReason::InvalidRequest,
-                    limit: None,
-                    requested: None,
-                    maximum: None,
-                };
-                host.record_observation_admission(
-                    OPERATION,
-                    RESULT_INVALID_ARGUMENT,
-                    Some(refusal),
-                    None,
-                    false,
-                );
-                return RESULT_INVALID_ARGUMENT;
-            }
-
-            commit_protected_spectrum_window(
+            post_read_protected_spectrum_window(
+                host,
                 &mut staging,
                 &window,
+                owner.get(),
                 target,
+                channels,
                 cadence,
-                snapshot_token,
-            );
-            staging.stream_window = Some(SpectrumStreamWindowFacts {
-                stream_epoch: window.window.stream_epoch,
-                sequence: window.window.sequence,
-                dropped_captures: window.window.dropped_captures,
-            });
-            staging.stream_metadata.result = RESULT_OK;
-            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
-            staging.stream_metadata.target = target;
-            staging.stream_metadata.channels = channels;
-            staging.stream_metadata.sample_rate_hz = cadence.sample_rate_hz();
-            staging.stream_metadata.quantum_frames = cadence.quantum_frames();
-            staging.stream_metadata.hop_frames = cadence.hop_frames();
-            staging.stream_metadata.source_underrun = u32::from(window.window.source_underrun);
-            staging.stream_metadata.capture_epoch = window.window.stream_epoch;
-            staging.stream_metadata.sequence = window.window.sequence;
-            staging.stream_metadata.dropped_captures = window.window.dropped_captures;
-            staging.stream_metadata.windows = snapshot_token;
-            staging.stream_metadata.captured_sample = window.window.first_sample;
-            staging.stream_metadata.end_sample = expected_end;
-            host.commit_observation_capture_identity(identity);
-            RESULT_OK
+            )
         })
     })
+}
+
+/// Validate an already consumed native window before changing any committed output.
+/// A failed post-read check records its arithmetic or identity outcome without implying that
+/// the native queue can restore the window.
+fn post_read_protected_spectrum_window(
+    host: &mut AudioWorkletEngineHost,
+    staging: &mut SpectrumStaging,
+    window: &ObservedContinuousSpectrumWindow,
+    owner: u64,
+    target: u32,
+    channels: u32,
+    cadence: SpectrumCadence,
+) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_READ_SPECTRUM;
+    let expected_end = match window.window.end_sample() {
+        Some(end_sample) => end_sample,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_REFUSED_BUDGET,
+                Some(refusal),
+                None,
+                false,
+            );
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if window.window.channels as u32 != SPECTRUM_CHANNEL_BOTH
+        || window.window.left.len() != SPECTRUM_WINDOW_FRAMES as usize
+        || window.window.right.len() != SPECTRUM_WINDOW_FRAMES as usize
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+    let snapshot_token = match window.window.sequence.checked_add(1) {
+        Some(token) => token,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_REFUSED_BUDGET,
+                Some(refusal),
+                None,
+                false,
+            );
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if expected_end
+        != window
+            .window
+            .first_sample
+            .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
+            .expect("end sample was checked")
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+
+    let identity = match AudioWorkletEngineHost::spectrum_capture_identity(window) {
+        Ok(identity) => identity,
+        Err(result) => {
+            let reason = if result == RESULT_REFUSED_BUDGET {
+                ObservationRefusalReason::ArithmeticOverflow
+            } else {
+                ObservationRefusalReason::InvalidRequest
+            };
+            let refusal = ObservationRefusal {
+                reason,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(OPERATION, result, Some(refusal), None, false);
+            return result;
+        }
+    };
+    let status = host.observation_status();
+    if identity.owner != owner
+        || identity.observation_generation == 0
+        || identity.selection_epoch == 0
+        || identity.observation_generation != status.applied_generation
+        || identity.selection_epoch != status.selection_epoch
+        || identity.snapshot_token != snapshot_token
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+
+    commit_protected_spectrum_window(staging, window, target, cadence, snapshot_token);
+    staging.stream_window = Some(SpectrumStreamWindowFacts {
+        stream_epoch: window.window.stream_epoch,
+        sequence: window.window.sequence,
+        dropped_captures: window.window.dropped_captures,
+    });
+    staging.stream_metadata.result = RESULT_OK;
+    staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+    staging.stream_metadata.target = target;
+    staging.stream_metadata.channels = channels;
+    staging.stream_metadata.sample_rate_hz = cadence.sample_rate_hz();
+    staging.stream_metadata.quantum_frames = cadence.quantum_frames();
+    staging.stream_metadata.hop_frames = cadence.hop_frames();
+    staging.stream_metadata.source_underrun = u32::from(window.window.source_underrun);
+    staging.stream_metadata.capture_epoch = window.window.stream_epoch;
+    staging.stream_metadata.sequence = window.window.sequence;
+    staging.stream_metadata.dropped_captures = window.window.dropped_captures;
+    staging.stream_metadata.windows = snapshot_token;
+    staging.stream_metadata.captured_sample = window.window.first_sample;
+    staging.stream_metadata.end_sample = expected_end;
+    host.commit_observation_capture_identity(identity);
+    RESULT_OK
 }
 
 /// Read one independently scheduled stream window into the existing fixed capture staging.
@@ -8311,6 +8323,82 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn consumed_protected_window_arithmetic_faults_preserve_committed_output() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+
+        // Obtain one actual admitted native window. The typed read consumes the queue record;
+        // only copies of this owned result are faulted below, so no rollback is implied.
+        let observed = LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live.as_mut().expect("protected host").host;
+            let permit = host
+                .begin_observation(
+                    ObservationClass::Ordinary,
+                    host.protected_spectrum_read_lengths(),
+                )
+                .expect("ordinary read permit");
+            host.read_spectrum_stream_admitted(permit)
+                .expect("real admitted native window")
+        });
+        assert_eq!(observed.window.sequence, 0);
+        assert!(observed.window.left.iter().any(|value| *value != 0.0));
+        assert!(observed.window.right.iter().any(|value| *value != 0.0));
+
+        for (fault, first_sample, sequence) in [
+            ("sequence", observed.window.first_sample, u64::MAX),
+            (
+                "end sample",
+                u64::MAX - u64::from(SPECTRUM_WINDOW_FRAMES) + 1,
+                observed.window.sequence,
+            ),
+        ] {
+            let markers = stage_markers();
+            let mut copied = observed;
+            copied.window.first_sample = first_sample;
+            copied.window.sequence = sequence;
+            let (result, admission) = LIVE_HOST.with(|slot| {
+                let mut live = slot.borrow_mut();
+                let host = &mut live.as_mut().expect("protected host").host;
+                let owner = host
+                    .protected_observation_identity()
+                    .expect("same live protected owner")
+                    .0
+                    .get();
+                let target = host.spectrum_target();
+                let channels = host.spectrum_channels();
+                let cadence = host.protected_spectrum_cadence().expect("prepared cadence");
+                let result = SPECTRUM_STAGING.with(|slot| {
+                    post_read_protected_spectrum_window(
+                        host,
+                        &mut slot.borrow_mut(),
+                        &copied,
+                        owner,
+                        target,
+                        channels,
+                        cadence,
+                    )
+                });
+                (result, *host.observation_admission())
+            });
+            assert_eq!(result, RESULT_REFUSED_BUDGET, "{fault}");
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_REFUSED_BUDGET, "{fault}");
+            assert_eq!(
+                admission.reason, 9,
+                "{fault} must record arithmetic overflow"
+            );
+            assert_markers(&markers);
+        }
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stream_read_commits_nonzero_stereo_and_matching_identity() {
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
         let handle = boot_protected();
@@ -8409,6 +8497,25 @@ mod observation_checkpoint_c2a_tests {
         assert_ne!(ready_identity.owner, 0);
         assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
 
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let analyzed_metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging
+                    .stream_history
+                    .as_ref()
+                    .expect("analysis history")
+                    .history_start_sample(),
+                Some(ready_metadata.captured_sample),
+                "analysis must populate worker history before the seek"
+            );
+        });
+        assert_eq!(
+            analyzed_metadata.history_start_sample,
+            ready_metadata.captured_sample
+        );
+
         // Match the native seek fixture: leave a partial window in flight before changing the
         // source generation. The next render crosses that boundary and invalidates the partial
         // window, while the render owner remains usable.
@@ -8466,9 +8573,19 @@ mod observation_checkpoint_c2a_tests {
             );
             assert_eq!(
                 staging.stream_metadata.analysis_epoch,
-                ready_metadata.analysis_epoch
+                analyzed_metadata.analysis_epoch + 1,
+                "Failed must advance the populated analysis history epoch"
             );
             assert_eq!(staging.stream_metadata.history_start_sample, 0);
+            assert_eq!(
+                staging
+                    .stream_history
+                    .as_ref()
+                    .expect("reset analysis history")
+                    .history_start_sample(),
+                None,
+                "Failed must clear a populated worker history"
+            );
             assert!(staging.stream_window.is_none());
             assert_eq!(staging.capture_len, 0);
             assert_eq!(staging.result_len, 0);
@@ -8730,7 +8847,7 @@ mod observation_checkpoint_c2a_tests {
         assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
 
         // One applied block is still short of a complete window. A second admitted read must
-        // expose the native Warming/Pending state after the application boundary.
+        // expose the native Pending state after the application boundary.
         assert_eq!(
             miso_engine_web_v1_source_submit(handle, 14, 1, 128, 2, 128, 0),
             RESULT_OK
@@ -8742,10 +8859,10 @@ mod observation_checkpoint_c2a_tests {
         );
         SPECTRUM_STAGING.with(|slot| {
             let staging = slot.borrow();
-            assert!(matches!(
+            assert_eq!(
                 staging.stream_metadata.status,
-                SPECTRUM_STREAM_STATUS_WARMING | SPECTRUM_STREAM_STATUS_PENDING
-            ));
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
             assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
         });
         LIVE_HOST.with(|slot| {
@@ -8757,7 +8874,7 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(
                 admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
                 0,
-                "an applied Warming/Pending read is no longer boundary-pending"
+                "an applied Pending read is no longer boundary-pending"
             );
             let status = host.observation_status();
             assert_eq!(status.accepted_generation, status.applied_generation);
