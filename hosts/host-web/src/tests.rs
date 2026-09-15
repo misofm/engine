@@ -9568,3 +9568,90 @@ fn protected_eq_reads_preserve_pending_windows_and_native_fault_identity() {
     assert_eq!(host.spectrum_stream_epoch(), Some(2));
     assert_eq!(*host.observation_capture_identity(), committed);
 }
+
+#[test]
+fn protected_status_is_scalar_and_retains_native_terminal_identity() {
+    let mut host = protected_eq_console_host();
+    let owner = {
+        let ready = host.ready.as_ref().expect("ready owner");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        storage.controller.owner().get()
+    };
+
+    host.start_spectrum_stream().expect("native start");
+    let pending = host.observation_status();
+    assert_eq!(pending.owner, owner);
+    assert_eq!(pending.ingress_epoch, 1);
+    assert_eq!(pending.accepted_generation, 1);
+    assert_eq!(pending.applied_generation, 0);
+    assert_eq!(pending.selection_epoch, 1);
+    assert_eq!(pending.pending_count, 1);
+    assert_eq!(pending.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+    assert_ne!(pending.flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE, 0);
+
+    // The graph application is already available after this boundary, but status projection must
+    // not poll it. The pending row remains pending until the bounded application-take path.
+    assert_eq!(host.render_next(), RESULT_OK);
+    let applied_native = {
+        let ready = host.ready.as_ref().expect("ready owner");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        storage.controller.spectrum_state()
+    };
+    assert_eq!(applied_native.accepted_generation, 1);
+    assert_eq!(applied_native.applied_generation, 0);
+    let scalar = host.observation_status();
+    assert_eq!(
+        scalar.pending_count, 1,
+        "status must not poll native receipts"
+    );
+    assert_eq!(scalar.owner, owner);
+    assert_eq!(
+        scalar.accepted_generation,
+        applied_native.accepted_generation
+    );
+    assert_eq!(scalar.applied_generation, applied_native.applied_generation);
+    assert_eq!(scalar.selection_epoch, applied_native.selection_epoch);
+
+    // Make the same boundary fail after native application. The final status must retain the
+    // native owner and generation scalars while preserving the render-failed bit.
+    host.ready.as_mut().expect("ready owner").controls[0]
+        .producer
+        .try_push(TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..Matrix2x2::IDENTITY
+            },
+            smoothing_samples: 0,
+        })
+        .expect("malformed matrix fixture");
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    let failed = host.observation_status();
+    assert_eq!(failed.owner, owner);
+    assert_eq!(failed.accepted_generation, 1);
+    assert_eq!(failed.applied_generation, 0);
+    assert_eq!(failed.selection_epoch, 1);
+    assert_eq!(failed.pending_count, 1);
+    assert_ne!(failed.flags & OBSERVATION_STATUS_FLAG_RENDER_FAILED, 0);
+    assert_eq!(failed.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+
+    assert_eq!(host.dispose(), RESULT_OK);
+    let terminal = host.observation_status();
+    assert_eq!(terminal.owner, owner);
+    assert_eq!(terminal.ingress_epoch, 2);
+    assert_eq!(terminal.accepted_generation, 1);
+    assert_eq!(terminal.applied_generation, 1);
+    assert_eq!(terminal.selection_epoch, 1);
+    assert_eq!(terminal.pending_count, 0);
+    assert_ne!(terminal.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+    assert_ne!(terminal.flags & OBSERVATION_STATUS_FLAG_RENDER_FAILED, 0);
+    assert_eq!(
+        terminal.flags
+            & (OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                | OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+        0
+    );
+}

@@ -5671,3 +5671,288 @@ mod spectrum_ffi_tests {
         stage_left_output_request();
     }
 }
+
+#[cfg(test)]
+mod observation_checkpoint_a_tests {
+    use super::*;
+    use crate::{WebObservationIngressLimits, WebObservationWorkLimits};
+
+    fn protected_preparation_record() -> WebObservationPreparationRecord {
+        let mut record = WebObservationPreparationRecord {
+            struct_size: crate::OBSERVATION_PREPARATION_BYTES,
+            abi_version: ABI_VERSION,
+            profile: crate::OBSERVATION_PROFILE_EQ_SPECTRUM,
+            meter_count: 0,
+            resident_taps: 0,
+            spectrum_count: 1,
+            maximum_active_observers: 1,
+            reserved0: 0,
+            activation_maximum_retained_bytes: u64::MAX,
+            work_limits: WebObservationWorkLimits {
+                struct_size: crate::OBSERVATION_WORK_LIMITS_BYTES,
+                abi_version: ABI_VERSION,
+                maximum_active_meter_channels: u64::MAX - 1,
+                maximum_meter_samples_per_block: u64::MAX - 2,
+                maximum_meter_publications_per_block: u64::MAX - 3,
+                maximum_meter_publication_bytes_per_block: u64::MAX - 4,
+                maximum_active_spectrum_captures: u64::MAX - 5,
+                maximum_capture_input_samples_per_block: u64::MAX - 6,
+                maximum_capture_copy_samples_per_block: u64::MAX - 7,
+                maximum_capture_publications_per_block: u64::MAX - 8,
+                maximum_capture_bytes_per_second: u64::MAX - 9,
+                maximum_transition_entry_visits_per_block: u64::MAX - 10,
+                maximum_retained_bytes: u64::MAX - 11,
+            },
+            ingress_limits: WebObservationIngressLimits {
+                struct_size: crate::OBSERVATION_INGRESS_LIMITS_BYTES,
+                abi_version: ABI_VERSION,
+                maximum_control_bytes: 8_192,
+                maximum_observation_rows: 32,
+                maximum_result_bytes: 65_536,
+                ordinary_operations_per_boundary: 1,
+                removal_operations_per_boundary: 1,
+                maximum_admission_entry_visits: u64::MAX - 12,
+                maximum_response_binding_visits: u64::MAX - 13,
+                maximum_response_section_visits: u64::MAX - 14,
+                maximum_response_copy_bytes: u64::MAX - 15,
+                maximum_handler_copy_bytes_per_boundary: u64::MAX - 16,
+                maximum_cleanup_entry_visits_per_boundary: u64::MAX - 17,
+                maximum_retained_bytes: u64::MAX,
+            },
+            spectrum_request: WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                channels: SPECTRUM_CHANNEL_BOTH,
+                target_id_bytes: 3,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            },
+            target_id: [0; 128],
+        };
+        record.target_id[..3].copy_from_slice(b"eq0");
+        record
+    }
+
+    fn stage_protected_boot(document: &[u8], record: WebObservationPreparationRecord) {
+        BOOT_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            *staging.options = WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            };
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.preparation = record;
+        });
+        test_stage_document(document);
+    }
+
+    fn protected_document() -> &'static [u8] {
+        include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json")
+    }
+
+    fn no_live_host() {
+        assert!(LIVE_HOST.with(|slot| slot.borrow().is_none()));
+    }
+
+    #[test]
+    fn private_protected_boot_is_dormant_and_forwards_explicit_limits() {
+        no_live_host();
+        let record = protected_preparation_record();
+        stage_protected_boot(protected_document(), record);
+
+        let handle = boot_staged_observation_demand(protected_document().len() as u32);
+        assert_ne!(handle, 0, "valid protected preparation must boot");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("protected handle published");
+            assert_eq!(live.handle, handle);
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("private protected boot fell back to legacy storage");
+            };
+            assert!(ready.observation.legacy().is_none());
+            assert_eq!(storage.controller.spectrum_state().accepted_generation, 0);
+            assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+            assert_eq!(storage.ingress.epoch, 1);
+            assert_eq!(storage.ingress.limits.maximum_control_bytes, 8_192);
+            assert_eq!(
+                (
+                    storage.ingress.limits.maximum_observation_rows,
+                    storage.ingress.limits.maximum_result_bytes,
+                    storage.ingress.limits.ordinary_operations_per_boundary,
+                    storage.ingress.limits.removal_operations_per_boundary,
+                ),
+                (
+                    record.ingress_limits.maximum_observation_rows,
+                    record.ingress_limits.maximum_result_bytes,
+                    record.ingress_limits.ordinary_operations_per_boundary,
+                    record.ingress_limits.removal_operations_per_boundary,
+                )
+            );
+            assert_eq!(
+                (
+                    storage.ingress.limits.maximum_admission_entry_visits,
+                    storage.ingress.limits.maximum_response_binding_visits,
+                    storage.ingress.limits.maximum_response_section_visits,
+                    storage.ingress.limits.maximum_response_copy_bytes,
+                    storage
+                        .ingress
+                        .limits
+                        .maximum_handler_copy_bytes_per_boundary,
+                    storage
+                        .ingress
+                        .limits
+                        .maximum_cleanup_entry_visits_per_boundary,
+                    storage.ingress.limits.maximum_retained_bytes,
+                ),
+                (
+                    record.ingress_limits.maximum_admission_entry_visits,
+                    record.ingress_limits.maximum_response_binding_visits,
+                    record.ingress_limits.maximum_response_section_visits,
+                    record.ingress_limits.maximum_response_copy_bytes,
+                    record
+                        .ingress_limits
+                        .maximum_handler_copy_bytes_per_boundary,
+                    record
+                        .ingress_limits
+                        .maximum_cleanup_entry_visits_per_boundary,
+                    record.ingress_limits.maximum_retained_bytes,
+                )
+            );
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        let mut too_low = record;
+        too_low
+            .work_limits
+            .maximum_transition_entry_visits_per_block = 3;
+        stage_protected_boot(protected_document(), too_low);
+        assert_eq!(
+            boot_staged_observation_demand(protected_document().len() as u32),
+            0,
+            "native preparation must receive the supplied transition limit"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        no_live_host();
+    }
+
+    #[test]
+    fn private_protected_boot_rejects_nested_headers_reserved_and_padded_ids() {
+        no_live_host();
+        let cases: [(&str, fn(&mut WebObservationPreparationRecord)); 6] = [
+            (
+                "work header",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.work_limits.struct_size = 0;
+                },
+            ),
+            (
+                "ingress header",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.ingress_limits.abi_version = ABI_VERSION + 1;
+                },
+            ),
+            (
+                "request reserved0",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.reserved0 = 1;
+                },
+            ),
+            (
+                "request reserved",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.reserved[0] = 1;
+                },
+            ),
+            (
+                "padded target id",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.target_id[3] = 1;
+                },
+            ),
+            (
+                "target id over maximum",
+                |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.target_id_bytes = 128;
+                },
+            ),
+        ];
+
+        for (name, mutate) in cases {
+            let mut record = protected_preparation_record();
+            mutate(&mut record);
+            stage_protected_boot(protected_document(), record);
+            assert_eq!(
+                boot_staged_observation_demand(protected_document().len() as u32),
+                0,
+                "{name} must refuse without publishing a host"
+            );
+            assert_eq!(
+                miso_engine_web_v1_boot_result(),
+                RESULT_INVALID_ARGUMENT,
+                "{name}"
+            );
+            no_live_host();
+        }
+    }
+
+    #[test]
+    fn private_protected_boot_retained_budget_is_inclusive() {
+        no_live_host();
+        let mut record = protected_preparation_record();
+        stage_protected_boot(protected_document(), record);
+        let first = boot_staged_observation_demand(protected_document().len() as u32);
+        assert_ne!(first, 0, "baseline protected boot");
+        let retained = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("baseline handle");
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("protected owner");
+            };
+            storage.ingress.bounds.retained_bytes
+        });
+        assert_eq!(miso_engine_web_v1_dispose(first), RESULT_OK);
+
+        record.ingress_limits.maximum_retained_bytes = retained;
+        stage_protected_boot(protected_document(), record);
+        let exact = boot_staged_observation_demand(protected_document().len() as u32);
+        assert_ne!(exact, 0, "exact retained budget must be accepted");
+        assert_eq!(miso_engine_web_v1_dispose(exact), RESULT_OK);
+
+        record.ingress_limits.maximum_retained_bytes = retained - 1;
+        stage_protected_boot(protected_document(), record);
+        assert_eq!(
+            boot_staged_observation_demand(protected_document().len() as u32),
+            0,
+            "one byte below retained budget must refuse"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        no_live_host();
+    }
+
+    #[test]
+    fn observation_staging_retention_adds_actual_refcell_once() {
+        let count = MAXIMUM_OBSERVATION_READS as u64;
+        let unchanged_heap_sum = count
+            * (size_of::<WebObservationSelection>() as u64
+                + size_of::<ObservationAddress>() as u64
+                + size_of::<ObservationReadValues>() as u64)
+            + count * size_of::<WebObservationResult>() as u64
+            + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+        let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+        assert_eq!(
+            observation_staging_retained_bytes(),
+            unchanged_heap_sum + containing,
+            "the actual staging container is charged exactly once"
+        );
+        assert!(observation_staging_largest_allocation_bytes() >= containing);
+    }
+}
