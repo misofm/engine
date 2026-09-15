@@ -6399,12 +6399,18 @@ pub(crate) mod live_response_ffi_tests {
         let _ = seed_response_markers();
         RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
         let markers = response_markers();
+        let callback_before = live_response_owner_callback_calls();
 
         assert_eq!(
             miso_engine_web_v1_track_response_capture(handle),
             RESULT_REFUSED_BUDGET
         );
         assert_response_markers(&markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "token exhaustion must not invoke the response sink owner callback"
+        );
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().expect("protected live host").host;
@@ -6467,9 +6473,15 @@ pub(crate) mod live_response_ffi_tests {
         markers: &ResponseMarkers,
         expected: u32,
     ) {
+        let callback_before = live_response_owner_callback_calls();
         let result = miso_engine_web_v1_track_response_capture(handle);
         assert_eq!(result, expected, "{case} result");
         assert_response_markers(markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "{case} must not invoke the response sink owner callback"
+        );
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().expect("protected live host").host;
@@ -6868,11 +6880,17 @@ pub(crate) mod live_response_ffi_tests {
             );
         });
 
+        let callback_before = live_response_owner_callback_calls();
         assert_eq!(
             miso_engine_web_v1_track_response_capture(handle),
             RESULT_BACKPRESSURE
         );
         assert_response_markers(&markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "ordinary backpressure must not invoke the response sink owner callback"
+        );
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().expect("protected live host").host;
