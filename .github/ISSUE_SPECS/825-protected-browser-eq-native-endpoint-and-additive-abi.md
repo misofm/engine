@@ -499,3 +499,8 @@ Checkpoint `9ad69729` corrects the three source defects and passes five focused 
 ## ABI checkpoint B1 accepted evidence
 
 Fixture checkpoint `d5f57446` directly asserts raw pointer nullness during LIVE_HOST borrow conflicts and for unrelated handles, and raw non-nullness for valid live and matching disposed terminal query handles. It retains the exported `u32` pointer checks without using their native truncation as evidence. Five focused B1 tests and all 134 host-web library tests pass, with two existing ignored; locked check, format and diff checks pass. Astra MEDIUM returned PASS on attempt 3 for the additive demand/scalar-query path. B2 may now add application transfer and final disposal handoff; protected public boot remains unavailable.
+
+
+## ABI checkpoint B2 attempt 1 adversarial evidence
+
+Checkpoint `11d28e8d` adds application transfer, final FFI disposal handoff, guarded boot publication, and cold-invalid take sentinel. Five focused B2 tests, 136 host-web library tests, workspace locked check, format and diff pass. Astra MEDIUM returned FAIL on three evidence gaps without finding a concrete source defect: failed replacement boot test had already consumed its terminal handoff; invalid/borrow-refusal test used unrendered Pending rows rather than actual Applied rows; and no whole-host-drop fixture inspected final status/admission/nonzero capture identity values. Attempt 2 is fixture-only for those discriminating cases. C/D cannot start before B2 passes.
