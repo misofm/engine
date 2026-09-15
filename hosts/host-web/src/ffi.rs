@@ -8371,6 +8371,150 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn protected_stream_read_reports_native_pending_states_and_retains_last_ready_capture() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+
+        // The render boundary replenishes Ordinary admission while leaving the accepted graph
+        // unapplied. The typed native read must therefore report PendingApplication.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_ne!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0,
+                "PendingApplication must carry the pending-boundary flag"
+            );
+            let status = host.observation_status();
+            assert_ne!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_eq!(status.pending_count, 1);
+        });
+
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+
+        // One applied block is still short of a complete window. A second admitted read must
+        // expose the native Warming/Pending state after the application boundary.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(matches!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_WARMING | SPECTRUM_STREAM_STATUS_PENDING
+            ));
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_eq!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0,
+                "an applied Warming/Pending read is no longer boundary-pending"
+            );
+            let status = host.observation_status();
+            assert_eq!(status.accepted_generation, status.applied_generation);
+            assert_eq!(status.pending_count, 0);
+        });
+
+        for block in 2..=16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let (ready_capture, ready_header, ready_identity) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("ready header");
+            assert_eq!(
+                staging.capture_len,
+                usize::try_from(header.right_offset).unwrap()
+                    + host_core::SPECTRUM_WINDOW_FRAMES * size_of::<f32>()
+            );
+            (
+                bytes[..staging.capture_len].to_vec(),
+                header,
+                capture_identity(),
+            )
+        });
+        assert_eq!(ready_header.snapshot_token, 1);
+        assert_ne!(ready_identity.owner, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        // Replenish admission without completing another window. The admitted native Pending
+        // result changes status only; the previous raw capture/header and identity stay intact.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert_eq!(&bytes[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(bytes, 0).expect("retained ready header"),
+                ready_header
+            );
+        });
+        assert_eq!(capture_identity(), ready_identity);
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stream_read_writes_raw_header_bytes_in_release_safe_path() {
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
         let handle = boot_protected();
