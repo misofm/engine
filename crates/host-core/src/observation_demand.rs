@@ -185,6 +185,11 @@ pub struct HostObservationController {
     pending: [PendingApplication; 2],
     candidate_handles: Box<[u64]>,
     terminal_closed: bool,
+    /// Number of queued records discarded while retiring an applied meter selection.
+    ///
+    /// This is deliberately private and informational. Producer-side drop counts remain owned
+    /// by the meter accumulator; this counter accounts only for control-side cleanup.
+    retirement_discards: u64,
 }
 
 /// Inclusive limits for one prepared observation owner.
@@ -720,6 +725,7 @@ impl HostObservationController {
             pending: [pending_ordinary, pending_removal],
             candidate_handles: candidate_handles.into_boxed_slice(),
             terminal_closed: false,
+            retirement_discards: 0,
         })
     }
 
@@ -777,6 +783,74 @@ impl HostObservationController {
         self.publish_meter_candidate(remaining, PublicationKind::Removal)
     }
 
+    /// Reconcile at most one real graph application receipt.
+    ///
+    /// The graph controller is the sole source of application boundaries. A receipt is matched
+    /// to exactly one of the two preallocated pending records; no receipt is synthesized or
+    /// coalesced when ordinary and removal publications apply at the same sample.
+    pub fn try_applied(&mut self) -> Option<ObservationApplied> {
+        if self.observe_terminal_closure() {
+            return None;
+        }
+        let receipt = self.graph.as_mut()?.try_applied()?;
+        let pending_index = self
+            .pending_index_for_revision(receipt.revision)
+            .expect("graph receipt must match one pending observation record");
+        self.pending[pending_index]
+            .accepted
+            .take()
+            .expect("matching pending observation record must retain its acknowledgement");
+
+        self.cleanup_retired_readers(pending_index);
+        core::mem::swap(
+            &mut self.applied,
+            &mut self.pending[pending_index].selection,
+        );
+        self.pending[pending_index].selection.len = 0;
+
+        Some(ObservationApplied {
+            owner: self.owner,
+            revision: receipt.revision,
+            first_sample: receipt.first_sample,
+        })
+    }
+
+    /// Request removal of every selected meter, or report existing quiescence.
+    ///
+    /// Stop never polls the graph receipt queue. If an empty publication is already accepted,
+    /// the same stored acknowledgement is returned so repeating stop cannot spend a revision.
+    #[allow(clippy::result_large_err)]
+    pub fn stop_all(&mut self) -> Result<ObservationStop, ObservationRefusal> {
+        if self.observe_terminal_closure() {
+            return Err(closed());
+        }
+        if self.graph.is_none() {
+            return Ok(ObservationStop::Quiescent);
+        }
+
+        if self.accepted.len == 0 {
+            if let Some(accepted) = self
+                .pending
+                .iter()
+                .filter_map(|pending| pending.accepted)
+                .filter(|accepted| accepted.work.active_meter_channels == 0)
+                .max_by_key(|accepted| accepted.revision)
+            {
+                return Ok(ObservationStop::Pending(accepted));
+            }
+            if self.applied.len == 0
+                && self
+                    .pending
+                    .iter()
+                    .all(|pending| pending.accepted.is_none())
+            {
+                return Ok(ObservationStop::Quiescent);
+            }
+        }
+
+        self.remove_meters_to(&[]).map(ObservationStop::Pending)
+    }
+
     #[allow(clippy::result_large_err)]
     fn publish_meter_candidate(
         &mut self,
@@ -788,7 +862,7 @@ impl HostObservationController {
         if self.graph.is_none() {
             return Err(not_prepared());
         }
-        if self.is_closed() {
+        if self.observe_terminal_closure() {
             return Err(closed());
         }
 
@@ -902,6 +976,64 @@ impl HostObservationController {
         self.accepted.len = candidate_len;
         self.budget.commit_graph_demand(work);
         Ok(accepted)
+    }
+
+    fn observe_terminal_closure(&mut self) -> bool {
+        if self.terminal_closed {
+            return true;
+        }
+        let closed = self
+            .graph
+            .as_ref()
+            .is_some_and(GraphObservationController::is_closed);
+        if closed {
+            self.terminal_closed = true;
+            for pending in &mut self.pending {
+                pending.accepted = None;
+                pending.selection.len = 0;
+            }
+        }
+        closed
+    }
+
+    fn pending_index_for_revision(&self, revision: u64) -> Option<usize> {
+        let mut found = None;
+        for (index, pending) in self.pending.iter().enumerate() {
+            if pending
+                .accepted
+                .is_some_and(|accepted| accepted.revision == revision)
+            {
+                if found.is_some() {
+                    debug_assert!(false, "one graph revision matched two pending records");
+                    return None;
+                }
+                found = Some(index);
+            }
+        }
+        found
+    }
+
+    fn cleanup_retired_readers(&mut self, incoming_index: usize) {
+        let incoming = self.pending[incoming_index].selection.entries();
+        let old = self.applied.entries();
+        for old_entry in old {
+            if incoming
+                .iter()
+                .any(|entry| entry.prepared_index == old_entry.prepared_index)
+            {
+                continue;
+            }
+            let consumer = &mut self.meter_consumers[old_entry.prepared_index];
+            let available = consumer
+                .consumer
+                .available_at_entry()
+                .min(consumer.consumer.capacity());
+            for _ in 0..available {
+                if consumer.consumer.try_pop().is_ok() {
+                    self.retirement_discards = self.retirement_discards.saturating_add(1);
+                }
+            }
+        }
     }
 }
 

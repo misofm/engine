@@ -10,8 +10,9 @@ use host_core::{
     HostConsoleRequest, HostMeterId, HostMeterRequest, HostObservationController,
     HostObservationPreparation, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
     ObservationRefusalReason, ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter,
-    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumChannels,
-    SpectrumTarget, compile_host_session, prepare_host_runtime_with_observation_demand,
+    SourceSubmission, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
+    SpectrumChannels, SpectrumTarget, StartedRenderSession, compile_host_session,
+    prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
 };
 
@@ -102,6 +103,33 @@ fn common_admission_bytes(report: HostPrepareReport) -> u64 {
 
 fn owner_ids(owner: &HostObservationController) -> Vec<HostMeterId> {
     owner.meters().iter().map(|meter| meter.id).collect()
+}
+
+fn render_source_block(
+    render: &mut StartedRenderSession,
+    sources: &mut host_core::SourceControlSet,
+    block: usize,
+) {
+    const QUANTUM: usize = 128;
+    let left = [0.25_f32; QUANTUM];
+    let right = [-0.25_f32; QUANTUM];
+    sources
+        .submit(
+            b"fixture-source",
+            SourceSubmission {
+                generation: 1,
+                start_frame: (block * QUANTUM) as u64,
+                sample_rate_hz: 48_000,
+                planes: &[&left, &right],
+                frames: QUANTUM as u32,
+                end_of_region: false,
+            },
+        )
+        .expect("source block");
+    let mut output = [0.0_f32; QUANTUM * 2];
+    let _ = render
+        .render_planar(&mut output, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
+        .expect("render block");
 }
 
 #[test]
@@ -462,4 +490,122 @@ fn typed_identity_subset_capacity_and_work_refusals_preserve_state() {
     // The accepted and latest pending records remain the values established before a refused
     // request. The ordinary and removal records are both still occupied here.
     assert_eq!(ordinary.revision, 1);
+}
+
+#[test]
+fn receipts_are_real_bounded_and_stop_reuses_pending_empty_publication() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let demand = demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+
+    assert_eq!(owner.stop_all(), Ok(host_core::ObservationStop::Quiescent));
+    assert_eq!(owner.try_applied(), None);
+    let ordinary = owner.replace_meters(&ids[..1]).expect("ordinary admission");
+    assert_eq!(
+        owner.try_applied(),
+        None,
+        "paused owner cannot fabricate a receipt"
+    );
+    let removal = owner.stop_all().expect("reserved stop");
+    let removal = match removal {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("stop must publish removal"),
+    };
+    assert_eq!(removal.revision, ordinary.revision + 1);
+    assert_eq!(
+        owner.stop_all(),
+        Ok(host_core::ObservationStop::Pending(removal))
+    );
+
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+    builtins::test_only_reset_peak_samples();
+    render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(builtins::test_only_peak_samples(), 0);
+    let first = owner
+        .try_applied()
+        .expect("ordinary receipt at the first render boundary");
+    let second = owner
+        .try_applied()
+        .expect("removal receipt at the same render boundary");
+    assert_eq!(first.revision, ordinary.revision);
+    assert_eq!(second.revision, removal.revision);
+    assert_eq!(first.first_sample, 0);
+    assert_eq!(second.first_sample, 0);
+    assert_eq!(owner.try_applied(), None);
+    assert_eq!(owner.stop_all(), Ok(host_core::ObservationStop::Quiescent));
+}
+
+#[test]
+fn real_render_subset_removal_keeps_sibling_work_and_final_stop_is_quiescent() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let demand = demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+    let initial = owner.replace_meters(&ids).expect("select both meters");
+    let (mut render, mut sources, _) = host.start_render_session().unwrap();
+
+    builtins::test_only_reset_peak_samples();
+    render_source_block(&mut render, &mut sources, 0);
+    assert_eq!(
+        owner.try_applied().expect("initial receipt").revision,
+        initial.revision
+    );
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 2 * 128);
+
+    let subset = owner
+        .remove_meters_to(&ids[..1])
+        .expect("remove one meter and preserve its sibling");
+    builtins::test_only_reset_peak_samples();
+    render_source_block(&mut render, &mut sources, 1);
+    let subset_applied = owner.try_applied().expect("subset receipt");
+    assert_eq!(subset_applied.revision, subset.revision);
+    assert_eq!(subset_applied.first_sample, 128);
+    assert_eq!(builtins::test_only_peak_samples(), 2 * 128);
+
+    let final_removal = owner.stop_all().expect("stop remaining meter");
+    let final_removal = match final_removal {
+        host_core::ObservationStop::Pending(accepted) => accepted,
+        host_core::ObservationStop::Quiescent => panic!("active sibling requires removal"),
+    };
+    builtins::test_only_reset_peak_samples();
+    render_source_block(&mut render, &mut sources, 2);
+    let final_applied = owner.try_applied().expect("final removal receipt");
+    assert_eq!(final_applied.revision, final_removal.revision);
+    assert_eq!(final_applied.first_sample, 256);
+    assert_eq!(builtins::test_only_peak_samples(), 0);
+    assert_eq!(owner.stop_all(), Ok(host_core::ObservationStop::Quiescent));
+}
+
+#[test]
+fn dropping_the_renderer_closes_pending_observation_without_a_fake_receipt() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let demand = demand(&requests);
+    let (host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+    let accepted = owner.replace_meters(&ids[..1]).expect("ordinary admission");
+    let (render, _sources, _) = host.start_render_session().unwrap();
+    drop(render);
+
+    assert!(owner.is_closed());
+    assert_eq!(owner.try_applied(), None);
+    assert_eq!(
+        owner.stop_all(),
+        Err(host_core::ObservationRefusal {
+            reason: ObservationRefusalReason::Closed,
+            limit: None,
+            requested: None,
+            maximum: None,
+        })
+    );
+    assert_eq!(accepted.revision, 1);
 }
