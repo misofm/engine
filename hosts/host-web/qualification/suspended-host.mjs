@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -15,6 +15,13 @@ const ROOT = path.resolve(HERE, "../../..");
 const SESSION_PATH = path.join(HOST_WEB, "tests", "browser-v1", "session.json");
 const WASM_ARTIFACT = "miso-engine-v1-audio-worklet.simd128.wasm";
 const LAYOUT_ARTIFACT = "miso-engine-v1-abi-layout.json";
+const COMPANION_SOURCE_PATHS = Object.freeze({
+  "miso-engine-v1-audio-worklet-host.js": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-host.js"),
+  "miso-engine-v1-audio-worklet.js": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet.js"),
+  "prepared-control.js": path.join(HOST_WEB, "web", "prepared-control.js"),
+  "miso-engine-v1-audio-worklet-host.d.ts": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-host.d.ts"),
+  "miso-engine-v1-parameter-metadata.json": path.join(ROOT, "sdk", "assets", "miso-engine-v1-parameter-metadata.json"),
+});
 const WASM_PIN_PATH = path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-artifact.sha256");
 const SOURCE_LAYOUT_PATH = path.join(ROOT, "sdk", "assets", LAYOUT_ARTIFACT);
 const RESULTS_PATH = path.join(HERE, "results.json");
@@ -123,11 +130,16 @@ function equalRecord(left, right) {
 }
 
 async function sourceProvenance() {
-  const [wasmPin, matrixText, layoutDigest, commitResult] = await Promise.all([
+  const [wasmPin, matrixText, layoutDigest, commitResult, companionSources] = await Promise.all([
     readFile(WASM_PIN_PATH, "utf8").then((text) => text.trim()),
     readFile(RESULTS_PATH, "utf8").then((text) => JSON.parse(text)),
     sha256(SOURCE_LAYOUT_PATH),
     execFileAsync("git", ["rev-parse", `${SOURCE_COMMIT}^{commit}`], { cwd: ROOT }),
+    Promise.all(Object.entries(COMPANION_SOURCE_PATHS).map(async ([artifactName, sourcePath]) => ({
+      artifactName,
+      sourcePath: path.relative(ROOT, sourcePath),
+      sourceSha256: await sha256(sourcePath),
+    }))),
   ]);
   const resolvedCommit = commitResult.stdout.trim();
   if (wasmPin !== EXPECTED_WASM_SHA256) {
@@ -151,7 +163,8 @@ async function sourceProvenance() {
     sourceLayoutSha256: layoutDigest,
     matrixCandidateCommit: matrixText.candidateCommit,
     matrixWasmSha256: matrixText.wasmSha256,
-    identityAndCompanionPinsVerified: true,
+    authoritativeCompanions: companionSources,
+    identityAndCompanionPinsVerified: false,
     publicationProvenanceIndependentlyEstablished: false,
   };
 }
@@ -169,6 +182,21 @@ async function preflight(artifacts, browserNames) {
   if (hashes[LAYOUT_ARTIFACT] !== EXPECTED_LAYOUT_SHA256) {
     throw failure("supplied artifact ABI layout differs from the frozen issue pin");
   }
+  const companionComparisons = provenance.authoritativeCompanions.map((source) => ({
+    ...source,
+    artifactSha256: hashes[source.artifactName],
+    identical: hashes[source.artifactName] === source.sourceSha256,
+  }));
+  const mismatchedCompanion = companionComparisons.find((comparison) => !comparison.identical);
+  if (mismatchedCompanion !== undefined) {
+    throw failure(
+      `supplied artifact companion differs from authoritative source: ${mismatchedCompanion.artifactName}`,
+    );
+  }
+  const source = { ...provenance };
+  delete source.authoritativeCompanions;
+  source.companionComparisons = companionComparisons;
+  source.identityAndCompanionPinsVerified = true;
   const session = JSON.parse(sessionText);
   if (session.sample_rate_hz !== 48_000 || session.quantum_frames !== 128
       || !Array.isArray(session.tracks) || session.tracks.length !== 1) {
@@ -189,7 +217,7 @@ async function preflight(artifacts, browserNames) {
       quantumFrames: session.quantum_frames,
       tracks: session.tracks.length,
     },
-    source: provenance,
+    source,
     nodeVersion: process.version,
     playwrightVersion: playwrightPackage.version,
     browserNames,
@@ -223,10 +251,33 @@ async function qualifyBrowser(browserName, engine, origin, artifacts, preflightR
   };
   let browser;
   let page;
+  let launchPromise;
+  let pagePromise;
+  let evaluationStarted = false;
+  const browserOperationStarted = performance.now();
+  const browserOperationDeadline = browserOperationStarted + BROWSER_TIMEOUT_MS;
+  const browserOperation = (label, operation, individualLimitMs = null) => {
+    const remainingMs = Math.floor(browserOperationDeadline - performance.now());
+    if (remainingMs <= 0) return Promise.reject(timeoutError(label, BROWSER_TIMEOUT_MS));
+    const deadlineMs = individualLimitMs === null
+      ? remainingMs
+      : Math.min(individualLimitMs, remainingMs);
+    return withDeadline(label, operation, deadlineMs);
+  };
   try {
-    browser = await withDeadline(`${browserName}: launch`, () => engine.launch(launchOptions), STAGE_TIMEOUT_MS);
+    launchPromise = Promise.resolve().then(() => engine.launch(launchOptions));
+    browser = await browserOperation(
+      `${browserName}: launch`,
+      () => launchPromise,
+      STAGE_TIMEOUT_MS,
+    );
     row.browserVersion = browser.version();
-    page = await withDeadline(`${browserName}: newPage`, () => browser.newPage(), STAGE_TIMEOUT_MS);
+    pagePromise = Promise.resolve().then(() => browser.newPage());
+    page = await browserOperation(
+      `${browserName}: newPage`,
+      () => pagePromise,
+      STAGE_TIMEOUT_MS,
+    );
     page.setDefaultTimeout(STAGE_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(STAGE_TIMEOUT_MS);
     page.on("console", (message) => row.diagnostics.push(
@@ -236,19 +287,19 @@ async function qualifyBrowser(browserName, engine, origin, artifacts, preflightR
     page.on("response", (response) => {
       if (!response.ok()) row.diagnostics.push(`HTTP ${response.status()}: ${response.url()}`);
     });
-    await withDeadline(
+    await browserOperation(
       `${browserName}: navigate qualification fixture`,
       () => page.goto(`${origin}/qualification/index.html`, { waitUntil: "load" }),
       STAGE_TIMEOUT_MS,
     );
-    const fixture = await withDeadline(
+    evaluationStarted = true;
+    const fixture = await browserOperation(
       `${browserName}: page.evaluate suspended lifecycle`,
       () => page.evaluate(runSuspendedFixture, {
         hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
         wasmModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
         workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
       }),
-      BROWSER_TIMEOUT_MS,
     );
     row.fixture = fixture;
     if (fixture?.pass !== true) {
@@ -262,17 +313,58 @@ async function qualifyBrowser(browserName, engine, origin, artifacts, preflightR
     row.error = errorRecord(error);
     if (row.diagnostics.length > 0) row.error.diagnostics = row.diagnostics;
   } finally {
+    row.browserOperationBudget = {
+      limitMs: BROWSER_TIMEOUT_MS,
+      elapsedMs: performance.now() - browserOperationStarted,
+      stagesIndividuallyLimitedMs: STAGE_TIMEOUT_MS,
+      teardownSeparatelyLimitedMs: TEARDOWN_TIMEOUT_MS,
+    };
+    if (evaluationStarted && row.fixture === undefined) {
+      row.nativeCleanup = {
+        host: { outcome: "UNKNOWN", detail: "page evaluation result was lost" },
+        context: { outcome: "UNKNOWN", detail: "page evaluation result was lost" },
+      };
+    }
+    if (page === undefined && pagePromise !== undefined) {
+      try {
+        page = await withDeadline(
+          `${browserName}: late page acquisition during teardown`,
+          () => pagePromise,
+          TEARDOWN_TIMEOUT_MS,
+        );
+        row.latePageAcquisition = { outcome: "acquired-for-browser-teardown" };
+      } catch (error) {
+        row.latePageAcquisition = error?.code === "NODE_DEADLINE"
+          ? { outcome: "unknown-after-loss", error: errorRecord(error) }
+          : { outcome: "not-acquired", error: errorRecord(error) };
+      }
+    }
+    if (browser === undefined && launchPromise !== undefined) {
+      try {
+        browser = await withDeadline(
+          `${browserName}: late browser acquisition during teardown`,
+          () => launchPromise,
+          TEARDOWN_TIMEOUT_MS,
+        );
+        row.lateBrowserAcquisition = { outcome: "acquired-for-teardown" };
+      } catch (error) {
+        row.lateBrowserAcquisition = error?.code === "NODE_DEADLINE"
+          ? { outcome: "unknown-after-loss", error: errorRecord(error) }
+          : { outcome: "not-acquired", error: errorRecord(error) };
+      }
+    }
     if (browser !== undefined) {
       try {
-        row.browserCleanup = {
-          outcome: "pass",
-          acknowledgement: "browser.close resolved",
-        };
         await withDeadline(
           `${browserName}: browser teardown`,
           () => browser.close(),
           TEARDOWN_TIMEOUT_MS,
         );
+        row.browserCleanup = {
+          outcome: "pass",
+          acknowledgement: "browser.close resolved",
+          nativeHostAndContextDisposal: row.nativeCleanup === undefined ? "reported-by-page-fixture" : "UNKNOWN",
+        };
       } catch (error) {
         row.outcome = "fail";
         row.browserCleanup = {
@@ -512,14 +604,33 @@ async function runSuspendedFixture(urls) {
     const port = host.node.port;
     const receiver = port.onmessage;
     gate("red.statusSuppression.receiver", typeof receiver === "function", "host receiver was not callable");
+    const originalPostMessage = port.postMessage;
+    const originalPostMessageOwnDescriptor = Object.getOwnPropertyDescriptor(port, "postMessage");
+    gate("red.statusSuppression.sender", typeof originalPostMessage === "function",
+      "host transport sender was not callable");
     let suppressed = 0;
-    let requestId = null;
+    let outgoingRequestId = null;
+    let matchingReplyRequestId = null;
+    Object.defineProperty(port, "postMessage", {
+      configurable: true,
+      writable: true,
+      value: function qualificationObservedPostMessage(message) {
+        if (message?.tag === "miso.status.v1") {
+          gate("red.statusSuppression.outgoingRequest", outgoingRequestId === null,
+            "more than one outgoing status request crossed the observed transport");
+          gate("red.statusSuppression.outgoingRequestId",
+            Number.isSafeInteger(message.requestId) && message.requestId > 0,
+            "outgoing status request ID was invalid");
+          outgoingRequestId = message.requestId;
+        }
+        return Reflect.apply(originalPostMessage, port, arguments);
+      },
+    });
     port.onmessage = (event) => {
       const message = event.data;
-      if (suppressed === 0 && message?.tag === "miso.status.v1"
-          && Number.isSafeInteger(message.requestId) && message.requestId > 0) {
+      if (message?.tag === "miso.status.v1" && message.requestId === outgoingRequestId) {
         suppressed += 1;
-        requestId = message.requestId;
+        matchingReplyRequestId = message.requestId;
         return;
       }
       receiver(event);
@@ -535,19 +646,36 @@ async function runSuspendedFixture(urls) {
       );
     } finally {
       port.onmessage = receiver;
+      if (originalPostMessageOwnDescriptor === undefined) {
+        if (!delete port.postMessage) {
+          throw fixtureFailure("observed transport sender could not be restored", "TRANSPORT_RESTORE");
+        }
+      } else {
+        Object.defineProperty(port, "postMessage", originalPostMessageOwnDescriptor);
+      }
     }
-    gate("red.statusSuppression.reply", suppressed === 1 && requestId !== null,
+    gate("red.statusSuppression.outgoingRequest", outgoingRequestId !== null,
+      "no outgoing status request crossed the observed transport");
+    gate("red.statusSuppression.reply", suppressed === 1
+      && matchingReplyRequestId === outgoingRequestId,
       "no actual matching status reply was suppressed");
     gate("red.statusSuppression.timeout", timeoutOutcome?.expected === true,
       "suppressed status did not fail specifically as a timeout");
     gate("red.statusSuppression.receiverRestored", port.onmessage === receiver,
       "status receiver was not restored before cleanup");
+    gate("red.statusSuppression.senderRestored", port.postMessage === originalPostMessage,
+      "status sender was not restored before cleanup");
     redControls.statusSuppression = {
       outcome: "expected-timeout",
-      requestId,
+      transportBoundary: "MessagePort.postMessage/onmessage",
+      outgoingRequestId,
+      matchingReplyRequestId,
+      timedOutRequestId: outgoingRequestId,
       suppressedReplies: suppressed,
       deadlineMs: STAGE_TIMEOUT,
       receiverRestored: true,
+      senderRestored: true,
+      outgoingAndNonmatchingMessagesForwardedUnchanged: true,
     };
   };
   const resumeRedControl = async () => {
@@ -768,8 +896,22 @@ async function main() {
   const record = (event) => rawEvents.push({ at: new Date().toISOString(), ...event });
   let server;
   let preflightRecord;
+  let rows = [];
+  let browserCandidatePassed = false;
+  let serverCleanupPassed = false;
   let passed = false;
   let fatalError;
+  const rawPath = path.join(logDirectory, "raw.json");
+  const pendingRawPath = `${rawPath}.pending`;
+  const persistRaw = async (events) => {
+    await writeFile(
+      pendingRawPath,
+      `${JSON.stringify({ schema: "miso.web.suspended-host.log.v1", events }, (_key, value) => (
+      typeof value === "bigint" ? value.toString() : value
+      ), 2)}\n`,
+    );
+    await rename(pendingRawPath, rawPath);
+  };
   try {
     if (artifactsArgument === null) {
       throw new Error("usage: node suspended-host.mjs --artifacts DIR [--browser all|chromium|firefox|webkit]");
@@ -791,7 +933,6 @@ async function main() {
       STAGE_TIMEOUT_MS,
     );
     record({ phase: "server", origin: server.origin });
-    const rows = [];
     for (const browserName of browserNames) {
       const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, artifacts, preflightRecord);
       rows.push(row);
@@ -800,12 +941,9 @@ async function main() {
       if (row.outcome !== "pass") process.stdout.write(`${browserName} failure: ${json(row.error ?? row.fixture?.qualificationError)}\n`);
     }
     const allBrowsers = browserArgument === "all" && rows.length === Object.keys(ENGINES).length;
-    passed = allBrowsers && rows.every((row) => row.outcome === "pass")
+    browserCandidatePassed = allBrowsers && rows.every((row) => row.outcome === "pass")
       && rows.every((row) => row.fixture?.pass === true);
     if (!allBrowsers) record({ phase: "closure", outcome: "fail", detail: "all browsers are required for closure" });
-    record({ phase: "result", outcome: passed ? "PASS" : "FAIL", browsers: rows });
-    if (passed) process.stdout.write(`PASS suspended ordinary lifecycle; raw log: ${logDirectory}/raw.json\n`);
-    else process.stdout.write(`FAIL suspended ordinary lifecycle; raw log: ${logDirectory}/raw.json\n`);
   } catch (error) {
     fatalError = error;
     record({ phase: "fatal", error: errorRecord(error) });
@@ -814,27 +952,40 @@ async function main() {
     if (server !== undefined) {
       try {
         await withDeadline("qualification server teardown", () => server.close(), TEARDOWN_TIMEOUT_MS);
+        serverCleanupPassed = true;
         record({ phase: "serverCleanup", outcome: "pass" });
       } catch (error) {
-        passed = false;
         record({ phase: "serverCleanup", outcome: "unknown-after-loss", error: errorRecord(error) });
         process.stderr.write(`server cleanup failure: ${json(errorRecord(error))}\n`);
       }
     } else {
       record({ phase: "serverCleanup", outcome: "not-created" });
     }
-    try {
-      await writeFile(
-        path.join(logDirectory, "raw.json"),
-        `${JSON.stringify({ schema: "miso.web.suspended-host.log.v1", events: rawEvents }, (_key, value) => (
-          typeof value === "bigint" ? value.toString() : value
-        ), 2)}\n`,
-      );
-    } catch (error) {
-      fatalError ??= error;
-      passed = false;
-      process.stderr.write(`raw log write failure: ${json(errorRecord(error))}\n`);
+  }
+  const closurePassed = fatalError === undefined && browserCandidatePassed && serverCleanupPassed;
+  try {
+    if (closurePassed) {
+      // Establish that the finalized cleanup record is persistable before creating any PASS claim.
+      await persistRaw(rawEvents);
+      const passEvent = {
+        at: new Date().toISOString(),
+        phase: "result",
+        outcome: "PASS",
+        browsers: rows,
+      };
+      await persistRaw([...rawEvents, passEvent]);
+      rawEvents.push(passEvent);
+      passed = true;
+      process.stdout.write(`PASS suspended ordinary lifecycle; raw log: ${rawPath}\n`);
+    } else {
+      record({ phase: "result", outcome: "FAIL", browsers: rows });
+      await persistRaw(rawEvents);
+      process.stdout.write(`FAIL suspended ordinary lifecycle; raw log: ${rawPath}\n`);
     }
+  } catch (error) {
+    fatalError ??= error;
+    passed = false;
+    process.stderr.write(`raw log write failure at ${rawPath}; no PASS recorded: ${json(errorRecord(error))}\n`);
   }
   if (fatalError !== undefined || !passed) process.exitCode = 1;
 }
