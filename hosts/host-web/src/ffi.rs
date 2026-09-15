@@ -23,8 +23,9 @@ use crate::{
     MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH,
     OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
     OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationReadChannels, ObservationReadError,
-    ObservationReadValues, RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationIngressLimits,
+    ObservationReadChannels, ObservationReadError, ObservationReadValues,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
@@ -38,10 +39,12 @@ use crate::{
     SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_READY, SpectrumPreparationRequest,
     WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebObservationResult, WebObservationSelection, WebResponseParameter,
-    WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow,
+    WebLiveResponseSection, WebObservationAdmission, WebObservationCaptureIdentity,
+    WebObservationDemand, WebObservationPreparation, WebObservationPreparationRecord,
+    WebObservationProfile, WebObservationReceipt, WebObservationResult, WebObservationSelection,
+    WebObservationStatus, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -53,14 +56,14 @@ use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
-    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot,
-    ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
-    ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
-    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow, prepare_response_preview,
-    query_response_snapshot_into,
+    GraphObservationActivationConfig, ObservationWorkLimits, ResponseParameterOverride,
+    ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
+    ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot, ResponseSnapshotAvailability,
+    ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
+    SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence, SpectrumCaptureCollectionEntry,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
+    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumSmoothingConfig, SpectrumTarget,
+    SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -238,6 +241,44 @@ struct ObservationStaging {
     rows: Box<[ObservationReadValues]>,
     results: Vec<WebObservationResult>,
     id: Box<[u8]>,
+    endpoint: ObservationEndpointStaging,
+}
+
+/// Fixed protected-observation input/output staging carried by the existing TLS owner.
+///
+/// This is deliberately inline: it is the endpoint's fixed wire workspace, not a second receipt
+/// ledger. The outer host's four receipt rows remain the sole native application authority.
+struct ObservationEndpointStaging {
+    preparation: WebObservationPreparationRecord,
+    demand: WebObservationDemand,
+    admission: WebObservationAdmission,
+    status: WebObservationStatus,
+    capture_identity: WebObservationCaptureIdentity,
+    applications: [WebObservationReceipt; 4],
+    application_count: u32,
+    handle: u32,
+    terminal_application_pending: bool,
+}
+
+impl Default for ObservationEndpointStaging {
+    fn default() -> Self {
+        let mut demand = WebObservationDemand::default();
+        // Keep WebObservationDemand's established zero-default/layout unchanged. Endpoint
+        // staging is the owned ABI workspace, so its headers are initialized explicitly here.
+        demand.struct_size = size_of::<WebObservationDemand>() as u32;
+        demand.abi_version = ABI_VERSION;
+        Self {
+            preparation: WebObservationPreparationRecord::default(),
+            demand,
+            admission: WebObservationAdmission::default(),
+            status: WebObservationStatus::default(),
+            capture_identity: WebObservationCaptureIdentity::default(),
+            applications: [WebObservationReceipt::default(); 4],
+            application_count: 0,
+            handle: 0,
+            terminal_application_pending: false,
+        }
+    }
 }
 
 impl ObservationStaging {
@@ -250,6 +291,7 @@ impl ObservationStaging {
                 .into_boxed_slice(),
             results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
             id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
+            endpoint: ObservationEndpointStaging::default(),
         }
     }
 
@@ -260,24 +302,64 @@ impl ObservationStaging {
 }
 
 /// Heap payload retained by the fixed selected-observation staging area.
+const fn checked_mul_or_zero(left: u64, right: u64) -> u64 {
+    match left.checked_mul(right) {
+        Some(value) => value,
+        None => 0,
+    }
+}
+
 pub(crate) const fn observation_staging_retained_bytes() -> u64 {
     let count = MAXIMUM_OBSERVATION_READS as u64;
-    count * size_of::<WebObservationSelection>() as u64
-        + count * size_of::<ObservationAddress>() as u64
-        + count * size_of::<ObservationReadValues>() as u64
-        + count * size_of::<WebObservationResult>() as u64
-        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
+    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+    let mut bytes = containing;
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<WebObservationSelection>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<ObservationAddress>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<ObservationReadValues>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<WebObservationResult>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    match bytes.checked_add(RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64) {
+        Some(bytes) => bytes,
+        None => 0,
+    }
 }
 
 /// Largest one allocation in the fixed selected-observation staging area.
 pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
     let count = MAXIMUM_OBSERVATION_READS as u64;
-    let selections = count * size_of::<WebObservationSelection>() as u64;
-    let addresses = count * size_of::<ObservationAddress>() as u64;
-    let rows = count * size_of::<ObservationReadValues>() as u64;
-    let results = count * size_of::<WebObservationResult>() as u64;
+    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+    let selections = checked_mul_or_zero(count, size_of::<WebObservationSelection>() as u64);
+    let addresses = checked_mul_or_zero(count, size_of::<ObservationAddress>() as u64);
+    let rows = checked_mul_or_zero(count, size_of::<ObservationReadValues>() as u64);
+    let results = checked_mul_or_zero(count, size_of::<WebObservationResult>() as u64);
     let ids = RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
-    let mut largest = selections;
+    let mut largest = containing;
+    if selections > largest {
+        largest = selections;
+    }
     if addresses > largest {
         largest = addresses;
     }
@@ -833,6 +915,59 @@ fn staged_spectrum_request(
             maximum_capture_bytes: collection.maximum_capture_bytes,
         },
     )))
+}
+
+fn validate_observation_preparation_record(
+    record: &WebObservationPreparationRecord,
+) -> Result<(), u32> {
+    if record.struct_size != crate::OBSERVATION_PREPARATION_BYTES
+        || record.abi_version != ABI_VERSION
+        || record.profile != crate::OBSERVATION_PROFILE_EQ_SPECTRUM
+        || record.meter_count != 0
+        || record.resident_taps != 0
+        || record.spectrum_count != 1
+        || record.maximum_active_observers != 1
+        || record.reserved0 != 0
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let maximum_active_observers =
+        usize::try_from(record.maximum_active_observers).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if maximum_active_observers != 1 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let work = record.work_limits;
+    if work.struct_size != crate::OBSERVATION_WORK_LIMITS_BYTES || work.abi_version != ABI_VERSION {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let ingress = record.ingress_limits;
+    if ingress.struct_size != crate::OBSERVATION_INGRESS_LIMITS_BYTES
+        || ingress.abi_version != ABI_VERSION
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let request = record.spectrum_request;
+    if request.struct_size != SPECTRUM_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.target != SPECTRUM_TARGET_TRACK_POST_MATRIX
+        || request.channels != SPECTRUM_CHANNEL_BOTH
+        || request.reserved0 != 0
+        || request.reserved != [0; 2]
+        || request.maximum_capture_bytes == 0
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let target_bytes =
+        usize::try_from(request.target_id_bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if !(1..=SPECTRUM_MAXIMUM_ID_BYTES).contains(&target_bytes)
+        || record.target_id[target_bytes..]
+            .iter()
+            .any(|byte| *byte != 0)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    core::str::from_utf8(&record.target_id[..target_bytes]).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    Ok(())
 }
 
 fn spectrum_capture_bytes(channels: u32) -> usize {
@@ -3398,9 +3533,50 @@ pub extern "C" fn miso_engine_web_v1_buffer_capacity(handle: u32, kind: u32) -> 
     with_host(handle, 0, |host| buffer_capacity(host, kind))
 }
 
-/// Boot the exact staged document and atomically publish the sole running handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
+#[derive(Clone, Copy)]
+enum StagedBootMode {
+    Legacy,
+    ProtectedObservation,
+}
+
+impl ObservationEndpointStaging {
+    fn reset_outputs(&mut self) {
+        let mut demand = WebObservationDemand::default();
+        demand.struct_size = size_of::<WebObservationDemand>() as u32;
+        demand.abi_version = ABI_VERSION;
+        self.demand = demand;
+        self.admission = WebObservationAdmission::default();
+        self.status = WebObservationStatus::default();
+        self.capture_identity = WebObservationCaptureIdentity::default();
+        self.applications = [WebObservationReceipt::default(); 4];
+        self.application_count = 0;
+        self.handle = 0;
+        self.terminal_application_pending = false;
+    }
+}
+
+fn prewarm_observation_staging() -> Result<(), BootFailure> {
+    OBSERVATION_STAGING.with(|slot| {
+        slot.try_borrow_mut()
+            .map(|_| ())
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.observation.staging"))
+    })?;
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow_mut()
+            .map(|_| ())
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.response.staging"))
+    })?;
+    SPECTRUM_STAGING.with(|slot| {
+        let mut staging = slot
+            .try_borrow_mut()
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"))?;
+        staging
+            .configure_capture()
+            .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))
+    })
+}
+
+fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
     let already_live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
     if already_live {
         BOOT_STAGING.with(|staging| {
@@ -3422,25 +3598,133 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
             staging.document_valid = false;
             return None;
         }
-        let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
-            let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
-                return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
-            };
-            let request = staged_spectrum_request(&spectrum)
-                .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))?;
-            if request.is_some() {
-                spectrum
-                    .configure_capture()
-                    .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))?;
-            } else {
-                spectrum.release_capture();
+
+        let result = match mode {
+            StagedBootMode::Legacy => {
+                let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
+                    let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
+                        return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
+                    };
+                    let request = staged_spectrum_request(&spectrum)
+                        .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))?;
+                    if request.is_some() {
+                        spectrum
+                            .configure_capture()
+                            .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))?;
+                    } else {
+                        spectrum.release_capture();
+                    }
+                    Ok(request)
+                });
+                spectrum_request.and_then(|request| {
+                    AudioWorkletEngineHost::boot_with_spectrum(
+                        &staging.document,
+                        *staging.options,
+                        request,
+                    )
+                })
             }
-            Ok(request)
-        });
-        match spectrum_request.and_then(|request| {
-            AudioWorkletEngineHost::boot_with_spectrum(&staging.document, *staging.options, request)
-        }) {
+            StagedBootMode::ProtectedObservation => OBSERVATION_STAGING.with(|slot| {
+                let Ok(staged) = slot.try_borrow() else {
+                    return Err(BootFailure::fixed(
+                        RESULT_INTERNAL,
+                        "web.observation.staging",
+                    ));
+                };
+                let record = &staged.endpoint.preparation;
+                validate_observation_preparation_record(record)
+                    .map_err(|result| BootFailure::fixed(result, "web.observation.preparation"))?;
+                let request = record.spectrum_request;
+                let maximum_active_observers = usize::try_from(record.maximum_active_observers)
+                    .map_err(|_| {
+                        BootFailure::fixed(
+                            RESULT_INVALID_ARGUMENT,
+                            "web.observation.maximum_active_observers",
+                        )
+                    })?;
+                let target_bytes = usize::try_from(request.target_id_bytes).map_err(|_| {
+                    BootFailure::fixed(RESULT_INVALID_ARGUMENT, "web.observation.target")
+                })?;
+                let target =
+                    core::str::from_utf8(&record.target_id[..target_bytes]).map_err(|_| {
+                        BootFailure::fixed(RESULT_INVALID_ARGUMENT, "web.observation.target")
+                    })?;
+                let mut entries = Vec::new();
+                entries.try_reserve_exact(1).map_err(|_| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.observation.spectrum")
+                })?;
+                entries.push(SpectrumCaptureCollectionEntry {
+                    target: SpectrumTarget::TrackPostMatrix(target.into()),
+                    channels: SpectrumChannels::Stereo,
+                });
+                let spectrum = SpectrumCaptureCollectionRequest {
+                    entries,
+                    maximum_capture_bytes: request.maximum_capture_bytes,
+                };
+                let work = record.work_limits;
+                let ingress = record.ingress_limits;
+                let preparation = WebObservationPreparation {
+                    profile: WebObservationProfile::EqSpectrum,
+                    demand: host_core::HostObservationPreparation {
+                        meters: &[],
+                        spectrum: Some(&spectrum),
+                        work_limits: ObservationWorkLimits {
+                            maximum_active_meter_channels: work.maximum_active_meter_channels,
+                            maximum_meter_samples_per_block: work.maximum_meter_samples_per_block,
+                            maximum_meter_publications_per_block: work
+                                .maximum_meter_publications_per_block,
+                            maximum_meter_publication_bytes_per_block: work
+                                .maximum_meter_publication_bytes_per_block,
+                            maximum_active_spectrum_captures: work.maximum_active_spectrum_captures,
+                            maximum_capture_input_samples_per_block: work
+                                .maximum_capture_input_samples_per_block,
+                            maximum_capture_copy_samples_per_block: work
+                                .maximum_capture_copy_samples_per_block,
+                            maximum_capture_publications_per_block: work
+                                .maximum_capture_publications_per_block,
+                            maximum_capture_bytes_per_second: work.maximum_capture_bytes_per_second,
+                            maximum_transition_entry_visits_per_block: work
+                                .maximum_transition_entry_visits_per_block,
+                            maximum_retained_bytes: work.maximum_retained_bytes,
+                        },
+                        activation: GraphObservationActivationConfig {
+                            maximum_active_observers,
+                            maximum_retained_bytes: record.activation_maximum_retained_bytes,
+                        },
+                    },
+                    ingress: ObservationIngressLimits {
+                        maximum_control_bytes: ingress.maximum_control_bytes,
+                        maximum_observation_rows: ingress.maximum_observation_rows,
+                        maximum_result_bytes: ingress.maximum_result_bytes,
+                        ordinary_operations_per_boundary: ingress.ordinary_operations_per_boundary,
+                        removal_operations_per_boundary: ingress.removal_operations_per_boundary,
+                        maximum_admission_entry_visits: ingress.maximum_admission_entry_visits,
+                        maximum_response_binding_visits: ingress.maximum_response_binding_visits,
+                        maximum_response_section_visits: ingress.maximum_response_section_visits,
+                        maximum_response_copy_bytes: ingress.maximum_response_copy_bytes,
+                        maximum_handler_copy_bytes_per_boundary: ingress
+                            .maximum_handler_copy_bytes_per_boundary,
+                        maximum_cleanup_entry_visits_per_boundary: ingress
+                            .maximum_cleanup_entry_visits_per_boundary,
+                        maximum_retained_bytes: ingress.maximum_retained_bytes,
+                    },
+                };
+                AudioWorkletEngineHost::boot_with_observation_demand(
+                    &staging.document,
+                    *staging.options,
+                    &preparation,
+                )
+            }),
+        };
+
+        match result {
             Ok(host) => {
+                if matches!(mode, StagedBootMode::ProtectedObservation) {
+                    if let Err(failure) = prewarm_observation_staging() {
+                        staging.record_failure(failure);
+                        return None;
+                    }
+                }
                 staging.result = RESULT_OK;
                 staging.diagnostic_bytes = 0;
                 staging.document_valid = false;
@@ -3460,7 +3744,8 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
         });
         return 0;
     };
-    LIVE_HOST.with(|slot| {
+    let initial_status = host.observation_status();
+    let handle = LIVE_HOST.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -3473,7 +3758,29 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
             host: Box::new(host),
         });
         handle
-    })
+    });
+    if handle != 0 {
+        OBSERVATION_STAGING.with(|slot| {
+            if let Ok(mut staging) = slot.try_borrow_mut() {
+                staging.endpoint.reset_outputs();
+                staging.endpoint.status = initial_status;
+                staging.endpoint.handle = handle;
+            }
+        });
+    }
+    handle
+}
+
+/// Private protected staged boot used by the checkpoint-A fixtures.
+#[allow(dead_code)]
+pub(crate) fn boot_staged_observation_demand(len: u32) -> u32 {
+    boot_staged(len, StagedBootMode::ProtectedObservation)
+}
+
+/// Boot the exact staged document and atomically publish the sole running handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
+    boot_staged(len, StagedBootMode::Legacy)
 }
 
 /// Return the frozen result code of the last boot attempt.

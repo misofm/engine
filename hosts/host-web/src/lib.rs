@@ -320,6 +320,189 @@ pub struct ObservationIngressLimits {
     pub maximum_retained_bytes: u64,
 }
 
+/// Fixed wire limits for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationWorkLimits {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub maximum_active_meter_channels: u64,
+    pub maximum_meter_samples_per_block: u64,
+    pub maximum_meter_publications_per_block: u64,
+    pub maximum_meter_publication_bytes_per_block: u64,
+    pub maximum_active_spectrum_captures: u64,
+    pub maximum_capture_input_samples_per_block: u64,
+    pub maximum_capture_copy_samples_per_block: u64,
+    pub maximum_capture_publications_per_block: u64,
+    pub maximum_capture_bytes_per_second: u64,
+    pub maximum_transition_entry_visits_per_block: u64,
+    pub maximum_retained_bytes: u64,
+}
+
+impl Default for WebObservationWorkLimits {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            maximum_active_meter_channels: 0,
+            maximum_meter_samples_per_block: 0,
+            maximum_meter_publications_per_block: 0,
+            maximum_meter_publication_bytes_per_block: 0,
+            maximum_active_spectrum_captures: 0,
+            maximum_capture_input_samples_per_block: 0,
+            maximum_capture_copy_samples_per_block: 0,
+            maximum_capture_publications_per_block: 0,
+            maximum_capture_bytes_per_second: 0,
+            maximum_transition_entry_visits_per_block: 0,
+            maximum_retained_bytes: 0,
+        }
+    }
+}
+
+/// Fixed wire ingress limits for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationIngressLimits {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub maximum_control_bytes: u32,
+    pub maximum_observation_rows: u32,
+    pub maximum_result_bytes: u32,
+    pub ordinary_operations_per_boundary: u32,
+    pub removal_operations_per_boundary: u32,
+    pub maximum_admission_entry_visits: u64,
+    pub maximum_response_binding_visits: u64,
+    pub maximum_response_section_visits: u64,
+    pub maximum_response_copy_bytes: u64,
+    pub maximum_handler_copy_bytes_per_boundary: u64,
+    pub maximum_cleanup_entry_visits_per_boundary: u64,
+    pub maximum_retained_bytes: u64,
+}
+
+impl Default for WebObservationIngressLimits {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            maximum_control_bytes: 0,
+            maximum_observation_rows: 0,
+            maximum_result_bytes: 0,
+            ordinary_operations_per_boundary: 0,
+            removal_operations_per_boundary: 0,
+            maximum_admission_entry_visits: 0,
+            maximum_response_binding_visits: 0,
+            maximum_response_section_visits: 0,
+            maximum_response_copy_bytes: 0,
+            maximum_handler_copy_bytes_per_boundary: 0,
+            maximum_cleanup_entry_visits_per_boundary: 0,
+            maximum_retained_bytes: 0,
+        }
+    }
+}
+
+/// Fixed wire preparation record for the protected browser observation endpoint.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WebObservationPreparationRecord {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub profile: u32,
+    pub meter_count: u32,
+    pub resident_taps: u32,
+    pub spectrum_count: u32,
+    pub maximum_active_observers: u32,
+    pub reserved0: u32,
+    pub activation_maximum_retained_bytes: u64,
+    pub work_limits: WebObservationWorkLimits,
+    pub ingress_limits: WebObservationIngressLimits,
+    pub spectrum_request: WebSpectrumRequest,
+    pub target_id: [u8; 128],
+}
+
+impl Default for WebObservationPreparationRecord {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            profile: 0,
+            meter_count: 0,
+            resident_taps: 0,
+            spectrum_count: 0,
+            maximum_active_observers: 0,
+            reserved0: 0,
+            activation_maximum_retained_bytes: 0,
+            work_limits: WebObservationWorkLimits::default(),
+            ingress_limits: WebObservationIngressLimits::default(),
+            spectrum_request: WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                ..WebSpectrumRequest::default()
+            },
+            target_id: [0; 128],
+        }
+    }
+}
+
+/// Fixed wire status projection for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationStatus {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub profile: u32,
+    pub flags: u32,
+    pub pending_count: u32,
+    pub reserved: u32,
+    pub owner: u64,
+    pub ingress_epoch: u64,
+    pub accepted_generation: u64,
+    pub applied_generation: u64,
+    pub selection_epoch: u64,
+}
+
+impl Default for WebObservationStatus {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            profile: 0,
+            flags: 0,
+            pending_count: 0,
+            reserved: 0,
+            owner: 0,
+            ingress_epoch: 0,
+            accepted_generation: 0,
+            applied_generation: 0,
+            selection_epoch: 0,
+        }
+    }
+}
+
+/// Byte sizes of the protected observation preparation and status records.
+#[allow(missing_docs)]
+pub const OBSERVATION_WORK_LIMITS_BYTES: u32 = size_of::<WebObservationWorkLimits>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_INGRESS_LIMITS_BYTES: u32 = size_of::<WebObservationIngressLimits>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_PREPARATION_BYTES: u32 = size_of::<WebObservationPreparationRecord>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_BYTES: u32 = size_of::<WebObservationStatus>() as u32;
+/// Protected observation profile and status flags.
+#[allow(missing_docs)]
+pub const OBSERVATION_PROFILE_EQ_SPECTRUM: u32 = 1;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE: u32 = 1;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE: u32 = 1 << 1;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_FLAG_TERMINAL: u32 = 1 << 2;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_FLAG_RENDER_FAILED: u32 = 1 << 3;
+
 /// Scalar observation demand submitted through the protected browser endpoint.
 #[allow(missing_docs)]
 #[repr(C)]
@@ -444,6 +627,7 @@ impl Default for WebObservationCaptureIdentity {
 #[allow(dead_code)]
 struct ObservationSideRecords {
     admission: WebObservationAdmission,
+    status: WebObservationStatus,
     capture_identity: WebObservationCaptureIdentity,
     receipts: [WebObservationReceipt; 4],
     applications: [WebObservationReceipt; 4],
@@ -2472,6 +2656,50 @@ impl AudioWorkletEngineHost {
     #[allow(dead_code)]
     pub(crate) const fn observation_capture_identity(&self) -> &WebObservationCaptureIdentity {
         &self.side_records.capture_identity
+    }
+
+    /// Project the native observation owner using scalar state only.
+    ///
+    /// This path never polls application receipts or touches capture queues. A terminal snapshot
+    /// retained after disposal is returned verbatim, preserving the last native generations and
+    /// the render-failed bit observed before ownership was dropped.
+    fn observation_status(&self) -> WebObservationStatus {
+        if self.ready.is_none() && self.side_records.terminal_finalized {
+            return self.side_records.status;
+        }
+
+        let mut status = WebObservationStatus::default();
+        let Some(ready) = self.ready.as_ref() else {
+            return status;
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return status;
+        };
+
+        let spectrum = storage.controller.spectrum_state();
+        status.profile = OBSERVATION_PROFILE_EQ_SPECTRUM;
+        status.owner = storage.controller.owner().get();
+        status.ingress_epoch = storage.ingress.epoch;
+        status.accepted_generation = spectrum.accepted_generation;
+        status.applied_generation = spectrum.applied_generation;
+        status.selection_epoch = spectrum.selection_epoch;
+        status.pending_count = u32::from(self.side_records.pending_count);
+        let terminal = storage.controller.is_closed() || self.side_records.terminal_finalized;
+        if self.status.state == STATE_READY && !storage.ingress.exhausted && !terminal {
+            if !storage.ingress.ordinary_used {
+                status.flags |= OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE;
+            }
+            if !storage.ingress.removal_used {
+                status.flags |= OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE;
+            }
+        }
+        if terminal {
+            status.flags |= OBSERVATION_STATUS_FLAG_TERMINAL;
+        }
+        if self.status.state == STATE_FAILED {
+            status.flags |= OBSERVATION_STATUS_FLAG_RENDER_FAILED;
+        }
+        status
     }
 
     fn protected_observation_prepared(&self) -> bool {
@@ -5128,6 +5356,9 @@ impl AudioWorkletEngineHost {
         if !self.side_records.terminal_finalized && (protected_owner || has_protected_receipts) {
             self.reconcile_observation_applications();
             self.close_observation_receipts(self.status.state == STATE_FAILED);
+        }
+        if protected_owner {
+            self.side_records.status = self.observation_status();
         }
         self.ready = None;
         self.buffers = None;

@@ -125,6 +125,7 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+pub use graph::GraphObservationActivationConfig;
 pub use observation_demand::{
     HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
     HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, HostSpectrumState,
