@@ -8191,6 +8191,18 @@ mod observation_checkpoint_a_tests {
         include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json")
     }
 
+    fn one_track_protected_document() -> String {
+        let mut model = session::parse_session_json(
+            core::str::from_utf8(protected_document()).expect("protected fixture is UTF-8"),
+        )
+        .expect("protected fixture parses");
+        assert_eq!(model.sample_rate_hz, 48_000);
+        model.quantum_frames = 128;
+        model.tracks.truncate(1);
+        model.routes.truncate(1);
+        session::canonical_session_json(&model).expect("canonical one-track protected session")
+    }
+
     pub(super) fn no_live_host() {
         assert!(LIVE_HOST.with(|slot| slot.borrow().is_none()));
     }
@@ -8326,6 +8338,87 @@ mod observation_checkpoint_a_tests {
             "budget refusal must publish a boot diagnostic"
         );
         no_live_host();
+    }
+
+    #[test]
+    fn public_protected_boot_refuses_fixed_spectrum_payload_budget_floor() {
+        const PROTECTED_PAYLOAD_FLOOR_BYTES: u64 = 2_097_152;
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+
+        struct BudgetCase {
+            name: &'static str,
+            host_maximum_memory_bytes: u64,
+            ingress_maximum_retained_bytes: u64,
+            diagnostic_prefix: &'static [u8],
+        }
+
+        let cases = [
+            BudgetCase {
+                name: "host-only",
+                host_maximum_memory_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                ingress_maximum_retained_bytes: GENEROUS_BUDGET_BYTES,
+                diagnostic_prefix: b"host.budget.retained_projection\t",
+            },
+            BudgetCase {
+                name: "ingress-only",
+                host_maximum_memory_bytes: GENEROUS_BUDGET_BYTES,
+                ingress_maximum_retained_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                diagnostic_prefix: b"web.observation.ingress.maximum_retained_bytes\t",
+            },
+            BudgetCase {
+                name: "both-low",
+                host_maximum_memory_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                ingress_maximum_retained_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                diagnostic_prefix: b"host.budget.retained_projection\t",
+            },
+        ];
+        let document = one_track_protected_document();
+
+        no_live_host();
+        for case in cases {
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+            let mut record = protected_preparation_record();
+            record.ingress_limits.maximum_retained_bytes = case.ingress_maximum_retained_bytes;
+            stage_protected_boot(document.as_bytes(), record);
+            BOOT_STAGING.with(|slot| {
+                slot.borrow_mut().options.maximum_memory_bytes = case.host_maximum_memory_bytes;
+            });
+            test_stage_document(document.as_bytes());
+
+            let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+            assert_eq!(
+                handle, 0,
+                "protected boot must refuse the independent payload floor for {}",
+                case.name
+            );
+            assert_eq!(
+                miso_engine_web_v1_boot_result(),
+                RESULT_REFUSED_BUDGET,
+                "protected boot result for {}",
+                case.name
+            );
+            let diagnostic = BOOT_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let length = staging.diagnostic_bytes as usize;
+                assert!(length <= staging.document.len(), "bounded boot diagnostic");
+                staging.document[..length].to_vec()
+            });
+            assert!(
+                diagnostic.starts_with(case.diagnostic_prefix),
+                "unexpected {} diagnostic: {:?}",
+                case.name,
+                String::from_utf8_lossy(&diagnostic)
+            );
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                0,
+                "under-budget {} boot entered spectrum configuration",
+                case.name
+            );
+            no_live_host();
+        }
     }
 
     struct ProtectedBootPreparationCase {
