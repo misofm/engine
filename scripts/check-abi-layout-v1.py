@@ -235,6 +235,7 @@ STRUCTURES = {
     "observationPreparation": 392,
     "observationDemand": 32,
     "observationReceipt": 48,
+    "observationAdmission": 232,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -394,6 +395,16 @@ OBSERVATION_RECEIPT_FIELDS = [
 ]
 OBSERVATION_RECEIPT_TYPES = [
     "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
+]
+OBSERVATION_ADMISSION_FIELDS = [
+    "structSize", "abiVersion", "result", "operation", "flags", "reason", "limitBytes",
+    "reserved", "ingressEpoch", "requested", "maximum", "limit", "receipt.structSize",
+    "receipt.abiVersion", "receipt.domain", "receipt.state", "receipt.owner", "receipt.sequence",
+    "receipt.applicationSample", "receipt.result", "receipt.reserved",
+]
+OBSERVATION_ADMISSION_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u64", "u64",
+    "u8[128]", "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
 ]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
@@ -564,6 +575,11 @@ def validate(document: object) -> None:
             f"observationReceipt names exactly {OBSERVATION_RECEIPT_FIELDS}")
     require([row["type"] for row in receipt] == OBSERVATION_RECEIPT_TYPES,
             f"observationReceipt types exactly {OBSERVATION_RECEIPT_TYPES}")
+    admission = structures["observationAdmission"]["fields"]
+    require([row["name"] for row in admission] == OBSERVATION_ADMISSION_FIELDS,
+            f"observationAdmission names exactly {OBSERVATION_ADMISSION_FIELDS}")
+    require([row["type"] for row in admission] == OBSERVATION_ADMISSION_TYPES,
+            f"observationAdmission types exactly {OBSERVATION_ADMISSION_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")

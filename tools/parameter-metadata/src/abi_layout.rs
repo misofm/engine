@@ -90,13 +90,13 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationDemand, WebObservationIngressLimits,
-    WebObservationPreparationRecord, WebObservationReceipt, WebObservationResult,
-    WebObservationSelection, WebObservationWorkLimits, WebPreparedEffectCompanionHeader,
-    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget, WebResourceReport,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationAdmission, WebObservationDemand,
+    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
+    WebObservationResult, WebObservationSelection, WebObservationWorkLimits,
+    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -1217,6 +1217,133 @@ fn observation_receipt_fields() -> [Field; 9] {
             "reserved",
             offset_of!(WebObservationReceipt, reserved),
             "u32",
+        ),
+    ]
+}
+
+const OBSERVATION_ADMISSION_RECEIPT_NAMES: [&str; 9] = [
+    "receipt.structSize",
+    "receipt.abiVersion",
+    "receipt.domain",
+    "receipt.state",
+    "receipt.owner",
+    "receipt.sequence",
+    "receipt.applicationSample",
+    "receipt.result",
+    "receipt.reserved",
+];
+
+fn observation_admission_fields() -> [Field; 21] {
+    let receipt = observation_receipt_fields();
+    let limit_offset = offset_of!(WebObservationAdmission, limit);
+    let receipt_offset = offset_of!(WebObservationAdmission, receipt);
+
+    assert_eq!(size_of::<WebObservationAdmission>(), 232);
+    assert_eq!(receipt.len(), OBSERVATION_ADMISSION_RECEIPT_NAMES.len());
+    assert_eq!(receipt[0].1, 0);
+    assert_eq!(
+        receipt[receipt.len() - 1].1 + size_of::<u32>(),
+        size_of::<WebObservationReceipt>()
+    );
+    assert_eq!(
+        limit_offset + size_of::<[u8; 128]>(),
+        receipt_offset,
+        "the admission limit ends at the nested receipt"
+    );
+    assert_eq!(
+        receipt_offset + size_of::<WebObservationReceipt>(),
+        size_of::<WebObservationAdmission>()
+    );
+
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationAdmission, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationAdmission, abi_version),
+            "u32",
+        ),
+        ("result", offset_of!(WebObservationAdmission, result), "u32"),
+        (
+            "operation",
+            offset_of!(WebObservationAdmission, operation),
+            "u32",
+        ),
+        ("flags", offset_of!(WebObservationAdmission, flags), "u32"),
+        ("reason", offset_of!(WebObservationAdmission, reason), "u32"),
+        (
+            "limitBytes",
+            offset_of!(WebObservationAdmission, limit_bytes),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebObservationAdmission, reserved),
+            "u32",
+        ),
+        (
+            "ingressEpoch",
+            offset_of!(WebObservationAdmission, ingress_epoch),
+            "u64",
+        ),
+        (
+            "requested",
+            offset_of!(WebObservationAdmission, requested),
+            "u64",
+        ),
+        (
+            "maximum",
+            offset_of!(WebObservationAdmission, maximum),
+            "u64",
+        ),
+        ("limit", limit_offset, "u8[128]"),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[0],
+            receipt_offset + receipt[0].1,
+            receipt[0].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[1],
+            receipt_offset + receipt[1].1,
+            receipt[1].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[2],
+            receipt_offset + receipt[2].1,
+            receipt[2].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[3],
+            receipt_offset + receipt[3].1,
+            receipt[3].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[4],
+            receipt_offset + receipt[4].1,
+            receipt[4].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[5],
+            receipt_offset + receipt[5].1,
+            receipt[5].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[6],
+            receipt_offset + receipt[6].1,
+            receipt[6].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[7],
+            receipt_offset + receipt[7].1,
+            receipt[7].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[8],
+            receipt_offset + receipt[8].1,
+            receipt[8].2,
         ),
     ]
 }
@@ -2452,6 +2579,13 @@ pub fn render() -> String {
         "observationReceipt",
         size_of::<WebObservationReceipt>() as u32,
         &observation_receipt_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationAdmission",
+        size_of::<WebObservationAdmission>() as u32,
+        &observation_admission_fields(),
         true,
     );
     render_structure(

@@ -24,9 +24,9 @@ use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationDemand,
-    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
-    WebObservationWorkLimits, default_source_ring_frames,
+    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationAdmission,
+    WebObservationDemand, WebObservationIngressLimits, WebObservationPreparationRecord,
+    WebObservationReceipt, WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -823,6 +823,150 @@ fn observation_receipt_layout_matches_the_rust_record() {
         next_offset += width;
     }
     assert_eq!(next_offset, size_of::<WebObservationReceipt>());
+}
+
+/// The admission record flattens its own leaves and every nested receipt leaf into one complete
+/// parent layout. The receipt itself is represented only by its prefixed leaves, so no aggregate
+/// row overlaps those bytes.
+#[test]
+fn observation_admission_layout_flattens_the_rust_record() {
+    let document = render();
+    let structure = "observationAdmission";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationAdmission>());
+    assert_eq!(bytes, 232);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationAdmission, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("result", result, u32);
+    assert_field!("operation", operation, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("reason", reason, u32);
+    assert_field!("limitBytes", limit_bytes, u32);
+    assert_field!("reserved", reserved, u32);
+    assert_field!("ingressEpoch", ingress_epoch, u64);
+    assert_field!("requested", requested, u64);
+    assert_field!("maximum", maximum, u64);
+
+    let (limit_offset, limit_type) = field_entry(&document, structure, "limit");
+    assert_eq!(limit_offset, offset_of!(WebObservationAdmission, limit));
+    assert_eq!(limit_type, "u8[128]");
+
+    let receipt_offset = offset_of!(WebObservationAdmission, receipt);
+    assert_eq!(
+        receipt_offset,
+        offset_of!(WebObservationAdmission, limit) + size_of::<[u8; 128]>()
+    );
+    assert_eq!(
+        receipt_offset + size_of::<WebObservationReceipt>(),
+        size_of::<WebObservationAdmission>()
+    );
+
+    let receipt_fields = [
+        (
+            "receipt.structSize",
+            offset_of!(WebObservationReceipt, struct_size),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.abiVersion",
+            offset_of!(WebObservationReceipt, abi_version),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.domain",
+            offset_of!(WebObservationReceipt, domain),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.state",
+            offset_of!(WebObservationReceipt, state),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.owner",
+            offset_of!(WebObservationReceipt, owner),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.sequence",
+            offset_of!(WebObservationReceipt, sequence),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.applicationSample",
+            offset_of!(WebObservationReceipt, application_sample),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.result",
+            offset_of!(WebObservationReceipt, result),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.reserved",
+            offset_of!(WebObservationReceipt, reserved),
+            size_of::<u32>(),
+        ),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("result", size_of::<u32>()),
+        ("operation", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("reason", size_of::<u32>()),
+        ("limitBytes", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+        ("ingressEpoch", size_of::<u64>()),
+        ("requested", size_of::<u64>()),
+        ("maximum", size_of::<u64>()),
+        ("limit", size_of::<[u8; 128]>()),
+    ] {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded admission structure"
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    for (name, child_offset, width) in receipt_fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded admission structure"
+        );
+        assert_eq!(
+            field_offset(&document, structure, name),
+            receipt_offset + child_offset
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
 }
 
 /// Regeneration is deterministic: the same tree renders the same bytes.
