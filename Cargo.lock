@@ -1028,6 +1028,7 @@ dependencies = [
  "builtins-compiler",
  "effect-contract",
  "engine",
+ "graph",
  "host-core",
  "math",
  "serde_json",

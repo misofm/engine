@@ -8261,3 +8261,156 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     assert_eq!(no_console.prepared_companion_capacity(), 0);
     assert!(no_console.eq_target_config().is_none());
 }
+
+fn protected_eq_preparation(
+    request: &SpectrumCaptureCollectionRequest,
+) -> WebObservationPreparation<'_> {
+    WebObservationPreparation {
+        profile: WebObservationProfile::EqSpectrum,
+        demand: host_core::HostObservationPreparation {
+            meters: &[],
+            spectrum: Some(request),
+            activation: graph::GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+            work_limits: host_core::ObservationWorkLimits {
+                maximum_active_meter_channels: u64::MAX,
+                maximum_meter_samples_per_block: u64::MAX,
+                maximum_meter_publications_per_block: u64::MAX,
+                maximum_meter_publication_bytes_per_block: u64::MAX,
+                maximum_active_spectrum_captures: u64::MAX,
+                maximum_capture_input_samples_per_block: u64::MAX,
+                maximum_capture_copy_samples_per_block: u64::MAX,
+                maximum_capture_publications_per_block: u64::MAX,
+                maximum_capture_bytes_per_second: u64::MAX,
+                maximum_transition_entry_visits_per_block: u64::MAX,
+                maximum_retained_bytes: u64::MAX,
+            },
+        },
+        ingress: ObservationIngressLimits {
+            maximum_control_bytes: 8192,
+            maximum_observation_rows: 32,
+            maximum_result_bytes: 65536,
+            ordinary_operations_per_boundary: 1,
+            removal_operations_per_boundary: 1,
+            maximum_admission_entry_visits: u64::MAX,
+            maximum_response_binding_visits: u64::MAX,
+            maximum_response_section_visits: u64::MAX,
+            maximum_response_copy_bytes: u64::MAX,
+            maximum_handler_copy_bytes_per_boundary: u64::MAX,
+            maximum_cleanup_entry_visits_per_boundary: u64::MAX,
+            maximum_retained_bytes: u64::MAX,
+        },
+    }
+}
+
+fn protected_eq_request() -> SpectrumCaptureCollectionRequest {
+    SpectrumCaptureCollectionRequest {
+        entries: vec![host_core::SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    }
+}
+
+#[test]
+fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut preparation = protected_eq_preparation(&request);
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &preparation,
+    )
+    .unwrap();
+    let ready = host.ready.as_ref().unwrap();
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert_eq!(storage.controller.spectrum_state().accepted_generation, 0);
+    assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+    assert_eq!(storage.ingress.epoch, 1);
+    assert!(ready.meters.is_empty());
+    assert!(ready.observation.legacy().is_none());
+    let retained = storage.ingress.bounds.retained_bytes;
+    let legacy = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(128)).unwrap();
+    let overlap = size_of::<HostObservationController>() as u64;
+    let target_bytes = storage.target_track_id.len() as u64;
+    assert_eq!(
+        host.resources.bridge_metadata_bytes,
+        legacy.resources.bridge_metadata_bytes - overlap + target_bytes
+    );
+    assert_eq!(
+        host.resources.bridge_retained_bytes,
+        legacy.resources.bridge_retained_bytes - overlap + target_bytes
+    );
+    assert_eq!(
+        host.resources.largest_bridge_allocation_bytes,
+        legacy.resources.largest_bridge_allocation_bytes
+    );
+    #[cfg(feature = "test-support")]
+    host_core::test_only_reset_spectrum_operation_counts();
+    assert_eq!(host.render_next(), RESULT_OK);
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        host_core::test_only_spectrum_operation_counts(),
+        host_core::SpectrumOperationCounts::default()
+    );
+    preparation.ingress.maximum_retained_bytes = retained;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &preparation
+        )
+        .is_ok()
+    );
+    preparation.ingress.maximum_retained_bytes = retained - 1;
+    let failure = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &preparation,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.result, RESULT_REFUSED_BUDGET);
+}
+
+#[test]
+fn protected_eq_boot_rejects_incompatible_options_and_target() {
+    let document = one_track_resource_session(128);
+    let mut request = protected_eq_request();
+    let preparation = protected_eq_preparation(&request);
+    let mut options = boot_options(128);
+    options.console_meter_blocks = 1;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            options,
+            &preparation
+        )
+        .is_err()
+    );
+    request.entries[0].channels = SpectrumChannels::Left;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &protected_eq_preparation(&request)
+        )
+        .is_err()
+    );
+    request.entries[0].channels = SpectrumChannels::Stereo;
+    request.entries[0].target = SpectrumTarget::TrackPostMatrix("missing".into());
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &protected_eq_preparation(&request)
+        )
+        .is_err()
+    );
+}

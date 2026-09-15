@@ -38,6 +38,7 @@ use host_core::{
     PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, apply_input_filter_edit,
     compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_console_and_spectrum,
+    prepare_host_runtime_with_observation_demand_between_render_calls,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
@@ -51,6 +52,11 @@ use host_core::{
 use session::CompileCaps;
 
 use control_targets::{PREPARED_EFFECT_COMPANION_CAPACITY, PreparedControlWorkspace};
+
+use observation_ingress::{
+    ObservationIngressBridge, ObservationIngressShape, project_observation_ingress,
+    validate_observation_ingress_limits,
+};
 
 pub use host_core::EffectRack;
 
@@ -1430,6 +1436,11 @@ impl PreparedSpectrumCapture {
 struct ProtectedObservationStorage {
     controller: HostObservationController,
     ingress: ObservationIngressState,
+    /// Cadence derived once from the prepared session shape for later protected reads.
+    spectrum_cadence: SpectrumCadence,
+    /// Maximum packed payloads proved by the immutable ingress projection.
+    packed_response_bytes: u64,
+    packed_spectrum_bytes: u64,
     /// Prepared target identity retained off render for later response/spectrum mediation.
     target_track_id: Box<str>,
 }
@@ -1460,6 +1471,130 @@ impl PreparedObservationStorage {
             Self::Protected(_) => None,
         }
     }
+}
+
+struct ProtectedPreparationFacts {
+    target_track_id: Box<str>,
+    ingress_shape: ObservationIngressShape,
+    spectrum_cadence: SpectrumCadence,
+}
+
+fn validate_protected_options(options: WebBootOptions) -> Result<(), BootFailure> {
+    if options.console_observation_taps != 0
+        || options.console_meter_blocks != 0
+        || options.console_master_track_plus_one != 0
+    {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.console_options",
+        ));
+    }
+    Ok(())
+}
+
+fn protected_preparation_facts(
+    session: &CompiledSession,
+    preparation: &WebObservationPreparation<'_>,
+) -> Result<ProtectedPreparationFacts, BootFailure> {
+    if preparation.profile != WebObservationProfile::EqSpectrum {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.profile",
+        ));
+    }
+    if !preparation.demand.meters.is_empty() {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.meters",
+        ));
+    }
+    if preparation.demand.activation.maximum_active_observers != 1 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.activation.maximum_active_observers",
+        ));
+    }
+    let Some(spectrum) = preparation.demand.spectrum else {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum",
+        ));
+    };
+    let [entry] = spectrum.entries.as_slice() else {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.entries",
+        ));
+    };
+    if entry.channels != SpectrumChannels::Stereo {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.channels",
+        ));
+    }
+    let target_track_id = match &entry.target {
+        SpectrumTarget::TrackPostMatrix(track_id)
+            if !track_id.is_empty() && track_id.len() <= SPECTRUM_MAXIMUM_ID_BYTES =>
+        {
+            track_id
+        }
+        _ => {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.spectrum.target",
+            ));
+        }
+    };
+    if !session
+        .normalized_model()
+        .tracks
+        .iter()
+        .any(|track| track.id.as_str() == target_track_id.as_ref())
+    {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.target",
+        ));
+    }
+
+    let mut all_effects = 0_u64;
+    let mut selected_effects = 0_u64;
+    for track in &session.normalized_model().tracks {
+        let mut track_effects = 0_u64;
+        for count in [
+            track.simd1.effects.len(),
+            track.dynamic.effects.len(),
+            track.simd2.effects.len(),
+        ] {
+            let count = u64::try_from(count)
+                .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+            track_effects = track_effects.checked_add(count).ok_or_else(|| {
+                BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+            })?;
+        }
+        all_effects = all_effects
+            .checked_add(track_effects)
+            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+        if track.id.as_str() == target_track_id.as_ref() {
+            selected_effects = track_effects;
+        }
+    }
+    let all_tracks = u64::try_from(session.normalized_model().tracks.len())
+        .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+    let spectrum_cadence = SpectrumCadence::new(session.sample_rate().0, session.quantum().0)
+        .map_err(|_| {
+            BootFailure::fixed(RESULT_REFUSED_OPTIONS, "web.observation.spectrum_cadence")
+        })?;
+
+    Ok(ProtectedPreparationFacts {
+        target_track_id: target_track_id.clone(),
+        ingress_shape: ObservationIngressShape {
+            all_compiled_tracks: all_tracks,
+            all_compiled_effect_instances: all_effects,
+            selected_track_effect_instances: selected_effects,
+        },
+        spectrum_cadence,
+    })
 }
 
 /// Everything one compiled session owns on the browser side.
@@ -1916,6 +2051,18 @@ impl AudioWorkletEngineHost {
         Self::boot_with_spectrum(document, options, None)
     }
 
+    /// Prepare one private protected observation owner alongside the shared host transaction.
+    ///
+    /// This path remains crate-private until the protected operation aliases have been guarded.
+    #[allow(dead_code)]
+    fn boot_with_observation_demand(
+        document: &[u8],
+        options: WebBootOptions,
+        preparation: &WebObservationPreparation<'_>,
+    ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, None, Some(preparation))
+    }
+
     /// Prepare one optional graph spectrum observer alongside the existing console/meter plan.
     ///
     /// The request is supplied before boot because observer bindings are part of the immutable
@@ -1925,6 +2072,21 @@ impl AudioWorkletEngineHost {
         options: WebBootOptions,
         spectrum_request: Option<SpectrumPreparationRequest>,
     ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, spectrum_request, None)
+    }
+
+    fn boot_transaction(
+        document: &[u8],
+        options: WebBootOptions,
+        spectrum_request: Option<SpectrumPreparationRequest>,
+        observation_preparation: Option<&WebObservationPreparation<'_>>,
+    ) -> Result<Self, BootFailure> {
+        if spectrum_request.is_some() && observation_preparation.is_some() {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.preparation_conflict",
+            ));
+        }
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
         })?;
@@ -1935,6 +2097,9 @@ impl AudioWorkletEngineHost {
             ));
         }
         let options = validate_options(options)?;
+        if observation_preparation.is_some() {
+            validate_protected_options(options)?;
+        }
         let memory_budget = if options.maximum_memory_bytes == 0 {
             DEFAULT_MAXIMUM_MEMORY_BYTES
         } else {
@@ -1976,6 +2141,9 @@ impl AudioWorkletEngineHost {
                 "host.session.shape",
             ));
         }
+        let protected_facts = observation_preparation
+            .map(|preparation| protected_preparation_facts(&session, preparation))
+            .transpose()?;
         let source_ring_frames = if options.source_ring_frames == 0 {
             default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
         } else {
@@ -2027,6 +2195,8 @@ impl AudioWorkletEngineHost {
             options,
             projection.report,
             spectrum_request.as_ref(),
+            observation_preparation,
+            protected_facts,
         )?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
@@ -5779,6 +5949,8 @@ fn compile_ready(
     options: WebBootOptions,
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
+    observation_preparation: Option<&WebObservationPreparation<'_>>,
+    protected_facts: Option<ProtectedPreparationFacts>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
@@ -5796,38 +5968,72 @@ fn compile_ready(
     } else {
         Vec::new()
     };
-    let (host, handles, spectrum_capture) = match spectrum_request {
-        Some(SpectrumPreparationRequest::Single(request)) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_console_and_spectrum(&session, caps, &console, request)
-                    .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Single(capture)),
-            )
-        }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
-            let (host, handles, capture) =
-                host_core::prepare_host_runtime_with_console_and_spectrum_collection(
+    let (host, handles, spectrum_capture, protected_controller) =
+        match (spectrum_request, observation_preparation) {
+            (Some(_), Some(_)) => {
+                return Err(BootFailure::fixed(
+                    RESULT_REFUSED_OPTIONS,
+                    "web.observation.preparation_conflict",
+                ));
+            }
+            (Some(SpectrumPreparationRequest::Single(request)), None) => {
+                let (host, handles, capture) = prepare_host_runtime_with_console_and_spectrum(
                     &session, caps, &console, request,
                 )
                 .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Collection(capture)),
-            )
-        }
-        None => {
-            let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-                &session, caps, &console, &meters,
-            )
-            .map_err(BootFailure::preparation)?;
-            (host, handles, None)
-        }
-    };
+                (
+                    host,
+                    handles,
+                    Some(PreparedSpectrumCapture::Single(capture)),
+                    None,
+                )
+            }
+            (Some(SpectrumPreparationRequest::Collection(request)), None) => {
+                let (host, handles, capture) =
+                    host_core::prepare_host_runtime_with_console_and_spectrum_collection(
+                        &session, caps, &console, request,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (
+                    host,
+                    handles,
+                    Some(PreparedSpectrumCapture::Collection(capture)),
+                    None,
+                )
+            }
+            (None, Some(preparation)) => {
+                let (host, handles, controller) =
+                    prepare_host_runtime_with_observation_demand_between_render_calls(
+                        &session,
+                        caps,
+                        &console,
+                        &preparation.demand,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (host, handles, None, Some(controller))
+            }
+            (None, None) => {
+                let (host, handles) =
+                    prepare_host_runtime_with_selected_meters_between_render_calls(
+                        &session, caps, &console, &meters,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (host, handles, None, None)
+            }
+        };
     let engine = host.report;
+    let mut protected_facts = protected_facts;
+    if let Some(facts) = protected_facts.as_mut() {
+        if facts.ingress_shape.all_compiled_tracks != engine.track_count
+            || facts.ingress_shape.all_compiled_effect_instances != engine.effect_count
+        {
+            return Err(fixed_diagnostic("web.observation.prepared_counts").into());
+        }
+        // The projection consumes the counts from the prepared native report. The rack walk in
+        // `protected_preparation_facts` remains the checked source for the selected-track count.
+        facts.ingress_shape.all_compiled_tracks = engine.track_count;
+        facts.ingress_shape.all_compiled_effect_instances = engine.effect_count;
+    }
 
     let control_table = control_table_bytes(engine.source_count as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
@@ -6178,6 +6384,62 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
+    let observation = match (
+        observation_preparation,
+        protected_controller,
+        protected_facts,
+    ) {
+        (Some(preparation), Some(controller), Some(facts)) => {
+            let target_bytes = u64::try_from(facts.target_track_id.len())
+                .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
+            let bridge = ObservationIngressBridge {
+                projected_full_retained: report.bridge_retained_bytes,
+                additive_staging_bytes: 0,
+                private_target_allocation_bytes: target_bytes,
+            };
+            let projection = project_observation_ingress(
+                facts.ingress_shape,
+                bridge,
+                engine.observation_demand_resources.reserved_bytes,
+            )?;
+            validate_observation_ingress_limits(preparation.ingress, &projection)?;
+
+            let host_controller_bytes = u64::try_from(size_of::<HostObservationController>())
+                .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
+            report.bridge_metadata_bytes = report
+                .bridge_metadata_bytes
+                .checked_sub(host_controller_bytes)
+                .and_then(|bytes| bytes.checked_add(target_bytes))
+                .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+            report.bridge_retained_bytes = report
+                .bridge_retained_bytes
+                .checked_sub(host_controller_bytes)
+                .and_then(|bytes| bytes.checked_add(target_bytes))
+                .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+            // Keep the full actual shell allocation in the largest-allocation row. The target ID
+            // is a separate small allocation and does not replace that containing layout.
+            report.largest_bridge_allocation_bytes =
+                report.largest_bridge_allocation_bytes.max(target_bytes);
+            report.largest_named_allocation_bytes =
+                report.largest_named_allocation_bytes.max(target_bytes);
+
+            PreparedObservationStorage::Protected(ProtectedObservationStorage {
+                controller,
+                ingress: ObservationIngressState::new(preparation.ingress, projection.bounds),
+                spectrum_cadence: facts.spectrum_cadence,
+                packed_response_bytes: projection.packed_response_bytes,
+                packed_spectrum_bytes: projection.packed_spectrum_bytes,
+                target_track_id: facts.target_track_id,
+            })
+        }
+        (None, None, None) => PreparedObservationStorage::Legacy(spectrum_capture),
+        _ => {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.preparation_conflict",
+            ));
+        }
+    };
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),
@@ -6199,7 +6461,7 @@ fn compile_ready(
         sample_rate_hz: session.sample_rate().0,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
-        observation: PreparedObservationStorage::Legacy(spectrum_capture),
+        observation,
         host,
         meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(track_count)?,

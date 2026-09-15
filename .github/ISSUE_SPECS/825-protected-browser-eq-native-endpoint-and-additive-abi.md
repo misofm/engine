@@ -263,3 +263,117 @@ To use actual ABI sizes immediately, the next bounded checkpoint declares only t
 The four canonical demand/receipt/admission/capture-identity records are declared with their final repr(C) fields. The private observation_ingress module computes the frozen checked bounds and separate per-call facts using actual Rust sizes internally; callers cannot provide a layout-size table. Limit validation is a separate helper that must run before publishing protected preparation. The minimum control capacity covers the largest supported fixed request plus a 127-byte identity, and the minimum row capacity is four receipts. Invalid profile ceilings/counts use REFUSED_OPTIONS; insufficient supplied budgets use REFUSED_BUDGET with the named field.
 
 Root reviewed the formula translation and ran all four focused arithmetic cases: PASS, including exact/one-below limits, overflow and full-H deduplication. The implementer also reports locked host-web check, warning-denying library Clippy, formatting and diff checks passed. No FFI exports, staging allocations, protected boot or operation routing are enabled yet. Next is private boot wiring using the projection and validator.
+
+
+## Frozen native mediation and bounded execution handoffs
+
+# #825 bounded native continuous-spectrum mediation contract
+
+Authority: canonical #825 preparation/ingress/receipt contract, #822 C4/C5 source, and root's reset-history ruling. Native-only checkpoint; no FFI/metadata/JS/SDK changes, new owner, ledger, allocator, scheduler, or worker. Public protected boot remains private until the following raw-command/response/meter alias guards land. Preserve legacy public signatures and behavior. Allowed implementation: host-web lib.rs, observation_ingress.rs, one narrowly factored native mediation module, existing native tests. No host-core change is necessary.
+
+## Storage and exact ownership
+
+ProtectedObservationStorage retains the unique controller, existing ingress/projection facts, and prepared SpectrumCadence. Move its existing target_track_id allocation into `spectrum_demand: HostSpectrumDemand { target: TrackPostMatrix { track_id }, channels: Stereo, mode: Continuous }`; response later borrows this exact target string. No per-start clone or second target allocation.
+Add `history_epoch: Option<u64>` and `history_dropped_captures: u64` there. Initially None/0. These are metadata caches, not observation generations or a second history allocator.
+Add one inline private `ObservationSideRecords` field to AudioWorkletEngineHost, OUTSIDE ReadyOwnership, containing:
+`admission: WebObservationAdmission`, `capture_identity: WebObservationCaptureIdentity`, `receipts: [WebObservationReceipt; 4]`, `applications: [WebObservationReceipt; 4]`, `application_len: usize`, `pending_count: u8`, `completed_count: u8`, `reserved_mask: u8`, `pending_stop_slot: Option<usize>`, `terminal_finalized: bool`.
+There are exactly four authoritative receipt slots; applications is the ordinary four-row outgoing staging, not another admission ledger. Row state0 means free internally and is never exported. The reservation mask distinguishes a reserved free row. Empty staging length0 invalidates old staging bytes; do not clear arrays on empty calls.
+All these inline fields are charged by actual sizeof(AudioWorkletEngineHost), with the already-approved full-H owner overlap subtraction once. Do not add their sizes again as additive allocation payloads. Preserve admission94/cleanup132 and F=4 projections unchanged; no guessed ABI sizes or extra queues.
+
+## Exact private seams
+
+Use these names/types; structs/enums are crate-private, with private permit fields and no Clone/Copy implementation for the permit. C below means the existing controller, never a raw capture.
+```rust
+enum ObservationClass { Ordinary, Removal }
+struct ObservationLengths { control_bytes: u64, rows: u64, result_bytes: u64 }
+struct ObservationPermit { owner: ObservationOwnerId, epoch: u64, class: ObservationClass }
+enum ProtectedSpectrumReadError { Refused(ObservationRefusal), Native(HostSpectrumReadError) }
+// AudioWorkletEngineHost methods; existing public stream methods call these only for Protected.
+fn begin_observation(&mut self, class: ObservationClass, lengths: ObservationLengths)
+    -> Result<ObservationPermit, ObservationRefusal>;
+fn start_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> Result<SpectrumCadence, u32>;
+fn restart_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32;
+fn stop_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32;
+fn read_protected_spectrum_stream(&mut self)
+    -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError>;
+fn read_spectrum_stream_admitted(&mut self, permit: ObservationPermit)
+    -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError>;
+fn reserve_receipt(&mut self, class: ObservationClass) -> Result<usize, ObservationRefusal>;
+fn release_receipt(&mut self, slot: usize);
+fn commit_receipt(&mut self, slot: usize, accepted: ObservationAccepted, operation: u32);
+fn reconcile_observation_applications(&mut self);
+fn take_observation_applications(&mut self) -> &[WebObservationReceipt];
+fn close_observation_receipts(&mut self, failed: bool);
+fn record_observation_admission(&mut self, operation: u32, result: u32,
+    refusal: Option<ObservationRefusal>, receipt: Option<WebObservationReceipt>, pending_boundary: bool);
+fn spectrum_capture_identity(window: &ObservedContinuousSpectrumWindow)
+    -> Result<WebObservationCaptureIdentity, u32>;
+fn commit_observation_capture_identity(&mut self, identity: WebObservationCaptureIdentity);
+// ObservationIngressState method, called only in render's successful branch.
+fn on_successful_render(&mut self);
+```
+Expose immutable native getters `observation_admission(&self) -> &WebObservationAdmission` and `observation_capture_identity(&self) -> &WebObservationCaptureIdentity`; take remains a between-render-calls native seam. Future ABI wrappers reuse these helpers and the same permit, never reacquiring credit.
+
+## Permit and operation behavior
+
+begin consumes the selected attempt before readiness/length/target/native checks; a refused attempt stays spent. Check explicit inclusive control/row/result lengths after consumption. Already-used credit refuses Backpressure with exact ordinary_operations_per_boundary/removal_operations_per_boundary, requested2, maximum1. Add ingress exhausted:bool, initially false; successful render checked-increments epoch and clears both bits, overflow permanently sets exhausted and grants nothing (RevisionExhausted). Failed render grants nothing. Permits carry actual C.owner(), current epoch and class; admitted helpers verify these fixed scalars and never issue another permit. A mismatched owner refuses WrongOwner, other token mismatch InvalidRequest, before native work; this cannot refund its original attempt.
+For native Rust start/restart reserve control_bytes=sizeof(WebSpectrumRequest)+prepared target bytes, rows1, result_bytes0; read uses control_bytes0, rows1, result_bytes=prepared packed_spectrum_bytes; stop uses control_bytes=sizeof(WebObservationDemand), rows0, result_bytes0. Later ABI wrappers provide their actual validated encoded lengths through the same begin seam before touching output staging.
+Public start/restart use Ordinary and tags4/5. After permit/readiness, reserve receipt, then call C.replace_spectrum(&retained_demand) ONCE or C.restart_spectrum() ONCE. Native refusal releases only that reservation; it changes no cached configuration or committed capture identity. Accepted publication commits Pending receipt infallibly, caches history1/drops0, records RESULT_OK with receipt and pendingBoundary, and returns prepared cadence/current result. No stop/start pair, trial publication, receipt polling, or raw capture calls.
+Public stop uses Removal/tag7. Before acquiring credit, a scalar pending_stop_slot check may return its existing Pending receipt unchanged, even with exhausted credit; no native call or scan. Otherwise acquire permit and reserve one row, then call C.stop_spectrum(). Pending commits the real acknowledgement; Quiescent releases the unused row and records RESULT_OK without receipt/pendingBoundary. After accepted stop, getters report inactive cadence/epoch via accepted_generation0; retained capture output/identity still keeps its old identity. StopGraph/tag3 later reuses this exact path because this profile has no other selected family.
+The ordinary reservation requires two free rows (its own plus one left for removal); removal requires one. Cached counts refuse full capacity without scanning. At most one four-row search picks a free unreserved slot. Refuse Backpressure when no admissible row, with no graph call and without overwriting any receipt. commit sets Graph1/Pending1, owner=accepted.owner.get(), sequence=accepted.revision, application_sample0, result=RESULT_OK and valid record header; stop/tag3 caches its slot. No invented receipt for Quiescent.
+
+## Read, compatibility, and identity
+
+read_protected_spectrum_stream acquires one Ordinary permit/tag6 then calls read_spectrum_stream_admitted; the admitted helper alone calls C.try_read_continuous_spectrum exactly once. No receipt slot, graph mutation, receipt reconciliation, or second queue pop. Native READY gating remains; a retained STATE_FAILED host permits receipt taking, not new capture/admission. A native read outcome is an admitted availability outcome, not a preflight refusal.
+Preserve the existing public `read_spectrum_stream() -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError>`. Its Protected branch calls the typed seam, commits identity only when returning a successful native window, then returns observed.window. Its Legacy branch stays unchanged. Future protected FFI must call the typed/admitted seam rather than this lossy compatibility facade.
+Native outcome | admission result / pendingBoundary | old Rust error
+Inactive | RESULT_WRONG_STATE / false | NotActive
+PendingApplication | RESULT_BACKPRESSURE / true | Pending
+Warming | RESULT_BACKPRESSURE / false | Warming
+Pending | RESULT_BACKPRESSURE / false | Pending
+Closed | RESULT_WRONG_STATE / false | NotActive
+Failed { epoch, .. } | RESULT_RENDER_REJECTED / false | Failed { same epoch }
+Gap { epoch, drops, .. } | RESULT_OK / false | Gap { same epoch, drops }
+All these native outcomes set reason0, no receipt, and retain the full HostSpectrumReadError in the typed path. Refused admission carries its exact ObservationRefusal in the side record; the old Rust facade maps Closed/NotPrepared to NotActive and all other admission refusals to Pending. Never infer a generation from that compatibility error.
+Refusal result mapping: NotPrepared→UNSUPPORTED; WrongOwner/InvalidRequest→INVALID_ARGUMENT; Capacity/WorkBudget/ArithmeticOverflow/RevisionExhausted→REFUSED_BUDGET; Backpressure→BACKPRESSURE; Conflict/Closed→WRONG_STATE. Preserve canonical refusal reasons1–10 and native limit/requested/maximum. All diagnostic writes initialize canonical headers/flags/reserved bytes; refusals write only admission diagnostics, not committed output bytes/length/token/identity or stream configuration.
+On successful typed read, owner/generation/selection come directly from ObservedContinuousSpectrumWindow. On Failed/Gap, keep their native owner/generation in the typed error; the unchanged accepted/applied scalar projection supplies selection epoch if needed. These error paths publish no new successful capture identity. Never substitute accepted generation for applied, receipt revision for a window generation, or stream epoch for selection epoch.
+spectrum_capture_identity constructs kind2/flags1 and those actual three identities; snapshot_token is checked window.sequence+1, EXACTLY matching old raw continuous packing. Never use host.spectrum_token (one-shot only). Check end_sample and token before output publication; impossible overflow returns REFUSED_BUDGET, consumes this admitted read, and preserves committed output/identity without wrapping. The old facade records ArithmeticOverflow and returns Pending on this post-read failure; the typed read itself still preserves the original native window. Do not mislabel such a post-read failure as a preflight refusal that never touched capture.
+The identity commit is infallible scalar assignment. Direct Rust success commits it with the returned window; the following ABI tranche will commit it only with successful final raw packing after all fallible checks, using its already-held permit. Admission refusal never clears raw capture_len/result_len. This checkpoint does not edit today's unsafe-for-Protected FFI staging aliases; private boot prevents their public reachability.
+
+## Cadence, history, and status truth
+
+spectrum_target/channels return the one prepared TrackPostMatrix/Both profile, even dormant; spectrum_selection_epoch returns C.spectrum_state().selection_epoch. spectrum_stream_cadence returns prepared cadence only when accepted_generation!=0. spectrum_stream_epoch similarly returns the cache only while accepted_generation!=0. These are scalar getters and never consume credit or poll receipts.
+On accepted start/restart cache1: #822 explicitly stages history epoch1 and resets it again at activation. This is a real deterministic native reset contract, not a synthetic graph generation. Return it immediately for old stream-start metadata; accepted receipt and PendingApplication still explicitly prohibit claiming Applied. Selection epoch comes only from C and does not increment on same-target restart/stop.
+On Window replace cache epoch/drops with window values; on native Failed replace with its real epoch and drops0; on Gap replace with its real epoch/cumulative drops. Warming/Pending preserve these values. No additional readonly host-core history getter is needed. No new analyzer/history allocation or analysis-epoch mutation belongs in this native checkpoint. Later FFI resets its existing analysis history only after admitted successful start/restart or actual Failed/Gap, and preserves it on admission refusal.
+
+## Reconciliation and final handoff
+
+Never reconcile in admission or inside REALTIME_POLICY_BEGIN/END. take calls reconcile between render calls, including after sticky render failure, then copies completed rows in deterministic slot order to applications, releases only those source slots, sets application_len, and returns that slice. A repeated empty take sets length0 and does not scan/clear four rows. Pending rows are never released by taking.
+Reconcile calls C.try_applied at most twice per take; stop immediately on None. If cached pending_count0, skip native polling entirely. Each Some matches owner/Graph/sequence in at most four rows, changes Pending→Applied with actual first_sample, adjusts cached counts, and clears matching pending_stop_slot. C performs its own at-most-two-slot retirement. Do not read graph state or imitate its retirement.
+F=4 already reserves two carried receipts plus two current-credit receipts applied by a failed render before epoch advance; keep it. Missing receipts do fixed scalar queue/closure checks only, and empty takes repeat neither matching scans nor staging clears. No extra per-boundary cleanup credits, deep drain loops, receipt coalescing, or scans across historical generations.
+Before explicit dispose destroys ReadyOwnership, reconcile once (at most two), then close_observation_receipts exactly once: preserve all Applied rows, mark only remaining Pending Closed/result WRONG_STATE or Failed/result RENDER_REJECTED according to sticky host failure, leave application_sample0, update counts, and clear pending_stop_slot. Status failure alone never calls this finalizer or invents closure/application.
+Outer-host authoritative rows survive native dispose; take can expose them afterward. The later FFI disposal tranche must copy the final taken rows into its persistent application staging BEFORE dropping the live host, because current FFI dispose drops the whole host. No TLS allocation or FFI change now. Previous takes already transferred their rows; the next take may replace outgoing staging normally.
+
+## Focused native checkpoint gates
+
+Reuse private protected boot: dormant getters; start Pending before rendering; take actual receipt then obtain nonzero generation-bearing PCM; same-target restart keeps selection and resets history1; ordinary exhaustion cannot pop native capture or alter committed identity; stop retains removal credit and repeated-stop receipt identity; four-row pressure preserves every acknowledgement; start+stop yield both actual same-boundary receipts; failed audio preserves already-applied receipts; disposal closes only outstanding Pending and final take survives native disposal. Reuse native fault/gap fixtures where available without adding a harness or host-core test mutation API.
+Exercise exact/one-below containing retained bytes after final inline fields, cached empty-take behavior, successful-render epoch reset and overflow. Run focused native tests/check/fmt/diff with CARGO_TARGET_DIR=/home/bl/misofm/engine/target; root commits the compiling checkpoint. No public protected boot, ABI/artifact claim, broad target matrix, or unrelated alias implementation in this task.
+
+## Dependency-ordered Luna checkpoints (supersedes a combined implementation task)
+
+Each task starts only after root commits its predecessor. Keep protected boot private throughout; permit only narrowly explained transitional dead-code annotations. Every task runs locked host-web native check, its focused tests, fmt/diff, and stops at a compiling checkpoint. No FFI, metadata, host-core, JS/SDK, artifact, GitHub, or delegated work.
+1. **Side records and permit primitives.** Add the exact inline side-record storage/defaults/getters; permit/class/length types; begin, scalar on_successful_render integration, diagnostic mapping, pure spectrum_capture_identity and its scalar commit helper. Preserve the existing protected target/cadence storage. Do not implement receipt reservation/lifecycle or protected spectrum operation routing yet.
+   Gates: real private boot still dormant; ordinary/removal credits independent; length refusal consumes its class; second attempt preserves seeded committed identity; successful render resets credit while failure does not; epoch overflow permanently refuses; pure identity uses actual owner/generation/selection and checked sequence+1; final shell retained accounting passes exact/one-below. No receipt polling anywhere in this task.
+2. **Four-row receipt lifecycle.** Implement reserve/release/commit, cached pending-stop identity, reconcile, take, and one-shot close; integrate native dispose ordering. Do not route public spectrum operations yet. Existing module tests may submit actual C start/stop and commit their acknowledgements through private helpers to exercise the completed lifecycle without enabling a public alias.
+   Gates: ordinary needs two free rows/removal one; rejected reservation preserves all rows; actual start+stop produce two distinct same-sample Applied receipts; pending rows survive take; completed rows release on take; repeated empty take performs no row scan/clear; failed audio preserves real Applied; dispose closes only remaining Pending and final rows remain takeable afterward. Verify no more than two C.try_applied calls per reconcile invocation and no receipt poll in reservation/commit.
+3. **Protected spectrum controls and metadata.** Move the existing target allocation into retained HostSpectrumDemand; route only start/restart/stop through one permit, receipt reservation and the exact native methods. Add pending-stop fast return and fixed target/channel/selection/cadence/history getters. Start/restart cache epoch1 only after acceptance. Leave protected continuous read forwarding for task4.
+   Gates: accepted start is Pending until task2 reconciliation; same-target restart preserves selection and resets history1; native publication refusal releases only its reservation and preserves previous cached history/identity; ordinary exhaustion leaves reserved stop usable; repeated Pending stop returns its original receipt without credit/native call; applied stop has zero capture dispatch. Legacy start/restart/stop tests remain green.
+4. **Typed continuous read and compatibility facade.** Implement read_protected_spectrum_stream/read_spectrum_stream_admitted, native availability mapping/cache updates, existing public read compatibility mapping and successful direct-Rust identity publication. Use the already-frozen permit and receipt helpers; do not add another storage layer or enable public protected boot.
+   Gates: pending generation cannot pop capture; actual nonzero PCM carries native owner/generation/selection and sequence+1 token; admission exhaustion preserves queued capture and committed identity; native Failed/Gap preserve supplied epoch/drop facts and publish no successful identity; Warming/Pending retain metadata; legacy continuous-read tests pass. Reuse existing fixtures; no new fault-injection framework.
+
+Disposal call rule: dispose invokes reconcile at most once (therefore at most two C.try_applied calls) while ReadyOwnership still exists, then finalizes Pending rows once and removes ReadyOwnership. A subsequent take is handoff-only: if ReadyOwnership is absent or terminal_finalized is true, it must not call reconcile. While live, take calls reconcile at most once, only when cached pending_count is nonzero. Never compose dispose with an additional live take/reconcile pass merely to stage final rows. The later FFI copies final rows by taking AFTER native dispose, before dropping the whole host. Thus final reconciliation uses the existing F=4 receipt reservation and the one-shot terminal work in cleanup132; it adds no duplicate retirement/terminal scan.
+
+
+## Private boot checkpoint evidence
+
+Private protected boot now shares the legacy parse/compile transaction, prepares one dormant native owner, validates the exact target and ingress limits, and retains packed result sizes. Public protected boot remains unavailable until operation aliases are guarded. Root retained two focused tests: dormant render performs zero capture operations; accepted/applied generations start at zero; incompatible meter options, channel and target refuse; full controller overlap and one target allocation match actual bridge reports; retained limit is inclusive. Both pass with test-support. Locked native check, lib Clippy with warnings denied, formatting and diff checks pass. Implementer also reported the existing lib suite (105 passed, 2 ignored) and four ingress tests passing before root retained the focused fixtures. No Wasm/artifact or deployment claim at this checkpoint.
