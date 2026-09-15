@@ -581,6 +581,22 @@ fn with_host_mut<R>(
     })
 }
 
+/// Refuse an unsupported protected alias before it touches caller-owned staging or input.
+///
+/// The native owner records the classified attempt and diagnostic. Returning `None` means that
+/// the handle is legacy (or otherwise leaves the existing alias path responsible for its normal
+/// invalid-handle result); a protected handle returns the native Unsupported/exhaustion result.
+fn refuse_protected_observation_alias(
+    handle: u32,
+    class: ObservationClass,
+    operation: u32,
+) -> Option<u32> {
+    with_host_mut(handle, None, |host| {
+        host.protected_observation_prepared()
+            .then(|| host.refuse_unsupported_observation(class, operation))
+    })
+}
+
 fn pointer_u32<T>(pointer: *const T) -> u32 {
     u32::try_from(pointer.addr()).unwrap_or(0)
 }
@@ -2726,6 +2742,10 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
+    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11)
+    {
+        return result;
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -2864,6 +2884,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
+    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11)
+    {
+        return result;
+    }
     let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
         Ok(value) => value,
         Err(_) => return RESULT_INVALID_ARGUMENT,
@@ -2880,6 +2904,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
+    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 10)
+    {
+        return result;
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -3251,6 +3279,10 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
+    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Removal, 10)
+    {
+        return result;
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -4469,6 +4501,14 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
+    let class = if enabled == 0 {
+        ObservationClass::Removal
+    } else {
+        ObservationClass::Ordinary
+    };
+    if let Some(result) = refuse_protected_observation_alias(handle, class, 12) {
+        return result;
+    }
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         if enabled > 1 {
             return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
@@ -4658,6 +4698,10 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
+    if let Some(result) = refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 14)
+    {
+        return result;
+    }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -6727,6 +6771,457 @@ mod observation_checkpoint_b1_tests {
             observation_capture_identity_ptr_for_handle(handle.wrapping_add(1)),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_c1_tests {
+    use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+    use crate::{COMMAND_RECORD_BYTES, WebCommandReport};
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn boot_protected_with_console() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.console_command_queue_records = 4;
+        });
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected console fixture must boot");
+        handle
+    }
+
+    fn dispose(handle: u32) {
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    fn live_status(handle: u32) -> WebObservationStatus {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+        })
+    }
+
+    fn stage_spectrum_markers() -> (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>) {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.capture_len = 17;
+            staging.result_len = 19;
+            staging.stream_active = true;
+            staging.stream_smoothing = Some(SpectrumSmoothingConfig::new(5.0).unwrap());
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.sequence = 41;
+            staging.stream_metadata.dropped_captures = 3;
+            (
+                staging.capture_len,
+                staging.result_len,
+                staging.stream_metadata,
+                staging.stream_active,
+                staging
+                    .stream_smoothing
+                    .map(SpectrumSmoothingConfig::smoothing_ms),
+            )
+        })
+    }
+
+    fn assert_spectrum_markers(
+        markers: (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>),
+    ) {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.capture_len, markers.0);
+            assert_eq!(staging.result_len, markers.1);
+            assert_eq!(staging.stream_metadata, markers.2);
+            assert_eq!(staging.stream_active, markers.3);
+            assert_eq!(
+                staging
+                    .stream_smoothing
+                    .map(SpectrumSmoothingConfig::smoothing_ms),
+                markers.4
+            );
+        });
+    }
+
+    #[test]
+    fn protected_unsupported_aliases_guard_before_staging_and_input_validation() {
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_cancel(handle),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.target_id[0] = 0xff;
+            let _borrow = staging;
+            assert_eq!(
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, 1),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                ),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.addresses.push(ObservationAddress {
+                track_index: 99,
+                rack: host_core::EffectRack::Dynamic,
+                effect_index: 98,
+                tap_id: 97,
+                channels: ObservationReadChannels::Both,
+            });
+            staging.results.push(WebObservationResult {
+                status: OBSERVATION_STATUS_READY,
+                track_index: 96,
+                ..WebObservationResult::default()
+            });
+            let _borrow = staging;
+            assert_eq!(
+                miso_engine_web_v1_observation_read(handle, u32::MAX),
+                RESULT_UNSUPPORTED
+            );
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.addresses.len(), 1);
+            assert_eq!(staging.results.len(), 1);
+            assert_eq!(staging.results[0].track_index, 96);
+        });
+        dispose(handle);
+
+        let handle = boot_protected();
+        let before = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (host.meter_lease, *host.status())
+        });
+        assert_eq!(
+            miso_engine_web_v1_meter_lease(handle, 2),
+            RESULT_UNSUPPORTED,
+            "enabled validation must follow the protected guard"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!((host.meter_lease, *host.status()), before);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn each_unsupported_alias_spends_its_classified_attempt_once() {
+        let ordinary_calls: [fn(u32) -> u32; 5] = [
+            |handle| miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+            |handle| miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
+            |handle| {
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                )
+            },
+            |handle| miso_engine_web_v1_observation_read(handle, u32::MAX),
+            |handle| miso_engine_web_v1_meter_lease(handle, 2),
+        ];
+        for call in ordinary_calls {
+            let handle = boot_protected();
+            let before = live_status(handle);
+            assert_ne!(
+                before.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            assert_eq!(call(handle), RESULT_UNSUPPORTED);
+            let spent = live_status(handle);
+            assert_eq!(
+                spent.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            assert_eq!(spent.ingress_epoch, before.ingress_epoch);
+            assert_eq!(
+                spent.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
+            );
+            assert_eq!(call(handle), RESULT_BACKPRESSURE);
+            assert_eq!(
+                live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            dispose(handle);
+        }
+
+        let handle = boot_protected();
+        let before = live_status(handle);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_UNSUPPORTED
+        );
+        assert_eq!(
+            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+            0
+        );
+        assert_eq!(
+            miso_engine_web_v1_meter_lease(handle, 0),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(
+            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+            crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+        );
+        assert_eq!(before.ingress_epoch, live_status(handle).ingress_epoch);
+        dispose(handle);
+    }
+
+    fn wire_command(
+        kind: u32,
+        rack: u8,
+        channel: u8,
+        track_index: u32,
+        effect_index: u32,
+        parameter_id: u32,
+        smoothing_samples: u32,
+        values: [f32; 4],
+    ) -> [u8; COMMAND_RECORD_BYTES as usize] {
+        let mut bytes = [0; COMMAND_RECORD_BYTES as usize];
+        bytes[0] = kind as u8;
+        bytes[1] = rack;
+        bytes[2] = channel;
+        for (offset, value) in [
+            (4, track_index),
+            (8, effect_index),
+            (12, parameter_id),
+            (16, smoothing_samples),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            let offset = 24 + index * 4;
+            bytes[offset..offset + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+        bytes
+    }
+
+    fn stage_commands(handle: u32, commands: &[[u8; COMMAND_RECORD_BYTES as usize]]) {
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let bytes = host.command_staging_mut().expect("command staging");
+            for (index, command) in commands.iter().enumerate() {
+                let start = index * COMMAND_RECORD_BYTES as usize;
+                bytes[start..start + command.len()].copy_from_slice(command);
+            }
+        });
+    }
+
+    fn stage_empty_companion(handle: u32) -> u32 {
+        const HEADER_BYTES: usize = 24;
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let generation = host.host_generation;
+            let bytes = host.prepared_companion_mut().expect("prepared staging");
+            bytes[..HEADER_BYTES].fill(0);
+            bytes[0..4].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+            bytes[8..16].copy_from_slice(&generation.to_le_bytes());
+            HEADER_BYTES as u32
+        })
+    }
+
+    fn command_state(
+        handle: u32,
+    ) -> (
+        Vec<u32>,
+        Vec<u32>,
+        Vec<(u64, usize, u64, usize, u64, usize)>,
+        Vec<([f32; 4], [f32; 4], [bool; 4], u64)>,
+        bool,
+        WebCommandReport,
+    ) {
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let ready = host.ready.as_ref().expect("ready ownership");
+            (
+                ready.command_wanted.to_vec(),
+                ready.in_flight.to_vec(),
+                ready
+                    .controls
+                    .iter()
+                    .map(|control| {
+                        (
+                            control.producer.success_count(),
+                            control.producer.available_capacity(),
+                            control.fader.success_count(),
+                            control.fader.available_capacity(),
+                            control.input.success_count(),
+                            control.input.available_capacity(),
+                        )
+                    })
+                    .collect(),
+                ready
+                    .input_filter_shadows
+                    .iter()
+                    .map(|shadow| {
+                        (
+                            shadow.committed,
+                            shadow.candidate,
+                            shadow.dirty,
+                            shadow.revision,
+                        )
+                    })
+                    .collect(),
+                ready.has_in_flight_commands,
+                *host.command_report(),
+            )
+        })
+    }
+
+    fn assert_mixed_batch_refused_before_companion(
+        handle: u32,
+        prepared: bool,
+    ) -> WebCommandReport {
+        let audio = wire_command(crate::COMMAND_PAN, u8::MAX, u8::MAX, 0, 0, 0, 0, [0.0; 4]);
+        let observation = wire_command(
+            crate::COMMAND_OBSERVE_SUBSCRIBE,
+            0,
+            u8::MAX,
+            0,
+            0,
+            0,
+            0,
+            [0.0; 4],
+        );
+        stage_commands(handle, &[audio, observation]);
+        let before = command_state(handle);
+        let result = if prepared {
+            // The companion span is deliberately malformed; raw observation classification must
+            // refuse before it is even inspected.
+            miso_engine_web_v1_prepared_command_submit(handle, 2, 1)
+        } else {
+            miso_engine_web_v1_command_submit(handle, 2)
+        };
+        assert_eq!(result, RESULT_UNSUPPORTED);
+        let after = command_state(handle);
+        assert_eq!(after.0, before.0, "queue room shadow changed");
+        assert_eq!(after.1, before.1, "in-flight queue shadow changed");
+        assert_eq!(after.2, before.2, "producer queue changed");
+        assert_eq!(after.3, before.3, "input-filter shadow changed");
+        assert_eq!(after.4, before.4, "in-flight flag changed");
+        let report = after.5;
+        assert_eq!(report.result, RESULT_UNSUPPORTED);
+        assert_eq!(report.reason, crate::COMMAND_REASON_UNSUPPORTED_KIND);
+        assert_eq!(report.rejected_index, 1);
+        assert_eq!(report.admitted, 0);
+        report
+    }
+
+    #[test]
+    fn both_command_submit_exports_refuse_mixed_observation_batches_before_mutation() {
+        let handle = boot_protected_with_console();
+        let _plain = assert_mixed_batch_refused_before_companion(handle, false);
+        let audio = wire_command(crate::COMMAND_PAN, u8::MAX, u8::MAX, 0, 0, 0, 0, [0.0; 4]);
+        stage_commands(handle, &[audio]);
+        assert_eq!(
+            miso_engine_web_v1_command_submit(handle, 1),
+            RESULT_OK,
+            "audio-only command remains admissible after ordinary observation credit is spent"
+        );
+        dispose(handle);
+
+        let handle = boot_protected_with_console();
+        let _prepared = assert_mixed_batch_refused_before_companion(handle, true);
+        stage_commands(
+            handle,
+            &[wire_command(
+                crate::COMMAND_PAN,
+                u8::MAX,
+                u8::MAX,
+                0,
+                0,
+                0,
+                0,
+                [0.0; 4],
+            )],
+        );
+        let companion_bytes = stage_empty_companion(handle);
+        assert_eq!(
+            miso_engine_web_v1_prepared_command_submit(handle, 1, companion_bytes),
+            RESULT_OK,
+            "prepared audio-only command remains admissible after ordinary observation credit is spent"
+        );
+        dispose(handle);
     }
 }
 
