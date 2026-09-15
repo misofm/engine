@@ -462,3 +462,13 @@ Protected readonly resident/catalog/meter paths now return immediate Unsupported
 ## Native response checkpoint evidence
 
 Protected response capture now uses the shared ordinary permit, cached result bound and exact prepared-target preflight before invoking the existing sink. Typed admission refusals remain distinct from actual provider/sink errors; no receipt or capture identity is invented. Three focused response tests pass with test-support, proving actual success, zero sink calls on rejected/exhausted requests, real sink error preservation, shared spectrum credit and unchanged side records. The implementer reports 121 lib tests, locked check, strict Clippy and formatting/diff passing. Native-only mediation is complete; ABI checkpoints A–D and qualification remain. The ABI handoff permits a narrow host-core re-export of its existing graph activation field type for wire conversion, without a new host-web production dependency.
+
+
+## ABI checkpoint A provisional evidence and review
+
+Checkpoint `c6da79b7` adds the four missing records, inline endpoint staging, checked staging accounting, scalar native status retention, and a private protected staged boot transaction. It is a useful compiling recovery checkpoint, not an accepted A verdict: locked host-web check, 121 existing library tests, format and diff checks pass, but no retained test calls the new staged boot or proves terminal status and independent staging-byte accounting. Astra MEDIUM returned FAIL on evidence and found no concrete source defect. A fresh Luna XHIGH task adds only these A fixtures before another Astra MEDIUM verdict. B cannot start before A passes and its exact-path test checkpoint is committed/pushed.
+
+
+## Generated-layout representation ruling for ABI closure
+
+Keep the additive wire records' Rust field order and old ABI layouts unchanged. The metadata generator represents an embedded record by flattened leaf rows whose offsets sum the containing `offset_of!` and nested `offset_of!` values. Real alignment holes, including the four bytes before the first `u64` in `WebObservationIngressLimits`, are explicit non-semantic padding byte rows derived from adjacent actual offsets. The Python layout validator continues to require complete non-overlapping tiling and checks padding as bytes; it does not infer field offsets or accept an implicit hole. No new wire reserved field, hand-written JavaScript offset, or changed old-record schema is authorized. The metadata Luna handoff follows A–D closure; user-requested implementation uses fresh Luna XHIGH tasks and Astra MEDIUM adversarial verification.
