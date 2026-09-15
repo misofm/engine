@@ -97,15 +97,9 @@ Closure requires independent review PASS, required CI, merged source/evidence an
 
 The current native owner exposes owner/work/closure but no accepted/applied spectrum state getter. Add `HostSpectrumState { accepted_generation: u64, applied_generation: u64, selection_epoch: u64 }` and `HostObservationController::spectrum_state(&self) -> HostSpectrumState` as the narrow read-only projection needed by the browser status. Missing accepted/applied selections project generation0; selection_epoch is the existing persisted counter. No receipt polling, graph query, queue read, new stored counter, or mutable status cache. Export the type through host-core. It may land with preparation checkpoint (a), and existing owner fixtures can assert the scalar projection at their existing boundaries.
 
-## Storage checkpoint and bounded rescope
+## Ownership accounting ruling
 
-The initial private-preparation assignment was reduced before it grew further. It delivered the public preparation/limit types, private mutually exclusive Legacy/Protected storage, existing legacy method forwarding, and the native read-only HostSpectrumState getter. Root completed the existing constructor adaptation. Protected preparation and public protected boot are not enabled. Narrow temporary dead-code annotations identify storage to be wired in subsequent checkpoints; the inline owner is intentional and the actual containing allocation is charged.
-
-Root's eight existing spectrum ABI cases passed, including continuous and collection behavior; formatting/diff and warning-denying host-web library Clippy passed. Shipped artifact repinning waits for completed native/ABI implementation. No new native review attempt has begun.
-
-Source-derived overlap ruling: project_buffers charges the full AudioWorkletEngineHost shell, now containing the full native owner H. Native graph_session_plus_plan_bytes already includes H through (H-C)+(A-R), where A contains C. Protected bridge metadata/retained accounting must deduct full sizeof(HostObservationController) exactly once, not just the native owner_inline_bytes H-C. Largest allocation retains full actual shell size; the browser target identity allocation is separate and charged once. Legacy has no owner deduction.
-
-The remaining preparation work is split into exact checked ingress projection, private boot wiring, then protected operation mediation. Astra XHIGH is supplying the missing code-ready projection arithmetic so fresh Luna tasks do not have to discover architectural budget rules while implementing. This refines execution order; the frozen endpoint contract is unchanged.
+project_buffers charges the full AudioWorkletEngineHost shell containing the full native owner H. Native graph_session_plus_plan_bytes already includes H through (H-C)+(A-R), where A contains C. Protected bridge metadata/retained accounting deducts full sizeof(HostObservationController) exactly once, not just owner_inline_bytes H-C. Largest allocation retains the actual full shell; the browser target identity allocation is separate and charged once. Legacy has no owner deduction.
 
 ## Frozen source-derived ingress projection
 
@@ -254,16 +248,9 @@ fixed per-call work; repeated pending stop returns its existing receipt without 
 Owned sender/receiver throttling bounds entry frequency; arbitrary caller floods have
 no universal deadline qualification. No scheduler or suppression of typed refusals.
 
-### Projection implementation order
+## Preparation and projection evidence
 
-To use actual ABI sizes immediately, the next bounded checkpoint declares only the four scalar ABI records referenced by the projection (WebObservationDemand, WebObservationReceipt, WebObservationAdmission and WebObservationCaptureIdentity) and implements the frozen checked projection helper. No exports, FFI staging, receipt mediation or protected boot are enabled in that checkpoint. These are the final canonical record types, not mirrors or guessed byte constants. Private boot wiring follows using this exact validated projection. This further splits implementation to keep Luna tasks bounded; public protected boot still waits for complete alias mediation.
-
-## Checked projection checkpoint
-
-The four canonical demand/receipt/admission/capture-identity records are declared with their final repr(C) fields. The private observation_ingress module computes the frozen checked bounds and separate per-call facts using actual Rust sizes internally; callers cannot provide a layout-size table. Limit validation is a separate helper that must run before publishing protected preparation. The minimum control capacity covers the largest supported fixed request plus a 127-byte identity, and the minimum row capacity is four receipts. Invalid profile ceilings/counts use REFUSED_OPTIONS; insufficient supplied budgets use REFUSED_BUDGET with the named field.
-
-Root reviewed the formula translation and ran all four focused arithmetic cases: PASS, including exact/one-below limits, overflow and full-H deduplication. The implementer also reports locked host-web check, warning-denying library Clippy, formatting and diff checks passed. No FFI exports, staging allocations, protected boot or operation routing are enabled yet. Next is private boot wiring using the projection and validator.
-
+Checkpoints 17ae6d01, 6b019b8e and cc559f08 delivered mutually exclusive native ownership, HostSpectrumState, the four canonical repr(C) records and the checked projection. Actual Rust sizes are internal; callers cannot supply guessed layouts. Boot must call the separate limit validator. Control minimum covers the largest fixed request plus127 ID bytes; row minimum is4. Invalid ceilings/counts use REFUSED_OPTIONS; insufficient budgets use named REFUSED_BUDGET. Four focused arithmetic tests, eight existing spectrum ABI cases, native check, library Clippy and formatting/diff passed. Later checkpoints below integrate private boot and permits. Shipped artifact repinning and public protected boot wait for native/ABI closure.
 
 ## Frozen native mediation and bounded execution handoffs
 
@@ -442,3 +429,11 @@ Both tasks use CARGO_TARGET_DIR=/home/bl/misofm/engine/target, run focused tests
 ## Permit checkpoint evidence
 
 Inline side records, affine owner/epoch/class permits, inclusive request-length admission, independent ordinary/removal attempts, checked successful-render epoch advancement, diagnostic mapping and actual-window capture identity are implemented. Refusal preserves committed identity; failed renders grant no credit; epoch exhaustion never wraps. Six focused protected tests pass with test-support (including dormant boot and actual shell retained accounting). Root reviewed primitives and corrected explicit Unsupported diagnostic preservation; the implementer reports 111 existing lib tests passing, 2 ignored, integration tests and strict Clippy passing. Formatting/diff checks pass. Receipt reconciliation and native operation routing remain subsequent checkpoints; protected boot is still private.
+
+
+Receipt implementation ruling: private reserved-slot/count/matching-ack invariants are asserted on the control path; accepted receipts must never be silently dropped or count divergence hidden by saturation. Capacity refusal uses limit observation.application_capacity, requested occupied+required-free, maximum4. Legacy disposal skips protected reconciliation; terminal cleanup with pending_count0 skips the row scan. No new ledger or public limit field.
+
+
+## Receipt checkpoint evidence
+
+Four authoritative rows now reserve before publication, commit actual acknowledgements, reconcile at most two native receipts per call, and hand off completed rows in stable order. Protected disposal reconciles once before ownership removal and preserves terminal rows afterward. Seven focused protected tests pass with test-support. The receipt fixture proves capacity refusal, Pending survival, two real same-boundary start/stop applications, preservation across a subsequent failed render, row reuse and pending closure/handoff. It does not yet prove graph applications first produced during a failing render; the ABI failure-path gate remains required. Native check, reported 112 library tests, strict Clippy, formatting and diff checks pass. Public spectrum routing and protected boot remain subsequent work.

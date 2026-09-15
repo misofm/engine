@@ -8691,3 +8691,126 @@ fn protected_eq_admission_diagnostic_maps_refusal_and_preserves_headers() {
     assert_eq!(admission.result, RESULT_UNSUPPORTED);
     assert_eq!(admission.reason, 8);
 }
+
+#[test]
+fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let demand = host_core::HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: host_core::HostSpectrumMode::Continuous,
+    };
+    let held0 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("first ordinary reservation");
+    let held1 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("second ordinary reservation");
+    let held2 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("third ordinary reservation");
+    let refusal = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect_err("ordinary reservation must retain two free rows");
+    assert_eq!(refusal.reason, ObservationRefusalReason::Backpressure);
+    assert_eq!(refusal.limit, Some("observation.application_capacity"));
+    assert_eq!(refusal.requested, Some(5));
+    assert_eq!(refusal.maximum, Some(4));
+    host.release_receipt(held0);
+    host.release_receipt(held1);
+    host.release_receipt(held2);
+    let start_slot = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("ordinary receipt reservation");
+    let accepted_start = {
+        let ready = host.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage
+            .controller
+            .replace_spectrum(&demand)
+            .expect("native start admission")
+    };
+    host.commit_receipt(start_slot, accepted_start, 4);
+
+    let stop_slot = host
+        .reserve_receipt(ObservationClass::Removal)
+        .expect("removal receipt reservation");
+    let accepted_stop = {
+        let ready = host.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        match storage
+            .controller
+            .stop_spectrum()
+            .expect("native stop admission")
+        {
+            host_core::ObservationStop::Pending(accepted) => accepted,
+            host_core::ObservationStop::Quiescent => panic!("spectrum stop must publish"),
+        }
+    };
+    host.commit_receipt(stop_slot, accepted_stop, OBSERVATION_OPERATION_STOP);
+    assert_eq!(host.side_records.pending_count, 2);
+    assert!(host.take_observation_applications().is_empty());
+    assert_eq!(host.side_records.pending_count, 2);
+    assert!(host.take_observation_applications().is_empty());
+    assert_eq!(host.side_records.pending_count, 2);
+
+    assert_eq!(host.render_next(), RESULT_OK);
+    host.status.next_absolute_sample = u64::MAX;
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 2);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[1].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].owner, applications[1].owner);
+    assert_eq!(
+        applications[0].application_sample,
+        applications[1].application_sample
+    );
+    assert_ne!(applications[0].sequence, applications[1].sequence);
+    assert_eq!(host.side_records.pending_count, 0);
+    assert_eq!(host.side_records.completed_count, 0);
+    let reused_slot = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("completed rows released by take");
+    host.release_receipt(reused_slot);
+
+    host.dispose();
+    assert!(host.take_observation_applications().is_empty());
+
+    let mut pending = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let slot = pending
+        .reserve_receipt(ObservationClass::Removal)
+        .expect("pending receipt reservation");
+    let accepted_pending = {
+        let ready = pending.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage
+            .controller
+            .replace_spectrum(&demand)
+            .expect("native start admission")
+    };
+    pending.commit_receipt(slot, accepted_pending, OBSERVATION_OPERATION_STOP_GRAPH);
+    pending.dispose();
+    let terminal = pending.take_observation_applications();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].state, OBSERVATION_RECEIPT_STATE_CLOSED);
+    assert_eq!(terminal[0].result, RESULT_WRONG_STATE);
+}

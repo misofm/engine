@@ -42,9 +42,9 @@ use host_core::{
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
-    ObservationRefusal, ObservationRefusalReason, ObservedContinuousSpectrumWindow,
-    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
-    SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
+    ObservationAccepted, ObservationRefusal, ObservationRefusalReason,
+    ObservedContinuousSpectrumWindow, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
+    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
@@ -460,6 +460,13 @@ const OBSERVATION_ADMISSION_MAXIMUM: u32 = 1 << 2;
 const OBSERVATION_ADMISSION_PENDING_BOUNDARY: u32 = 1 << 3;
 const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
 const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
+const OBSERVATION_RECEIPT_DOMAIN_GRAPH: u32 = 1;
+const OBSERVATION_RECEIPT_STATE_PENDING: u32 = 1;
+const OBSERVATION_RECEIPT_STATE_APPLIED: u32 = 2;
+const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
+const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
+const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
+const OBSERVATION_OPERATION_STOP: u32 = 7;
 
 fn observation_not_prepared() -> ObservationRefusal {
     ObservationRefusal {
@@ -2396,6 +2403,233 @@ impl AudioWorkletEngineHost {
         storage.ingress.begin_observation(owner, class, lengths)
     }
 
+    /// Reserve one fixed receipt row before a native publication.
+    ///
+    /// Ordinary work keeps one additional row available for a removal. The cached row counts
+    /// reject impossible requests without walking the four slots; only an admissible request
+    /// performs the single bounded free-row search.
+    #[allow(dead_code)]
+    fn reserve_receipt(&mut self, class: ObservationClass) -> Result<usize, ObservationRefusal> {
+        if self.side_records.terminal_finalized {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::Closed,
+                limit: None,
+                requested: None,
+                maximum: None,
+            });
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        if !matches!(ready.observation, PreparedObservationStorage::Protected(_)) {
+            return Err(observation_not_prepared());
+        }
+
+        const RECEIPT_CAPACITY: u8 = 4;
+        let required = match class {
+            ObservationClass::Ordinary => 2,
+            ObservationClass::Removal => 1,
+        };
+        let reserved = self.side_records.reserved_mask.count_ones() as u8;
+        let occupied =
+            self.side_records.pending_count + self.side_records.completed_count + reserved;
+        debug_assert!(occupied <= RECEIPT_CAPACITY);
+        let available = RECEIPT_CAPACITY - occupied;
+        if available < required {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::Backpressure,
+                limit: Some("observation.application_capacity"),
+                requested: Some(u64::from(occupied + required)),
+                maximum: Some(u64::from(RECEIPT_CAPACITY)),
+            });
+        }
+
+        for (slot, receipt) in self.side_records.receipts.iter().enumerate() {
+            let bit = 1_u8 << slot;
+            if receipt.state == 0 && self.side_records.reserved_mask & bit == 0 {
+                self.side_records.reserved_mask |= bit;
+                return Ok(slot);
+            }
+        }
+
+        // Cached counts and the authoritative row state must agree. Keep this a typed bounded
+        // refusal if a defensive invariant is ever violated rather than overwriting a receipt.
+        Err(ObservationRefusal {
+            reason: ObservationRefusalReason::Backpressure,
+            limit: Some("observation.application_capacity"),
+            requested: Some(u64::from(occupied + required)),
+            maximum: Some(u64::from(RECEIPT_CAPACITY)),
+        })
+    }
+
+    /// Release an unused receipt reservation without touching an authoritative row.
+    #[allow(dead_code)]
+    fn release_receipt(&mut self, slot: usize) {
+        let Some(receipt) = self.side_records.receipts.get(slot) else {
+            return;
+        };
+        if receipt.state == 0 {
+            self.side_records.reserved_mask &= !(1_u8 << slot);
+        }
+    }
+
+    /// Commit one accepted native publication as a Pending graph receipt.
+    #[allow(dead_code)]
+    fn commit_receipt(&mut self, slot: usize, accepted: ObservationAccepted, operation: u32) {
+        assert!(
+            slot < self.side_records.receipts.len(),
+            "receipt slot must be reserved"
+        );
+        assert_ne!(
+            self.side_records.reserved_mask & (1_u8 << slot),
+            0,
+            "receipt slot must be reserved"
+        );
+        let receipt = &mut self.side_records.receipts[slot];
+        debug_assert_eq!(receipt.state, 0);
+        self.side_records.reserved_mask &= !(1_u8 << slot);
+        *receipt = WebObservationReceipt {
+            struct_size: size_of::<WebObservationReceipt>() as u32,
+            abi_version: ABI_VERSION,
+            domain: OBSERVATION_RECEIPT_DOMAIN_GRAPH,
+            state: OBSERVATION_RECEIPT_STATE_PENDING,
+            owner: accepted.owner.get(),
+            sequence: accepted.revision,
+            application_sample: 0,
+            result: RESULT_OK,
+            reserved: 0,
+        };
+        assert!(
+            self.side_records.pending_count < 4,
+            "receipt pending count must fit four rows"
+        );
+        self.side_records.pending_count += 1;
+        if matches!(
+            operation,
+            OBSERVATION_OPERATION_STOP_GRAPH | OBSERVATION_OPERATION_STOP
+        ) {
+            self.side_records.pending_stop_slot = Some(slot);
+        }
+    }
+
+    /// Reconcile at most two native application acknowledgements into the authoritative rows.
+    #[allow(dead_code)]
+    fn reconcile_observation_applications(&mut self) {
+        if self.side_records.terminal_finalized || self.side_records.pending_count == 0 {
+            return;
+        }
+
+        for _ in 0..2 {
+            let applied = {
+                let Some(ready) = self.ready.as_mut() else {
+                    return;
+                };
+                let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                    return;
+                };
+                storage.controller.try_applied()
+            };
+            let Some(applied) = applied else {
+                return;
+            };
+
+            let mut matching_slot = None;
+            for (slot, receipt) in self.side_records.receipts.iter().enumerate() {
+                if receipt.domain == OBSERVATION_RECEIPT_DOMAIN_GRAPH
+                    && receipt.state == OBSERVATION_RECEIPT_STATE_PENDING
+                    && receipt.owner == applied.owner.get()
+                    && receipt.sequence == applied.revision
+                {
+                    matching_slot = Some(slot);
+                    break;
+                }
+            }
+            let slot = matching_slot
+                .expect("native observation acknowledgement must match one Pending receipt");
+            let receipt = &mut self.side_records.receipts[slot];
+            receipt.state = OBSERVATION_RECEIPT_STATE_APPLIED;
+            receipt.application_sample = applied.first_sample;
+            assert!(self.side_records.pending_count > 0);
+            assert!(self.side_records.completed_count < 4);
+            self.side_records.pending_count -= 1;
+            self.side_records.completed_count += 1;
+            if self.side_records.pending_stop_slot == Some(slot) {
+                self.side_records.pending_stop_slot = None;
+            }
+        }
+    }
+
+    /// Copy completed rows in stable slot order and release only those source rows.
+    #[allow(dead_code)]
+    fn take_observation_applications(&mut self) -> &[WebObservationReceipt] {
+        if self.side_records.pending_count != 0 && !self.side_records.terminal_finalized {
+            self.reconcile_observation_applications();
+        }
+
+        self.side_records.application_len = 0;
+        if self.side_records.completed_count == 0 {
+            return &self.side_records.applications[..0];
+        }
+
+        let records = &mut self.side_records;
+        let mut application_len = 0;
+        for slot in 0..records.receipts.len() {
+            let state = records.receipts[slot].state;
+            if matches!(
+                state,
+                OBSERVATION_RECEIPT_STATE_APPLIED
+                    | OBSERVATION_RECEIPT_STATE_CLOSED
+                    | OBSERVATION_RECEIPT_STATE_FAILED
+            ) {
+                records.applications[application_len] = records.receipts[slot];
+                application_len += 1;
+                records.receipts[slot] = WebObservationReceipt::default();
+                assert!(records.completed_count > 0);
+                records.completed_count -= 1;
+                if records.pending_stop_slot == Some(slot) {
+                    records.pending_stop_slot = None;
+                }
+            }
+        }
+        records.application_len = application_len;
+        &records.applications[..application_len]
+    }
+
+    /// Close the owner once, preserving Applied rows and exposing terminal Pending rows.
+    #[allow(dead_code)]
+    fn close_observation_receipts(&mut self, failed: bool) {
+        if self.side_records.terminal_finalized {
+            return;
+        }
+        self.side_records.terminal_finalized = true;
+        self.side_records.reserved_mask = 0;
+        self.side_records.pending_stop_slot = None;
+        if self.side_records.pending_count == 0 {
+            return;
+        }
+        let terminal_state = if failed {
+            OBSERVATION_RECEIPT_STATE_FAILED
+        } else {
+            OBSERVATION_RECEIPT_STATE_CLOSED
+        };
+        let terminal_result = if failed {
+            RESULT_RENDER_REJECTED
+        } else {
+            RESULT_WRONG_STATE
+        };
+        for receipt in &mut self.side_records.receipts {
+            if receipt.state == OBSERVATION_RECEIPT_STATE_PENDING {
+                receipt.state = terminal_state;
+                receipt.application_sample = 0;
+                receipt.result = terminal_result;
+                assert!(self.side_records.pending_count > 0);
+                assert!(self.side_records.completed_count < 4);
+                self.side_records.pending_count -= 1;
+                self.side_records.completed_count += 1;
+            }
+        }
+    }
+
     /// Map one private refusal or native result into the fixed admission side record.
     #[allow(dead_code)]
     fn record_observation_admission(
@@ -3983,6 +4217,16 @@ impl AudioWorkletEngineHost {
     /// single point where the plan, the compiled session and the source rings are freed.
     pub fn dispose(&mut self) -> u32 {
         self.meter_lease = false;
+        let protected_owner = self.ready.as_ref().is_some_and(|ready| {
+            matches!(ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        let has_protected_receipts = self.side_records.pending_count != 0
+            || self.side_records.completed_count != 0
+            || self.side_records.reserved_mask != 0;
+        if !self.side_records.terminal_finalized && (protected_owner || has_protected_receipts) {
+            self.reconcile_observation_applications();
+            self.close_observation_receipts(self.status.state == STATE_FAILED);
+        }
         self.ready = None;
         self.buffers = None;
         self.diagnostic_len = 0;
