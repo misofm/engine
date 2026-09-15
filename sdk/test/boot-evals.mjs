@@ -47,6 +47,407 @@ before(async () => {
   asset = await MisoEngineAsset.load(bytes);
 });
 
+test("protected observation shipped Wasm ABI and boot", async () => {
+  const instance = await asset.instantiate();
+  const { exports } = instance;
+  let handle = 0;
+
+  const structure = (name) => {
+    const layout = ABI_LAYOUT.structures[name];
+    assert.ok(layout, `generated structure ${name} must exist`);
+    return layout;
+  };
+  const field = (structureName, name, type) => {
+    const row = structure(structureName).fields.find((candidate) => candidate.name === name);
+    assert.ok(row, `generated field ${structureName}.${name} must exist`);
+    assert.equal(row.type, type, `${structureName}.${name} type`);
+    return row;
+  };
+  const constant = (group, name) => {
+    const row = ABI_LAYOUT.constants[group].find((candidate) => candidate.name === name);
+    assert.ok(row, `generated constant ${group}.${name} must exist`);
+    return row.value;
+  };
+  const writeU32 = (view, structureName, name, value) => {
+    view.setUint32(field(structureName, name, "u32").offset, value, true);
+  };
+  const writeU64 = (view, structureName, name, value) => {
+    view.setBigUint64(field(structureName, name, "u64").offset, value, true);
+  };
+  const writeBytes = (view, structureName, name, type, value) => {
+    const row = field(structureName, name, type);
+    assert.ok(value.length <= Number(type.match(/\[(\d+)\]$/)[1]));
+    new Uint8Array(view.buffer, view.byteOffset + row.offset, value.length).set(value);
+  };
+  const zero = (pointer, bytes) => {
+    new Uint8Array(exports.memory.buffer, pointer, bytes).fill(0);
+  };
+  const range = (label, pointer, bytes) => {
+    assert.ok(Number.isInteger(pointer) && pointer > 0, `${label} pointer must be nonzero`);
+    assert.ok(
+      pointer + bytes <= exports.memory.buffer.byteLength,
+      `${label} range must fit current Wasm memory`,
+    );
+  };
+  const view = (label, pointer, bytes) => {
+    range(label, pointer, bytes);
+    return new DataView(exports.memory.buffer, pointer, bytes);
+  };
+  const writeHeader = (target, structureName) => {
+    writeU32(target, structureName, "structSize", structure(structureName).bytes);
+    writeU32(target, structureName, "abiVersion", ABI_LAYOUT.abiVersion);
+  };
+  const assertHeader = (target, structureName) => {
+    assert.equal(
+      target.getUint32(field(structureName, "structSize", "u32").offset, true),
+      structure(structureName).bytes,
+      `${structureName}.structSize`,
+    );
+    assert.equal(
+      target.getUint32(field(structureName, "abiVersion", "u32").offset, true),
+      ABI_LAYOUT.abiVersion,
+      `${structureName}.abiVersion`,
+    );
+  };
+
+  try {
+    assert.deepEqual(
+      Object.keys(exports).sort(),
+      [...ABI_LAYOUT.exports, "memory"].sort(),
+      "shipped exports must equal generated exports plus memory",
+    );
+    for (const name of ABI_LAYOUT.exports) {
+      assert.equal(typeof exports[name], "function", `${name} must be callable`);
+    }
+    assert.ok(exports.memory instanceof WebAssembly.Memory);
+
+    const bootOptions = structure("bootOptions");
+
+    const preparation = structure("observationPreparation");
+    assert.equal(
+      exports.miso_engine_web_v1_observation_preparation_bytes(),
+      preparation.bytes,
+      "preparation size export",
+    );
+    const preparationPointer = exports.miso_engine_web_v1_observation_preparation_ptr();
+    range("observation preparation", preparationPointer, preparation.bytes);
+    const prepared = new DataView(
+      exports.memory.buffer,
+      preparationPointer,
+      preparation.bytes,
+    );
+    zero(preparationPointer, preparation.bytes);
+    writeHeader(prepared, "observationPreparation");
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "profile",
+      constant("observationProfiles", "eqSpectrum"),
+    );
+    writeU32(prepared, "observationPreparation", "spectrumCount", 1);
+    writeU32(prepared, "observationPreparation", "maximumActiveObservers", 1);
+
+    const budget = 67_108_864n;
+    writeU64(
+      prepared,
+      "observationPreparation",
+      "activationMaximumRetainedBytes",
+      budget,
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "workLimits.structSize",
+      structure("observationWorkLimits").bytes,
+    );
+    writeU32(prepared, "observationPreparation", "workLimits.abiVersion", ABI_LAYOUT.abiVersion);
+    const workLimitFields = preparation.fields.filter(
+      ({ name, type }) => name.startsWith("workLimits.") && type === "u64",
+    );
+    assert.equal(workLimitFields.length, 11, "all generated work-limit u64 fields are present");
+    for (const row of workLimitFields) {
+      prepared.setBigUint64(row.offset, budget, true);
+    }
+
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "ingressLimits.structSize",
+      structure("observationIngressLimits").bytes,
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "ingressLimits.abiVersion",
+      ABI_LAYOUT.abiVersion,
+    );
+    writeU32(prepared, "observationPreparation", "ingressLimits.maximumControlBytes", 8_192);
+    writeU32(prepared, "observationPreparation", "ingressLimits.maximumObservationRows", 32);
+    writeU32(prepared, "observationPreparation", "ingressLimits.maximumResultBytes", 65_536);
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "ingressLimits.ordinaryOperationsPerBoundary",
+      1,
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "ingressLimits.removalOperationsPerBoundary",
+      1,
+    );
+    const ingressLimitFields = preparation.fields.filter(
+      ({ name, type }) => name.startsWith("ingressLimits.") && type === "u64",
+    );
+    assert.equal(ingressLimitFields.length, 7, "all generated ingress-limit u64 fields are present");
+    for (const row of ingressLimitFields) {
+      prepared.setBigUint64(row.offset, budget, true);
+    }
+
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "spectrumRequest.structSize",
+      structure("spectrumRequest").bytes,
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "spectrumRequest.abiVersion",
+      ABI_LAYOUT.abiVersion,
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "spectrumRequest.target",
+      constant("spectrumTargets", "trackPostMatrix"),
+    );
+    writeU32(
+      prepared,
+      "observationPreparation",
+      "spectrumRequest.channels",
+      constant("spectrumChannels", "both"),
+    );
+    writeU32(prepared, "observationPreparation", "spectrumRequest.targetIdBytes", 1);
+    writeU64(
+      prepared,
+      "observationPreparation",
+      "spectrumRequest.maximumCaptureBytes",
+      BigInt(ABI_LAYOUT.constants.spectrumCaptureBytes),
+    );
+    writeBytes(
+      prepared,
+      "observationPreparation",
+      "targetId",
+      "u8[128]",
+      new TextEncoder().encode("t"),
+    );
+
+    const document = new TextEncoder().encode(
+      sessionDocument({ sampleRateHz: 48_000, quantumFrames: 128 }),
+    );
+
+    const restageProtectedBoot = (maximumMemoryBytes, maximumRetainedBytes) => {
+      const currentOptionsPointer = exports.miso_engine_web_v1_boot_options_ptr();
+      const currentOptions = view("boot options", currentOptionsPointer, bootOptions.bytes);
+      zero(currentOptionsPointer, bootOptions.bytes);
+      writeHeader(currentOptions, "bootOptions");
+      writeU32(currentOptions, "bootOptions", "requireSampleRateHz", 48_000);
+      writeU32(currentOptions, "bootOptions", "requireQuantumFrames", 128);
+      writeU64(currentOptions, "bootOptions", "maximumMemoryBytes", maximumMemoryBytes);
+
+      const currentPreparationPointer = exports.miso_engine_web_v1_observation_preparation_ptr();
+      const currentPreparation = view(
+        "observation preparation",
+        currentPreparationPointer,
+        preparation.bytes,
+      );
+      writeU64(
+        currentPreparation,
+        "observationPreparation",
+        "ingressLimits.maximumRetainedBytes",
+        maximumRetainedBytes,
+      );
+
+      const currentDocumentPointer = exports.miso_engine_web_v1_document_ptr(document.length);
+      range("document", currentDocumentPointer, document.length);
+      new Uint8Array(exports.memory.buffer, currentDocumentPointer, document.length).set(document);
+      return currentDocumentPointer;
+    };
+
+    const budgetCases = [
+      {
+        name: "host-only",
+        maximumMemoryBytes: 2_097_152n,
+        maximumRetainedBytes: budget,
+        diagnostic: "host.budget.retained_projection\t",
+      },
+      {
+        name: "ingress-only",
+        maximumMemoryBytes: budget,
+        maximumRetainedBytes: 2_097_152n,
+        diagnostic: "web.observation.ingress.maximum_retained_bytes\t",
+      },
+      {
+        name: "both-low",
+        maximumMemoryBytes: 2_097_152n,
+        maximumRetainedBytes: 2_097_152n,
+        diagnostic: "host.budget.retained_projection\t",
+      },
+    ];
+    const budgetOutcomes = [];
+    for (const budgetCase of budgetCases) {
+      const diagnosticPointer = restageProtectedBoot(
+        budgetCase.maximumMemoryBytes,
+        budgetCase.maximumRetainedBytes,
+      );
+      const budgetHandle = exports.miso_engine_web_v1_boot_with_observation_demand(
+        document.length,
+      );
+      const result = Number(exports.miso_engine_web_v1_boot_result());
+      const diagnosticBytes = Number(exports.miso_engine_web_v1_boot_diagnostic_bytes());
+      const boundedDiagnosticBytes = Math.min(diagnosticBytes, document.length);
+      const diagnostic = new TextDecoder().decode(
+        new Uint8Array(exports.memory.buffer, diagnosticPointer, boundedDiagnosticBytes),
+      );
+      let cleanupResult = null;
+      if (budgetHandle !== 0) {
+        cleanupResult = exports.miso_engine_web_v1_dispose(budgetHandle);
+      }
+      budgetOutcomes.push({
+        name: budgetCase.name,
+        handle: budgetHandle,
+        result,
+        diagnosticBytes,
+        diagnostic,
+        cleanupResult,
+      });
+    }
+
+    restageProtectedBoot(budget, budget);
+
+    handle = exports.miso_engine_web_v1_boot_with_observation_demand(document.length);
+    assert.notEqual(handle, 0, "protected boot returns a handle");
+    assert.equal(
+      Number(exports.miso_engine_web_v1_boot_result()),
+      constant("resultCodes", "ok"),
+      "protected boot result",
+    );
+
+    const hostStatus = structure("status");
+    const hostStatusPointer = exports.miso_engine_web_v1_status_ptr(handle);
+    const hostStatusView = view("host status", hostStatusPointer, hostStatus.bytes);
+    assertHeader(hostStatusView, "status");
+    assert.equal(
+      hostStatusView.getUint32(field("status", "state", "u32").offset, true),
+      constant("states", "ready"),
+      "host status is ready",
+    );
+
+    const observationRecord = (structureName, bytesExport, pointerExport) => {
+      const layout = structure(structureName);
+      assert.equal(exports[bytesExport](), layout.bytes, `${structureName} size export`);
+      const pointer = exports[pointerExport](handle);
+      return { layout, pointer };
+    };
+
+    const demand = observationRecord(
+      "observationDemand",
+      "miso_engine_web_v1_observation_demand_bytes",
+      "miso_engine_web_v1_observation_demand_ptr",
+    );
+    const admission = observationRecord(
+      "observationAdmission",
+      "miso_engine_web_v1_observation_admission_bytes",
+      "miso_engine_web_v1_observation_admission_ptr",
+    );
+    const observationStatus = observationRecord(
+      "observationStatus",
+      "miso_engine_web_v1_observation_status_bytes",
+      "miso_engine_web_v1_observation_status_ptr",
+    );
+    const captureIdentity = observationRecord(
+      "observationCaptureIdentity",
+      "miso_engine_web_v1_observation_capture_identity_bytes",
+      "miso_engine_web_v1_observation_capture_identity_ptr",
+    );
+    const demandView = view("observationDemand", demand.pointer, demand.layout.bytes);
+    const admissionView = view("observationAdmission", admission.pointer, admission.layout.bytes);
+    const observationStatusView = view(
+      "observationStatus",
+      observationStatus.pointer,
+      observationStatus.layout.bytes,
+    );
+    const captureIdentityView = view(
+      "observationCaptureIdentity",
+      captureIdentity.pointer,
+      captureIdentity.layout.bytes,
+    );
+    assertHeader(demandView, "observationDemand");
+    assertHeader(admissionView, "observationAdmission");
+    assertHeader(observationStatusView, "observationStatus");
+    assertHeader(captureIdentityView, "observationCaptureIdentity");
+
+    assert.equal(
+      observationStatusView.getUint32(
+        field("observationStatus", "profile", "u32").offset,
+        true,
+      ),
+      constant("observationProfiles", "eqSpectrum"),
+      "protected observation profile",
+    );
+    assert.ok(
+      observationStatusView.getBigUint64(
+        field("observationStatus", "owner", "u64").offset,
+        true,
+      ) > 0n,
+      "protected observation owner",
+    );
+
+    const receipt = structure("observationReceipt");
+    assert.equal(
+      exports.miso_engine_web_v1_observation_application_bytes(),
+      receipt.bytes,
+      "observation application size export",
+    );
+    const applicationCapacity = exports.miso_engine_web_v1_observation_application_capacity();
+    assert.ok(applicationCapacity > 0, "observation application capacity is positive");
+    const applicationPointer = exports.miso_engine_web_v1_observation_application_ptr();
+    const applicationBytes = receipt.bytes * applicationCapacity;
+    range("observation application", applicationPointer, applicationBytes);
+    for (let index = 0; index < applicationCapacity; index += 1) {
+      const application = new DataView(
+        exports.memory.buffer,
+        applicationPointer + index * receipt.bytes,
+        receipt.bytes,
+      );
+      assertHeader(application, "observationReceipt");
+    }
+
+    assert.deepEqual(
+      budgetOutcomes.map((outcome, index) => ({
+        name: outcome.name,
+        handle: outcome.handle,
+        result: outcome.result,
+        diagnosticBytesWithinDocument: outcome.diagnosticBytes <= document.length,
+        diagnostic: outcome.diagnostic.slice(0, budgetCases[index].diagnostic.length),
+        cleanupResult: outcome.cleanupResult,
+      })),
+      budgetCases.map((budgetCase) => ({
+        name: budgetCase.name,
+        handle: 0,
+        result: constant("resultCodes", "refusedBudget"),
+        diagnosticBytesWithinDocument: true,
+        diagnostic: budgetCase.diagnostic,
+        cleanupResult: null,
+      })),
+      "protected budget refusals",
+    );
+  } finally {
+    assert.equal(exports.miso_engine_web_v1_dispose(handle), 0, "dispose protected boot");
+  }
+});
+
 describe("eval 1 -- the three red probes at the SDK boundary", () => {
   test("(a) a quoted-key 48k/128 raw document boots headless", async () => {
     const engine = await createOfflineEngine(

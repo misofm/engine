@@ -17,13 +17,25 @@
 //!   base names on the same values.
 //! * the **document's own structure**, so a schema key cannot be dropped silently.
 
+use core::mem::{offset_of, size_of};
+
 use effect_compiler::launch_native_effect_registry;
 use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
-    default_source_ring_frames,
+    COMMAND_RECORD_BYTES, OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+    OBSERVATION_OPERATION_COLLECTION_SELECTION, OBSERVATION_OPERATION_METER_LEASE,
+    OBSERVATION_OPERATION_METER_READ, OBSERVATION_OPERATION_ONE_SHOT,
+    OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH, OBSERVATION_OPERATION_READ_SPECTRUM,
+    OBSERVATION_OPERATION_REMOVE_METERS_TO, OBSERVATION_OPERATION_REPLACE_METERS,
+    OBSERVATION_OPERATION_RESIDENT_READ, OBSERVATION_OPERATION_RESTART_SPECTRUM,
+    OBSERVATION_OPERATION_START_SPECTRUM, OBSERVATION_OPERATION_STOP_GRAPH,
+    OBSERVATION_OPERATION_STOP_SPECTRUM, OBSERVATION_PROFILE_EQ_SPECTRUM,
+    OBSERVATION_PROFILE_LEGACY_UNPROTECTED, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
+    WebObservationAdmission, WebObservationCaptureIdentity, WebObservationDemand,
+    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
+    WebObservationStatus, WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -32,24 +44,66 @@ use parameter_metadata::abi_layout::{
 /// Minimal parsing: the document is generated, so a test that pulled in a JSON crate would be
 /// testing the crate. These helpers read the exact shapes this generator emits and panic loudly on
 /// anything else, which is itself an assertion that the shape did not change.
-fn field_offset(document: &str, structure: &str, field: &str) -> usize {
-    let structure_start = document
-        .find(&format!("\"{structure}\": {{"))
+fn structure_body<'a>(document: &'a str, structure: &str) -> &'a str {
+    let marker = format!("\"{structure}\": {{\n");
+    let marker_start = document
+        .find(&marker)
         .unwrap_or_else(|| panic!("document names structure {structure}"));
+    let indent_start = document[..marker_start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let indent = &document[indent_start..marker_start];
+    let structure_start = marker_start + marker.len();
+    let close = format!("\n{indent}}}");
+    let structure_end = document[structure_start..]
+        .find(&close)
+        .unwrap_or_else(|| panic!("structure {structure} is closed"));
+    &document[structure_start..structure_start + structure_end]
+}
+
+fn field_entry(document: &str, structure: &str, field: &str) -> (usize, String) {
+    let body = structure_body(document, structure);
     let row = format!("{{ \"name\": \"{field}\", \"offset\": ");
-    let row_start = document[structure_start..]
+    let row_start = body
         .find(&row)
         .unwrap_or_else(|| panic!("structure {structure} names field {field}"))
-        + structure_start
         + row.len();
-    let row_end = document[row_start..]
-        .find(',')
+    let type_marker = ", \"type\": \"";
+    let offset_end = body[row_start..]
+        .find(type_marker)
         .expect("offset is followed by a type")
         + row_start;
-    document[row_start..row_end]
+    let type_start = offset_end + type_marker.len();
+    let type_end = body[type_start..].find('"').expect("type is closed") + type_start;
+    (
+        body[row_start..offset_end]
+            .trim()
+            .parse()
+            .expect("offset is an integer"),
+        body[type_start..type_end].to_owned(),
+    )
+}
+
+fn structure_bytes(document: &str, structure: &str) -> u64 {
+    let body = structure_body(document, structure);
+    let key = "\"bytes\": ";
+    let start = body
+        .find(key)
+        .unwrap_or_else(|| panic!("structure {structure} names bytes"))
+        + key.len();
+    let end = body[start..]
+        .find(',')
+        .or_else(|| body[start..].find('\n'))
+        .expect("structure bytes is terminated")
+        + start;
+    body[start..end]
         .trim()
         .parse()
-        .expect("offset is an integer")
+        .expect("structure bytes is an integer")
+}
+
+fn field_offset(document: &str, structure: &str, field: &str) -> usize {
+    field_entry(document, structure, field).0
 }
 
 fn named_constants(document: &str, group: &str) -> Vec<(u32, String)> {
@@ -316,6 +370,243 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
     );
 }
 
+/// The published protected observation vocabulary is the shared host-web authority, in order.
+#[test]
+fn observation_profiles_and_operations_are_exactly_the_shared_constants() {
+    let document = render();
+    assert_eq!(
+        named_constants(&document, "observationProfiles"),
+        vec![
+            (
+                OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
+                "legacyUnprotected".to_owned()
+            ),
+            (OBSERVATION_PROFILE_EQ_SPECTRUM, "eqSpectrum".to_owned()),
+        ]
+    );
+    assert_eq!(
+        named_constants(&document, "observationOperations"),
+        vec![
+            (
+                OBSERVATION_OPERATION_REPLACE_METERS,
+                "replaceMeters".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_REMOVE_METERS_TO,
+                "removeMetersTo".to_owned()
+            ),
+            (OBSERVATION_OPERATION_STOP_GRAPH, "stopGraph".to_owned()),
+            (
+                OBSERVATION_OPERATION_START_SPECTRUM,
+                "startSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_RESTART_SPECTRUM,
+                "restartSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_READ_SPECTRUM,
+                "readSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_STOP_SPECTRUM,
+                "stopSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                "captureResponse".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH,
+                "rawObservationBatch".to_owned()
+            ),
+            (OBSERVATION_OPERATION_ONE_SHOT, "oneShot".to_owned()),
+            (
+                OBSERVATION_OPERATION_COLLECTION_SELECTION,
+                "collectionSelection".to_owned()
+            ),
+            (OBSERVATION_OPERATION_METER_LEASE, "meterLease".to_owned()),
+            (OBSERVATION_OPERATION_METER_READ, "meterRead".to_owned()),
+            (
+                OBSERVATION_OPERATION_RESIDENT_READ,
+                "residentRead".to_owned()
+            ),
+        ]
+    );
+}
+
+/// The six C2b groups publish every row from the shared host-web authority in order.
+///
+/// The source records keep zero as the empty sentinel for domains, states, and capture kinds;
+/// those sentinels are deliberately absent from the named wire vocabulary. Resident is retained
+/// as a reserved wire name only, without implying executable V1 support.
+#[test]
+fn observation_receipts_flags_and_captures_are_exactly_shared_constants() {
+    let document = render();
+    let groups = [
+        (
+            "observationReceiptDomains",
+            vec![
+                (
+                    host_web::OBSERVATION_RECEIPT_DOMAIN_GRAPH,
+                    "graph".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_DOMAIN_RESIDENT,
+                    "resident".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationReceiptStates",
+            vec![
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_PENDING,
+                    "pending".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_APPLIED,
+                    "applied".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_CLOSED,
+                    "closed".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_RECEIPT_STATE_FAILED,
+                    "failed".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationAdmissionFlags",
+            vec![
+                (
+                    host_web::OBSERVATION_ADMISSION_RECEIPT,
+                    "receiptPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_REQUESTED,
+                    "requestedPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_MAXIMUM,
+                    "maximumPresent".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                    "pendingBoundary".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationStatusFlags",
+            vec![
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                    "ordinaryAvailable".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                    "removalAvailable".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_TERMINAL,
+                    "terminal".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_STATUS_FLAG_RENDER_FAILED,
+                    "renderFailed".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationCaptureKinds",
+            vec![
+                (
+                    host_web::OBSERVATION_CAPTURE_KIND_RESPONSE,
+                    "response".to_owned(),
+                ),
+                (
+                    host_web::OBSERVATION_CAPTURE_KIND_SPECTRUM,
+                    "spectrum".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "observationCaptureFlags",
+            vec![(
+                host_web::OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION,
+                "graphGeneration".to_owned(),
+            )],
+        ),
+    ];
+    assert_eq!(
+        groups.iter().map(|(_, rows)| rows.len()).sum::<usize>(),
+        17,
+        "C2b publishes exactly the seventeen shared rows"
+    );
+    for (group, expected) in groups {
+        assert_eq!(
+            named_constants(&document, group),
+            expected,
+            "{group} is the shared host-web vocabulary in frozen order"
+        );
+    }
+}
+
+/// The C2c refusal group publishes every row from the shared host-web authority in order.
+#[test]
+fn observation_refusal_reasons_are_exactly_shared_constants() {
+    let document = render();
+    assert_eq!(
+        named_constants(&document, "observationRefusalReasons"),
+        vec![
+            (host_web::OBSERVATION_REFUSAL_REASON_NONE, "none".to_owned()),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_NOT_PREPARED,
+                "notPrepared".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_WRONG_OWNER,
+                "wrongOwner".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CAPACITY,
+                "capacity".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_WORK_BUDGET,
+                "workBudget".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_BACKPRESSURE,
+                "backpressure".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CONFLICT,
+                "conflict".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_CLOSED,
+                "closed".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_INVALID_REQUEST,
+                "invalidRequest".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW,
+                "arithmeticOverflow".to_owned()
+            ),
+            (
+                host_web::OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED,
+                "revisionExhausted".to_owned()
+            ),
+        ]
+    );
+}
+
 /// Every published struct offset is the engine's, and the document carries its whole schema.
 #[test]
 fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
@@ -371,6 +662,685 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         scalar_after(&document, "\"constants\": {", "defaultCommandQueueRecords"),
         u64::from(host_web::DEFAULT_COMMAND_QUEUE_RECORDS)
     );
+}
+
+/// The work-limit record is published from the actual Rust record, including its scalar types.
+///
+/// Red mutations: moving a field's `offset_of!` row or changing one of its type strings makes the
+/// corresponding assertion fail. Each lookup is bounded to `observationWorkLimits`, so a missing
+/// field cannot accidentally resolve to a same-named row in another structure.
+#[test]
+fn observation_work_limits_layout_matches_the_rust_record() {
+    let document = render();
+    assert_eq!(
+        structure_bytes(&document, "observationWorkLimits"),
+        size_of::<WebObservationWorkLimits>() as u64,
+        "the published work-limit size is the Rust record size"
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, "observationWorkLimits", $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationWorkLimits, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!(
+        "maximumActiveMeterChannels",
+        maximum_active_meter_channels,
+        u64
+    );
+    assert_field!(
+        "maximumMeterSamplesPerBlock",
+        maximum_meter_samples_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumMeterPublicationsPerBlock",
+        maximum_meter_publications_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumMeterPublicationBytesPerBlock",
+        maximum_meter_publication_bytes_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumActiveSpectrumCaptures",
+        maximum_active_spectrum_captures,
+        u64
+    );
+    assert_field!(
+        "maximumCaptureInputSamplesPerBlock",
+        maximum_capture_input_samples_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumCaptureCopySamplesPerBlock",
+        maximum_capture_copy_samples_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumCapturePublicationsPerBlock",
+        maximum_capture_publications_per_block,
+        u64
+    );
+    assert_field!(
+        "maximumCaptureBytesPerSecond",
+        maximum_capture_bytes_per_second,
+        u64
+    );
+    assert_field!(
+        "maximumTransitionEntryVisitsPerBlock",
+        maximum_transition_entry_visits_per_block,
+        u64
+    );
+    assert_field!("maximumRetainedBytes", maximum_retained_bytes, u64);
+}
+
+/// The ingress-limit record publishes every Rust scalar and its actual alignment hole.
+///
+/// The padding row is derived from adjacent Rust fields rather than represented by a Rust
+/// reserved member. It is nonsemantic: consumers may ignore its bytes and must not require them
+/// to be zero.
+#[test]
+fn observation_ingress_limits_layout_matches_the_rust_record() {
+    let document = render();
+    assert_eq!(
+        structure_bytes(&document, "observationIngressLimits"),
+        size_of::<WebObservationIngressLimits>() as u64,
+        "the published ingress-limit size is the Rust record size"
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, "observationIngressLimits", $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationIngressLimits, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("maximumControlBytes", maximum_control_bytes, u32);
+    assert_field!("maximumObservationRows", maximum_observation_rows, u32);
+    assert_field!("maximumResultBytes", maximum_result_bytes, u32);
+    assert_field!(
+        "ordinaryOperationsPerBoundary",
+        ordinary_operations_per_boundary,
+        u32
+    );
+    assert_field!(
+        "removalOperationsPerBoundary",
+        removal_operations_per_boundary,
+        u32
+    );
+
+    let removal_end =
+        offset_of!(WebObservationIngressLimits, removal_operations_per_boundary) + size_of::<u32>();
+    let admission_start = offset_of!(WebObservationIngressLimits, maximum_admission_entry_visits);
+    assert_eq!(admission_start - removal_end, 4);
+    let (padding_offset, padding_type) =
+        field_entry(&document, "observationIngressLimits", "alignmentPadding");
+    assert_eq!(padding_offset, removal_end);
+    assert_eq!(padding_type, "u8[4]");
+
+    assert_field!(
+        "maximumAdmissionEntryVisits",
+        maximum_admission_entry_visits,
+        u64
+    );
+    assert_field!(
+        "maximumResponseBindingVisits",
+        maximum_response_binding_visits,
+        u64
+    );
+    assert_field!(
+        "maximumResponseSectionVisits",
+        maximum_response_section_visits,
+        u64
+    );
+    assert_field!("maximumResponseCopyBytes", maximum_response_copy_bytes, u64);
+    assert_field!(
+        "maximumHandlerCopyBytesPerBoundary",
+        maximum_handler_copy_bytes_per_boundary,
+        u64
+    );
+    assert_field!(
+        "maximumCleanupEntryVisitsPerBoundary",
+        maximum_cleanup_entry_visits_per_boundary,
+        u64
+    );
+    assert_field!("maximumRetainedBytes", maximum_retained_bytes, u64);
+}
+
+/// The preparation record is published as one flattened, non-overlapping byte layout. The
+/// nested records remain authoritative through their own generated rows; this test checks the
+/// parent size/boundaries, the prefixed names, and the derived ingress padding without duplicating
+/// every child Rust field assertion here.
+#[test]
+fn observation_preparation_layout_flattens_the_rust_record() {
+    let document = render();
+    let structure = "observationPreparation";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationPreparationRecord>());
+
+    assert_eq!(
+        field_entry(&document, structure, "structSize"),
+        (0, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "activationMaximumRetainedBytes"),
+        (32, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "workLimits.structSize"),
+        (40, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "workLimits.maximumRetainedBytes"),
+        (128, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.structSize"),
+        (136, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.alignmentPadding"),
+        (164, "u8[4]".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "ingressLimits.maximumRetainedBytes"),
+        (216, "u64".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "spectrumRequest.structSize"),
+        (224, "u32".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "spectrumRequest.reserved"),
+        (256, "u32[2]".into())
+    );
+    assert_eq!(
+        field_entry(&document, structure, "targetId"),
+        (264, "u8[128]".into())
+    );
+
+    let names = [
+        "structSize",
+        "abiVersion",
+        "profile",
+        "meterCount",
+        "residentTaps",
+        "spectrumCount",
+        "maximumActiveObservers",
+        "reserved0",
+        "activationMaximumRetainedBytes",
+        "workLimits.structSize",
+        "workLimits.abiVersion",
+        "workLimits.maximumActiveMeterChannels",
+        "workLimits.maximumMeterSamplesPerBlock",
+        "workLimits.maximumMeterPublicationsPerBlock",
+        "workLimits.maximumMeterPublicationBytesPerBlock",
+        "workLimits.maximumActiveSpectrumCaptures",
+        "workLimits.maximumCaptureInputSamplesPerBlock",
+        "workLimits.maximumCaptureCopySamplesPerBlock",
+        "workLimits.maximumCapturePublicationsPerBlock",
+        "workLimits.maximumCaptureBytesPerSecond",
+        "workLimits.maximumTransitionEntryVisitsPerBlock",
+        "workLimits.maximumRetainedBytes",
+        "ingressLimits.structSize",
+        "ingressLimits.abiVersion",
+        "ingressLimits.maximumControlBytes",
+        "ingressLimits.maximumObservationRows",
+        "ingressLimits.maximumResultBytes",
+        "ingressLimits.ordinaryOperationsPerBoundary",
+        "ingressLimits.removalOperationsPerBoundary",
+        "ingressLimits.alignmentPadding",
+        "ingressLimits.maximumAdmissionEntryVisits",
+        "ingressLimits.maximumResponseBindingVisits",
+        "ingressLimits.maximumResponseSectionVisits",
+        "ingressLimits.maximumResponseCopyBytes",
+        "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+        "ingressLimits.maximumCleanupEntryVisitsPerBoundary",
+        "ingressLimits.maximumRetainedBytes",
+        "spectrumRequest.structSize",
+        "spectrumRequest.abiVersion",
+        "spectrumRequest.target",
+        "spectrumRequest.channels",
+        "spectrumRequest.targetIdBytes",
+        "spectrumRequest.reserved0",
+        "spectrumRequest.maximumCaptureBytes",
+        "spectrumRequest.reserved",
+        "targetId",
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (index, name) in names.iter().enumerate() {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded preparation structure"
+        );
+        let (offset, kind) = field_entry(&document, structure, name);
+        assert_eq!(offset, next_offset, "field {name} tiles row {index}");
+        next_offset += match kind.as_str() {
+            "u8" => 1,
+            "u8[4]" => 4,
+            "u8[128]" => 128,
+            "u32" | "f32" => 4,
+            "u32[2]" => 8,
+            "u64" => 8,
+            other => panic!("unexpected preparation field type {other}"),
+        };
+    }
+    assert_eq!(next_offset, bytes);
+}
+
+/// The demand record is published from the six leaves of the authoritative Rust record.
+#[test]
+fn observation_demand_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationDemand";
+    assert_eq!(
+        structure_bytes(&document, structure),
+        size_of::<WebObservationDemand>() as u64
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationDemand, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("operation", operation, u32);
+    assert_field!("count", count, u32);
+    assert_field!("owner", owner, u64);
+    let (reserved_offset, reserved_type) = field_entry(&document, structure, "reserved");
+    assert_eq!(reserved_offset, offset_of!(WebObservationDemand, reserved));
+    assert_eq!(reserved_type, "u32[2]");
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("operation", size_of::<u32>()),
+        ("count", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("reserved", size_of::<[u32; 2]>()),
+    ];
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, size_of::<WebObservationDemand>());
+}
+
+/// The receipt record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_receipt_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationReceipt";
+    assert_eq!(
+        structure_bytes(&document, structure),
+        size_of::<WebObservationReceipt>() as u64
+    );
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationReceipt, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("domain", domain, u32);
+    assert_field!("state", state, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("sequence", sequence, u64);
+    assert_field!("applicationSample", application_sample, u64);
+    assert_field!("result", result, u32);
+    assert_field!("reserved", reserved, u32);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("domain", size_of::<u32>()),
+        ("state", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("sequence", size_of::<u64>()),
+        ("applicationSample", size_of::<u64>()),
+        ("result", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+    ];
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, size_of::<WebObservationReceipt>());
+}
+
+/// The admission record flattens its own leaves and every nested receipt leaf into one complete
+/// parent layout. The receipt itself is represented only by its prefixed leaves, so no aggregate
+/// row overlaps those bytes.
+#[test]
+fn observation_admission_layout_flattens_the_rust_record() {
+    let document = render();
+    let structure = "observationAdmission";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationAdmission>());
+    assert_eq!(bytes, 232);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationAdmission, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("result", result, u32);
+    assert_field!("operation", operation, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("reason", reason, u32);
+    assert_field!("limitBytes", limit_bytes, u32);
+    assert_field!("reserved", reserved, u32);
+    assert_field!("ingressEpoch", ingress_epoch, u64);
+    assert_field!("requested", requested, u64);
+    assert_field!("maximum", maximum, u64);
+
+    let (limit_offset, limit_type) = field_entry(&document, structure, "limit");
+    assert_eq!(limit_offset, offset_of!(WebObservationAdmission, limit));
+    assert_eq!(limit_type, "u8[128]");
+
+    let receipt_offset = offset_of!(WebObservationAdmission, receipt);
+    assert_eq!(
+        receipt_offset,
+        offset_of!(WebObservationAdmission, limit) + size_of::<[u8; 128]>()
+    );
+    assert_eq!(
+        receipt_offset + size_of::<WebObservationReceipt>(),
+        size_of::<WebObservationAdmission>()
+    );
+
+    let receipt_fields = [
+        (
+            "receipt.structSize",
+            offset_of!(WebObservationReceipt, struct_size),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.abiVersion",
+            offset_of!(WebObservationReceipt, abi_version),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.domain",
+            offset_of!(WebObservationReceipt, domain),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.state",
+            offset_of!(WebObservationReceipt, state),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.owner",
+            offset_of!(WebObservationReceipt, owner),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.sequence",
+            offset_of!(WebObservationReceipt, sequence),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.applicationSample",
+            offset_of!(WebObservationReceipt, application_sample),
+            size_of::<u64>(),
+        ),
+        (
+            "receipt.result",
+            offset_of!(WebObservationReceipt, result),
+            size_of::<u32>(),
+        ),
+        (
+            "receipt.reserved",
+            offset_of!(WebObservationReceipt, reserved),
+            size_of::<u32>(),
+        ),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("result", size_of::<u32>()),
+        ("operation", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("reason", size_of::<u32>()),
+        ("limitBytes", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+        ("ingressEpoch", size_of::<u64>()),
+        ("requested", size_of::<u64>()),
+        ("maximum", size_of::<u64>()),
+        ("limit", size_of::<[u8; 128]>()),
+    ] {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded admission structure"
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    for (name, child_offset, width) in receipt_fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded admission structure"
+        );
+        assert_eq!(
+            field_offset(&document, structure, name),
+            receipt_offset + child_offset
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
+}
+
+/// The status record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_status_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationStatus";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationStatus>());
+    assert_eq!(bytes, 64);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationStatus, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("profile", profile, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("pendingCount", pending_count, u32);
+    assert_field!("reserved", reserved, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("ingressEpoch", ingress_epoch, u64);
+    assert_field!("acceptedGeneration", accepted_generation, u64);
+    assert_field!("appliedGeneration", applied_generation, u64);
+    assert_field!("selectionEpoch", selection_epoch, u64);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("profile", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("pendingCount", size_of::<u32>()),
+        ("reserved", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("ingressEpoch", size_of::<u64>()),
+        ("acceptedGeneration", size_of::<u64>()),
+        ("appliedGeneration", size_of::<u64>()),
+        ("selectionEpoch", size_of::<u64>()),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded status structure"
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
+}
+
+/// The capture identity record is published from every leaf of the authoritative Rust record.
+#[test]
+fn observation_capture_identity_layout_matches_the_rust_record() {
+    let document = render();
+    let structure = "observationCaptureIdentity";
+    let bytes = structure_bytes(&document, structure) as usize;
+    assert_eq!(bytes, size_of::<WebObservationCaptureIdentity>());
+    assert_eq!(bytes, 48);
+
+    macro_rules! assert_field {
+        ($name:literal, $field:ident, $ty:ty) => {{
+            let (offset, kind) = field_entry(&document, structure, $name);
+            assert_eq!(
+                offset,
+                offset_of!(WebObservationCaptureIdentity, $field),
+                "the published offset for {} is the Rust offset",
+                $name
+            );
+            assert_eq!(
+                kind,
+                core::any::type_name::<$ty>(),
+                "the published type for {} is the Rust type",
+                $name
+            );
+        }};
+    }
+
+    assert_field!("structSize", struct_size, u32);
+    assert_field!("abiVersion", abi_version, u32);
+    assert_field!("kind", kind, u32);
+    assert_field!("flags", flags, u32);
+    assert_field!("owner", owner, u64);
+    assert_field!("observationGeneration", observation_generation, u64);
+    assert_field!("selectionEpoch", selection_epoch, u64);
+    assert_field!("snapshotToken", snapshot_token, u64);
+
+    let fields = [
+        ("structSize", size_of::<u32>()),
+        ("abiVersion", size_of::<u32>()),
+        ("kind", size_of::<u32>()),
+        ("flags", size_of::<u32>()),
+        ("owner", size_of::<u64>()),
+        ("observationGeneration", size_of::<u64>()),
+        ("selectionEpoch", size_of::<u64>()),
+        ("snapshotToken", size_of::<u64>()),
+    ];
+    let body = structure_body(&document, structure);
+    let mut next_offset = 0;
+    for (name, width) in fields {
+        let marker = format!("\"name\": \"{name}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "field {name} occurs exactly once in the bounded capture identity structure"
+        );
+        assert_eq!(field_offset(&document, structure, name), next_offset);
+        next_offset += width;
+    }
+    assert_eq!(next_offset, bytes);
 }
 
 /// Regeneration is deterministic: the same tree renders the same bytes.

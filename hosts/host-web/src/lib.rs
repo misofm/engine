@@ -33,16 +33,19 @@ use effect_contract::{
 use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
-    InputFilterEditErrorKind, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    SourceControlError, SourceSubmission, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
+    HostConsoleRequest, HostMeterRequest, HostObservationController, HostPrepareCaps,
+    HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, apply_input_filter_edit,
+    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_console_and_spectrum,
+    prepare_host_runtime_with_observation_demand_between_render_calls,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
-    ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
-    SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
+    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationAccepted,
+    ObservationRefusal, ObservationRefusalReason, ObservationStop,
+    ObservedContinuousSpectrumWindow, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
+    SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
@@ -51,6 +54,11 @@ use host_core::{
 use session::CompileCaps;
 
 use control_targets::{PREPARED_EFFECT_COMPANION_CAPACITY, PreparedControlWorkspace};
+
+use observation_ingress::{
+    ObservationIngressBridge, ObservationIngressShape, project_observation_ingress,
+    validate_observation_ingress_limits,
+};
 
 pub use host_core::EffectRack;
 
@@ -274,6 +282,591 @@ pub struct WebSpectrumCollectionEntry {
     pub channels: u32,
     pub target_id_bytes: u32,
     pub reserved: [u32; 3],
+}
+
+/// Protected browser observation preparation profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebObservationProfile {
+    /// One continuous stereo spectrum target after one prepared track's matrix stage.
+    EqSpectrum,
+}
+
+/// Explicit bounded ingress limits for a protected observation owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationIngressLimits {
+    /// Inclusive maximum encoded observation control bytes.
+    pub maximum_control_bytes: u32,
+    /// Inclusive maximum observation rows in one bounded result or application batch.
+    pub maximum_observation_rows: u32,
+    /// Inclusive maximum copied observation result bytes.
+    pub maximum_result_bytes: u32,
+    /// Inclusive ordinary operation attempts per successful render boundary.
+    pub ordinary_operations_per_boundary: u32,
+    /// Inclusive removal operation attempts per successful render boundary.
+    pub removal_operations_per_boundary: u32,
+    /// Inclusive admission entry visits per boundary.
+    pub maximum_admission_entry_visits: u64,
+    /// Inclusive prepared response-binding visits per capture.
+    pub maximum_response_binding_visits: u64,
+    /// Inclusive response section visits per capture.
+    pub maximum_response_section_visits: u64,
+    /// Inclusive response copy bytes per capture.
+    pub maximum_response_copy_bytes: u64,
+    /// Inclusive handler copy bytes per boundary.
+    pub maximum_handler_copy_bytes_per_boundary: u64,
+    /// Inclusive cleanup entry visits per boundary.
+    pub maximum_cleanup_entry_visits_per_boundary: u64,
+    /// Inclusive retained protected-observation bytes.
+    pub maximum_retained_bytes: u64,
+}
+
+/// Fixed wire limits for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationWorkLimits {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub maximum_active_meter_channels: u64,
+    pub maximum_meter_samples_per_block: u64,
+    pub maximum_meter_publications_per_block: u64,
+    pub maximum_meter_publication_bytes_per_block: u64,
+    pub maximum_active_spectrum_captures: u64,
+    pub maximum_capture_input_samples_per_block: u64,
+    pub maximum_capture_copy_samples_per_block: u64,
+    pub maximum_capture_publications_per_block: u64,
+    pub maximum_capture_bytes_per_second: u64,
+    pub maximum_transition_entry_visits_per_block: u64,
+    pub maximum_retained_bytes: u64,
+}
+
+impl Default for WebObservationWorkLimits {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            maximum_active_meter_channels: 0,
+            maximum_meter_samples_per_block: 0,
+            maximum_meter_publications_per_block: 0,
+            maximum_meter_publication_bytes_per_block: 0,
+            maximum_active_spectrum_captures: 0,
+            maximum_capture_input_samples_per_block: 0,
+            maximum_capture_copy_samples_per_block: 0,
+            maximum_capture_publications_per_block: 0,
+            maximum_capture_bytes_per_second: 0,
+            maximum_transition_entry_visits_per_block: 0,
+            maximum_retained_bytes: 0,
+        }
+    }
+}
+
+/// Fixed wire ingress limits for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationIngressLimits {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub maximum_control_bytes: u32,
+    pub maximum_observation_rows: u32,
+    pub maximum_result_bytes: u32,
+    pub ordinary_operations_per_boundary: u32,
+    pub removal_operations_per_boundary: u32,
+    pub maximum_admission_entry_visits: u64,
+    pub maximum_response_binding_visits: u64,
+    pub maximum_response_section_visits: u64,
+    pub maximum_response_copy_bytes: u64,
+    pub maximum_handler_copy_bytes_per_boundary: u64,
+    pub maximum_cleanup_entry_visits_per_boundary: u64,
+    pub maximum_retained_bytes: u64,
+}
+
+impl Default for WebObservationIngressLimits {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            maximum_control_bytes: 0,
+            maximum_observation_rows: 0,
+            maximum_result_bytes: 0,
+            ordinary_operations_per_boundary: 0,
+            removal_operations_per_boundary: 0,
+            maximum_admission_entry_visits: 0,
+            maximum_response_binding_visits: 0,
+            maximum_response_section_visits: 0,
+            maximum_response_copy_bytes: 0,
+            maximum_handler_copy_bytes_per_boundary: 0,
+            maximum_cleanup_entry_visits_per_boundary: 0,
+            maximum_retained_bytes: 0,
+        }
+    }
+}
+
+/// Fixed wire preparation record for the protected browser observation endpoint.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WebObservationPreparationRecord {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub profile: u32,
+    pub meter_count: u32,
+    pub resident_taps: u32,
+    pub spectrum_count: u32,
+    pub maximum_active_observers: u32,
+    pub reserved0: u32,
+    pub activation_maximum_retained_bytes: u64,
+    pub work_limits: WebObservationWorkLimits,
+    pub ingress_limits: WebObservationIngressLimits,
+    pub spectrum_request: WebSpectrumRequest,
+    pub target_id: [u8; 128],
+}
+
+impl Default for WebObservationPreparationRecord {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            profile: OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
+            meter_count: 0,
+            resident_taps: 0,
+            spectrum_count: 0,
+            maximum_active_observers: 0,
+            reserved0: 0,
+            activation_maximum_retained_bytes: 0,
+            work_limits: WebObservationWorkLimits::default(),
+            ingress_limits: WebObservationIngressLimits::default(),
+            spectrum_request: WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                ..WebSpectrumRequest::default()
+            },
+            target_id: [0; 128],
+        }
+    }
+}
+
+/// Fixed wire status projection for one protected observation owner.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationStatus {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub profile: u32,
+    pub flags: u32,
+    pub pending_count: u32,
+    pub reserved: u32,
+    pub owner: u64,
+    pub ingress_epoch: u64,
+    pub accepted_generation: u64,
+    pub applied_generation: u64,
+    pub selection_epoch: u64,
+}
+
+impl Default for WebObservationStatus {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            profile: OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
+            flags: 0,
+            pending_count: 0,
+            reserved: 0,
+            owner: 0,
+            ingress_epoch: 0,
+            accepted_generation: 0,
+            applied_generation: 0,
+            selection_epoch: 0,
+        }
+    }
+}
+
+/// Byte sizes of the protected observation preparation and status records.
+#[allow(missing_docs)]
+pub const OBSERVATION_WORK_LIMITS_BYTES: u32 = size_of::<WebObservationWorkLimits>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_INGRESS_LIMITS_BYTES: u32 = size_of::<WebObservationIngressLimits>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_PREPARATION_BYTES: u32 = size_of::<WebObservationPreparationRecord>() as u32;
+#[allow(missing_docs)]
+pub const OBSERVATION_STATUS_BYTES: u32 = size_of::<WebObservationStatus>() as u32;
+/// Unprotected legacy observation profile (`observationProfiles.legacyUnprotected`).
+pub const OBSERVATION_PROFILE_LEGACY_UNPROTECTED: u32 = 0;
+/// Protected EQ spectrum observation profile (`observationProfiles.eqSpectrum`).
+pub const OBSERVATION_PROFILE_EQ_SPECTRUM: u32 = 1;
+/// Replace the meter observation set (`observationOperations.replaceMeters`).
+pub const OBSERVATION_OPERATION_REPLACE_METERS: u32 = 1;
+/// Remove meter observations through the requested boundary (`observationOperations.removeMetersTo`).
+pub const OBSERVATION_OPERATION_REMOVE_METERS_TO: u32 = 2;
+/// Stop the protected observation graph (`observationOperations.stopGraph`).
+pub const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
+/// Start a continuous spectrum observation (`observationOperations.startSpectrum`).
+pub const OBSERVATION_OPERATION_START_SPECTRUM: u32 = 4;
+/// Restart a continuous spectrum observation (`observationOperations.restartSpectrum`).
+pub const OBSERVATION_OPERATION_RESTART_SPECTRUM: u32 = 5;
+/// Read a continuous spectrum observation (`observationOperations.readSpectrum`).
+pub const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
+/// Stop a continuous spectrum observation (`observationOperations.stopSpectrum`).
+pub const OBSERVATION_OPERATION_STOP_SPECTRUM: u32 = 7;
+/// Capture a response observation (`observationOperations.captureResponse`).
+pub const OBSERVATION_OPERATION_CAPTURE_RESPONSE: u32 = 8;
+/// Submit a raw observation batch (`observationOperations.rawObservationBatch`).
+pub const OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH: u32 = 9;
+/// Read a one-shot observation (`observationOperations.oneShot`).
+pub const OBSERVATION_OPERATION_ONE_SHOT: u32 = 10;
+/// Select a spectrum collection entry (`observationOperations.collectionSelection`).
+pub const OBSERVATION_OPERATION_COLLECTION_SELECTION: u32 = 11;
+/// Acquire or release the meter lease (`observationOperations.meterLease`).
+pub const OBSERVATION_OPERATION_METER_LEASE: u32 = 12;
+/// Read a meter observation (`observationOperations.meterRead`).
+pub const OBSERVATION_OPERATION_METER_READ: u32 = 13;
+/// Read resident observations (`observationOperations.residentRead`).
+pub const OBSERVATION_OPERATION_RESIDENT_READ: u32 = 14;
+
+/// Compatibility spelling for [`OBSERVATION_OPERATION_STOP_SPECTRUM`].
+pub const OBSERVATION_OPERATION_STOP: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
+/// Compatibility spelling for [`OBSERVATION_OPERATION_CAPTURE_RESPONSE`].
+pub const OBSERVATION_OPERATION_RESPONSE: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
+
+/// A status flag indicating that ordinary observation admission is available.
+pub const OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE: u32 = 1;
+/// A status flag indicating that removal observation admission is available.
+pub const OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE: u32 = 1 << 1;
+/// A status flag indicating that the protected observation owner is terminal.
+pub const OBSERVATION_STATUS_FLAG_TERMINAL: u32 = 1 << 2;
+/// A status flag indicating that rendering failed for the protected observation owner.
+pub const OBSERVATION_STATUS_FLAG_RENDER_FAILED: u32 = 1 << 3;
+
+/// Scalar observation demand submitted through the protected browser endpoint.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebObservationDemand {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub operation: u32,
+    pub count: u32,
+    pub owner: u64,
+    pub reserved: [u32; 2],
+}
+
+/// One graph or resident observation application receipt.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationReceipt {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub domain: u32,
+    pub state: u32,
+    pub owner: u64,
+    pub sequence: u64,
+    pub application_sample: u64,
+    pub result: u32,
+    pub reserved: u32,
+}
+
+impl Default for WebObservationReceipt {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            domain: 0,
+            state: 0,
+            owner: 0,
+            sequence: 0,
+            application_sample: 0,
+            result: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Scalar result and refusal record for one protected observation admission.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationAdmission {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub result: u32,
+    pub operation: u32,
+    pub flags: u32,
+    pub reason: u32,
+    pub limit_bytes: u32,
+    pub reserved: u32,
+    pub ingress_epoch: u64,
+    pub requested: u64,
+    pub maximum: u64,
+    pub limit: [u8; 128],
+    pub receipt: WebObservationReceipt,
+}
+
+impl Default for WebObservationAdmission {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            result: 0,
+            operation: 0,
+            flags: 0,
+            reason: 0,
+            limit_bytes: 0,
+            reserved: 0,
+            ingress_epoch: 0,
+            requested: 0,
+            maximum: 0,
+            limit: [0; 128],
+            receipt: WebObservationReceipt::default(),
+        }
+    }
+}
+
+/// Identity carried beside one successful response or spectrum capture.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationCaptureIdentity {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub owner: u64,
+    pub observation_generation: u64,
+    pub selection_epoch: u64,
+    pub snapshot_token: u64,
+}
+
+impl Default for WebObservationCaptureIdentity {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: ABI_VERSION,
+            kind: 0,
+            flags: 0,
+            owner: 0,
+            observation_generation: 0,
+            selection_epoch: 0,
+            snapshot_token: 0,
+        }
+    }
+}
+
+/// Private fixed-capacity side records for the protected observation owner.
+///
+/// The arrays are deliberately inline in the outer host. They are reserved here so later receipt
+/// mediation can fill them without changing the host's allocation shape or introducing a second
+/// queue/ledger. Free receipt rows have state zero and are never exported.
+#[derive(Default)]
+#[allow(dead_code)]
+struct ObservationSideRecords {
+    admission: WebObservationAdmission,
+    status: WebObservationStatus,
+    capture_identity: WebObservationCaptureIdentity,
+    receipts: [WebObservationReceipt; 4],
+    applications: [WebObservationReceipt; 4],
+    application_len: usize,
+    pending_count: u8,
+    completed_count: u8,
+    reserved_mask: u8,
+    pending_stop_slot: Option<usize>,
+    terminal_finalized: bool,
+}
+
+/// A graph-domain observation receipt.
+pub const OBSERVATION_RECEIPT_DOMAIN_GRAPH: u32 = 1;
+/// A resident-domain observation receipt reserved by the wire vocabulary.
+pub const OBSERVATION_RECEIPT_DOMAIN_RESIDENT: u32 = 2;
+/// A pending observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_PENDING: u32 = 1;
+/// An applied observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_APPLIED: u32 = 2;
+/// A closed observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
+/// A failed observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
+/// Admission metadata includes an observation receipt.
+pub const OBSERVATION_ADMISSION_RECEIPT: u32 = 1;
+/// Admission metadata includes the requested value.
+pub const OBSERVATION_ADMISSION_REQUESTED: u32 = 1 << 1;
+/// Admission metadata includes the maximum value.
+pub const OBSERVATION_ADMISSION_MAXIMUM: u32 = 1 << 2;
+/// Admission metadata records a pending render-boundary application.
+pub const OBSERVATION_ADMISSION_PENDING_BOUNDARY: u32 = 1 << 3;
+/// A protected response capture identity.
+pub const OBSERVATION_CAPTURE_KIND_RESPONSE: u32 = 1;
+/// A protected spectrum capture identity.
+pub const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
+/// A capture identity carries graph-generation fields.
+pub const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
+/// No observation refusal was recorded.
+pub const OBSERVATION_REFUSAL_REASON_NONE: u32 = 0;
+/// No prepared observation owner exists for the operation.
+pub const OBSERVATION_REFUSAL_REASON_NOT_PREPARED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::NotPrepared);
+/// A handle belongs to another observation owner.
+pub const OBSERVATION_REFUSAL_REASON_WRONG_OWNER: u32 =
+    observation_refusal_reason(ObservationRefusalReason::WrongOwner);
+/// The requested selection exceeds a configured capacity.
+pub const OBSERVATION_REFUSAL_REASON_CAPACITY: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Capacity);
+/// The requested selection exceeds an inclusive work or retained-byte limit.
+pub const OBSERVATION_REFUSAL_REASON_WORK_BUDGET: u32 =
+    observation_refusal_reason(ObservationRefusalReason::WorkBudget);
+/// A bounded publication or application credit is occupied.
+pub const OBSERVATION_REFUSAL_REASON_BACKPRESSURE: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Backpressure);
+/// The requested removal is not a subset of the accepted selection.
+pub const OBSERVATION_REFUSAL_REASON_CONFLICT: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Conflict);
+/// The observation owner has reached terminal closure.
+pub const OBSERVATION_REFUSAL_REASON_CLOSED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::Closed);
+/// The request is not valid for this owner or tranche.
+pub const OBSERVATION_REFUSAL_REASON_INVALID_REQUEST: u32 =
+    observation_refusal_reason(ObservationRefusalReason::InvalidRequest);
+/// Checked identity, cost, or allocation arithmetic overflowed.
+pub const OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW: u32 =
+    observation_refusal_reason(ObservationRefusalReason::ArithmeticOverflow);
+/// No further observation revision can be represented.
+pub const OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED: u32 =
+    observation_refusal_reason(ObservationRefusalReason::RevisionExhausted);
+/// A protected continuous-spectrum read preserves either its exact admission refusal or the
+/// complete native availability outcome. The public Rust compatibility facade maps this typed
+/// seam back to [`SpectrumContinuousReadError`] after the native result has been retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedSpectrumReadError {
+    Refused(ObservationRefusal),
+    Native(HostSpectrumReadError),
+}
+
+/// A protected response capture keeps admission refusals distinct from native capture failures.
+///
+/// The public Rust facade retains its existing [`ResponseSnapshotError`] signature, while this
+/// private seam preserves the typed observation refusal for the protected admission diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedResponseCaptureError {
+    Refused(ObservationRefusal),
+    Capture(ResponseSnapshotError),
+}
+
+fn observation_not_prepared() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::NotPrepared,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+const fn observation_refusal_reason(reason: ObservationRefusalReason) -> u32 {
+    match reason {
+        ObservationRefusalReason::NotPrepared => 1,
+        ObservationRefusalReason::WrongOwner => 2,
+        ObservationRefusalReason::Capacity => 3,
+        ObservationRefusalReason::WorkBudget => 4,
+        ObservationRefusalReason::Backpressure => 5,
+        ObservationRefusalReason::Conflict => 6,
+        ObservationRefusalReason::Closed => 7,
+        ObservationRefusalReason::InvalidRequest => 8,
+        ObservationRefusalReason::ArithmeticOverflow => 9,
+        ObservationRefusalReason::RevisionExhausted => 10,
+    }
+}
+
+#[allow(dead_code)]
+fn observation_refusal_result(reason: ObservationRefusalReason) -> u32 {
+    match reason {
+        ObservationRefusalReason::NotPrepared => RESULT_UNSUPPORTED,
+        ObservationRefusalReason::WrongOwner | ObservationRefusalReason::InvalidRequest => {
+            RESULT_INVALID_ARGUMENT
+        }
+        ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => RESULT_REFUSED_BUDGET,
+        ObservationRefusalReason::Backpressure => RESULT_BACKPRESSURE,
+        ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => RESULT_WRONG_STATE,
+    }
+}
+
+fn legacy_response_refusal(refusal: ObservationRefusal) -> ResponseSnapshotError {
+    match refusal.reason {
+        ObservationRefusalReason::NotPrepared => ResponseSnapshotError::Unsupported,
+        ObservationRefusalReason::WrongOwner | ObservationRefusalReason::InvalidRequest => {
+            ResponseSnapshotError::InvalidShape
+        }
+        ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::Backpressure
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => ResponseSnapshotError::Capacity,
+        ObservationRefusalReason::Conflict | ObservationRefusalReason::Closed => {
+            ResponseSnapshotError::Owner
+        }
+    }
+}
+
+fn response_snapshot_result(error: ResponseSnapshotError) -> u32 {
+    match error {
+        ResponseSnapshotError::Unsupported => RESULT_UNSUPPORTED,
+        ResponseSnapshotError::MissingTrack | ResponseSnapshotError::InvalidShape => {
+            RESULT_INVALID_ARGUMENT
+        }
+        ResponseSnapshotError::Capacity => RESULT_REFUSED_BUDGET,
+        ResponseSnapshotError::Owner => RESULT_INTERNAL,
+    }
+}
+
+fn legacy_spectrum_read_error(error: HostSpectrumReadError) -> SpectrumContinuousReadError {
+    match error {
+        HostSpectrumReadError::Inactive | HostSpectrumReadError::Closed => {
+            SpectrumContinuousReadError::NotActive
+        }
+        HostSpectrumReadError::PendingApplication | HostSpectrumReadError::Pending => {
+            SpectrumContinuousReadError::Pending
+        }
+        HostSpectrumReadError::Warming => SpectrumContinuousReadError::Warming,
+        HostSpectrumReadError::Failed { stream_epoch, .. } => {
+            SpectrumContinuousReadError::Failed { stream_epoch }
+        }
+        HostSpectrumReadError::Gap {
+            stream_epoch,
+            dropped_captures,
+            ..
+        } => SpectrumContinuousReadError::Gap {
+            stream_epoch,
+            dropped_captures,
+        },
+    }
+}
+
+fn legacy_spectrum_read_refusal(refusal: ObservationRefusal) -> SpectrumContinuousReadError {
+    match refusal.reason {
+        ObservationRefusalReason::Closed | ObservationRefusalReason::NotPrepared => {
+            SpectrumContinuousReadError::NotActive
+        }
+        ObservationRefusalReason::WrongOwner
+        | ObservationRefusalReason::Capacity
+        | ObservationRefusalReason::WorkBudget
+        | ObservationRefusalReason::Backpressure
+        | ObservationRefusalReason::Conflict
+        | ObservationRefusalReason::InvalidRequest
+        | ObservationRefusalReason::ArithmeticOverflow
+        | ObservationRefusalReason::RevisionExhausted => SpectrumContinuousReadError::Pending,
+    }
+}
+
+/// Rust-side protected observation preparation supplied before the host is published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationPreparation<'a> {
+    /// The protected browser profile to prepare.
+    pub profile: WebObservationProfile,
+    /// The shared native observation demand and its explicit work limits.
+    pub demand: host_core::HostObservationPreparation<'a>,
+    /// The explicit browser ingress and copy limits.
+    pub ingress: ObservationIngressLimits,
 }
 
 /// Raw one-shot 2048-frame spectrum window header.
@@ -1294,6 +1887,179 @@ impl PreparedSpectrumCapture {
     }
 }
 
+/// Protected preparation ownership and the retained spectrum demand/caches.
+#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
+struct ProtectedObservationStorage {
+    controller: HostObservationController,
+    ingress: ObservationIngressState,
+    /// Last native continuous history epoch observed by protected mediation.
+    history_epoch: Option<u64>,
+    /// Cumulative native windows dropped in the cached history epoch.
+    history_dropped_captures: u64,
+    /// Cadence derived once from the prepared session shape for later protected reads.
+    spectrum_cadence: SpectrumCadence,
+    /// Maximum packed payloads proved by the immutable ingress projection.
+    packed_response_bytes: u64,
+    packed_spectrum_bytes: u64,
+    /// Prepared continuous spectrum demand retained off render for later protected mediation.
+    ///
+    /// The target string is moved into this demand at publication time; every operation borrows
+    /// it, so starting or restarting a stream never allocates or clones the target identity.
+    spectrum_demand: HostSpectrumDemand,
+}
+
+/// The only spectrum/observation owner a ready host may carry.
+#[allow(dead_code)]
+// Private preparation is wired in the next bounded #825 checkpoint.
+// Keep the single prepared owner inline; the full containing allocation is resource-accounted.
+#[allow(clippy::large_enum_variant)]
+enum PreparedObservationStorage {
+    /// Existing public one-shot/continuous capture compatibility owner.
+    Legacy(Option<PreparedSpectrumCapture>),
+    /// Private protected owner prepared through host-core's observation controller.
+    Protected(ProtectedObservationStorage),
+}
+
+impl PreparedObservationStorage {
+    fn legacy(&self) -> Option<&PreparedSpectrumCapture> {
+        match self {
+            Self::Legacy(capture) => capture.as_ref(),
+            Self::Protected(_) => None,
+        }
+    }
+
+    fn legacy_mut(&mut self) -> Option<&mut PreparedSpectrumCapture> {
+        match self {
+            Self::Legacy(capture) => capture.as_mut(),
+            Self::Protected(_) => None,
+        }
+    }
+}
+
+struct ProtectedPreparationFacts {
+    target_track_id: Box<str>,
+    ingress_shape: ObservationIngressShape,
+    spectrum_cadence: SpectrumCadence,
+}
+
+fn validate_protected_options(options: WebBootOptions) -> Result<(), BootFailure> {
+    if options.console_observation_taps != 0
+        || options.console_meter_blocks != 0
+        || options.console_master_track_plus_one != 0
+    {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.console_options",
+        ));
+    }
+    Ok(())
+}
+
+fn protected_preparation_facts(
+    session: &CompiledSession,
+    preparation: &WebObservationPreparation<'_>,
+) -> Result<ProtectedPreparationFacts, BootFailure> {
+    if preparation.profile != WebObservationProfile::EqSpectrum {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.profile",
+        ));
+    }
+    if !preparation.demand.meters.is_empty() {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.meters",
+        ));
+    }
+    if preparation.demand.activation.maximum_active_observers != 1 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.activation.maximum_active_observers",
+        ));
+    }
+    let Some(spectrum) = preparation.demand.spectrum else {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum",
+        ));
+    };
+    let [entry] = spectrum.entries.as_slice() else {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.entries",
+        ));
+    };
+    if entry.channels != SpectrumChannels::Stereo {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.channels",
+        ));
+    }
+    let target_track_id = match &entry.target {
+        SpectrumTarget::TrackPostMatrix(track_id)
+            if !track_id.is_empty() && track_id.len() <= SPECTRUM_MAXIMUM_ID_BYTES =>
+        {
+            track_id
+        }
+        _ => {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.spectrum.target",
+            ));
+        }
+    };
+    if !session
+        .normalized_model()
+        .tracks
+        .iter()
+        .any(|track| track.id.as_str() == target_track_id.as_ref())
+    {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.observation.spectrum.target",
+        ));
+    }
+
+    let mut all_effects = 0_u64;
+    let mut selected_effects = 0_u64;
+    for track in &session.normalized_model().tracks {
+        let mut track_effects = 0_u64;
+        for count in [
+            track.simd1.effects.len(),
+            track.dynamic.effects.len(),
+            track.simd2.effects.len(),
+        ] {
+            let count = u64::try_from(count)
+                .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+            track_effects = track_effects.checked_add(count).ok_or_else(|| {
+                BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+            })?;
+        }
+        all_effects = all_effects
+            .checked_add(track_effects)
+            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+        if track.id.as_str() == target_track_id.as_ref() {
+            selected_effects = track_effects;
+        }
+    }
+    let all_tracks = u64::try_from(session.normalized_model().tracks.len())
+        .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+    let spectrum_cadence = SpectrumCadence::new(session.sample_rate().0, session.quantum().0)
+        .map_err(|_| {
+            BootFailure::fixed(RESULT_REFUSED_OPTIONS, "web.observation.spectrum_cadence")
+        })?;
+
+    Ok(ProtectedPreparationFacts {
+        target_track_id: target_track_id.clone(),
+        ingress_shape: ObservationIngressShape {
+            all_compiled_tracks: all_tracks,
+            all_compiled_effect_instances: all_effects,
+            selected_track_effect_instances: selected_effects,
+        },
+        spectrum_cadence,
+    })
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
@@ -1341,9 +2107,9 @@ struct ReadyOwnership {
     /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
     /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
     rack_effects: Box<[[u32; 3]]>,
-    /// The optional one-shot spectrum observer or atomically selectable collection. It is
-    /// declared before the prepared host so consumers are released before the plan's producers.
-    spectrum_capture: Option<PreparedSpectrumCapture>,
+    /// The legacy capture or private protected observation owner. It is declared before the
+    /// prepared host so consumers/controllers are released before the plan's producers.
+    observation: PreparedObservationStorage,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
     /// when `console_meter_blocks` was zero, in which case no observer exists at all.
@@ -1721,6 +2487,8 @@ pub struct AudioWorkletEngineHost {
     meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
+    /// Fixed protected-observation records retained outside the prepared ownership shell.
+    side_records: ObservationSideRecords,
     /// Checked host-scoped generation for prepared companion ownership. This token is distinct
     /// from the wrapping Wasm handle and changes on every successfully published host.
     host_generation: u64,
@@ -1748,6 +2516,18 @@ impl AudioWorkletEngineHost {
         Self::boot_with_spectrum(document, options, None)
     }
 
+    /// Prepare one private protected observation owner alongside the shared host transaction.
+    ///
+    /// This path remains crate-private until the protected operation aliases have been guarded.
+    #[allow(dead_code)]
+    fn boot_with_observation_demand(
+        document: &[u8],
+        options: WebBootOptions,
+        preparation: &WebObservationPreparation<'_>,
+    ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, None, Some(preparation))
+    }
+
     /// Prepare one optional graph spectrum observer alongside the existing console/meter plan.
     ///
     /// The request is supplied before boot because observer bindings are part of the immutable
@@ -1757,6 +2537,21 @@ impl AudioWorkletEngineHost {
         options: WebBootOptions,
         spectrum_request: Option<SpectrumPreparationRequest>,
     ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, spectrum_request, None)
+    }
+
+    fn boot_transaction(
+        document: &[u8],
+        options: WebBootOptions,
+        spectrum_request: Option<SpectrumPreparationRequest>,
+        observation_preparation: Option<&WebObservationPreparation<'_>>,
+    ) -> Result<Self, BootFailure> {
+        if spectrum_request.is_some() && observation_preparation.is_some() {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.preparation_conflict",
+            ));
+        }
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
         })?;
@@ -1767,6 +2562,9 @@ impl AudioWorkletEngineHost {
             ));
         }
         let options = validate_options(options)?;
+        if observation_preparation.is_some() {
+            validate_protected_options(options)?;
+        }
         let memory_budget = if options.maximum_memory_bytes == 0 {
             DEFAULT_MAXIMUM_MEMORY_BYTES
         } else {
@@ -1808,6 +2606,9 @@ impl AudioWorkletEngineHost {
                 "host.session.shape",
             ));
         }
+        let protected_facts = observation_preparation
+            .map(|preparation| protected_preparation_facts(&session, preparation))
+            .transpose()?;
         let source_ring_frames = if options.source_ring_frames == 0 {
             default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
         } else {
@@ -1823,7 +2624,7 @@ impl AudioWorkletEngineHost {
         }
         let (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes) =
             spectrum_collection_staging_bytes(spectrum_request.as_ref())?;
-        let projection = project_buffers(
+        let mut projection = project_buffers(
             document_bytes,
             shape.sample_rate_hz,
             shape.quantum_frames,
@@ -1840,6 +2641,32 @@ impl AudioWorkletEngineHost {
                 ),
             ),
         )?;
+        if observation_preparation.is_some() {
+            let protected_spectrum_payload_bytes = crate::ffi::SPECTRUM_CAPTURE_PAYLOAD_BYTES;
+            projection.report.bridge_metadata_bytes = projection
+                .report
+                .bridge_metadata_bytes
+                .checked_add(protected_spectrum_payload_bytes)
+                .ok_or_else(|| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+                })?;
+            projection.report.bridge_retained_bytes = projection
+                .report
+                .bridge_retained_bytes
+                .checked_add(protected_spectrum_payload_bytes)
+                .ok_or_else(|| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic")
+                })?;
+            let protected_spectrum_buffer_bytes = SPECTRUM_CAPTURE_BYTES as u64;
+            projection.report.largest_bridge_allocation_bytes = projection
+                .report
+                .largest_bridge_allocation_bytes
+                .max(protected_spectrum_buffer_bytes);
+            projection.report.largest_named_allocation_bytes = projection
+                .report
+                .largest_named_allocation_bytes
+                .max(protected_spectrum_buffer_bytes);
+        }
         let retained_projection = projected_retained_bytes(
             &session,
             source_ring_frames,
@@ -1859,6 +2686,8 @@ impl AudioWorkletEngineHost {
             options,
             projection.report,
             spectrum_request.as_ref(),
+            observation_preparation,
+            protected_facts,
         )?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
@@ -1893,6 +2722,7 @@ impl AudioWorkletEngineHost {
             meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
+            side_records: ObservationSideRecords::default(),
             host_generation,
             spectrum_token: 0,
             diagnostic_len: 0,
@@ -1915,6 +2745,928 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn resources(&self) -> &WebResourceReport {
         &self.resources
+    }
+
+    /// Return the last protected-observation admission/refusal record.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) const fn observation_admission(&self) -> &WebObservationAdmission {
+        &self.side_records.admission
+    }
+
+    /// Return the last successfully committed protected capture identity.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) const fn observation_capture_identity(&self) -> &WebObservationCaptureIdentity {
+        &self.side_records.capture_identity
+    }
+
+    /// Project the native observation owner using scalar state only.
+    ///
+    /// This path never polls application receipts or touches capture queues. A terminal snapshot
+    /// retained after disposal is returned verbatim, preserving the last native generations and
+    /// the render-failed bit observed before ownership was dropped.
+    fn observation_status(&self) -> WebObservationStatus {
+        if self.ready.is_none() && self.side_records.terminal_finalized {
+            return self.side_records.status;
+        }
+
+        let mut status = WebObservationStatus::default();
+        let Some(ready) = self.ready.as_ref() else {
+            return status;
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return status;
+        };
+
+        let spectrum = storage.controller.spectrum_state();
+        status.profile = OBSERVATION_PROFILE_EQ_SPECTRUM;
+        status.owner = storage.controller.owner().get();
+        status.ingress_epoch = storage.ingress.epoch;
+        status.accepted_generation = spectrum.accepted_generation;
+        status.applied_generation = spectrum.applied_generation;
+        status.selection_epoch = spectrum.selection_epoch;
+        status.pending_count = u32::from(self.side_records.pending_count);
+        let terminal = storage.controller.is_closed() || self.side_records.terminal_finalized;
+        if self.status.state == STATE_READY && !storage.ingress.exhausted && !terminal {
+            if !storage.ingress.ordinary_used {
+                status.flags |= OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE;
+            }
+            if !storage.ingress.removal_used {
+                status.flags |= OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE;
+            }
+        }
+        if terminal {
+            status.flags |= OBSERVATION_STATUS_FLAG_TERMINAL;
+        }
+        if self.status.state == STATE_FAILED {
+            status.flags |= OBSERVATION_STATUS_FLAG_RENDER_FAILED;
+        }
+        status
+    }
+
+    fn protected_observation_prepared(&self) -> bool {
+        self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        })
+    }
+
+    /// Spend one protected operation credit after the owner has been prepared.
+    ///
+    /// The ingress state spends the selected class before checking the request lengths, preserving
+    /// the refusal semantics for retries in the same render epoch. No public protected operation
+    /// calls this seam yet; later mediation passes the moved permit through native helpers.
+    #[allow(dead_code)]
+    fn begin_observation(
+        &mut self,
+        class: ObservationClass,
+        lengths: ObservationLengths,
+    ) -> Result<ObservationPermit, ObservationRefusal> {
+        let Some(ready) = self.ready.as_mut() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        let owner = storage.controller.owner();
+        storage.ingress.begin_observation(owner, class, lengths)
+    }
+
+    fn protected_observation_identity(
+        &self,
+    ) -> Result<(host_core::ObservationOwnerId, u64), ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        Ok((storage.controller.owner(), storage.ingress.epoch))
+    }
+
+    fn protected_spectrum_cadence(&self) -> Result<SpectrumCadence, ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        Ok(storage.spectrum_cadence)
+    }
+
+    fn protected_spectrum_control_lengths(removal: bool, target_bytes: u64) -> ObservationLengths {
+        if removal {
+            ObservationLengths {
+                control_bytes: size_of::<WebObservationDemand>() as u64,
+                rows: 0,
+                result_bytes: 0,
+            }
+        } else {
+            ObservationLengths {
+                control_bytes: size_of::<WebSpectrumRequest>() as u64 + target_bytes,
+                rows: 1,
+                result_bytes: 0,
+            }
+        }
+    }
+
+    fn protected_spectrum_read_lengths(&self) -> ObservationLengths {
+        let result_bytes = self
+            .ready
+            .as_ref()
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(storage.packed_spectrum_bytes)
+                }
+                PreparedObservationStorage::Legacy(_) => None,
+            })
+            .unwrap_or(0);
+        ObservationLengths {
+            control_bytes: 0,
+            rows: 1,
+            result_bytes,
+        }
+    }
+
+    fn protected_spectrum_target_bytes(&self) -> Result<u64, ObservationRefusal> {
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(observation_not_prepared());
+        };
+        let target = match &storage.spectrum_demand.target {
+            SpectrumTarget::TrackPostInputBuiltins(target)
+            | SpectrumTarget::TrackPostMatrix(target)
+            | SpectrumTarget::Output(target) => target,
+        };
+        Ok(target.len() as u64)
+    }
+
+    fn record_observation_refusal(&mut self, operation: u32, refusal: ObservationRefusal) -> u32 {
+        let result = observation_refusal_result(refusal.reason);
+        self.record_observation_admission(operation, result, Some(refusal), None, false);
+        result
+    }
+
+    fn refuse_unsupported_observation(&mut self, class: ObservationClass, operation: u32) -> u32 {
+        let lengths = ObservationLengths {
+            control_bytes: 0,
+            rows: 0,
+            result_bytes: 0,
+        };
+        if let Err(refusal) = self.begin_observation(class, lengths) {
+            return self.record_observation_refusal(operation, refusal);
+        }
+        self.record_observation_admission(
+            operation,
+            RESULT_UNSUPPORTED,
+            Some(ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            }),
+            None,
+            false,
+        );
+        RESULT_UNSUPPORTED
+    }
+
+    fn pending_stop_receipt(&self) -> Option<WebObservationReceipt> {
+        let slot = self.side_records.pending_stop_slot?;
+        let receipt = *self.side_records.receipts.get(slot)?;
+        (receipt.state == OBSERVATION_RECEIPT_STATE_PENDING).then_some(receipt)
+    }
+
+    fn validate_admitted_observation_permit(
+        &mut self,
+        permit: &ObservationPermit,
+        class: ObservationClass,
+        operation: u32,
+    ) -> Result<(), u32> {
+        let (owner, epoch) = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => return Err(self.record_observation_refusal(operation, refusal)),
+        };
+        if let Err(refusal) = permit.validate(owner, epoch, class) {
+            return Err(self.record_observation_refusal(operation, refusal));
+        }
+        if self.status.state != STATE_READY {
+            self.record_observation_admission(operation, RESULT_WRONG_STATE, None, None, false);
+            return Err(RESULT_WRONG_STATE);
+        }
+        Ok(())
+    }
+
+    /// Execute one admitted protected continuous-spectrum start.
+    fn start_spectrum_stream_admitted(
+        &mut self,
+        permit: ObservationPermit,
+    ) -> Result<SpectrumCadence, u32> {
+        const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
+        self.validate_admitted_observation_permit(&permit, ObservationClass::Ordinary, OPERATION)?;
+        let cadence = match self.protected_spectrum_cadence() {
+            Ok(cadence) => cadence,
+            Err(refusal) => return Err(self.record_observation_refusal(OPERATION, refusal)),
+        };
+        let slot = match self.reserve_receipt(ObservationClass::Ordinary) {
+            Ok(slot) => slot,
+            Err(refusal) => return Err(self.record_observation_refusal(OPERATION, refusal)),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return Err(self.record_observation_refusal(OPERATION, observation_not_prepared()));
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return Err(self.record_observation_refusal(OPERATION, observation_not_prepared()));
+            };
+            storage
+                .controller
+                .replace_spectrum(&storage.spectrum_demand)
+        };
+        match native {
+            Ok(accepted) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                if let Some(ready) = self.ready.as_mut()
+                    && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+                {
+                    storage.history_epoch = Some(1);
+                    storage.history_dropped_captures = 0;
+                }
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                Ok(cadence)
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                Err(self.record_observation_refusal(OPERATION, refusal))
+            }
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum restart.
+    fn restart_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
+        const OPERATION: u32 = OBSERVATION_OPERATION_RESTART_SPECTRUM;
+        if let Err(result) = self.validate_admitted_observation_permit(
+            &permit,
+            ObservationClass::Ordinary,
+            OPERATION,
+        ) {
+            return result;
+        }
+        let slot = match self.reserve_receipt(ObservationClass::Ordinary) {
+            Ok(slot) => slot,
+            Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            storage.controller.restart_spectrum()
+        };
+        match native {
+            Ok(accepted) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                if let Some(ready) = self.ready.as_mut()
+                    && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+                {
+                    storage.history_epoch = Some(1);
+                    storage.history_dropped_captures = 0;
+                }
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                RESULT_OK
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                self.record_observation_refusal(OPERATION, refusal)
+            }
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum stop.
+    fn stop_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
+        const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
+        if let Err(result) =
+            self.validate_admitted_observation_permit(&permit, ObservationClass::Removal, OPERATION)
+        {
+            return result;
+        }
+        let slot = match self.reserve_receipt(ObservationClass::Removal) {
+            Ok(slot) => slot,
+            Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+        };
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                self.release_receipt(slot);
+                return self.record_observation_refusal(OPERATION, observation_not_prepared());
+            };
+            storage.controller.stop_spectrum()
+        };
+        match native {
+            Ok(ObservationStop::Pending(accepted)) => {
+                self.commit_receipt(slot, accepted, OPERATION);
+                let receipt = self.side_records.receipts[slot];
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                RESULT_OK
+            }
+            Ok(ObservationStop::Quiescent) => {
+                self.release_receipt(slot);
+                self.record_observation_admission(OPERATION, RESULT_OK, None, None, false);
+                RESULT_OK
+            }
+            Err(refusal) => {
+                self.release_receipt(slot);
+                self.record_observation_refusal(OPERATION, refusal)
+            }
+        }
+    }
+
+    fn record_protected_spectrum_read_refusal(
+        &mut self,
+        refusal: ObservationRefusal,
+    ) -> ProtectedSpectrumReadError {
+        let result = observation_refusal_result(refusal.reason);
+        self.record_observation_admission(
+            OBSERVATION_OPERATION_READ_SPECTRUM,
+            result,
+            Some(refusal),
+            None,
+            false,
+        );
+        ProtectedSpectrumReadError::Refused(refusal)
+    }
+
+    fn cache_protected_spectrum_history(&mut self, stream_epoch: u64, dropped_captures: u64) {
+        if let Some(ready) = self.ready.as_mut()
+            && let PreparedObservationStorage::Protected(storage) = &mut ready.observation
+        {
+            storage.history_epoch = Some(stream_epoch);
+            storage.history_dropped_captures = dropped_captures;
+        }
+    }
+
+    /// Execute one admitted protected continuous-spectrum read.
+    ///
+    /// The permit is validated directly so callers of the typed seam retain the complete
+    /// [`ObservationRefusal`] rather than receiving only the lossy legacy result code. Once the
+    /// owner and host state are admitted, the native controller is called exactly once; native
+    /// availability outcomes are recorded without touching receipt rows or polling applications.
+    fn read_spectrum_stream_admitted(
+        &mut self,
+        permit: ObservationPermit,
+    ) -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError> {
+        let owner_epoch = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => {
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            }
+        };
+        if let Err(refusal) =
+            permit.validate(owner_epoch.0, owner_epoch.1, ObservationClass::Ordinary)
+        {
+            return Err(self.record_protected_spectrum_read_refusal(refusal));
+        }
+        if self.status.state != STATE_READY {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::Closed,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            self.record_observation_admission(
+                OBSERVATION_OPERATION_READ_SPECTRUM,
+                RESULT_WRONG_STATE,
+                Some(refusal),
+                None,
+                false,
+            );
+            return Err(ProtectedSpectrumReadError::Refused(refusal));
+        }
+
+        let native = {
+            let Some(ready) = self.ready.as_mut() else {
+                let refusal = observation_not_prepared();
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            };
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                let refusal = observation_not_prepared();
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            };
+            storage.controller.try_read_continuous_spectrum()
+        };
+
+        match native {
+            Ok(window) => {
+                self.cache_protected_spectrum_history(
+                    window.window.stream_epoch,
+                    window.window.dropped_captures,
+                );
+                self.record_observation_admission(
+                    OBSERVATION_OPERATION_READ_SPECTRUM,
+                    RESULT_OK,
+                    None,
+                    None,
+                    false,
+                );
+                Ok(window)
+            }
+            Err(error) => {
+                let (result, pending_boundary) = match error {
+                    HostSpectrumReadError::Inactive | HostSpectrumReadError::Closed => {
+                        (RESULT_WRONG_STATE, false)
+                    }
+                    HostSpectrumReadError::PendingApplication
+                    | HostSpectrumReadError::Warming
+                    | HostSpectrumReadError::Pending => (
+                        RESULT_BACKPRESSURE,
+                        matches!(error, HostSpectrumReadError::PendingApplication),
+                    ),
+                    HostSpectrumReadError::Failed { stream_epoch, .. } => {
+                        self.cache_protected_spectrum_history(stream_epoch, 0);
+                        (RESULT_RENDER_REJECTED, false)
+                    }
+                    HostSpectrumReadError::Gap {
+                        stream_epoch,
+                        dropped_captures,
+                        ..
+                    } => {
+                        self.cache_protected_spectrum_history(stream_epoch, dropped_captures);
+                        (RESULT_OK, false)
+                    }
+                };
+                self.record_observation_admission(
+                    OBSERVATION_OPERATION_READ_SPECTRUM,
+                    result,
+                    None,
+                    None,
+                    pending_boundary,
+                );
+                Err(ProtectedSpectrumReadError::Native(error))
+            }
+        }
+    }
+
+    /// Admit and execute one protected continuous-spectrum read.
+    fn read_protected_spectrum_stream(
+        &mut self,
+    ) -> Result<ObservedContinuousSpectrumWindow, ProtectedSpectrumReadError> {
+        let permit = match self.begin_observation(
+            ObservationClass::Ordinary,
+            self.protected_spectrum_read_lengths(),
+        ) {
+            Ok(permit) => permit,
+            Err(refusal) => {
+                return Err(self.record_protected_spectrum_read_refusal(refusal));
+            }
+        };
+        self.read_spectrum_stream_admitted(permit)
+    }
+
+    /// Reserve one fixed receipt row before a native publication.
+    ///
+    /// Ordinary work keeps one additional row available for a removal. The cached row counts
+    /// reject impossible requests without walking the four slots; only an admissible request
+    /// performs the single bounded free-row search.
+    #[allow(dead_code)]
+    fn reserve_receipt(&mut self, class: ObservationClass) -> Result<usize, ObservationRefusal> {
+        if self.side_records.terminal_finalized {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::Closed,
+                limit: None,
+                requested: None,
+                maximum: None,
+            });
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(observation_not_prepared());
+        };
+        if !matches!(ready.observation, PreparedObservationStorage::Protected(_)) {
+            return Err(observation_not_prepared());
+        }
+
+        const RECEIPT_CAPACITY: u8 = 4;
+        let required = match class {
+            ObservationClass::Ordinary => 2,
+            ObservationClass::Removal => 1,
+        };
+        let reserved = self.side_records.reserved_mask.count_ones() as u8;
+        let occupied =
+            self.side_records.pending_count + self.side_records.completed_count + reserved;
+        debug_assert!(occupied <= RECEIPT_CAPACITY);
+        let available = RECEIPT_CAPACITY - occupied;
+        if available < required {
+            return Err(ObservationRefusal {
+                reason: ObservationRefusalReason::Backpressure,
+                limit: Some("observation.application_capacity"),
+                requested: Some(u64::from(occupied + required)),
+                maximum: Some(u64::from(RECEIPT_CAPACITY)),
+            });
+        }
+
+        for (slot, receipt) in self.side_records.receipts.iter().enumerate() {
+            let bit = 1_u8 << slot;
+            if receipt.state == 0 && self.side_records.reserved_mask & bit == 0 {
+                self.side_records.reserved_mask |= bit;
+                return Ok(slot);
+            }
+        }
+
+        // Cached counts and the authoritative row state must agree. Keep this a typed bounded
+        // refusal if a defensive invariant is ever violated rather than overwriting a receipt.
+        Err(ObservationRefusal {
+            reason: ObservationRefusalReason::Backpressure,
+            limit: Some("observation.application_capacity"),
+            requested: Some(u64::from(occupied + required)),
+            maximum: Some(u64::from(RECEIPT_CAPACITY)),
+        })
+    }
+
+    /// Release an unused receipt reservation without touching an authoritative row.
+    #[allow(dead_code)]
+    fn release_receipt(&mut self, slot: usize) {
+        let Some(receipt) = self.side_records.receipts.get(slot) else {
+            return;
+        };
+        if receipt.state == 0 {
+            self.side_records.reserved_mask &= !(1_u8 << slot);
+        }
+    }
+
+    /// Commit one accepted native publication as a Pending graph receipt.
+    #[allow(dead_code)]
+    fn commit_receipt(&mut self, slot: usize, accepted: ObservationAccepted, operation: u32) {
+        assert!(
+            slot < self.side_records.receipts.len(),
+            "receipt slot must be reserved"
+        );
+        assert_ne!(
+            self.side_records.reserved_mask & (1_u8 << slot),
+            0,
+            "receipt slot must be reserved"
+        );
+        let receipt = &mut self.side_records.receipts[slot];
+        debug_assert_eq!(receipt.state, 0);
+        self.side_records.reserved_mask &= !(1_u8 << slot);
+        *receipt = WebObservationReceipt {
+            struct_size: size_of::<WebObservationReceipt>() as u32,
+            abi_version: ABI_VERSION,
+            domain: OBSERVATION_RECEIPT_DOMAIN_GRAPH,
+            state: OBSERVATION_RECEIPT_STATE_PENDING,
+            owner: accepted.owner.get(),
+            sequence: accepted.revision,
+            application_sample: 0,
+            result: RESULT_OK,
+            reserved: 0,
+        };
+        assert!(
+            self.side_records.pending_count < 4,
+            "receipt pending count must fit four rows"
+        );
+        self.side_records.pending_count += 1;
+        if matches!(
+            operation,
+            OBSERVATION_OPERATION_STOP_GRAPH | OBSERVATION_OPERATION_STOP_SPECTRUM
+        ) {
+            self.side_records.pending_stop_slot = Some(slot);
+        }
+    }
+
+    /// Reconcile at most two native application acknowledgements into the authoritative rows.
+    #[allow(dead_code)]
+    fn reconcile_observation_applications(&mut self) {
+        if self.side_records.terminal_finalized || self.side_records.pending_count == 0 {
+            return;
+        }
+
+        for _ in 0..2 {
+            let applied = {
+                let Some(ready) = self.ready.as_mut() else {
+                    return;
+                };
+                let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                    return;
+                };
+                storage.controller.try_applied()
+            };
+            let Some(applied) = applied else {
+                return;
+            };
+
+            let mut matching_slot = None;
+            for (slot, receipt) in self.side_records.receipts.iter().enumerate() {
+                if receipt.domain == OBSERVATION_RECEIPT_DOMAIN_GRAPH
+                    && receipt.state == OBSERVATION_RECEIPT_STATE_PENDING
+                    && receipt.owner == applied.owner.get()
+                    && receipt.sequence == applied.revision
+                {
+                    matching_slot = Some(slot);
+                    break;
+                }
+            }
+            let slot = matching_slot
+                .expect("native observation acknowledgement must match one Pending receipt");
+            let receipt = &mut self.side_records.receipts[slot];
+            receipt.state = OBSERVATION_RECEIPT_STATE_APPLIED;
+            receipt.application_sample = applied.first_sample;
+            assert!(self.side_records.pending_count > 0);
+            assert!(self.side_records.completed_count < 4);
+            self.side_records.pending_count -= 1;
+            self.side_records.completed_count += 1;
+            if self.side_records.pending_stop_slot == Some(slot) {
+                self.side_records.pending_stop_slot = None;
+            }
+        }
+    }
+
+    /// Copy completed rows in stable slot order and release only those source rows.
+    #[allow(dead_code)]
+    fn take_observation_applications(&mut self) -> &[WebObservationReceipt] {
+        if self.side_records.pending_count != 0 && !self.side_records.terminal_finalized {
+            self.reconcile_observation_applications();
+        }
+
+        self.side_records.application_len = 0;
+        if self.side_records.completed_count == 0 {
+            return &self.side_records.applications[..0];
+        }
+
+        let records = &mut self.side_records;
+        let mut application_len = 0;
+        for slot in 0..records.receipts.len() {
+            let state = records.receipts[slot].state;
+            if matches!(
+                state,
+                OBSERVATION_RECEIPT_STATE_APPLIED
+                    | OBSERVATION_RECEIPT_STATE_CLOSED
+                    | OBSERVATION_RECEIPT_STATE_FAILED
+            ) {
+                records.applications[application_len] = records.receipts[slot];
+                application_len += 1;
+                records.receipts[slot] = WebObservationReceipt::default();
+                assert!(records.completed_count > 0);
+                records.completed_count -= 1;
+                if records.pending_stop_slot == Some(slot) {
+                    records.pending_stop_slot = None;
+                }
+            }
+        }
+        records.application_len = application_len;
+        &records.applications[..application_len]
+    }
+
+    /// Close the owner once, preserving Applied rows and exposing terminal Pending rows.
+    #[allow(dead_code)]
+    fn close_observation_receipts(&mut self, failed: bool) {
+        if self.side_records.terminal_finalized {
+            return;
+        }
+        self.side_records.terminal_finalized = true;
+        self.side_records.reserved_mask = 0;
+        self.side_records.pending_stop_slot = None;
+        if self.side_records.pending_count == 0 {
+            return;
+        }
+        let terminal_state = if failed {
+            OBSERVATION_RECEIPT_STATE_FAILED
+        } else {
+            OBSERVATION_RECEIPT_STATE_CLOSED
+        };
+        let terminal_result = if failed {
+            RESULT_RENDER_REJECTED
+        } else {
+            RESULT_WRONG_STATE
+        };
+        for receipt in &mut self.side_records.receipts {
+            if receipt.state == OBSERVATION_RECEIPT_STATE_PENDING {
+                receipt.state = terminal_state;
+                receipt.application_sample = 0;
+                receipt.result = terminal_result;
+                assert!(self.side_records.pending_count > 0);
+                assert!(self.side_records.completed_count < 4);
+                self.side_records.pending_count -= 1;
+                self.side_records.completed_count += 1;
+            }
+        }
+    }
+
+    /// Map one private refusal or native result into the fixed admission side record.
+    #[allow(dead_code)]
+    fn record_observation_admission(
+        &mut self,
+        operation: u32,
+        result: u32,
+        refusal: Option<ObservationRefusal>,
+        receipt: Option<WebObservationReceipt>,
+        pending_boundary: bool,
+    ) {
+        let ingress_epoch = self
+            .ready
+            .as_ref()
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Protected(storage) => Some(storage.ingress.epoch),
+                PreparedObservationStorage::Legacy(_) => None,
+            })
+            .unwrap_or(0);
+        let mut admission = WebObservationAdmission {
+            struct_size: size_of::<WebObservationAdmission>() as u32,
+            abi_version: ABI_VERSION,
+            result,
+            operation,
+            flags: 0,
+            reason: 0,
+            limit_bytes: 0,
+            reserved: 0,
+            ingress_epoch,
+            requested: 0,
+            maximum: 0,
+            limit: [0; 128],
+            receipt: WebObservationReceipt::default(),
+        };
+        if let Some(refusal) = refusal {
+            admission.reason = observation_refusal_reason(refusal.reason);
+            if let Some(requested) = refusal.requested {
+                admission.flags |= OBSERVATION_ADMISSION_REQUESTED;
+                admission.requested = requested;
+            }
+            if let Some(maximum) = refusal.maximum {
+                admission.flags |= OBSERVATION_ADMISSION_MAXIMUM;
+                admission.maximum = maximum;
+            }
+            if let Some(limit) = refusal.limit {
+                let bytes = limit.as_bytes();
+                let length = bytes.len().min(admission.limit.len());
+                admission.limit[..length].copy_from_slice(&bytes[..length]);
+                admission.limit_bytes = length as u32;
+            }
+        }
+        if let Some(receipt) = receipt {
+            admission.flags |= OBSERVATION_ADMISSION_RECEIPT;
+            admission.receipt = receipt;
+        }
+        if pending_boundary {
+            admission.flags |= OBSERVATION_ADMISSION_PENDING_BOUNDARY;
+        }
+        self.side_records.admission = admission;
+    }
+
+    /// Derive the checked identity accompanying one native continuous spectrum window.
+    #[allow(dead_code)]
+    fn spectrum_capture_identity(
+        window: &ObservedContinuousSpectrumWindow,
+    ) -> Result<WebObservationCaptureIdentity, u32> {
+        if window.window.end_sample().is_none() {
+            return Err(RESULT_REFUSED_BUDGET);
+        }
+        let snapshot_token = window
+            .window
+            .sequence
+            .checked_add(1)
+            .ok_or(RESULT_REFUSED_BUDGET)?;
+        Ok(WebObservationCaptureIdentity {
+            struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+            abi_version: ABI_VERSION,
+            kind: OBSERVATION_CAPTURE_KIND_SPECTRUM,
+            flags: OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION,
+            owner: window.owner.get(),
+            observation_generation: window.observation_generation,
+            selection_epoch: window.selection_epoch,
+            snapshot_token,
+        })
+    }
+
+    /// Commit a successfully derived capture identity using scalar assignment only.
+    #[allow(dead_code)]
+    fn commit_observation_capture_identity(&mut self, identity: WebObservationCaptureIdentity) {
+        self.side_records.capture_identity = identity;
+    }
+
+    /// Validate the protected response target and return its cached packed-response bound.
+    ///
+    /// This read-only preflight is shared with the FFI capture transaction before it creates a
+    /// sink. The target must remain the exact prepared post-matrix track and the host must still
+    /// be ready; all failures retain the native response error mapping.
+    pub(crate) fn response_capture_preflight(
+        &self,
+        track_id: &str,
+    ) -> Result<u64, ResponseSnapshotError> {
+        let selected_track = self.ready.as_ref().and_then(|ready| {
+            let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                return None;
+            };
+            match &storage.spectrum_demand.target {
+                SpectrumTarget::TrackPostMatrix(track_id) => Some(track_id.as_ref()),
+                _ => None,
+            }
+        });
+        if selected_track != Some(track_id) {
+            return Err(ResponseSnapshotError::MissingTrack);
+        }
+
+        if self.status.state != STATE_READY {
+            return Err(ResponseSnapshotError::Owner);
+        }
+
+        let Some(ready) = self.ready.as_ref() else {
+            return Err(ResponseSnapshotError::Owner);
+        };
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            return Err(ResponseSnapshotError::Owner);
+        };
+        Ok(storage.packed_response_bytes)
+    }
+
+    /// Execute one admitted protected response capture through the existing native sink.
+    ///
+    /// The permit is validated before any target comparison or provider call. The prepared
+    /// spectrum target is the exact response-track identity for this private profile, so the
+    /// preflight is bounded to the prepared target and does not scan response bindings. Admission
+    /// never creates a graph receipt or commits a capture identity; those belong to later
+    /// transport-specific output handling.
+    fn copy_response_snapshot_admitted(
+        &mut self,
+        permit: ObservationPermit,
+        track_id: &str,
+        sink: &mut dyn ResponseSnapshotSink,
+    ) -> Result<engine::realtime::ResponseSnapshotCapture, ProtectedResponseCaptureError> {
+        const OPERATION: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
+
+        let (owner, epoch) = match self.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => {
+                self.record_observation_refusal(OPERATION, refusal);
+                return Err(ProtectedResponseCaptureError::Refused(refusal));
+            }
+        };
+        if let Err(refusal) = permit.validate(owner, epoch, ObservationClass::Ordinary) {
+            self.record_observation_refusal(OPERATION, refusal);
+            return Err(ProtectedResponseCaptureError::Refused(refusal));
+        }
+
+        if track_id.is_empty() || track_id.len() > LIVE_RESPONSE_MAXIMUM_ID_BYTES {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            self.record_observation_refusal(OPERATION, refusal);
+            return Err(ProtectedResponseCaptureError::Refused(refusal));
+        }
+
+        if let Err(error) = self.response_capture_preflight(track_id) {
+            self.record_observation_admission(
+                OPERATION,
+                response_snapshot_result(error),
+                None,
+                None,
+                false,
+            );
+            return Err(ProtectedResponseCaptureError::Capture(error));
+        }
+
+        let capture = {
+            let Some(ready) = self.ready.as_mut() else {
+                let error = ResponseSnapshotError::Owner;
+                self.record_observation_admission(
+                    OPERATION,
+                    response_snapshot_result(error),
+                    None,
+                    None,
+                    false,
+                );
+                return Err(ProtectedResponseCaptureError::Capture(error));
+            };
+            ready.host.copy_response_snapshot(track_id, sink)
+        };
+        match capture {
+            Ok(capture) => {
+                self.record_observation_admission(OPERATION, RESULT_OK, None, None, false);
+                Ok(capture)
+            }
+            Err(error) => {
+                self.record_observation_admission(
+                    OPERATION,
+                    response_snapshot_result(error),
+                    None,
+                    None,
+                    false,
+                );
+                Err(ProtectedResponseCaptureError::Capture(error))
+            }
+        }
     }
 
     /// Read the last live-console submission report (issue #137 D1).
@@ -1980,12 +3732,18 @@ impl AudioWorkletEngineHost {
     /// aged effect observation and does not share the peak interval in [`WebMeterHeader`].
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
+        if self.protected_observation_prepared() {
+            return &[];
+        }
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
     }
 
     /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
     #[must_use]
     pub fn meter_header(&self) -> &WebMeterHeader {
+        if self.protected_observation_prepared() {
+            return &EMPTY_METER_HEADER;
+        }
         self.ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
@@ -1994,6 +3752,9 @@ impl AudioWorkletEngineHost {
     /// Armed taps, in the dense effect-slot order. Off-ABI introspection for the tests.
     #[must_use]
     pub fn observation_armed_taps(&self) -> u32 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| {
             ready
                 .observation_armed
@@ -2006,6 +3767,9 @@ impl AudioWorkletEngineHost {
     /// Whether preparation bound any observation taps at all (issue #143 D3, level 1).
     #[must_use]
     pub fn observation_attached(&self) -> bool {
+        if self.protected_observation_prepared() {
+            return false;
+        }
         self.ready.as_ref().is_some_and(|ready| {
             ready
                 .effect_observations
@@ -2023,6 +3787,64 @@ impl AudioWorkletEngineHost {
         track_id: &str,
         sink: &mut dyn ResponseSnapshotSink,
     ) -> Result<engine::realtime::ResponseSnapshotCapture, ResponseSnapshotError> {
+        if self.protected_observation_prepared() {
+            let control_bytes = match u64::try_from(size_of::<WebLiveResponseRequest>())
+                .ok()
+                .and_then(|header| {
+                    u64::try_from(track_id.len())
+                        .ok()
+                        .and_then(|id_bytes| header.checked_add(id_bytes))
+                }) {
+                Some(control_bytes) => control_bytes,
+                None => {
+                    let refusal = ObservationRefusal {
+                        reason: ObservationRefusalReason::ArithmeticOverflow,
+                        limit: None,
+                        requested: None,
+                        maximum: None,
+                    };
+                    self.record_observation_refusal(
+                        OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                        refusal,
+                    );
+                    return Err(legacy_response_refusal(refusal));
+                }
+            };
+            let result_bytes = self
+                .ready
+                .as_ref()
+                .and_then(|ready| match &ready.observation {
+                    PreparedObservationStorage::Protected(storage) => {
+                        Some(storage.packed_response_bytes)
+                    }
+                    PreparedObservationStorage::Legacy(_) => None,
+                })
+                .unwrap_or(0);
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                ObservationLengths {
+                    control_bytes,
+                    rows: 1,
+                    result_bytes,
+                },
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    self.record_observation_refusal(
+                        OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                        refusal,
+                    );
+                    return Err(legacy_response_refusal(refusal));
+                }
+            };
+            return match self.copy_response_snapshot_admitted(permit, track_id, sink) {
+                Ok(capture) => Ok(capture),
+                Err(ProtectedResponseCaptureError::Refused(refusal)) => {
+                    Err(legacy_response_refusal(refusal))
+                }
+                Err(ProtectedResponseCaptureError::Capture(error)) => Err(error),
+            };
+        }
         if self.status.state != STATE_READY {
             return Err(ResponseSnapshotError::Owner);
         }
@@ -2034,13 +3856,16 @@ impl AudioWorkletEngineHost {
 
     /// Arm the prepared one-shot spectrum observer for its next complete window.
     pub fn arm_spectrum(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 10);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_ref() else {
+        let Some(capture) = ready.observation.legacy() else {
             return RESULT_UNSUPPORTED;
         };
         match capture.arm() {
@@ -2051,13 +3876,16 @@ impl AudioWorkletEngineHost {
 
     /// Read the completed spectrum window, if the observer has finished its fixed capture.
     pub fn read_spectrum(&mut self) -> Result<Option<(SpectrumWindow, u64)>, u32> {
+        if self.protected_observation_prepared() {
+            return Err(self.refuse_unsupported_observation(ObservationClass::Ordinary, 10));
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
         let Some(ready) = self.ready.as_mut() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(RESULT_UNSUPPORTED);
         };
         match capture.try_read() {
@@ -2079,13 +3907,30 @@ impl AudioWorkletEngineHost {
     /// The sample rate and render quantum come from the prepared host, so callers cannot create
     /// a stream whose cadence differs from the graph that will produce its samples.
     pub fn start_spectrum_stream(&mut self) -> Result<SpectrumCadence, u32> {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
+            let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                Self::protected_spectrum_control_lengths(false, target_bytes),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    return Err(self.record_observation_refusal(OPERATION, refusal));
+                }
+            };
+            return self.start_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
         let Some(ready) = self.ready.as_mut() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(RESULT_UNSUPPORTED);
         };
         capture
@@ -2104,13 +3949,28 @@ impl AudioWorkletEngineHost {
     /// Restart the active managed stream at a fresh capture epoch without a fallible stop/start
     /// pair. The caller has already prevalidated the replacement analysis configuration.
     pub fn restart_spectrum_stream(&mut self) -> u32 {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = OBSERVATION_OPERATION_RESTART_SPECTRUM;
+            let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
+            let permit = match self.begin_observation(
+                ObservationClass::Ordinary,
+                Self::protected_spectrum_control_lengths(false, target_bytes),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+            };
+            return self.restart_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         let result = match capture {
@@ -2129,13 +3989,51 @@ impl AudioWorkletEngineHost {
     pub fn read_spectrum_stream(
         &mut self,
     ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            return match self.read_protected_spectrum_stream() {
+                Ok(observed) => match Self::spectrum_capture_identity(&observed) {
+                    Ok(identity) => {
+                        self.commit_observation_capture_identity(identity);
+                        Ok(observed.window)
+                    }
+                    Err(result) => {
+                        // The native window has already been admitted and consumed. Preserve it
+                        // in the typed seam, but report the checked post-read identity overflow
+                        // through the compatibility facade without wrapping the token.
+                        let refusal = ObservationRefusal {
+                            reason: ObservationRefusalReason::ArithmeticOverflow,
+                            limit: None,
+                            requested: None,
+                            maximum: None,
+                        };
+                        self.record_observation_admission(
+                            OBSERVATION_OPERATION_READ_SPECTRUM,
+                            result,
+                            Some(refusal),
+                            None,
+                            false,
+                        );
+                        Err(SpectrumContinuousReadError::Pending)
+                    }
+                },
+                Err(ProtectedSpectrumReadError::Refused(refusal)) => {
+                    Err(legacy_spectrum_read_refusal(refusal))
+                }
+                Err(ProtectedSpectrumReadError::Native(error)) => {
+                    Err(legacy_spectrum_read_error(error))
+                }
+            };
+        }
         if self.status.state != STATE_READY {
             return Err(SpectrumContinuousReadError::NotActive);
         }
         let Some(ready) = self.ready.as_mut() else {
             return Err(SpectrumContinuousReadError::NotActive);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(SpectrumContinuousReadError::NotActive);
         };
         capture.try_read_continuous()
@@ -2143,13 +4041,31 @@ impl AudioWorkletEngineHost {
 
     /// Stop the managed stream and discard its queued native window.
     pub fn stop_spectrum_stream(&mut self) -> u32 {
+        let protected = self.ready.as_ref().is_some_and(|ready| {
+            matches!(&ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        if protected {
+            const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
+            if let Some(receipt) = self.pending_stop_receipt() {
+                self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                return RESULT_OK;
+            }
+            let permit = match self.begin_observation(
+                ObservationClass::Removal,
+                Self::protected_spectrum_control_lengths(true, 0),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => return self.record_observation_refusal(OPERATION, refusal),
+            };
+            return self.stop_spectrum_stream_admitted(permit);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         capture.stop_continuous();
@@ -2161,8 +4077,15 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_cadence(&self) -> Option<SpectrumCadence> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(PreparedSpectrumCapture::cadence)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::cadence)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    (storage.controller.spectrum_state().accepted_generation != 0)
+                        .then_some(storage.spectrum_cadence)
+                }
+            })
     }
 
     /// Return the native capture epoch for the active managed stream.
@@ -2170,19 +4093,30 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_epoch(&self) -> Option<u64> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(PreparedSpectrumCapture::stream_epoch)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => capture
+                    .as_ref()
+                    .and_then(PreparedSpectrumCapture::stream_epoch),
+                PreparedObservationStorage::Protected(storage) => {
+                    (storage.controller.spectrum_state().accepted_generation != 0)
+                        .then_some(storage.history_epoch)
+                        .flatten()
+                }
+            })
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
     pub fn cancel_spectrum(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Removal, 10);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         capture.cancel();
@@ -2194,8 +4128,14 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_target(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(PreparedSpectrumCapture::target)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::target)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(&storage.spectrum_demand.target)
+                }
+            })
             .map(spectrum_target_raw)
             .unwrap_or(0)
     }
@@ -2205,8 +4145,14 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_channels(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
-            .and_then(PreparedSpectrumCapture::channels)
+            .and_then(|ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().and_then(PreparedSpectrumCapture::channels)
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    Some(storage.spectrum_demand.channels)
+                }
+            })
             .map(spectrum_channels_raw)
             .unwrap_or(0)
     }
@@ -2216,13 +4162,16 @@ impl AudioWorkletEngineHost {
     /// The collection performs all fallible admission before retiring its current capture. A
     /// refusal therefore leaves the old stream, queued window and effective configuration intact.
     pub fn select_spectrum(&mut self, target: &SpectrumTarget, channels: SpectrumChannels) -> u32 {
+        if self.protected_observation_prepared() {
+            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 11);
+        }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         let PreparedSpectrumCapture::Collection(capture) = capture else {
@@ -2242,13 +4191,16 @@ impl AudioWorkletEngineHost {
         target: &SpectrumTarget,
         channels: SpectrumChannels,
     ) -> Result<bool, u32> {
+        if self.protected_observation_prepared() {
+            return Err(RESULT_UNSUPPORTED);
+        }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
         }
         let Some(ready) = self.ready.as_ref() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_ref() else {
+        let Some(capture) = ready.observation.legacy() else {
             return Err(RESULT_UNSUPPORTED);
         };
         let PreparedSpectrumCapture::Collection(capture) = capture else {
@@ -2271,10 +4223,16 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_selection_epoch(&self) -> u64 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
-            .map_or(0, |capture| match capture {
-                PreparedSpectrumCapture::Single(_) => 0,
-                PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
+            .map_or(0, |ready| match &ready.observation {
+                PreparedObservationStorage::Legacy(capture) => {
+                    capture.as_ref().map_or(0, |capture| match capture {
+                        PreparedSpectrumCapture::Single(_) => 0,
+                        PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
+                    })
+                }
+                PreparedObservationStorage::Protected(storage) => {
+                    storage.controller.spectrum_state().selection_epoch
+                }
             })
     }
 
@@ -2288,6 +4246,9 @@ impl AudioWorkletEngineHost {
         &self,
         selections: &[ObservationSelection<'_>],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if self.status.state != STATE_READY {
             return Err(ObservationReadError::WrongState);
         }
@@ -2347,6 +4308,9 @@ impl AudioWorkletEngineHost {
     /// Number of currently bound resident observation effects in dense owner order.
     #[must_use]
     pub fn observation_binding_count(&self) -> usize {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| {
             ready
                 .effect_observations
@@ -2359,6 +4323,9 @@ impl AudioWorkletEngineHost {
     /// One current-owner observation binding for the read-only session map.
     #[must_use]
     pub fn observation_binding(&self, index: u32) -> Option<ObservationBinding<'_>> {
+        if self.protected_observation_prepared() {
+            return None;
+        }
         let ready = self.ready.as_ref()?;
         let mut observed_index = 0_u32;
         for (effect, handle) in ready.effect_observations.iter().enumerate() {
@@ -2393,6 +4360,9 @@ impl AudioWorkletEngineHost {
         &self,
         addresses: &[ObservationAddress],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if addresses.len() > MAXIMUM_OBSERVATION_READS {
             return Err(ObservationReadError::BufferTooSmall);
         }
@@ -2412,6 +4382,9 @@ impl AudioWorkletEngineHost {
         addresses: &[ObservationAddress],
         output: &mut [ObservationReadValues],
     ) -> Result<(), ObservationReadError> {
+        if self.protected_observation_prepared() {
+            return Err(ObservationReadError::Unsupported);
+        }
         if self.status.state != STATE_READY {
             return Err(ObservationReadError::WrongState);
         }
@@ -2438,6 +4411,9 @@ impl AudioWorkletEngineHost {
     /// Number of complete meter windows folded since compilation.
     #[must_use]
     pub fn meter_windows(&self) -> u64 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         self.ready.as_ref().map_or(0, |ready| ready.meter_windows)
     }
 
@@ -2465,6 +4441,9 @@ impl AudioWorkletEngineHost {
     /// Whether meter observers were attached at preparation (issue #137 D2).
     #[must_use]
     pub fn meters_attached(&self) -> bool {
+        if self.protected_observation_prepared() {
+            return false;
+        }
         self.ready
             .as_ref()
             .is_some_and(|ready| !ready.meters.is_empty())
@@ -2476,6 +4455,14 @@ impl AudioWorkletEngineHost {
     /// caller asked for numbers this preparation cannot produce, and silently reporting zeros
     /// would be worse than saying so.
     pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
+        if self.protected_observation_prepared() {
+            let class = if enabled {
+                ObservationClass::Ordinary
+            } else {
+                ObservationClass::Removal
+            };
+            return self.refuse_unsupported_observation(class, 12);
+        }
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -2916,6 +4903,9 @@ impl AudioWorkletEngineHost {
                         ready.master_end_sample = 0;
                     }
                 }
+                if let PreparedObservationStorage::Protected(storage) = &mut ready.observation {
+                    storage.ingress.on_successful_render();
+                }
                 self.record(RESULT_OK)
             }
             Err(_) => self.fail(RESULT_RENDER_REJECTED, b"web.render.rejected\t$\n"),
@@ -2961,6 +4951,72 @@ impl AudioWorkletEngineHost {
         }
         if self.ready.is_none() {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        }
+        let protected = self.protected_observation_prepared();
+        let observation = {
+            let Some(buffers) = self.buffers.as_ref() else {
+                return self.fail(RESULT_INTERNAL, b"web.internal.console\t$\n");
+            };
+            let Some(bytes) = buffers.command.get(..staged) else {
+                return self.finish_commands(
+                    RESULT_INVALID_ARGUMENT,
+                    COMMAND_REASON_MALFORMED,
+                    0,
+                    0,
+                );
+            };
+            if protected {
+                classify_raw_observation_commands(bytes)
+            } else {
+                None
+            }
+        };
+        if let Some((class, index)) = observation {
+            const OPERATION: u32 = OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH;
+            let control_bytes = u64::from(count)
+                .checked_mul(u64::from(COMMAND_RECORD_BYTES))
+                .and_then(|bytes| bytes.checked_add(u64::from(companion_bytes.unwrap_or(0))));
+            let Some(control_bytes) = control_bytes else {
+                return self.finish_commands(
+                    RESULT_REFUSED_BUDGET,
+                    COMMAND_REASON_BACKPRESSURE,
+                    index,
+                    0,
+                );
+            };
+            let permit = match self.begin_observation(
+                class,
+                ObservationLengths {
+                    control_bytes,
+                    rows: u64::from(count),
+                    result_bytes: 0,
+                },
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => {
+                    let result = self.record_observation_refusal(OPERATION, refusal);
+                    return self.finish_commands(result, COMMAND_REASON_BACKPRESSURE, index, 0);
+                }
+            };
+            let _permit = permit;
+            self.record_observation_admission(
+                OPERATION,
+                RESULT_UNSUPPORTED,
+                Some(ObservationRefusal {
+                    reason: ObservationRefusalReason::InvalidRequest,
+                    limit: None,
+                    requested: None,
+                    maximum: None,
+                }),
+                None,
+                false,
+            );
+            return self.finish_commands(
+                RESULT_UNSUPPORTED,
+                COMMAND_REASON_UNSUPPORTED_KIND,
+                index,
+                0,
+            );
         }
         // Disjoint borrows: the staged bytes live in `buffers`, the console lives in `ready`.
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
@@ -3048,6 +5104,9 @@ impl AudioWorkletEngineHost {
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
     /// buffer allocated at compilation.
     pub fn poll_meters(&mut self) -> u32 {
+        if self.protected_observation_prepared() {
+            return 0;
+        }
         if !self.meter_lease || self.status.state != STATE_READY {
             return 0;
         }
@@ -3410,6 +5469,19 @@ impl AudioWorkletEngineHost {
     /// single point where the plan, the compiled session and the source rings are freed.
     pub fn dispose(&mut self) -> u32 {
         self.meter_lease = false;
+        let protected_owner = self.ready.as_ref().is_some_and(|ready| {
+            matches!(ready.observation, PreparedObservationStorage::Protected(_))
+        });
+        let has_protected_receipts = self.side_records.pending_count != 0
+            || self.side_records.completed_count != 0
+            || self.side_records.reserved_mask != 0;
+        if !self.side_records.terminal_finalized && (protected_owner || has_protected_receipts) {
+            self.reconcile_observation_applications();
+            self.close_observation_receipts(self.status.state == STATE_FAILED);
+        }
+        if protected_owner {
+            self.side_records.status = self.observation_status();
+        }
         self.ready = None;
         self.buffers = None;
         self.diagnostic_len = 0;
@@ -3760,6 +5832,40 @@ struct CommandRecord {
     parameter_id: u32,
     smoothing_samples: u32,
     values: [f32; 4],
+}
+
+fn classify_raw_observation_commands(bytes: &[u8]) -> Option<(ObservationClass, u32)> {
+    const SUBSCRIBE: u8 = COMMAND_OBSERVE_SUBSCRIBE as u8;
+    const UNSUBSCRIBE: u8 = COMMAND_OBSERVE_UNSUBSCRIBE as u8;
+    let mut first_observation_index = None;
+    let mut all_unsubscribe = true;
+    for (index, record) in bytes
+        .chunks_exact(COMMAND_RECORD_BYTES as usize)
+        .enumerate()
+    {
+        match record[0] {
+            SUBSCRIBE => {
+                first_observation_index.get_or_insert(index as u32);
+                all_unsubscribe = false;
+            }
+            UNSUBSCRIBE => {
+                first_observation_index.get_or_insert(index as u32);
+            }
+            _ => {
+                all_unsubscribe = false;
+            }
+        }
+    }
+    first_observation_index.map(|index| {
+        (
+            if all_unsubscribe {
+                ObservationClass::Removal
+            } else {
+                ObservationClass::Ordinary
+            },
+            index,
+        )
+    })
 }
 
 impl CommandRecord {
@@ -5611,6 +7717,8 @@ fn compile_ready(
     options: WebBootOptions,
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
+    observation_preparation: Option<&WebObservationPreparation<'_>>,
+    protected_facts: Option<ProtectedPreparationFacts>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
@@ -5628,38 +7736,72 @@ fn compile_ready(
     } else {
         Vec::new()
     };
-    let (host, handles, spectrum_capture) = match spectrum_request {
-        Some(SpectrumPreparationRequest::Single(request)) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_console_and_spectrum(&session, caps, &console, request)
-                    .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Single(capture)),
-            )
-        }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
-            let (host, handles, capture) =
-                host_core::prepare_host_runtime_with_console_and_spectrum_collection(
+    let (host, handles, spectrum_capture, protected_controller) =
+        match (spectrum_request, observation_preparation) {
+            (Some(_), Some(_)) => {
+                return Err(BootFailure::fixed(
+                    RESULT_REFUSED_OPTIONS,
+                    "web.observation.preparation_conflict",
+                ));
+            }
+            (Some(SpectrumPreparationRequest::Single(request)), None) => {
+                let (host, handles, capture) = prepare_host_runtime_with_console_and_spectrum(
                     &session, caps, &console, request,
                 )
                 .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Collection(capture)),
-            )
-        }
-        None => {
-            let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-                &session, caps, &console, &meters,
-            )
-            .map_err(BootFailure::preparation)?;
-            (host, handles, None)
-        }
-    };
+                (
+                    host,
+                    handles,
+                    Some(PreparedSpectrumCapture::Single(capture)),
+                    None,
+                )
+            }
+            (Some(SpectrumPreparationRequest::Collection(request)), None) => {
+                let (host, handles, capture) =
+                    host_core::prepare_host_runtime_with_console_and_spectrum_collection(
+                        &session, caps, &console, request,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (
+                    host,
+                    handles,
+                    Some(PreparedSpectrumCapture::Collection(capture)),
+                    None,
+                )
+            }
+            (None, Some(preparation)) => {
+                let (host, handles, controller) =
+                    prepare_host_runtime_with_observation_demand_between_render_calls(
+                        &session,
+                        caps,
+                        &console,
+                        &preparation.demand,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (host, handles, None, Some(controller))
+            }
+            (None, None) => {
+                let (host, handles) =
+                    prepare_host_runtime_with_selected_meters_between_render_calls(
+                        &session, caps, &console, &meters,
+                    )
+                    .map_err(BootFailure::preparation)?;
+                (host, handles, None, None)
+            }
+        };
     let engine = host.report;
+    let mut protected_facts = protected_facts;
+    if let Some(facts) = protected_facts.as_mut() {
+        if facts.ingress_shape.all_compiled_tracks != engine.track_count
+            || facts.ingress_shape.all_compiled_effect_instances != engine.effect_count
+        {
+            return Err(fixed_diagnostic("web.observation.prepared_counts").into());
+        }
+        // The projection consumes the counts from the prepared native report. The rack walk in
+        // `protected_preparation_facts` remains the checked source for the selected-track count.
+        facts.ingress_shape.all_compiled_tracks = engine.track_count;
+        facts.ingress_shape.all_compiled_effect_instances = engine.effect_count;
+    }
 
     let control_table = control_table_bytes(engine.source_count as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
@@ -6010,6 +8152,70 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
+    let observation = match (
+        observation_preparation,
+        protected_controller,
+        protected_facts,
+    ) {
+        (Some(preparation), Some(controller), Some(facts)) => {
+            let target_bytes = u64::try_from(facts.target_track_id.len())
+                .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
+            let bridge = ObservationIngressBridge {
+                projected_full_retained: report.bridge_retained_bytes,
+                additive_staging_bytes: 0,
+                private_target_allocation_bytes: target_bytes,
+            };
+            let projection = project_observation_ingress(
+                facts.ingress_shape,
+                bridge,
+                engine.observation_demand_resources.reserved_bytes,
+            )?;
+            validate_observation_ingress_limits(preparation.ingress, &projection)?;
+
+            let host_controller_bytes = u64::try_from(size_of::<HostObservationController>())
+                .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
+            report.bridge_metadata_bytes = report
+                .bridge_metadata_bytes
+                .checked_sub(host_controller_bytes)
+                .and_then(|bytes| bytes.checked_add(target_bytes))
+                .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+            report.bridge_retained_bytes = report
+                .bridge_retained_bytes
+                .checked_sub(host_controller_bytes)
+                .and_then(|bytes| bytes.checked_add(target_bytes))
+                .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+            // Keep the full actual shell allocation in the largest-allocation row. The target ID
+            // is a separate small allocation and does not replace that containing layout.
+            report.largest_bridge_allocation_bytes =
+                report.largest_bridge_allocation_bytes.max(target_bytes);
+            report.largest_named_allocation_bytes =
+                report.largest_named_allocation_bytes.max(target_bytes);
+
+            let spectrum_demand = HostSpectrumDemand {
+                target: SpectrumTarget::TrackPostMatrix(facts.target_track_id),
+                channels: SpectrumChannels::Stereo,
+                mode: HostSpectrumMode::Continuous,
+            };
+
+            PreparedObservationStorage::Protected(ProtectedObservationStorage {
+                controller,
+                ingress: ObservationIngressState::new(preparation.ingress, projection.bounds),
+                history_epoch: None,
+                history_dropped_captures: 0,
+                spectrum_cadence: facts.spectrum_cadence,
+                packed_response_bytes: projection.packed_response_bytes,
+                packed_spectrum_bytes: projection.packed_spectrum_bytes,
+                spectrum_demand,
+            })
+        }
+        (None, None, None) => PreparedObservationStorage::Legacy(spectrum_capture),
+        _ => {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.observation.preparation_conflict",
+            ));
+        }
+    };
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),
@@ -6031,7 +8237,7 @@ fn compile_ready(
         sample_rate_hz: session.sample_rate().0,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
-        spectrum_capture,
+        observation,
         host,
         meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(track_count)?,
@@ -6230,6 +8436,10 @@ pub use control_targets::{
     WebBuiltinInputConfig, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest,
     WebEqTargetResult, WebInputFilterEdit, WebPreparedEffectCompanionHeader,
     WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+};
+mod observation_ingress;
+pub(crate) use observation_ingress::{
+    ObservationClass, ObservationIngressState, ObservationLengths, ObservationPermit,
 };
 mod ffi;
 

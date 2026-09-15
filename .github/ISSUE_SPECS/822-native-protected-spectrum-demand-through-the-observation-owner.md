@@ -1,6 +1,6 @@
 # Native protected spectrum demand through the observation owner
 
-Status: OPEN. Astra XHIGH design and continuous-first scope approved by coordinator. Depends on closed #820 (PR #821, merge e907b632). C1–C4 are pushed; C5 is next. This canonical body supersedes the earlier one-shot/cache draft without changing the approved continuous-first contract.
+Status: CLOSED through PR #823, merge 1d223493e68ee3d1a6cf7cfc5ca9d34f379ef88e. C1–C5 delivered; fresh Astra XHIGH attempt 1 PASS; required qualification 34943119276 succeeded at 0750426519060d1bac169106aa6716c1a381b4d5. GitHub closure verified 2026-09-15. Historical checkpoint sections below record evidence as it accumulated. Protected one-shot is deferred #824; the next native browser integration is #825. Full SDK/frontend production delivery remains open.
 
 ## Smallest closable capability
 
@@ -151,7 +151,7 @@ At closure run proportional existing host-core native/control-provider, shared p
 - C2: 37b107ca. Root reran both controlled unit cases PASS; implementer checked host-core, all53 lib tests and nine spectrum integration cases, fmt/diff PASS. Real graph/queued-result integration remains C4/C5.
 - C3: 0d2812a4. Root test-support observation integration16 PASS, including serialized constructor invocation and actual dormant render probes. Implementer reported no-default integration15, observation unit12, spectrum unit31, spectrum integration9, no-default/control-provider checks and fmt/diff PASS. Resource composition test includes nonzero meter/fixed rows and deliberately nonzero spectrum fixed rows to prove they are not charged twice.
 
-Reproduce focused gates with `CARGO_TARGET_DIR=/home/bl/misofm/engine/target cargo test -p host-core --features test-support --test observation_demand`, `cargo test -p host-core --lib`, and `cargo test -p host-core --test spectrum`; use the same target directory for each Cargo invocation. Final issue-wide evidence and verdict remain outstanding.
+Reproduce focused gates with `CARGO_TARGET_DIR=/home/bl/misofm/engine/target cargo test -p host-core --features test-support --test observation_demand`, `cargo test -p host-core --lib`, and `cargo test -p host-core --test spectrum`; use the same target directory for each Cargo invocation. Final issue-wide evidence and verdict are recorded below.
 
 ## Successor and next visible milestone
 

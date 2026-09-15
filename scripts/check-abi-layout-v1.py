@@ -108,6 +108,7 @@ EXPORTS = [
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_boot_with_observation_demand",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
@@ -133,12 +134,26 @@ EXPORTS = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_admission_bytes",
+    "miso_engine_web_v1_observation_admission_ptr",
+    "miso_engine_web_v1_observation_application_bytes",
+    "miso_engine_web_v1_observation_application_capacity",
+    "miso_engine_web_v1_observation_application_ptr",
+    "miso_engine_web_v1_observation_application_take",
+    "miso_engine_web_v1_observation_capture_identity_bytes",
+    "miso_engine_web_v1_observation_capture_identity_ptr",
     "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_demand_apply",
+    "miso_engine_web_v1_observation_demand_bytes",
+    "miso_engine_web_v1_observation_demand_capacity",
+    "miso_engine_web_v1_observation_demand_ptr",
     "miso_engine_web_v1_observation_effect_index",
     "miso_engine_web_v1_observation_effect_slot_id",
     "miso_engine_web_v1_observation_id_capacity",
     "miso_engine_web_v1_observation_id_ptr",
     "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_preparation_bytes",
+    "miso_engine_web_v1_observation_preparation_ptr",
     "miso_engine_web_v1_observation_rack",
     "miso_engine_web_v1_observation_read",
     "miso_engine_web_v1_observation_result_bytes",
@@ -146,6 +161,8 @@ EXPORTS = [
     "miso_engine_web_v1_observation_selection_bytes",
     "miso_engine_web_v1_observation_selection_capacity",
     "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_status_bytes",
+    "miso_engine_web_v1_observation_status_ptr",
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
@@ -230,6 +247,14 @@ STRUCTURES = {
     "meterHeader": 64,
     "commandReport": 48,
     "observationSelection": 32,
+    "observationStatus": 64,
+    "observationWorkLimits": 96,
+    "observationIngressLimits": 88,
+    "observationPreparation": 392,
+    "observationDemand": 32,
+    "observationReceipt": 48,
+    "observationAdmission": 232,
+    "observationCaptureIdentity": 48,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -331,6 +356,87 @@ OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
     "reserved",
 ]
+OBSERVATION_STATUS_FIELDS = [
+    "structSize", "abiVersion", "profile", "flags", "pendingCount", "reserved", "owner",
+    "ingressEpoch", "acceptedGeneration", "appliedGeneration", "selectionEpoch",
+]
+OBSERVATION_STATUS_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u64", "u64",
+]
+OBSERVATION_WORK_LIMITS_FIELDS = [
+    "structSize", "abiVersion", "maximumActiveMeterChannels", "maximumMeterSamplesPerBlock",
+    "maximumMeterPublicationsPerBlock", "maximumMeterPublicationBytesPerBlock",
+    "maximumActiveSpectrumCaptures", "maximumCaptureInputSamplesPerBlock",
+    "maximumCaptureCopySamplesPerBlock", "maximumCapturePublicationsPerBlock",
+    "maximumCaptureBytesPerSecond", "maximumTransitionEntryVisitsPerBlock", "maximumRetainedBytes",
+]
+OBSERVATION_WORK_LIMITS_TYPES = [
+    "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+]
+OBSERVATION_INGRESS_LIMITS_FIELDS = [
+    "structSize", "abiVersion", "maximumControlBytes", "maximumObservationRows",
+    "maximumResultBytes", "ordinaryOperationsPerBoundary", "removalOperationsPerBoundary",
+    "alignmentPadding", "maximumAdmissionEntryVisits", "maximumResponseBindingVisits",
+    "maximumResponseSectionVisits", "maximumResponseCopyBytes",
+    "maximumHandlerCopyBytesPerBoundary", "maximumCleanupEntryVisitsPerBoundary",
+    "maximumRetainedBytes",
+]
+OBSERVATION_INGRESS_LIMITS_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64",
+    "u64", "u64", "u64", "u64",
+]
+OBSERVATION_PREPARATION_FIELDS = [
+    "structSize", "abiVersion", "profile", "meterCount", "residentTaps", "spectrumCount",
+    "maximumActiveObservers", "reserved0", "activationMaximumRetainedBytes",
+    "workLimits.structSize", "workLimits.abiVersion", "workLimits.maximumActiveMeterChannels",
+    "workLimits.maximumMeterSamplesPerBlock", "workLimits.maximumMeterPublicationsPerBlock",
+    "workLimits.maximumMeterPublicationBytesPerBlock", "workLimits.maximumActiveSpectrumCaptures",
+    "workLimits.maximumCaptureInputSamplesPerBlock", "workLimits.maximumCaptureCopySamplesPerBlock",
+    "workLimits.maximumCapturePublicationsPerBlock", "workLimits.maximumCaptureBytesPerSecond",
+    "workLimits.maximumTransitionEntryVisitsPerBlock", "workLimits.maximumRetainedBytes",
+    "ingressLimits.structSize", "ingressLimits.abiVersion", "ingressLimits.maximumControlBytes",
+    "ingressLimits.maximumObservationRows", "ingressLimits.maximumResultBytes",
+    "ingressLimits.ordinaryOperationsPerBoundary", "ingressLimits.removalOperationsPerBoundary",
+    "ingressLimits.alignmentPadding", "ingressLimits.maximumAdmissionEntryVisits",
+    "ingressLimits.maximumResponseBindingVisits", "ingressLimits.maximumResponseSectionVisits",
+    "ingressLimits.maximumResponseCopyBytes", "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+    "ingressLimits.maximumCleanupEntryVisitsPerBoundary", "ingressLimits.maximumRetainedBytes",
+    "spectrumRequest.structSize", "spectrumRequest.abiVersion", "spectrumRequest.target",
+    "spectrumRequest.channels", "spectrumRequest.targetIdBytes", "spectrumRequest.reserved0",
+    "spectrumRequest.maximumCaptureBytes", "spectrumRequest.reserved", "targetId",
+]
+OBSERVATION_PREPARATION_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u64",
+    "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u8[4]", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
+    "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u32[2]", "u8[128]",
+]
+OBSERVATION_DEMAND_FIELDS = [
+    "structSize", "abiVersion", "operation", "count", "owner", "reserved",
+]
+OBSERVATION_DEMAND_TYPES = ["u32", "u32", "u32", "u32", "u64", "u32[2]"]
+OBSERVATION_RECEIPT_FIELDS = [
+    "structSize", "abiVersion", "domain", "state", "owner", "sequence",
+    "applicationSample", "result", "reserved",
+]
+OBSERVATION_RECEIPT_TYPES = [
+    "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
+]
+OBSERVATION_ADMISSION_FIELDS = [
+    "structSize", "abiVersion", "result", "operation", "flags", "reason", "limitBytes",
+    "reserved", "ingressEpoch", "requested", "maximum", "limit", "receipt.structSize",
+    "receipt.abiVersion", "receipt.domain", "receipt.state", "receipt.owner", "receipt.sequence",
+    "receipt.applicationSample", "receipt.result", "receipt.reserved",
+]
+OBSERVATION_ADMISSION_TYPES = [
+    "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u32", "u64", "u64", "u64",
+    "u8[128]", "u32", "u32", "u32", "u32", "u64", "u64", "u64", "u32", "u32",
+]
+OBSERVATION_CAPTURE_IDENTITY_FIELDS = [
+    "structSize", "abiVersion", "kind", "flags", "owner", "observationGeneration",
+    "selectionEpoch", "snapshotToken",
+]
+OBSERVATION_CAPTURE_IDENTITY_TYPES = ["u32", "u32", "u32", "u32", "u64", "u64", "u64", "u64"]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
     "channels", "sampleRateHz", "reserved0", "firstSample", "endSample", "sequence", "blocks",
@@ -382,7 +488,8 @@ def check_fields(name: str, fields: object, total: int) -> None:
 def check_named(document: dict, group: str, expected: list[tuple[int, str]]) -> None:
     rows = document["constants"].get(group)
     require(isinstance(rows, list), f"constants.{group} is a list")
-    require(all(isinstance(row, dict) and set(row) == {"value", "name"} for row in rows),
+    require(all(isinstance(row, dict) and set(row) == {"value", "name"}
+                and type(row["value"]) is int for row in rows),
             f"constants.{group} rows are exactly value/name")
     actual = [(row["value"], row["name"]) for row in rows]
     require(actual == expected, f"constants.{group} is {actual}, expected {expected}")
@@ -475,6 +582,46 @@ def validate(document: object) -> None:
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
+    observation_status = structures["observationStatus"]["fields"]
+    require([row["name"] for row in observation_status] == OBSERVATION_STATUS_FIELDS,
+            f"observationStatus names exactly {OBSERVATION_STATUS_FIELDS}")
+    require([row["type"] for row in observation_status] == OBSERVATION_STATUS_TYPES,
+            f"observationStatus types exactly {OBSERVATION_STATUS_TYPES}")
+    work_limits = structures["observationWorkLimits"]["fields"]
+    require([row["name"] for row in work_limits] == OBSERVATION_WORK_LIMITS_FIELDS,
+            f"observationWorkLimits names exactly {OBSERVATION_WORK_LIMITS_FIELDS}")
+    require([row["type"] for row in work_limits] == OBSERVATION_WORK_LIMITS_TYPES,
+            f"observationWorkLimits types exactly {OBSERVATION_WORK_LIMITS_TYPES}")
+    ingress_limits = structures["observationIngressLimits"]["fields"]
+    require([row["name"] for row in ingress_limits] == OBSERVATION_INGRESS_LIMITS_FIELDS,
+            f"observationIngressLimits names exactly {OBSERVATION_INGRESS_LIMITS_FIELDS}")
+    require([row["type"] for row in ingress_limits] == OBSERVATION_INGRESS_LIMITS_TYPES,
+            f"observationIngressLimits types exactly {OBSERVATION_INGRESS_LIMITS_TYPES}")
+    preparation = structures["observationPreparation"]["fields"]
+    require([row["name"] for row in preparation] == OBSERVATION_PREPARATION_FIELDS,
+            f"observationPreparation names exactly {OBSERVATION_PREPARATION_FIELDS}")
+    require([row["type"] for row in preparation] == OBSERVATION_PREPARATION_TYPES,
+            f"observationPreparation types exactly {OBSERVATION_PREPARATION_TYPES}")
+    demand = structures["observationDemand"]["fields"]
+    require([row["name"] for row in demand] == OBSERVATION_DEMAND_FIELDS,
+            f"observationDemand names exactly {OBSERVATION_DEMAND_FIELDS}")
+    require([row["type"] for row in demand] == OBSERVATION_DEMAND_TYPES,
+            f"observationDemand types exactly {OBSERVATION_DEMAND_TYPES}")
+    receipt = structures["observationReceipt"]["fields"]
+    require([row["name"] for row in receipt] == OBSERVATION_RECEIPT_FIELDS,
+            f"observationReceipt names exactly {OBSERVATION_RECEIPT_FIELDS}")
+    require([row["type"] for row in receipt] == OBSERVATION_RECEIPT_TYPES,
+            f"observationReceipt types exactly {OBSERVATION_RECEIPT_TYPES}")
+    admission = structures["observationAdmission"]["fields"]
+    require([row["name"] for row in admission] == OBSERVATION_ADMISSION_FIELDS,
+            f"observationAdmission names exactly {OBSERVATION_ADMISSION_FIELDS}")
+    require([row["type"] for row in admission] == OBSERVATION_ADMISSION_TYPES,
+            f"observationAdmission types exactly {OBSERVATION_ADMISSION_TYPES}")
+    capture_identity = structures["observationCaptureIdentity"]["fields"]
+    require([row["name"] for row in capture_identity] == OBSERVATION_CAPTURE_IDENTITY_FIELDS,
+            f"observationCaptureIdentity names exactly {OBSERVATION_CAPTURE_IDENTITY_FIELDS}")
+    require([row["type"] for row in capture_identity] == OBSERVATION_CAPTURE_IDENTITY_TYPES,
+            f"observationCaptureIdentity types exactly {OBSERVATION_CAPTURE_IDENTITY_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")
@@ -493,6 +640,9 @@ def validate(document: object) -> None:
         "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
         "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes", "maximumPreparedSpectrumTargets",
         "spectrumStreamStatuses", "spectrumStreamMetadataBytes",
+        "observationProfiles", "observationOperations", "observationReceiptDomains",
+        "observationReceiptStates", "observationAdmissionFlags", "observationStatusFlags",
+        "observationCaptureKinds", "observationCaptureFlags", "observationRefusalReasons",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -513,6 +663,33 @@ def validate(document: object) -> None:
     check_named(document, "liveResponseMeanings", [(1, "eqFilterSubtotal")])
     check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
     check_named(document, "observationStatuses", [(1, "pending"), (2, "unarmed"), (3, "ready")])
+    check_named(document, "observationProfiles", [(0, "legacyUnprotected"), (1, "eqSpectrum")])
+    check_named(document, "observationOperations", [
+        (1, "replaceMeters"), (2, "removeMetersTo"), (3, "stopGraph"),
+        (4, "startSpectrum"), (5, "restartSpectrum"), (6, "readSpectrum"),
+        (7, "stopSpectrum"), (8, "captureResponse"), (9, "rawObservationBatch"),
+        (10, "oneShot"), (11, "collectionSelection"), (12, "meterLease"),
+        (13, "meterRead"), (14, "residentRead"),
+    ])
+    check_named(document, "observationReceiptDomains", [(1, "graph"), (2, "resident")])
+    check_named(document, "observationReceiptStates", [
+        (1, "pending"), (2, "applied"), (3, "closed"), (4, "failed"),
+    ])
+    check_named(document, "observationAdmissionFlags", [
+        (1, "receiptPresent"), (2, "requestedPresent"), (4, "maximumPresent"),
+        (8, "pendingBoundary"),
+    ])
+    check_named(document, "observationStatusFlags", [
+        (1, "ordinaryAvailable"), (2, "removalAvailable"), (4, "terminal"),
+        (8, "renderFailed"),
+    ])
+    check_named(document, "observationCaptureKinds", [(1, "response"), (2, "spectrum")])
+    check_named(document, "observationCaptureFlags", [(1, "graphGeneration")])
+    check_named(document, "observationRefusalReasons", [
+        (0, "none"), (1, "notPrepared"), (2, "wrongOwner"), (3, "capacity"),
+        (4, "workBudget"), (5, "backpressure"), (6, "conflict"), (7, "closed"),
+        (8, "invalidRequest"), (9, "arithmeticOverflow"), (10, "revisionExhausted"),
+    ])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a
@@ -594,11 +771,45 @@ def self_test() -> int:
     def widen_field(document: dict) -> None:
         document["structures"]["status"]["fields"][0]["type"] = "u64"
 
+    def widen_ingress_padding(document: dict) -> None:
+        for row in document["structures"]["observationIngressLimits"]["fields"]:
+            if row["name"] == "alignmentPadding":
+                row["type"] = "u32"
+                return
+        raise AssertionError("the ingress padding row exists in the valid fixture")
+
+    def preparation_field(document: dict, name: str) -> dict:
+        for row in document["structures"]["observationPreparation"]["fields"]:
+            if row["name"] == name:
+                return row
+        raise AssertionError(f"the preparation field {name} exists in the valid fixture")
+
+    def drop_preparation_nested_leaf(document: dict) -> None:
+        fields = document["structures"]["observationPreparation"]["fields"]
+        row = preparation_field(document, "workLimits.maximumRetainedBytes")
+        fields.remove(row)
+
+    def widen_preparation_nested_leaf(document: dict) -> None:
+        preparation_field(document, "workLimits.maximumMeterSamplesPerBlock")["type"] = "f64"
+
+    def widen_preparation_padding(document: dict) -> None:
+        preparation_field(document, "ingressLimits.alignmentPadding")["type"] = "u32"
+
+    def shift_preparation_nested_leaf(document: dict) -> None:
+        preparation_field(document, "workLimits.maximumRetainedBytes")["offset"] += 4
+
     def hole_in_layout(document: dict) -> None:
         document["structures"]["commandReport"]["fields"][3]["offset"] = 16
 
     def drop_export(document: dict) -> None:
         document["exports"].pop()
+
+    def drop_protected_boot_export(document: dict) -> None:
+        export = "miso_engine_web_v1_boot_with_observation_demand"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError("the protected boot export exists in the valid fixture") from error
 
     def unsorted_exports(document: dict) -> None:
         document["exports"].reverse()
@@ -627,6 +838,30 @@ def self_test() -> int:
     def duplicate_result_name(document: dict) -> None:
         document["constants"]["resultCodes"][5]["name"] = "prepareRejected"
 
+    def drop_refusal_none(document: dict) -> None:
+        rows = document["constants"]["observationRefusalReasons"]
+        for row in rows:
+            if row["name"] == "none" and row["value"] == 0:
+                rows.remove(row)
+                return
+        raise AssertionError("the observation refusal none=0 row exists in the valid fixture")
+
+    def change_observation_flag(document: dict) -> None:
+        rows = document["constants"]["observationStatusFlags"]
+        for row in rows:
+            if row["name"] == "terminal":
+                row["value"] = 16
+                return
+        raise AssertionError("the observation terminal flag exists in the valid fixture")
+
+    def boolean_named_value(document: dict) -> None:
+        rows = document["constants"]["observationProfiles"]
+        for row in rows:
+            if row["name"] == "eqSpectrum":
+                row["value"] = True
+                return
+        raise AssertionError("the observation eqSpectrum row exists in the valid fixture")
+
     mutations = [
         ("an alias row is dropped", drop_alias),
         ("an alias repeats its base name", alias_repeats_base),
@@ -634,8 +869,14 @@ def self_test() -> int:
         ("a boot option is renamed", rename_field),
         ("a boot option is dropped", drop_field),
         ("a status word is widened", widen_field),
+        ("ingress padding changes to a same-width scalar", widen_ingress_padding),
+        ("a preparation nested leaf is dropped", drop_preparation_nested_leaf),
+        ("a preparation nested leaf type changes at the same width", widen_preparation_nested_leaf),
+        ("preparation padding changes to a same-width scalar", widen_preparation_padding),
+        ("a preparation nested leaf shifts by four bytes", shift_preparation_nested_leaf),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
+        ("the protected observation boot export is dropped", drop_protected_boot_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
@@ -645,6 +886,9 @@ def self_test() -> int:
         ("the 192-byte prepare config returns", prepare_config_returns),
         ("the ABI version goes stale", stale_abi_version),
         ("a retired result name returns", duplicate_result_name),
+        ("the refusal none=0 row is dropped", drop_refusal_none),
+        ("an observation status flag value changes", change_observation_flag),
+        ("a named numeric value becomes boolean", boolean_named_value),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)

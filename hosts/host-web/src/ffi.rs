@@ -13,6 +13,8 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(test)]
+use crate::OBSERVATION_OPERATION_STOP;
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
@@ -20,11 +22,18 @@ use crate::{
     LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
     LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
     LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
-    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH,
-    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
-    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationReadChannels, ObservationReadError,
-    ObservationReadValues, RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CAPTURE_KIND_RESPONSE,
+    OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT,
+    OBSERVATION_OPERATION_CAPTURE_RESPONSE, OBSERVATION_OPERATION_COLLECTION_SELECTION,
+    OBSERVATION_OPERATION_METER_LEASE, OBSERVATION_OPERATION_ONE_SHOT,
+    OBSERVATION_OPERATION_READ_SPECTRUM, OBSERVATION_OPERATION_REMOVE_METERS_TO,
+    OBSERVATION_OPERATION_RESIDENT_READ, OBSERVATION_OPERATION_START_SPECTRUM,
+    OBSERVATION_OPERATION_STOP_GRAPH, OBSERVATION_OPERATION_STOP_SPECTRUM,
+    OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING,
+    OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationClass,
+    ObservationIngressLimits, ObservationLengths, ObservationReadChannels, ObservationReadError,
+    ObservationReadValues, ProtectedResponseCaptureError, ProtectedSpectrumReadError,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
     RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
     RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
@@ -38,10 +47,12 @@ use crate::{
     SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_READY, SpectrumPreparationRequest,
     WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebObservationResult, WebObservationSelection, WebResponseParameter,
-    WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow,
+    WebLiveResponseSection, WebObservationAdmission, WebObservationCaptureIdentity,
+    WebObservationDemand, WebObservationPreparation, WebObservationPreparationRecord,
+    WebObservationProfile, WebObservationReceipt, WebObservationResult, WebObservationSelection,
+    WebObservationStatus, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, legacy_response_refusal,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -53,14 +64,15 @@ use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
-    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot,
-    ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
-    ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
-    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow, prepare_response_preview,
-    query_response_snapshot_into,
+    GraphObservationActivationConfig, ObservationRefusal, ObservationRefusalReason,
+    ObservationWorkLimits, ObservedContinuousSpectrumWindow, ResponseParameterOverride,
+    ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
+    ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot, ResponseSnapshotAvailability,
+    ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
+    SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence, SpectrumCaptureCollectionEntry,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
+    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumSmoothingConfig, SpectrumTarget,
+    SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -112,6 +124,8 @@ struct SpectrumStaging {
     stream_smoothing: Option<SpectrumSmoothingConfig>,
     stream_history: Option<Box<SpectrumAnalysisHistory>>,
     stream_window: Option<SpectrumStreamWindowFacts>,
+    #[cfg(test)]
+    stream_history_exhausted_for_test: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -153,6 +167,8 @@ impl SpectrumStaging {
             stream_smoothing: None,
             stream_history: None,
             stream_window: None,
+            #[cfg(test)]
+            stream_history_exhausted_for_test: false,
         }
     }
 
@@ -160,15 +176,21 @@ impl SpectrumStaging {
         if self.capture.is_some() && self.result.is_some() {
             return Ok(());
         }
+        #[cfg(test)]
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        });
         let mut capture = Vec::new();
         capture
             .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
             .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        validate_spectrum_capture_capacity(capture.capacity())?;
         capture.resize(SPECTRUM_CAPTURE_BYTES, 0);
         let mut result = Vec::new();
         result
             .try_reserve_exact(SPECTRUM_CAPTURE_BYTES)
             .map_err(|_| RESULT_REFUSED_BUDGET)?;
+        validate_spectrum_capture_capacity(result.capacity())?;
         result.resize(SPECTRUM_CAPTURE_BYTES, 0);
         self.capture = Some(capture);
         self.result = Some(result);
@@ -188,6 +210,10 @@ impl SpectrumStaging {
         self.stream_cadence = None;
         self.stream_smoothing = None;
         self.stream_window = None;
+        #[cfg(test)]
+        {
+            self.stream_history_exhausted_for_test = false;
+        }
         self.stream_metadata = WebSpectrumStreamMetadata {
             struct_size: SPECTRUM_STREAM_METADATA_BYTES,
             abi_version: ABI_VERSION,
@@ -230,6 +256,30 @@ impl SpectrumStaging {
         self.stream_metadata.history_start_sample = 0;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn stream_history_exhausted(&self) -> bool {
+        self.stream_history_exhausted_for_test
+            || self
+                .stream_history
+                .as_ref()
+                .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+    }
+
+    #[cfg(not(test))]
+    fn stream_history_exhausted(&self) -> bool {
+        self.stream_history
+            .as_ref()
+            .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+    }
+}
+
+fn validate_spectrum_capture_capacity(capacity: usize) -> Result<(), u32> {
+    if capacity > SPECTRUM_CAPTURE_BYTES {
+        Err(RESULT_REFUSED_BUDGET)
+    } else {
+        Ok(())
+    }
 }
 
 struct ObservationStaging {
@@ -238,6 +288,46 @@ struct ObservationStaging {
     rows: Box<[ObservationReadValues]>,
     results: Vec<WebObservationResult>,
     id: Box<[u8]>,
+    endpoint: ObservationEndpointStaging,
+}
+
+/// Fixed protected-observation input/output staging carried by the existing TLS owner.
+///
+/// This is deliberately inline: it is the endpoint's fixed wire workspace, not a second receipt
+/// ledger. The outer host's four receipt rows remain the sole native application authority.
+struct ObservationEndpointStaging {
+    preparation: WebObservationPreparationRecord,
+    demand: WebObservationDemand,
+    admission: WebObservationAdmission,
+    status: WebObservationStatus,
+    capture_identity: WebObservationCaptureIdentity,
+    applications: [WebObservationReceipt; 4],
+    application_count: u32,
+    handle: u32,
+    terminal_application_pending: bool,
+}
+
+impl Default for ObservationEndpointStaging {
+    fn default() -> Self {
+        // Keep WebObservationDemand's established zero-default/layout unchanged. Endpoint
+        // staging is the owned ABI workspace, so its headers are initialized explicitly here.
+        let demand = WebObservationDemand {
+            struct_size: size_of::<WebObservationDemand>() as u32,
+            abi_version: ABI_VERSION,
+            ..WebObservationDemand::default()
+        };
+        Self {
+            preparation: WebObservationPreparationRecord::default(),
+            demand,
+            admission: WebObservationAdmission::default(),
+            status: WebObservationStatus::default(),
+            capture_identity: WebObservationCaptureIdentity::default(),
+            applications: [WebObservationReceipt::default(); 4],
+            application_count: 0,
+            handle: 0,
+            terminal_application_pending: false,
+        }
+    }
 }
 
 impl ObservationStaging {
@@ -250,6 +340,7 @@ impl ObservationStaging {
                 .into_boxed_slice(),
             results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
             id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
+            endpoint: ObservationEndpointStaging::default(),
         }
     }
 
@@ -260,24 +351,64 @@ impl ObservationStaging {
 }
 
 /// Heap payload retained by the fixed selected-observation staging area.
+const fn checked_mul_or_zero(left: u64, right: u64) -> u64 {
+    match left.checked_mul(right) {
+        Some(value) => value,
+        None => 0,
+    }
+}
+
 pub(crate) const fn observation_staging_retained_bytes() -> u64 {
     let count = MAXIMUM_OBSERVATION_READS as u64;
-    count * size_of::<WebObservationSelection>() as u64
-        + count * size_of::<ObservationAddress>() as u64
-        + count * size_of::<ObservationReadValues>() as u64
-        + count * size_of::<WebObservationResult>() as u64
-        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
+    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+    let mut bytes = containing;
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<WebObservationSelection>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<ObservationAddress>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<ObservationReadValues>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    bytes = match bytes.checked_add(checked_mul_or_zero(
+        count,
+        size_of::<WebObservationResult>() as u64,
+    )) {
+        Some(bytes) => bytes,
+        None => 0,
+    };
+    match bytes.checked_add(RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64) {
+        Some(bytes) => bytes,
+        None => 0,
+    }
 }
 
 /// Largest one allocation in the fixed selected-observation staging area.
 pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
     let count = MAXIMUM_OBSERVATION_READS as u64;
-    let selections = count * size_of::<WebObservationSelection>() as u64;
-    let addresses = count * size_of::<ObservationAddress>() as u64;
-    let rows = count * size_of::<ObservationReadValues>() as u64;
-    let results = count * size_of::<WebObservationResult>() as u64;
+    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+    let selections = checked_mul_or_zero(count, size_of::<WebObservationSelection>() as u64);
+    let addresses = checked_mul_or_zero(count, size_of::<ObservationAddress>() as u64);
+    let rows = checked_mul_or_zero(count, size_of::<ObservationReadValues>() as u64);
+    let results = checked_mul_or_zero(count, size_of::<WebObservationResult>() as u64);
     let ids = RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
-    let mut largest = selections;
+    let mut largest = containing;
+    if selections > largest {
+        largest = selections;
+    }
     if addresses > largest {
         largest = addresses;
     }
@@ -313,6 +444,14 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right { left } else { right }
 }
 
+const fn spectrum_capture_payload_bytes() -> u64 {
+    (SPECTRUM_CAPTURE_BYTES as u64)
+        .checked_mul(2)
+        .expect("spectrum capture payload size overflow")
+}
+
+pub(crate) const SPECTRUM_CAPTURE_PAYLOAD_BYTES: u64 = spectrum_capture_payload_bytes();
+
 /// Heap payload retained by the one-shot spectrum staging area.
 ///
 /// Request and target-ID staging are always available for the pre-boot write. The two PCM byte
@@ -329,7 +468,7 @@ pub(crate) const fn spectrum_staging_retained_bytes(
         + collection_entry_bytes
         + collection_target_id_bytes
         + if configured {
-            SPECTRUM_CAPTURE_BYTES as u64 * 2 + SPECTRUM_STREAM_METADATA_BYTES as u64
+            SPECTRUM_CAPTURE_PAYLOAD_BYTES + SPECTRUM_STREAM_METADATA_BYTES as u64
         } else {
             0
         }
@@ -441,11 +580,21 @@ impl BootStaging {
 
 thread_local! {
     static LIVE_HOST: RefCell<Option<LiveHost>> = const { RefCell::new(None) };
-    static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
+    // Zero is the never-issued sentinel. `next_handle` preserves the established nonzero
+    // handle contract when the first owner is published, while cold invalid lookups can avoid
+    // constructing the allocating observation staging TLS entirely.
+    static NEXT_HANDLE: Cell<u32> = const { Cell::new(0) };
     static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
     static RESPONSE_STAGING: RefCell<ResponseStaging> = RefCell::new(ResponseStaging::new());
     static SPECTRUM_STAGING: RefCell<SpectrumStaging> = RefCell::new(SpectrumStaging::new());
     static OBSERVATION_STAGING: RefCell<ObservationStaging> = RefCell::new(ObservationStaging::new());
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_RESPONSE_CAPTURE_FAULT: Cell<Option<ResponseSnapshotError>> = const { Cell::new(None) };
+    static LIVE_RESPONSE_CAPTURE_OWNER_CALLS: Cell<u32> = const { Cell::new(0) };
+    static SPECTRUM_CAPTURE_CONFIGURE_ENTRIES: Cell<u32> = const { Cell::new(0) };
 }
 
 fn next_handle() -> u32 {
@@ -491,6 +640,58 @@ fn with_host_mut<R>(
             return invalid;
         };
         operation(&mut live.host)
+    })
+}
+
+/// Refuse an unsupported protected alias before it touches caller-owned staging or input.
+///
+/// The native owner records the classified attempt and diagnostic. `Ok(None)` means that a
+/// successfully inspected matching handle is legacy, so the existing alias path remains
+/// responsible for its legacy behavior. A failed live-host borrow or invalid handle is terminal
+/// and must return before any alias-owned staging is touched.
+fn refuse_protected_observation_alias(
+    handle: u32,
+    class: ObservationClass,
+    operation: u32,
+) -> Result<Option<u32>, u32> {
+    if handle == 0 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    LIVE_HOST.with(|slot| {
+        let mut slot = slot.try_borrow_mut().map_err(|_| RESULT_INTERNAL)?;
+        let live = slot
+            .as_mut()
+            .filter(|live| live.handle == handle)
+            .ok_or(RESULT_INVALID_ARGUMENT)?;
+        if live.host.protected_observation_prepared() {
+            Ok(Some(
+                live.host.refuse_unsupported_observation(class, operation),
+            ))
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+/// Classify a stream endpoint only after inspecting the matching live host.
+///
+/// A failed host borrow and every nonmatching handle are terminal at the ABI boundary. They must
+/// not be mistaken for a legacy host, because the legacy fallback writes the shared stream
+/// staging record on refusal. Only an inspected matching host may select the legacy or protected
+/// implementation.
+fn stream_host_dispatch(handle: u32) -> Result<bool, u32> {
+    if handle == 0 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    LIVE_HOST.with(|slot| {
+        // These aliases may enter the legacy path, which later needs an exclusive host borrow.
+        // Acquire that same kind of borrow for classification so an immutable conflict cannot be
+        // mistaken for a verified legacy host and mutate stream staging on the fallback path.
+        let mut slot = slot.try_borrow_mut().map_err(|_| RESULT_INTERNAL)?;
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return Err(RESULT_INVALID_ARGUMENT);
+        };
+        Ok(live.host.protected_observation_prepared())
     })
 }
 
@@ -835,6 +1036,59 @@ fn staged_spectrum_request(
     )))
 }
 
+fn validate_observation_preparation_record(
+    record: &WebObservationPreparationRecord,
+) -> Result<(), u32> {
+    if record.struct_size != crate::OBSERVATION_PREPARATION_BYTES
+        || record.abi_version != ABI_VERSION
+        || record.profile != crate::OBSERVATION_PROFILE_EQ_SPECTRUM
+        || record.meter_count != 0
+        || record.resident_taps != 0
+        || record.spectrum_count != 1
+        || record.maximum_active_observers != 1
+        || record.reserved0 != 0
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let maximum_active_observers =
+        usize::try_from(record.maximum_active_observers).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if maximum_active_observers != 1 {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let work = record.work_limits;
+    if work.struct_size != crate::OBSERVATION_WORK_LIMITS_BYTES || work.abi_version != ABI_VERSION {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let ingress = record.ingress_limits;
+    if ingress.struct_size != crate::OBSERVATION_INGRESS_LIMITS_BYTES
+        || ingress.abi_version != ABI_VERSION
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let request = record.spectrum_request;
+    if request.struct_size != SPECTRUM_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.target != SPECTRUM_TARGET_TRACK_POST_MATRIX
+        || request.channels != SPECTRUM_CHANNEL_BOTH
+        || request.reserved0 != 0
+        || request.reserved != [0; 2]
+        || request.maximum_capture_bytes == 0
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let target_bytes =
+        usize::try_from(request.target_id_bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    if !(1..=SPECTRUM_MAXIMUM_ID_BYTES).contains(&target_bytes)
+        || record.target_id[target_bytes..]
+            .iter()
+            .any(|byte| *byte != 0)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    core::str::from_utf8(&record.target_id[..target_bytes]).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    Ok(())
+}
+
 fn spectrum_capture_bytes(channels: u32) -> usize {
     (SPECTRUM_WINDOW_HEADER_BYTES as usize)
         + if channels & SPECTRUM_CHANNEL_LEFT != 0 {
@@ -914,6 +1168,83 @@ fn stream_metadata_error(
     staging.capture_len = 0;
     staging.result_len = 0;
     staging.stream_window = None;
+}
+
+fn protected_spectrum_read_refusal(
+    host: &mut AudioWorkletEngineHost,
+    reason: ObservationRefusalReason,
+    limit: Option<&'static str>,
+    requested: Option<u64>,
+    maximum: Option<u64>,
+) -> u32 {
+    host.record_observation_refusal(
+        OBSERVATION_OPERATION_READ_SPECTRUM,
+        ObservationRefusal {
+            reason,
+            limit,
+            requested,
+            maximum,
+        },
+    )
+}
+
+/// Pack one checked protected stereo window into the existing raw staging bytes.
+///
+/// Every range used here is preflighted by `protected_spectrum_stream_read` before native
+/// consumption. The length is published only after the complete header and both planes have been
+/// copied, so a caller never observes a partially committed window.
+fn commit_protected_spectrum_window(
+    staging: &mut SpectrumStaging,
+    window: &ObservedContinuousSpectrumWindow,
+    target: u32,
+    cadence: SpectrumCadence,
+    snapshot_token: u64,
+) {
+    let header_bytes = SPECTRUM_WINDOW_HEADER_BYTES as usize;
+    let plane_bytes = (SPECTRUM_WINDOW_FRAMES as usize) * size_of::<f32>();
+    let right_offset = header_bytes + plane_bytes;
+    let total_bytes = right_offset + plane_bytes;
+    let left_offset = u32::try_from(header_bytes).expect("fixed spectrum header fits u32");
+    let right_offset_u32 = u32::try_from(right_offset).expect("fixed spectrum plane fits u32");
+    let end_sample = window
+        .window
+        .end_sample()
+        .expect("protected spectrum end was preflighted");
+    let header = WebSpectrumWindow {
+        struct_size: SPECTRUM_WINDOW_HEADER_BYTES,
+        abi_version: ABI_VERSION,
+        target,
+        channels: SPECTRUM_CHANNEL_BOTH,
+        sample_rate_hz: cadence.sample_rate_hz(),
+        frames: SPECTRUM_WINDOW_FRAMES,
+        source_underrun: u32::from(window.window.source_underrun),
+        reserved0: 0,
+        captured_sample: window.window.first_sample,
+        end_sample,
+        snapshot_token,
+        left_offset,
+        right_offset: right_offset_u32,
+    };
+
+    let bytes = staging
+        .capture
+        .as_mut()
+        .expect("protected spectrum capacity was preflighted");
+    debug_assert!(bytes.len() >= total_bytes);
+    for (index, value) in window.window.left.iter().copied().enumerate() {
+        let at = header_bytes + index * size_of::<f32>();
+        bytes[at..at + size_of::<f32>()].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in window.window.right.iter().copied().enumerate() {
+        let at = right_offset + index * size_of::<f32>();
+        bytes[at..at + size_of::<f32>()].copy_from_slice(&value.to_le_bytes());
+    }
+    assert!(
+        copy_live_record(bytes, 0, &header),
+        "protected spectrum header capacity was preflighted"
+    );
+    staging.capture_len = total_bytes;
+    staging.result_len = 0;
 }
 
 fn imported_stream_configuration(
@@ -1310,6 +1641,22 @@ fn live_response_grid(request: WebLiveResponseRequest) -> Result<ResponsePreview
     }
 }
 
+fn protected_live_response_grid(
+    request: WebLiveResponseRequest,
+    sample_rate_hz: u32,
+) -> Result<ResponsePreviewGrid, u32> {
+    let grid = live_response_grid(request)?;
+    let nyquist_hz = sample_rate_hz as f32 * 0.5;
+    if request.minimum_hz < 0.0
+        || request.minimum_hz >= request.maximum_hz
+        || request.maximum_hz > nyquist_hz
+        || (request.grid == crate::RESPONSE_GRID_LOGARITHMIC && request.minimum_hz <= 0.0)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok(grid)
+}
+
 fn live_response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
     staging.live_result_header = WebLiveResponseResult {
         struct_size: LIVE_RESPONSE_RESULT_BYTES,
@@ -1415,6 +1762,15 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
         left: &[ResponseSnapshotSection],
         right: &[ResponseSnapshotSection],
     ) -> Result<(), ResponseSnapshotError> {
+        #[cfg(test)]
+        {
+            LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(|calls| {
+                calls.set(calls.get().saturating_add(1));
+            });
+            if let Some(error) = LIVE_RESPONSE_CAPTURE_FAULT.with(Cell::take) {
+                return Err(error);
+            }
+        }
         if self.owner_count >= LIVE_RESPONSE_MAXIMUM_OWNERS
             || left.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
             || right.len() > LIVE_RESPONSE_MAXIMUM_SECTIONS
@@ -1464,6 +1820,217 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
         }
         Ok(())
     }
+}
+
+/// Capture one protected selected track through the shared ordinary ingress permit.
+///
+/// The protected path is deliberately separate from the legacy compatibility path below. Every
+/// refusal before the admitted native call leaves the previously committed response payload and
+/// identity untouched; only an admitted provider/sink failure uses the legacy failure header.
+fn run_protected_live_response_capture(
+    host: &mut AudioWorkletEngineHost,
+    staging: &mut ResponseStaging,
+) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
+    // Copy fixed scalars before any request interpretation. The ordinary attempt is classified
+    // from these declared lengths, so an oversized request spends the attempt before refusal.
+    let request = *staging.live_request;
+    let live_token = staging.live_token;
+    let control_bytes = match u64::try_from(size_of::<WebLiveResponseRequest>())
+        .ok()
+        .and_then(|header| header.checked_add(u64::from(request.track_id_bytes)))
+    {
+        Some(value) => value,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            return host.record_observation_refusal(OPERATION, refusal);
+        }
+    };
+    let permit = match host.begin_observation(
+        ObservationClass::Ordinary,
+        ObservationLengths {
+            control_bytes,
+            rows: 1,
+            result_bytes: u64::from(request.maximum_result_bytes),
+        },
+    ) {
+        Ok(permit) => permit,
+        Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+    };
+
+    // Token exhaustion and every shape/target/capacity check below are pre-provider refusals. The
+    // permit has already spent this boundary's Ordinary attempt, but no response staging is
+    // touched and no capture identity is replaced.
+    let sequence = match live_token.checked_add(1) {
+        Some(value) => value,
+        None => {
+            host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    let track_id_bytes = match usize::try_from(request.track_id_bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+    let maximum_result_bytes = match usize::try_from(request.maximum_result_bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+    if request.struct_size != LIVE_RESPONSE_REQUEST_BYTES
+        || request.abi_version != ABI_VERSION
+        || request.reserved != [0; 3]
+        || track_id_bytes == 0
+        || track_id_bytes > staging.live_track_id.len()
+        || request.maximum_result_bytes == 0
+        || maximum_result_bytes > staging.live_result.len()
+    {
+        host.record_observation_admission(OPERATION, RESULT_INVALID_ARGUMENT, None, None, false);
+        return RESULT_INVALID_ARGUMENT;
+    }
+    let sample_rate_hz = host.status().sample_rate_hz;
+    if let Err(result) = protected_live_response_grid(request, sample_rate_hz) {
+        host.record_observation_admission(OPERATION, result, None, None, false);
+        return result;
+    }
+    let track_id = match core::str::from_utf8(&staging.live_track_id[..track_id_bytes]) {
+        Ok(value) if !value.is_empty() && value.len() <= LIVE_RESPONSE_MAXIMUM_ID_BYTES => value,
+        _ => {
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_INVALID_ARGUMENT,
+                None,
+                None,
+                false,
+            );
+            return RESULT_INVALID_ARGUMENT;
+        }
+    };
+
+    let packed_bound = match host.response_capture_preflight(track_id) {
+        Ok(value) => value,
+        Err(error) => {
+            let result = live_response_capture_error_code(error);
+            host.record_observation_admission(OPERATION, result, None, None, false);
+            return result;
+        }
+    };
+    let actual_result_bytes = match u64::try_from(staging.live_result.len()) {
+        Ok(value) => value,
+        Err(_) => {
+            host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if u64::from(request.maximum_result_bytes) < packed_bound
+        || actual_result_bytes < packed_bound
+        || u64::from(request.maximum_result_bytes) > actual_result_bytes
+    {
+        host.record_observation_admission(OPERATION, RESULT_REFUSED_BUDGET, None, None, false);
+        return RESULT_REFUSED_BUDGET;
+    }
+    let owner = match host.protected_observation_identity() {
+        Ok((owner, _epoch)) => owner,
+        Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+    };
+
+    // All known fixed capacity and target/state checks are complete before constructing the sink.
+    // The affine permit is moved exactly once into the typed admitted seam.
+    let captured = {
+        let mut sink =
+            match LiveResponseCaptureSink::new(&mut staging.live_result[..maximum_result_bytes]) {
+                Ok(value) => value,
+                Err(error) => {
+                    let result = live_response_capture_error_code(error);
+                    host.record_observation_admission(OPERATION, result, None, None, false);
+                    return result;
+                }
+            };
+        let result = host.copy_response_snapshot_admitted(permit, track_id, &mut sink);
+        match result {
+            Ok(capture) => Ok((capture, sink.owner_count, sink.excluded_count, sink.next)),
+            Err(error) => Err(error),
+        }
+    };
+    let (capture, owner_count, excluded_count, result_bytes) = match captured {
+        Ok(value) => value,
+        Err(ProtectedResponseCaptureError::Refused(refusal)) => {
+            return live_response_capture_error_code(legacy_response_refusal(refusal));
+        }
+        Err(ProtectedResponseCaptureError::Capture(error)) => {
+            let result = live_response_capture_error_code(error);
+            return live_response_failure(staging, result);
+        }
+    };
+    if result_bytes > maximum_result_bytes {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+
+    let owners_offset = size_of::<WebLiveResponseResult>() as u32;
+    staging.live_result_header = WebLiveResponseResult {
+        struct_size: LIVE_RESPONSE_RESULT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        mode: LIVE_RESPONSE_MODE_TARGET,
+        meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+        channels: request.channels,
+        points: 0,
+        owner_count: u32::try_from(owner_count).unwrap_or(0),
+        excluded_count: u32::try_from(excluded_count).unwrap_or(0),
+        sample_rate_hz: host.status().sample_rate_hz,
+        reserved0: 0,
+        reserved1: 0,
+        captured_sample: capture.captured_sample,
+        snapshot_token: sequence,
+        result_bytes: u64::try_from(result_bytes).unwrap_or(u64::MAX),
+        frequencies_offset: 0,
+        left_offset: 0,
+        right_offset: 0,
+        owners_offset,
+        owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+        section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+        reserved: [0; 2],
+    };
+    if !copy_live_record(&mut staging.live_result, 0, &staging.live_result_header) {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
+    }
+
+    // The raw payload is complete before the three committed publication scalars become visible.
+    staging.live_result_len = result_bytes;
+    staging.live_token = sequence;
+    host.commit_observation_capture_identity(WebObservationCaptureIdentity {
+        struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+        abi_version: ABI_VERSION,
+        kind: OBSERVATION_CAPTURE_KIND_RESPONSE,
+        flags: 0,
+        owner: owner.get(),
+        observation_generation: 0,
+        selection_epoch: 0,
+        snapshot_token: sequence,
+    });
+    RESULT_OK
 }
 
 fn run_live_response_capture(
@@ -2586,6 +3153,14 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_COLLECTION_SELECTION,
+    ) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -2724,6 +3299,14 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_COLLECTION_SELECTION,
+    ) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
         Ok(value) => value,
         Err(_) => return RESULT_INVALID_ARGUMENT,
@@ -2740,6 +3323,14 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_ONE_SHOT,
+    ) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -2780,6 +3371,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
 /// duration is validated before the prepared capture changes state.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
+    match stream_host_dispatch(handle) {
+        Ok(true) => return protected_spectrum_stream_start(handle, smoothing_ms),
+        Ok(false) => {}
+        Err(result) => return result,
+    }
     let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
         Ok(value) => value,
         Err(_) => return RESULT_INVALID_ARGUMENT,
@@ -2853,9 +3449,494 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothin
     })
 }
 
+/// Start one protected managed stream through the admitted native seam.
+///
+/// The operation credit is spent before decoding the smoothing value or borrowing output
+/// staging. The prepared target length is the only target sizing input; the legacy staged request
+/// and target-ID buffers are deliberately not consulted. Native acceptance is the transaction
+/// boundary for every FFI-visible stream field, including analysis history reset.
+fn protected_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        let host = &mut live.host;
+        let target_bytes = host.protected_spectrum_target_bytes().unwrap_or_default();
+        let permit = match host.begin_observation(
+            ObservationClass::Ordinary,
+            AudioWorkletEngineHost::protected_spectrum_control_lengths(false, target_bytes),
+        ) {
+            Ok(permit) => permit,
+            Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+        };
+
+        let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
+            Ok(value) => value,
+            Err(_) => {
+                return host.record_observation_refusal(
+                    OPERATION,
+                    ObservationRefusal {
+                        reason: ObservationRefusalReason::InvalidRequest,
+                        limit: None,
+                        requested: None,
+                        maximum: None,
+                    },
+                );
+            }
+        };
+
+        SPECTRUM_STAGING.with(|staging_slot| {
+            let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                host.record_observation_admission(OPERATION, RESULT_INTERNAL, None, None, false);
+                return RESULT_INTERNAL;
+            };
+
+            // Reset can fail only at the epoch ceiling. Check that boundary after admission and
+            // before native publication so a refusal cannot publish a graph or alter staging.
+            if staging.stream_history_exhausted() {
+                return host.record_observation_refusal(
+                    OPERATION,
+                    ObservationRefusal {
+                        reason: ObservationRefusalReason::ArithmeticOverflow,
+                        limit: None,
+                        requested: None,
+                        maximum: None,
+                    },
+                );
+            }
+
+            let cadence = match host.start_spectrum_stream_admitted(permit) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+
+            // The epoch check above makes this reset infallible at the commit point. There is no
+            // late stop fallback: native acceptance remains authoritative if a defensive release
+            // build ever observes an unexpected reset error.
+            let reset = staging.reset_stream_analysis();
+            debug_assert!(reset.is_ok(), "stream-history reset was preflighted");
+
+            let target = host.spectrum_target();
+            let channels = host.spectrum_channels();
+            let epoch = host.spectrum_stream_epoch().unwrap_or(0);
+            staging.stream_active = true;
+            staging.stream_cadence = Some(cadence);
+            staging.stream_smoothing = Some(smoothing);
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+            let analysis_epoch = staging
+                .stream_history
+                .as_ref()
+                .map_or(0, |history| history.analysis_epoch());
+            staging.stream_metadata = WebSpectrumStreamMetadata::default();
+            stream_metadata_profile(
+                &mut staging,
+                target,
+                channels,
+                cadence,
+                SPECTRUM_STREAM_STATUS_WARMING,
+                RESULT_OK,
+            );
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                capture_epoch: epoch,
+                analysis_epoch,
+                smoothing_ms: smoothing.smoothing_ms(),
+                ..staging.stream_metadata
+            };
+            RESULT_OK
+        })
+    })
+}
+
+/// Read one protected managed stream window through the typed native seam.
+///
+/// The live-host borrow and the affine Ordinary permit are acquired before this function touches
+/// spectrum staging. Known staging capacity and cadence are checked before native consumption;
+/// after an admitted native window, every shape and identity check completes before the first raw
+/// byte is changed.
+fn protected_spectrum_stream_read(handle: u32) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_READ_SPECTRUM;
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        let host = &mut live.host;
+        let read_lengths = host.protected_spectrum_read_lengths();
+        let (owner, _) = match host.protected_observation_identity() {
+            Ok(identity) => identity,
+            Err(refusal) => {
+                return host.record_observation_refusal(OPERATION, refusal);
+            }
+        };
+        let permit = match host.begin_observation(ObservationClass::Ordinary, read_lengths) {
+            Ok(permit) => permit,
+            Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+        };
+
+        SPECTRUM_STAGING.with(|staging_slot| {
+            let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                host.record_observation_admission(OPERATION, RESULT_INTERNAL, None, None, false);
+                return RESULT_INTERNAL;
+            };
+
+            let target = host.spectrum_target();
+            let channels = host.spectrum_channels();
+            if target != SPECTRUM_TARGET_TRACK_POST_MATRIX || channels != SPECTRUM_CHANNEL_BOTH {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::InvalidRequest,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            let cadence = match host.protected_spectrum_cadence() {
+                Ok(cadence) => cadence,
+                Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+            };
+            let header_bytes = usize::try_from(SPECTRUM_WINDOW_HEADER_BYTES)
+                .expect("fixed spectrum header fits usize");
+            let plane_bytes = (SPECTRUM_WINDOW_FRAMES as usize) * size_of::<f32>();
+            let required_bytes = header_bytes
+                .checked_add(plane_bytes)
+                .and_then(|bytes| bytes.checked_add(plane_bytes));
+            let Some(required_bytes) = required_bytes else {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::ArithmeticOverflow,
+                    None,
+                    None,
+                    None,
+                );
+            };
+            let Some(cached_bytes) = usize::try_from(read_lengths.result_bytes).ok() else {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::ArithmeticOverflow,
+                    Some("maximum_result_bytes"),
+                    Some(read_lengths.result_bytes),
+                    None,
+                );
+            };
+            if cached_bytes < required_bytes {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::Capacity,
+                    Some("maximum_result_bytes"),
+                    Some(required_bytes as u64),
+                    Some(read_lengths.result_bytes),
+                );
+            }
+
+            if staging.capture.is_none()
+                && staging.result.is_none()
+                && staging.configure_capture().is_err()
+            {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::Capacity,
+                    Some("spectrum_capture_capacity"),
+                    Some(required_bytes as u64),
+                    Some(0),
+                );
+            }
+            let capacity = staging.capture.as_ref().map_or(0, Vec::len);
+            if capacity < header_bytes {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::Capacity,
+                    Some("spectrum_capture_capacity"),
+                    Some(header_bytes as u64),
+                    Some(capacity as u64),
+                );
+            }
+            if capacity < required_bytes {
+                return protected_spectrum_read_refusal(
+                    host,
+                    ObservationRefusalReason::Capacity,
+                    Some("spectrum_capture_capacity"),
+                    Some(required_bytes as u64),
+                    Some(capacity as u64),
+                );
+            }
+
+            let native = host.read_spectrum_stream_admitted(permit);
+            let window = match native {
+                Ok(window) => window,
+                Err(ProtectedSpectrumReadError::Refused(_)) => {
+                    // The admitted seam has already recorded the exact refusal. Do not map it
+                    // through the lossy public compatibility facade or touch committed staging.
+                    return host.observation_admission().result;
+                }
+                Err(ProtectedSpectrumReadError::Native(error)) => {
+                    let (status, result, epoch, drops, reset) = match error {
+                        host_core::HostSpectrumReadError::Inactive
+                        | host_core::HostSpectrumReadError::Closed => (
+                            SPECTRUM_STREAM_STATUS_INACTIVE,
+                            RESULT_WRONG_STATE,
+                            None,
+                            None,
+                            false,
+                        ),
+                        host_core::HostSpectrumReadError::PendingApplication => (
+                            SPECTRUM_STREAM_STATUS_PENDING,
+                            RESULT_BACKPRESSURE,
+                            None,
+                            None,
+                            false,
+                        ),
+                        host_core::HostSpectrumReadError::Warming => (
+                            SPECTRUM_STREAM_STATUS_WARMING,
+                            RESULT_BACKPRESSURE,
+                            None,
+                            None,
+                            false,
+                        ),
+                        host_core::HostSpectrumReadError::Pending => (
+                            SPECTRUM_STREAM_STATUS_PENDING,
+                            RESULT_BACKPRESSURE,
+                            None,
+                            None,
+                            false,
+                        ),
+                        host_core::HostSpectrumReadError::Gap {
+                            stream_epoch,
+                            dropped_captures,
+                            ..
+                        } => (
+                            SPECTRUM_STREAM_STATUS_GAP,
+                            RESULT_OK,
+                            Some(stream_epoch),
+                            Some(dropped_captures),
+                            true,
+                        ),
+                        host_core::HostSpectrumReadError::Failed { stream_epoch, .. } => (
+                            SPECTRUM_STREAM_STATUS_FAILED,
+                            RESULT_RENDER_REJECTED,
+                            Some(stream_epoch),
+                            None,
+                            true,
+                        ),
+                    };
+                    if reset && staging.reset_stream_analysis().is_err() {
+                        let refusal = ObservationRefusal {
+                            reason: ObservationRefusalReason::ArithmeticOverflow,
+                            limit: None,
+                            requested: None,
+                            maximum: None,
+                        };
+                        host.record_observation_admission(
+                            OPERATION,
+                            RESULT_REFUSED_BUDGET,
+                            Some(refusal),
+                            None,
+                            false,
+                        );
+                        stream_metadata_error(
+                            &mut staging,
+                            SPECTRUM_STREAM_STATUS_FAILED,
+                            RESULT_REFUSED_BUDGET,
+                            epoch,
+                            drops,
+                        );
+                        return RESULT_REFUSED_BUDGET;
+                    }
+                    stream_metadata_error(&mut staging, status, result, epoch, drops);
+                    return host.observation_admission().result;
+                }
+            };
+
+            post_read_protected_spectrum_window(
+                host,
+                &mut staging,
+                &window,
+                owner.get(),
+                target,
+                channels,
+                cadence,
+            )
+        })
+    })
+}
+
+/// Validate an already consumed native window before changing any committed output.
+/// A failed post-read check records its arithmetic or identity outcome without implying that
+/// the native queue can restore the window.
+fn post_read_protected_spectrum_window(
+    host: &mut AudioWorkletEngineHost,
+    staging: &mut SpectrumStaging,
+    window: &ObservedContinuousSpectrumWindow,
+    owner: u64,
+    target: u32,
+    channels: u32,
+    cadence: SpectrumCadence,
+) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_READ_SPECTRUM;
+    let expected_end = match window.window.end_sample() {
+        Some(end_sample) => end_sample,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_REFUSED_BUDGET,
+                Some(refusal),
+                None,
+                false,
+            );
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if window.window.channels as u32 != SPECTRUM_CHANNEL_BOTH
+        || window.window.left.len() != SPECTRUM_WINDOW_FRAMES as usize
+        || window.window.right.len() != SPECTRUM_WINDOW_FRAMES as usize
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+    let snapshot_token = match window.window.sequence.checked_add(1) {
+        Some(token) => token,
+        None => {
+            let refusal = ObservationRefusal {
+                reason: ObservationRefusalReason::ArithmeticOverflow,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(
+                OPERATION,
+                RESULT_REFUSED_BUDGET,
+                Some(refusal),
+                None,
+                false,
+            );
+            return RESULT_REFUSED_BUDGET;
+        }
+    };
+    if expected_end
+        != window
+            .window
+            .first_sample
+            .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
+            .expect("end sample was checked")
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+
+    let identity = match AudioWorkletEngineHost::spectrum_capture_identity(window) {
+        Ok(identity) => identity,
+        Err(result) => {
+            let reason = if result == RESULT_REFUSED_BUDGET {
+                ObservationRefusalReason::ArithmeticOverflow
+            } else {
+                ObservationRefusalReason::InvalidRequest
+            };
+            let refusal = ObservationRefusal {
+                reason,
+                limit: None,
+                requested: None,
+                maximum: None,
+            };
+            host.record_observation_admission(OPERATION, result, Some(refusal), None, false);
+            return result;
+        }
+    };
+    let status = host.observation_status();
+    if identity.owner != owner
+        || identity.observation_generation == 0
+        || identity.selection_epoch == 0
+        || identity.observation_generation != status.applied_generation
+        || identity.selection_epoch != status.selection_epoch
+        || identity.snapshot_token != snapshot_token
+    {
+        let refusal = ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        };
+        host.record_observation_admission(
+            OPERATION,
+            RESULT_INVALID_ARGUMENT,
+            Some(refusal),
+            None,
+            false,
+        );
+        return RESULT_INVALID_ARGUMENT;
+    }
+
+    commit_protected_spectrum_window(staging, window, target, cadence, snapshot_token);
+    staging.stream_window = Some(SpectrumStreamWindowFacts {
+        stream_epoch: window.window.stream_epoch,
+        sequence: window.window.sequence,
+        dropped_captures: window.window.dropped_captures,
+    });
+    staging.stream_metadata.result = RESULT_OK;
+    staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+    staging.stream_metadata.target = target;
+    staging.stream_metadata.channels = channels;
+    staging.stream_metadata.sample_rate_hz = cadence.sample_rate_hz();
+    staging.stream_metadata.quantum_frames = cadence.quantum_frames();
+    staging.stream_metadata.hop_frames = cadence.hop_frames();
+    staging.stream_metadata.source_underrun = u32::from(window.window.source_underrun);
+    staging.stream_metadata.capture_epoch = window.window.stream_epoch;
+    staging.stream_metadata.sequence = window.window.sequence;
+    staging.stream_metadata.dropped_captures = window.window.dropped_captures;
+    staging.stream_metadata.windows = snapshot_token;
+    staging.stream_metadata.captured_sample = window.window.first_sample;
+    staging.stream_metadata.end_sample = expected_end;
+    host.commit_observation_capture_identity(identity);
+    RESULT_OK
+}
+
 /// Read one independently scheduled stream window into the existing fixed capture staging.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
+    match stream_host_dispatch(handle) {
+        Ok(true) => return protected_spectrum_stream_read(handle),
+        Ok(false) => {}
+        Err(result) => return result,
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -3064,6 +4145,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
 /// Stop the managed native stream and retain its final normalized profile in metadata.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
+    match stream_host_dispatch(handle) {
+        Ok(true) => return protected_spectrum_stream_stop(handle),
+        Ok(false) => {}
+        Err(result) => return result,
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -3089,6 +4175,69 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
     })
 }
 
+/// Stop one protected managed stream through the admitted native seam.
+///
+/// A pending stop is a scalar identity shortcut and therefore runs before removal admission. All
+/// other protected stops spend exactly one removal credit and call native stop exactly once. Raw
+/// lengths are invalidated only after native acceptance; the backing bytes and host capture
+/// identity remain untouched for C2b's read/packing path.
+fn protected_spectrum_stream_stop(handle: u32) -> u32 {
+    const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        let host = &mut live.host;
+
+        if let Some(receipt) = host.pending_stop_receipt() {
+            return SPECTRUM_STAGING.with(|staging_slot| {
+                let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                    return RESULT_INTERNAL;
+                };
+                host.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
+                staging.stream_active = false;
+                staging.stream_cadence = None;
+                staging.stream_smoothing = None;
+                staging.capture_len = 0;
+                staging.result_len = 0;
+                staging.stream_window = None;
+                staging.stream_metadata.result = RESULT_OK;
+                staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
+                RESULT_OK
+            });
+        }
+
+        SPECTRUM_STAGING.with(|staging_slot| {
+            let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            let permit = match host.begin_observation(
+                ObservationClass::Removal,
+                AudioWorkletEngineHost::protected_spectrum_control_lengths(true, 0),
+            ) {
+                Ok(permit) => permit,
+                Err(refusal) => return host.record_observation_refusal(OPERATION, refusal),
+            };
+            let result = host.stop_spectrum_stream_admitted(permit);
+            if result != RESULT_OK {
+                return result;
+            }
+            staging.stream_active = false;
+            staging.stream_cadence = None;
+            staging.stream_smoothing = None;
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
+            RESULT_OK
+        })
+    })
+}
+
 /// Return the fixed managed-stream metadata record address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_ptr() -> u32 {
@@ -3111,6 +4260,14 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Removal,
+        OBSERVATION_OPERATION_ONE_SHOT,
+    ) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     SPECTRUM_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -3213,11 +4370,16 @@ pub extern "C" fn miso_engine_web_v1_track_response_capture(handle: u32) -> u32 
         let Some(live) = live.as_mut().filter(|value| value.handle == handle) else {
             return RESULT_WRONG_STATE;
         };
+        let protected = live.host.protected_observation_prepared();
         RESPONSE_STAGING.with(|staging_slot| {
             let Ok(mut staging) = staging_slot.try_borrow_mut() else {
                 return RESULT_INTERNAL;
             };
-            run_live_response_capture(&mut live.host, &mut staging)
+            if protected {
+                run_protected_live_response_capture(&mut live.host, &mut staging)
+            } else {
+                run_live_response_capture(&mut live.host, &mut staging)
+            }
         })
     })
 }
@@ -3349,6 +4511,433 @@ pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
     })
 }
 
+/// Return the fixed protected-observation preparation record address.
+///
+/// The protected boot transaction remains private in this checkpoint. This pointer is therefore
+/// only a control-side staging address; publishing it does not publish a protected boot entry
+/// point or create an owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_preparation_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(ptr::from_mut(&mut staging.endpoint.preparation))
+    })
+}
+
+/// Return the actual protected-observation preparation record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_preparation_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationPreparationRecord>()).unwrap_or(0)
+}
+
+/// Return the fixed protected-observation demand record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_ptr(handle: u32) -> u32 {
+    pointer_u32(observation_demand_ptr_for_handle(handle))
+}
+
+fn observation_demand_ptr_for_handle(handle: u32) -> *mut WebObservationDemand {
+    if handle == 0 {
+        return ptr::null_mut();
+    }
+    // The demand address is live-owner input staging. It must never be exposed for a disposed,
+    // unrelated, or otherwise invalid handle, even when the endpoint retains a terminal snapshot.
+    LIVE_HOST.with(|live_slot| {
+        let Ok(live_slot) = live_slot.try_borrow() else {
+            return ptr::null_mut();
+        };
+        let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
+            return ptr::null_mut();
+        };
+        let _ = live;
+        OBSERVATION_STAGING.with(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return ptr::null_mut();
+            };
+            ptr::from_mut(&mut staging.endpoint.demand)
+        })
+    })
+}
+
+/// Return the actual protected-observation demand record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationDemand>()).unwrap_or(0)
+}
+
+/// Meter-row capacity for the scalar protected-observation demand endpoint.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_capacity() -> u32 {
+    0
+}
+
+fn observation_demand_class(operation: u32) -> ObservationClass {
+    match operation {
+        OBSERVATION_OPERATION_REMOVE_METERS_TO | OBSERVATION_OPERATION_STOP_GRAPH => {
+            ObservationClass::Removal
+        }
+        _ => ObservationClass::Ordinary,
+    }
+}
+
+fn observation_demand_refusal(
+    host: &mut AudioWorkletEngineHost,
+    operation: u32,
+    reason: ObservationRefusalReason,
+) -> u32 {
+    host.record_observation_refusal(
+        operation,
+        ObservationRefusal {
+            reason,
+            limit: None,
+            requested: None,
+            maximum: None,
+        },
+    )
+}
+
+fn apply_observation_demand(
+    host: &mut AudioWorkletEngineHost,
+    demand: WebObservationDemand,
+) -> u32 {
+    let operation = demand.operation;
+    let class = observation_demand_class(operation);
+    let lengths = ObservationLengths {
+        control_bytes: size_of::<WebObservationDemand>() as u64,
+        rows: 0,
+        result_bytes: 0,
+    };
+    let (owner, _) = match host.protected_observation_identity() {
+        Ok(identity) => identity,
+        Err(refusal) => return host.record_observation_refusal(operation, refusal),
+    };
+    let header_valid = demand.struct_size == size_of::<WebObservationDemand>() as u32
+        && demand.abi_version == ABI_VERSION
+        && demand.reserved == [0; 2];
+    let valid_stop = header_valid
+        && operation == OBSERVATION_OPERATION_STOP_GRAPH
+        && demand.count == 0
+        && demand.owner == owner.get();
+
+    // A repeated pending stop is an identity query on the already-admitted native operation. It
+    // is reachable only after every fixed field and the owner have matched, so malformed and
+    // wrong-owner records still spend their classified attempt below.
+    if valid_stop && let Some(receipt) = host.pending_stop_receipt() {
+        // The pending receipt is authoritative, but the preceding admission may have been
+        // replaced by a refusal. Rebuild the successful pending projection and retag only
+        // its wire operation; never copy that arbitrary refusal's result or reason.
+        host.record_observation_admission(
+            OBSERVATION_OPERATION_STOP_GRAPH,
+            RESULT_OK,
+            None,
+            Some(receipt),
+            true,
+        );
+        return RESULT_OK;
+    }
+
+    let permit = match host.begin_observation(class, lengths) {
+        Ok(permit) => permit,
+        Err(refusal) => return host.record_observation_refusal(operation, refusal),
+    };
+    if !header_valid {
+        return observation_demand_refusal(
+            host,
+            operation,
+            ObservationRefusalReason::InvalidRequest,
+        );
+    }
+    if demand.owner != owner.get() {
+        return observation_demand_refusal(host, operation, ObservationRefusalReason::WrongOwner);
+    }
+    if operation != OBSERVATION_OPERATION_STOP_GRAPH {
+        host.record_observation_admission(
+            operation,
+            RESULT_UNSUPPORTED,
+            Some(ObservationRefusal {
+                reason: ObservationRefusalReason::InvalidRequest,
+                limit: None,
+                requested: None,
+                maximum: None,
+            }),
+            None,
+            false,
+        );
+        return RESULT_UNSUPPORTED;
+    }
+    if demand.count != 0 {
+        return observation_demand_refusal(
+            host,
+            operation,
+            ObservationRefusalReason::InvalidRequest,
+        );
+    }
+
+    // The native helper owns receipt reservation and the single stop publication. Its admission
+    // record remains authoritative; only the wire operation tag is retagged after that call.
+    let result = host.stop_spectrum_stream_admitted(permit);
+    if host.observation_admission().operation == OBSERVATION_OPERATION_STOP_SPECTRUM {
+        host.side_records.admission.operation = OBSERVATION_OPERATION_STOP_GRAPH;
+    }
+    result
+}
+
+/// Apply one fixed protected-observation demand record to a live matching protected owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_demand_apply(handle: u32) -> u32 {
+    if handle == 0 {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(staging) = slot.try_borrow() else {
+            return RESULT_INTERNAL;
+        };
+        let demand = staging.endpoint.demand;
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            apply_observation_demand(host, demand)
+        })
+    })
+}
+
+fn observation_admission_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_admission_ptr_for_handle_raw(handle))
+}
+
+fn observation_admission_ptr_for_handle_raw(handle: u32) -> *mut WebObservationAdmission {
+    if handle == 0 {
+        return ptr::null_mut();
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return ptr::null_mut();
+        };
+        // A failed LIVE_HOST borrow is distinct from an empty slot. In either case the query
+        // refuses while a live slot exists or cannot be inspected; only a proven empty slot may
+        // fall through to the retained terminal mirror.
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.admission = *live.host.observation_admission();
+                    ptr::from_mut(&mut staging.endpoint.admission)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.admission)
+                }
+                None => ptr::null_mut(),
+            }
+        })
+    })
+}
+
+fn observation_status_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_status_ptr_for_handle_raw(handle))
+}
+
+fn observation_status_ptr_for_handle_raw(handle: u32) -> *mut WebObservationStatus {
+    if handle == 0 {
+        return ptr::null_mut();
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return ptr::null_mut();
+        };
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.status = live.host.observation_status();
+                    ptr::from_mut(&mut staging.endpoint.status)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.status)
+                }
+                None => ptr::null_mut(),
+            }
+        })
+    })
+}
+
+fn observation_capture_identity_ptr_for_handle(handle: u32) -> u32 {
+    pointer_u32(observation_capture_identity_ptr_for_handle_raw(handle))
+}
+
+fn observation_capture_identity_ptr_for_handle_raw(
+    handle: u32,
+) -> *mut WebObservationCaptureIdentity {
+    if handle == 0 {
+        return ptr::null_mut();
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return ptr::null_mut();
+        };
+        LIVE_HOST.with(|live_slot| {
+            let Ok(live_slot) = live_slot.try_borrow() else {
+                return ptr::null_mut();
+            };
+            match live_slot.as_ref() {
+                Some(live) if live.handle == handle => {
+                    staging.endpoint.capture_identity = *live.host.observation_capture_identity();
+                    ptr::from_mut(&mut staging.endpoint.capture_identity)
+                }
+                Some(_) => ptr::null_mut(),
+                None if staging.endpoint.handle == handle => {
+                    ptr::from_mut(&mut staging.endpoint.capture_identity)
+                }
+                None => ptr::null_mut(),
+            }
+        })
+    })
+}
+
+/// Return the current or matching retained terminal admission record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_admission_ptr(handle: u32) -> u32 {
+    observation_admission_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation admission record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_admission_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationAdmission>()).unwrap_or(0)
+}
+
+/// Return the current or matching retained terminal status record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_status_ptr(handle: u32) -> u32 {
+    observation_status_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation status record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_status_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationStatus>()).unwrap_or(0)
+}
+
+/// Return the current or matching retained terminal capture-identity record address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_capture_identity_ptr(handle: u32) -> u32 {
+    observation_capture_identity_ptr_for_handle(handle)
+}
+
+/// Return the actual protected-observation capture-identity record size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_capture_identity_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationCaptureIdentity>()).unwrap_or(0)
+}
+
+fn observation_application_take_live(handle: u32, staging: &mut ObservationStaging) -> u32 {
+    LIVE_HOST.with(|live_slot| {
+        let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+            return 0;
+        };
+        let Some(live) = live_slot.as_mut().filter(|live| live.handle == handle) else {
+            return 0;
+        };
+        // The native helper performs the bounded reconciliation exactly once. Its returned slice
+        // is stable until this host borrow ends, so copy the rows before releasing LIVE_HOST.
+        let applications = live.host.take_observation_applications();
+        let count = applications.len();
+        debug_assert!(count <= staging.endpoint.applications.len());
+        staging.endpoint.applications[..count].copy_from_slice(applications);
+        staging.endpoint.application_count = u32::try_from(count).unwrap_or(0);
+        staging.endpoint.terminal_application_pending = false;
+        u32::try_from(count).unwrap_or(0)
+    })
+}
+
+/// Transfer completed protected-observation receipts into the fixed ABI staging array.
+///
+/// A matching disposed handle receives the one retained terminal handoff. Repeated takes return
+/// zero without clearing the previous rows, which keeps the fixed address stable for a caller that
+/// has already observed the terminal batch. A cold invalid handle returns before touching the
+/// allocating observation staging TLS.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_take(handle: u32) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+
+    // Distinguish a live match, a live mismatch, an empty slot, and a borrow conflict before
+    // touching OBSERVATION_STAGING. The zero NEXT_HANDLE value is the never-issued sentinel and
+    // makes a cold invalid take allocation-free.
+    let live_state = LIVE_HOST.with(|live_slot| {
+        let Ok(live_slot) = live_slot.try_borrow_mut() else {
+            return 0_u8;
+        };
+        match live_slot.as_ref() {
+            Some(live) if live.handle == handle => 1,
+            Some(_) => 2,
+            None => 3,
+        }
+    });
+    match live_state {
+        0 | 2 => return 0,
+        1 => {
+            return OBSERVATION_STAGING.with(|slot| {
+                let Ok(mut staging) = slot.try_borrow_mut() else {
+                    return 0;
+                };
+                observation_application_take_live(handle, &mut staging)
+            });
+        }
+        3 => {}
+        _ => unreachable!(),
+    }
+
+    if NEXT_HANDLE.with(Cell::get) == 0 {
+        return 0;
+    }
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if staging.endpoint.handle != handle {
+            return 0;
+        }
+        if !staging.endpoint.terminal_application_pending {
+            // The terminal rows remain in the fixed bytes for stable caller inspection, while a
+            // repeated take reports an empty batch through both its return value and count.
+            staging.endpoint.application_count = 0;
+            return 0;
+        }
+        staging.endpoint.terminal_application_pending = false;
+        staging.endpoint.application_count
+    })
+}
+
+/// Return the fixed protected-observation application row staging address.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_ptr() -> u32 {
+    OBSERVATION_STAGING.with(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        pointer_u32(staging.endpoint.applications.as_mut_ptr())
+    })
+}
+
+/// Return the actual protected-observation application row size.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_bytes() -> u32 {
+    u32::try_from(size_of::<WebObservationReceipt>()).unwrap_or(0)
+}
+
+/// Return the fixed protected-observation application row capacity.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_observation_application_capacity() -> u32 {
+    4
+}
+
 /// Stage an exact-length document before boot. Refuses lengths above the engine bound.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
@@ -3398,9 +4987,51 @@ pub extern "C" fn miso_engine_web_v1_buffer_capacity(handle: u32, kind: u32) -> 
     with_host(handle, 0, |host| buffer_capacity(host, kind))
 }
 
-/// Boot the exact staged document and atomically publish the sole running handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
+#[derive(Clone, Copy)]
+enum StagedBootMode {
+    Legacy,
+    ProtectedObservation,
+}
+
+impl ObservationEndpointStaging {
+    fn reset_outputs(&mut self) {
+        self.demand = WebObservationDemand {
+            struct_size: size_of::<WebObservationDemand>() as u32,
+            abi_version: ABI_VERSION,
+            ..WebObservationDemand::default()
+        };
+        self.admission = WebObservationAdmission::default();
+        self.status = WebObservationStatus::default();
+        self.capture_identity = WebObservationCaptureIdentity::default();
+        self.applications = [WebObservationReceipt::default(); 4];
+        self.application_count = 0;
+        self.handle = 0;
+        self.terminal_application_pending = false;
+    }
+}
+
+fn prewarm_observation_staging() -> Result<(), BootFailure> {
+    OBSERVATION_STAGING.with(|slot| {
+        slot.try_borrow_mut()
+            .map(|_| ())
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.observation.staging"))
+    })?;
+    RESPONSE_STAGING.with(|slot| {
+        slot.try_borrow_mut()
+            .map(|_| ())
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.response.staging"))
+    })?;
+    SPECTRUM_STAGING.with(|slot| {
+        let mut staging = slot
+            .try_borrow_mut()
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"))?;
+        staging
+            .configure_capture()
+            .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))
+    })
+}
+
+fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
     let already_live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
     if already_live {
         BOOT_STAGING.with(|staging| {
@@ -3422,25 +5053,133 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
             staging.document_valid = false;
             return None;
         }
-        let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
-            let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
-                return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
-            };
-            let request = staged_spectrum_request(&spectrum)
-                .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))?;
-            if request.is_some() {
-                spectrum
-                    .configure_capture()
-                    .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))?;
-            } else {
-                spectrum.release_capture();
+
+        let result = match mode {
+            StagedBootMode::Legacy => {
+                let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
+                    let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
+                        return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
+                    };
+                    let request = staged_spectrum_request(&spectrum)
+                        .map_err(|result| BootFailure::fixed(result, "web.spectrum.request"))?;
+                    if request.is_some() {
+                        spectrum
+                            .configure_capture()
+                            .map_err(|result| BootFailure::fixed(result, "web.spectrum.staging"))?;
+                    } else {
+                        spectrum.release_capture();
+                    }
+                    Ok(request)
+                });
+                spectrum_request.and_then(|request| {
+                    AudioWorkletEngineHost::boot_with_spectrum(
+                        &staging.document,
+                        *staging.options,
+                        request,
+                    )
+                })
             }
-            Ok(request)
-        });
-        match spectrum_request.and_then(|request| {
-            AudioWorkletEngineHost::boot_with_spectrum(&staging.document, *staging.options, request)
-        }) {
+            StagedBootMode::ProtectedObservation => OBSERVATION_STAGING.with(|slot| {
+                let Ok(staged) = slot.try_borrow() else {
+                    return Err(BootFailure::fixed(
+                        RESULT_INTERNAL,
+                        "web.observation.staging",
+                    ));
+                };
+                let record = &staged.endpoint.preparation;
+                validate_observation_preparation_record(record)
+                    .map_err(|result| BootFailure::fixed(result, "web.observation.preparation"))?;
+                let request = record.spectrum_request;
+                let maximum_active_observers = usize::try_from(record.maximum_active_observers)
+                    .map_err(|_| {
+                        BootFailure::fixed(
+                            RESULT_INVALID_ARGUMENT,
+                            "web.observation.maximum_active_observers",
+                        )
+                    })?;
+                let target_bytes = usize::try_from(request.target_id_bytes).map_err(|_| {
+                    BootFailure::fixed(RESULT_INVALID_ARGUMENT, "web.observation.target")
+                })?;
+                let target =
+                    core::str::from_utf8(&record.target_id[..target_bytes]).map_err(|_| {
+                        BootFailure::fixed(RESULT_INVALID_ARGUMENT, "web.observation.target")
+                    })?;
+                let mut entries = Vec::new();
+                entries.try_reserve_exact(1).map_err(|_| {
+                    BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.observation.spectrum")
+                })?;
+                entries.push(SpectrumCaptureCollectionEntry {
+                    target: SpectrumTarget::TrackPostMatrix(target.into()),
+                    channels: SpectrumChannels::Stereo,
+                });
+                let spectrum = SpectrumCaptureCollectionRequest {
+                    entries,
+                    maximum_capture_bytes: request.maximum_capture_bytes,
+                };
+                let work = record.work_limits;
+                let ingress = record.ingress_limits;
+                let preparation = WebObservationPreparation {
+                    profile: WebObservationProfile::EqSpectrum,
+                    demand: host_core::HostObservationPreparation {
+                        meters: &[],
+                        spectrum: Some(&spectrum),
+                        work_limits: ObservationWorkLimits {
+                            maximum_active_meter_channels: work.maximum_active_meter_channels,
+                            maximum_meter_samples_per_block: work.maximum_meter_samples_per_block,
+                            maximum_meter_publications_per_block: work
+                                .maximum_meter_publications_per_block,
+                            maximum_meter_publication_bytes_per_block: work
+                                .maximum_meter_publication_bytes_per_block,
+                            maximum_active_spectrum_captures: work.maximum_active_spectrum_captures,
+                            maximum_capture_input_samples_per_block: work
+                                .maximum_capture_input_samples_per_block,
+                            maximum_capture_copy_samples_per_block: work
+                                .maximum_capture_copy_samples_per_block,
+                            maximum_capture_publications_per_block: work
+                                .maximum_capture_publications_per_block,
+                            maximum_capture_bytes_per_second: work.maximum_capture_bytes_per_second,
+                            maximum_transition_entry_visits_per_block: work
+                                .maximum_transition_entry_visits_per_block,
+                            maximum_retained_bytes: work.maximum_retained_bytes,
+                        },
+                        activation: GraphObservationActivationConfig {
+                            maximum_active_observers,
+                            maximum_retained_bytes: record.activation_maximum_retained_bytes,
+                        },
+                    },
+                    ingress: ObservationIngressLimits {
+                        maximum_control_bytes: ingress.maximum_control_bytes,
+                        maximum_observation_rows: ingress.maximum_observation_rows,
+                        maximum_result_bytes: ingress.maximum_result_bytes,
+                        ordinary_operations_per_boundary: ingress.ordinary_operations_per_boundary,
+                        removal_operations_per_boundary: ingress.removal_operations_per_boundary,
+                        maximum_admission_entry_visits: ingress.maximum_admission_entry_visits,
+                        maximum_response_binding_visits: ingress.maximum_response_binding_visits,
+                        maximum_response_section_visits: ingress.maximum_response_section_visits,
+                        maximum_response_copy_bytes: ingress.maximum_response_copy_bytes,
+                        maximum_handler_copy_bytes_per_boundary: ingress
+                            .maximum_handler_copy_bytes_per_boundary,
+                        maximum_cleanup_entry_visits_per_boundary: ingress
+                            .maximum_cleanup_entry_visits_per_boundary,
+                        maximum_retained_bytes: ingress.maximum_retained_bytes,
+                    },
+                };
+                AudioWorkletEngineHost::boot_with_observation_demand(
+                    &staging.document,
+                    *staging.options,
+                    &preparation,
+                )
+            }),
+        };
+
+        match result {
             Ok(host) => {
+                if matches!(mode, StagedBootMode::ProtectedObservation)
+                    && let Err(failure) = prewarm_observation_staging()
+                {
+                    staging.record_failure(failure);
+                    return None;
+                }
                 staging.result = RESULT_OK;
                 staging.diagnostic_bytes = 0;
                 staging.document_valid = false;
@@ -3460,20 +5199,74 @@ pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
         });
         return 0;
     };
-    LIVE_HOST.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else {
-            return 0;
+    let initial_status = host.observation_status();
+    let mut host = Some(host);
+    // Acquire endpoint staging before publishing LIVE_HOST. A conflicting borrow is a real boot
+    // failure, and the prior terminal handoff remains intact because reset_outputs runs only on a
+    // successful publication.
+    let handle = OBSERVATION_STAGING.with(|observation_slot| {
+        let Ok(mut observation) = observation_slot.try_borrow_mut() else {
+            return None;
         };
-        if slot.is_some() {
-            return 0;
+        LIVE_HOST.with(|live_slot| {
+            let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+                return None;
+            };
+            if live_slot.is_some() {
+                return None;
+            }
+            let handle = next_handle();
+            observation.endpoint.reset_outputs();
+            observation.endpoint.status = initial_status;
+            observation.endpoint.handle = handle;
+            *live_slot = Some(LiveHost {
+                handle,
+                host: Box::new(
+                    host.take()
+                        .expect("boot host is present before publication"),
+                ),
+            });
+            Some(handle)
+        })
+    });
+    let Some(handle) = handle else {
+        if let Some(mut host) = host.take() {
+            let _ = host.dispose();
         }
-        let handle = next_handle();
-        *slot = Some(LiveHost {
-            handle,
-            host: Box::new(host),
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                staging.record_failure(BootFailure::fixed(
+                    RESULT_INTERNAL,
+                    "web.observation.staging",
+                ));
+            }
         });
-        handle
-    })
+        SPECTRUM_STAGING.with(|slot| {
+            if let Ok(mut staging) = slot.try_borrow_mut() {
+                staging.release_capture();
+            }
+        });
+        return 0;
+    };
+    handle
+}
+
+/// Private protected staged boot used by the checkpoint-A fixtures.
+#[allow(dead_code)]
+pub(crate) fn boot_staged_observation_demand(len: u32) -> u32 {
+    boot_staged(len, StagedBootMode::ProtectedObservation)
+}
+
+/// Boot the exact staged document with the protected observation preparation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_with_observation_demand(len: u32) -> u32 {
+    boot_staged_observation_demand(len)
+}
+
+/// Boot the exact staged document and atomically publish the sole running handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
+    boot_staged(len, StagedBootMode::Legacy)
 }
 
 /// Return the frozen result code of the last boot attempt.
@@ -3705,6 +5498,15 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
+    let class = if enabled == 0 {
+        ObservationClass::Removal
+    } else {
+        ObservationClass::Ordinary
+    };
+    match refuse_protected_observation_alias(handle, class, OBSERVATION_OPERATION_METER_LEASE) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         if enabled > 1 {
             return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
@@ -3894,6 +5696,14 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_RESIDENT_READ,
+    ) {
+        Err(result) | Ok(Some(result)) => return result,
+        Ok(None) => {}
+    }
     OBSERVATION_STAGING.with(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -4091,30 +5901,56 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
     if handle == 0 {
         return RESULT_OK;
     }
-    LIVE_HOST.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else {
+
+    // Acquire every staging owner first. A borrow refusal therefore leaves LIVE_HOST untouched,
+    // including its native ownership and pending receipt rows.
+    OBSERVATION_STAGING.with(|observation_slot| {
+        let Ok(mut observation) = observation_slot.try_borrow_mut() else {
             return RESULT_INVALID_ARGUMENT;
         };
-        let Some(live) = slot.as_ref().filter(|live| live.handle == handle) else {
-            return RESULT_INVALID_ARGUMENT;
-        };
-        let _ = live;
-        let Some(mut live) = slot.take() else {
-            return RESULT_INTERNAL;
-        };
-        let result = live.host.dispose();
-        drop(live);
-        SPECTRUM_STAGING.with(|staging| {
-            if let Ok(mut staging) = staging.try_borrow_mut() {
-                staging.release_capture();
-            }
-        });
-        BOOT_STAGING.with(|staging| {
-            if let Ok(mut staging) = staging.try_borrow_mut() {
-                staging.reset_after_dispose();
-            }
-        });
-        result
+        SPECTRUM_STAGING.with(|spectrum_slot| {
+            let Ok(mut spectrum) = spectrum_slot.try_borrow_mut() else {
+                return RESULT_INVALID_ARGUMENT;
+            };
+            BOOT_STAGING.with(|boot_slot| {
+                let Ok(mut boot) = boot_slot.try_borrow_mut() else {
+                    return RESULT_INVALID_ARGUMENT;
+                };
+                LIVE_HOST.with(|live_slot| {
+                    let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
+                        return RESULT_INVALID_ARGUMENT;
+                    };
+                    let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
+                        return RESULT_INVALID_ARGUMENT;
+                    };
+                    let _ = live;
+                    let Some(mut live) = live_slot.take() else {
+                        return RESULT_INTERNAL;
+                    };
+
+                    // Native disposal performs its one reconciliation and terminalizes remaining
+                    // Pending rows. Snapshot all scalar mirrors only after that transition, then
+                    // take the resulting rows once from the now-terminal native owner.
+                    let result = live.host.dispose();
+                    observation.endpoint.status = live.host.observation_status();
+                    observation.endpoint.admission = *live.host.observation_admission();
+                    observation.endpoint.capture_identity =
+                        *live.host.observation_capture_identity();
+                    let applications = live.host.take_observation_applications();
+                    let count = applications.len();
+                    debug_assert!(count <= observation.endpoint.applications.len());
+                    observation.endpoint.applications[..count].copy_from_slice(applications);
+                    observation.endpoint.application_count = u32::try_from(count).unwrap_or(0);
+                    observation.endpoint.handle = handle;
+                    observation.endpoint.terminal_application_pending = count != 0;
+
+                    drop(live);
+                    spectrum.release_capture();
+                    boot.reset_after_dispose();
+                    result
+                })
+            })
+        })
     })
 }
 
@@ -4238,6 +6074,9 @@ mod response_budget_tests {
 #[cfg(test)]
 pub(crate) mod live_response_ffi_tests {
     use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
     use core::alloc::Layout;
     use core::cell::Cell;
     use std::alloc::{GlobalAlloc, System};
@@ -4345,6 +6184,826 @@ pub(crate) mod live_response_ffi_tests {
 
     fn captured_header() -> WebLiveResponseResult {
         RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct ResponseMarkers {
+        raw_result: Vec<u8>,
+        live_result_len: usize,
+        live_token: u64,
+        live_result_header: WebLiveResponseResult,
+        capture_identity: WebObservationCaptureIdentity,
+    }
+
+    fn response_markers() -> ResponseMarkers {
+        let (raw_result, live_result_len, live_token, live_result_header) =
+            RESPONSE_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                (
+                    staging.live_result.clone(),
+                    staging.live_result_len,
+                    staging.live_token,
+                    staging.live_result_header,
+                )
+            });
+        let capture_identity = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        });
+        ResponseMarkers {
+            raw_result,
+            live_result_len,
+            live_token,
+            live_result_header,
+            capture_identity,
+        }
+    }
+
+    fn seed_response_markers() -> ResponseMarkers {
+        let snapshot_token = 41;
+        let result_bytes = LIVE_RESPONSE_CAPTURE_BYTES;
+        let seeded_header = WebLiveResponseResult {
+            struct_size: LIVE_RESPONSE_RESULT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            mode: LIVE_RESPONSE_MODE_TARGET,
+            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+            channels: crate::RESPONSE_CHANNEL_BOTH,
+            points: 5,
+            owner_count: 1,
+            excluded_count: 1,
+            sample_rate_hz: 48_000,
+            captured_sample: 12_288,
+            snapshot_token,
+            result_bytes: result_bytes as u64,
+            owners_offset: LIVE_RESPONSE_RESULT_BYTES,
+            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+            ..WebLiveResponseResult::default()
+        };
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_result.fill(0xa5);
+            assert!(copy_live_record(
+                &mut staging.live_result,
+                0,
+                &seeded_header
+            ));
+            staging.live_result_header = seeded_header;
+            staging.live_result_len = result_bytes;
+            staging.live_token = snapshot_token;
+        });
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        LIVE_HOST.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("protected live host")
+                .host
+                .commit_observation_capture_identity(WebObservationCaptureIdentity {
+                    struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+                    abi_version: ABI_VERSION,
+                    kind: 1,
+                    flags: 1,
+                    owner,
+                    observation_generation: 42,
+                    selection_epoch: 43,
+                    snapshot_token,
+                });
+        });
+        response_markers()
+    }
+
+    fn assert_response_markers(markers: &ResponseMarkers) {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.live_result, markers.raw_result);
+            assert_eq!(staging.live_result_len, markers.live_result_len);
+            assert_eq!(staging.live_token, markers.live_token);
+            assert_eq!(staging.live_result_header, markers.live_result_header);
+        });
+        LIVE_HOST.with(|slot| {
+            assert_eq!(
+                *slot
+                    .borrow()
+                    .as_ref()
+                    .expect("protected live host")
+                    .host
+                    .observation_capture_identity(),
+                markers.capture_identity
+            );
+        });
+    }
+
+    fn assert_response_staging_markers(markers: &ResponseMarkers) {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.live_result, markers.raw_result);
+            assert_eq!(staging.live_result_len, markers.live_result_len);
+            assert_eq!(staging.live_token, markers.live_token);
+            assert_eq!(staging.live_result_header, markers.live_result_header);
+        });
+    }
+
+    fn boot_private_protected() -> u32 {
+        no_live_host();
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().reset());
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "private protected fixture must boot");
+        handle
+    }
+
+    #[test]
+    fn ffi_protected_response_capture_publishes_raw_and_identity() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let header = captured_header();
+        assert_eq!(header.result, RESULT_OK);
+        assert_eq!(header.snapshot_token, 1);
+        assert!(header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+        assert_eq!(
+            RESPONSE_STAGING.with(|slot| slot.borrow().live_result_len),
+            header.result_bytes as usize
+        );
+        let identity = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        });
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        assert_eq!(identity.kind, 1);
+        assert_eq!(identity.flags, 0);
+        assert_eq!(identity.owner, owner);
+        assert_eq!(identity.observation_generation, 0);
+        assert_eq!(identity.selection_epoch, 0);
+        assert_eq!(identity.snapshot_token, 1);
+        assert_eq!(
+            miso_engine_web_v1_dispose(handle),
+            RESULT_OK,
+            "protected response fixture dispose"
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_preflight_refusal_preserves_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"missing", 65_536);
+        let markers = seed_response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_response_markers(&markers);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_dispatch_borrow_conflicts_preserve_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request(b"eq0");
+        let markers = seed_response_markers();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_response_markers(&markers);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_response_markers(&markers);
+
+        RESPONSE_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_response_markers(&markers);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_handles_preserve_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request(b"eq0");
+        let markers = seed_response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(0),
+            RESULT_WRONG_STATE
+        );
+        assert_response_markers(&markers);
+
+        let unrelated = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(unrelated),
+            RESULT_WRONG_STATE
+        );
+        assert_response_markers(&markers);
+
+        let committed_identity = markers.capture_identity;
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_WRONG_STATE
+        );
+        assert_response_staging_markers(&markers);
+        let terminal_identity =
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.capture_identity);
+        assert_eq!(terminal_identity, committed_identity);
+    }
+
+    #[test]
+    fn ffi_protected_response_token_exhaustion_preserves_markers_and_admission() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        let _ = seed_response_markers();
+        RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
+        let markers = response_markers();
+        let callback_before = live_response_owner_callback_calls();
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_response_markers(&markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "token exhaustion must not invoke the response sink owner callback"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "token exhaustion spends the Ordinary attempt"
+            );
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: RESULT_REFUSED_BUDGET,
+                    operation: 8,
+                    ingress_epoch: 1,
+                    ..WebObservationAdmission::default()
+                }
+            );
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    fn render_one_protected_boundary(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+    }
+
+    fn real_response_markers_after_boundary(handle: u32) -> ResponseMarkers {
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_OK,
+            "private protected response fixture capture"
+        );
+        render_one_protected_boundary(handle);
+        let markers = response_markers();
+        assert!(
+            markers.raw_result.iter().any(|byte| *byte != 0),
+            "real response payload must be nonzero"
+        );
+        assert_eq!(markers.live_result_header.result, RESULT_OK);
+        assert!(markers.live_result_len > LIVE_RESPONSE_RESULT_BYTES as usize);
+        assert!(markers.live_token > 0);
+        assert_eq!(markers.capture_identity.kind, 1);
+        assert_ne!(markers.capture_identity.owner, 0);
+        assert_eq!(markers.capture_identity.snapshot_token, markers.live_token);
+        markers
+    }
+
+    fn assert_real_response_refusal(
+        case: &str,
+        handle: u32,
+        markers: &ResponseMarkers,
+        expected: u32,
+    ) {
+        let callback_before = live_response_owner_callback_calls();
+        let result = miso_engine_web_v1_track_response_capture(handle);
+        assert_eq!(result, expected, "{case} result");
+        assert_response_markers(markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "{case} must not invoke the response sink owner callback"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "{case} spends the Ordinary attempt"
+            );
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: expected,
+                    operation: 8,
+                    ingress_epoch: status.ingress_epoch,
+                    ..WebObservationAdmission::default()
+                },
+                "{case} admission"
+            );
+        });
+    }
+
+    fn configure_live_request(request: impl FnOnce(&mut WebLiveResponseRequest)) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            request(&mut staging.live_request);
+        });
+    }
+
+    fn configure_live_track_id(bytes: &[u8], declared_bytes: u32) {
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            assert!(bytes.len() <= staging.live_track_id.len());
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..bytes.len()].copy_from_slice(bytes);
+            staging.live_request.track_id_bytes = declared_bytes;
+        });
+    }
+
+    fn protected_response_packed_bound() -> usize {
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            usize::try_from(
+                host.response_capture_preflight("eq0")
+                    .expect("prepared response target bound"),
+            )
+            .expect("packed response bound fits usize")
+        })
+    }
+
+    fn configure_live_result_capacity(capacity: usize) {
+        configure_live_request(|request| {
+            request.maximum_result_bytes =
+                u32::try_from(capacity).expect("test response capacity fits u32");
+        });
+    }
+
+    fn arm_live_response_owner_fault(error: ResponseSnapshotError) {
+        LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(|calls| calls.set(0));
+        LIVE_RESPONSE_CAPTURE_FAULT.with(|fault| fault.set(Some(error)));
+    }
+
+    fn live_response_owner_callback_calls() -> u32 {
+        LIVE_RESPONSE_CAPTURE_OWNER_CALLS.with(Cell::get)
+    }
+
+    fn truncate_live_result_for_test(
+        before: &ResponseMarkers,
+        actual_capacity: usize,
+    ) -> ResponseMarkers {
+        assert!(actual_capacity <= before.raw_result.len());
+        let surviving_prefix = before.raw_result[..actual_capacity].to_vec();
+        // This deliberately truncates the control-side fixture Vec to model a short actual
+        // staging region. Production response staging remains fixed; compare every surviving
+        // byte before invoking the protected FFI refusal.
+        RESPONSE_STAGING.with(|slot| {
+            slot.borrow_mut().live_result.truncate(actual_capacity);
+        });
+        let truncated = response_markers();
+        assert_eq!(truncated.raw_result, surviving_prefix);
+        assert_eq!(truncated.live_result_len, before.live_result_len);
+        assert_eq!(truncated.live_token, before.live_token);
+        assert_eq!(truncated.live_result_header, before.live_result_header);
+        assert_eq!(truncated.capture_identity, before.capture_identity);
+        truncated
+    }
+
+    fn run_real_response_refusal(case: &str, configure: impl FnOnce(), expected: u32) {
+        let handle = boot_private_protected();
+        let markers = real_response_markers_after_boundary(handle);
+        configure();
+        assert_real_response_refusal(case, handle, &markers, expected);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_malformed_fixed_request_preserves_real_markers() {
+        run_real_response_refusal(
+            "malformed struct size",
+            || configure_live_request(|request| request.struct_size -= 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "malformed ABI version",
+            || configure_live_request(|request| request.abi_version += 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "nonzero reserved request field",
+            || configure_live_request(|request| request.reserved[0] = 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_grid_preserves_real_markers() {
+        run_real_response_refusal(
+            "invalid response grid",
+            || configure_live_request(|request| request.grid = u32::MAX),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_semantic_grid_refusals_preserve_real_markers_before_sink() {
+        let cases = [
+            (
+                "finite reversed endpoints",
+                crate::RESPONSE_GRID_LINEAR,
+                20_000.0,
+                Some(20.0),
+            ),
+            (
+                "equal endpoints",
+                crate::RESPONSE_GRID_LINEAR,
+                20.0,
+                Some(20.0),
+            ),
+            (
+                "negative minimum",
+                crate::RESPONSE_GRID_LINEAR,
+                -1.0,
+                Some(20.0),
+            ),
+            (
+                "logarithmic zero minimum",
+                crate::RESPONSE_GRID_LOGARITHMIC,
+                0.0,
+                Some(20_000.0),
+            ),
+            (
+                "maximum above Nyquist",
+                crate::RESPONSE_GRID_LINEAR,
+                20.0,
+                None,
+            ),
+        ];
+        for (case, grid, minimum_hz, maximum_hz) in cases {
+            let handle = boot_private_protected();
+            let markers = real_response_markers_after_boundary(handle);
+            let callback_before = live_response_owner_callback_calls();
+            let maximum_hz = maximum_hz.unwrap_or_else(|| {
+                LIVE_HOST.with(|slot| {
+                    let live = slot.borrow();
+                    let sample_rate_hz = live
+                        .as_ref()
+                        .expect("protected live host")
+                        .host
+                        .status()
+                        .sample_rate_hz;
+                    sample_rate_hz as f32 * 0.5 + 1.0
+                })
+            });
+            configure_live_request(|request| {
+                request.grid = grid;
+                request.minimum_hz = minimum_hz;
+                request.maximum_hz = maximum_hz;
+            });
+
+            assert_real_response_refusal(case, handle, &markers, RESULT_INVALID_ARGUMENT);
+            assert_eq!(
+                live_response_owner_callback_calls(),
+                callback_before,
+                "{case} must not invoke the response sink owner callback"
+            );
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        }
+    }
+
+    #[test]
+    fn ffi_protected_response_invalid_id_preserves_real_markers() {
+        run_real_response_refusal(
+            "invalid UTF-8 track ID",
+            || configure_live_track_id(&[0xff], 1),
+            RESULT_INVALID_ARGUMENT,
+        );
+        run_real_response_refusal(
+            "overlong track ID",
+            || {
+                configure_live_track_id(
+                    b"eq0",
+                    u32::try_from(LIVE_RESPONSE_MAXIMUM_ID_BYTES + 1)
+                        .expect("overlong ID declaration"),
+                )
+            },
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_wrong_exact_target_preserves_real_markers() {
+        run_real_response_refusal(
+            "wrong prepared response target",
+            || configure_live_track_id(b"eq1", 3),
+            RESULT_INVALID_ARGUMENT,
+        );
+    }
+
+    #[test]
+    fn ffi_protected_response_declared_capacity_one_byte_short_preserves_real_markers() {
+        let handle = boot_private_protected();
+        let markers = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        assert!(packed_bound > 0);
+        configure_live_result_capacity(packed_bound - 1);
+
+        assert_real_response_refusal(
+            "declared response capacity one byte short",
+            handle,
+            &markers,
+            RESULT_REFUSED_BUDGET,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_actual_capacity_one_byte_short_preserves_surviving_markers() {
+        let handle = boot_private_protected();
+        let complete = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        assert!(packed_bound > 0);
+        let markers = truncate_live_result_for_test(&complete, packed_bound - 1);
+        configure_live_result_capacity(packed_bound);
+
+        assert_real_response_refusal(
+            "actual response staging capacity one byte short",
+            handle,
+            &markers,
+            RESULT_INVALID_ARGUMENT,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_declared_capacity_over_actual_staging_preserves_markers() {
+        let handle = boot_private_protected();
+        let complete = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        let actual_capacity = packed_bound;
+        let declared_capacity = packed_bound + 1;
+        assert!(declared_capacity <= complete.raw_result.len());
+        let markers = truncate_live_result_for_test(&complete, actual_capacity);
+        configure_live_result_capacity(declared_capacity);
+
+        assert_real_response_refusal(
+            "declared response capacity exceeds actual staging",
+            handle,
+            &markers,
+            RESULT_INVALID_ARGUMENT,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_exact_packed_capacity_advances_and_packs_complete_result() {
+        let handle = boot_private_protected();
+        let previous = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        configure_live_result_capacity(packed_bound);
+
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let current = response_markers();
+        assert_eq!(current.live_token, previous.live_token + 1);
+        assert_eq!(current.live_result_header.result, RESULT_OK);
+        assert_eq!(
+            current.live_result_len,
+            current.live_result_header.result_bytes as usize
+        );
+        assert!(current.live_result_len <= packed_bound);
+        assert_eq!(current.capture_identity.kind, 1);
+        assert_eq!(current.capture_identity.flags, 0);
+        assert_eq!(
+            current.capture_identity.owner,
+            previous.capture_identity.owner
+        );
+        assert_eq!(current.capture_identity.observation_generation, 0);
+        assert_eq!(current.capture_identity.selection_epoch, 0);
+        assert_eq!(current.capture_identity.snapshot_token, current.live_token);
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let (snapshot, token) =
+                parse_live_snapshot(&staging).expect("exact-fit response is complete");
+            assert_eq!(token, current.live_token);
+            assert!(!snapshot.owners.is_empty());
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_admitted_owner_failure_preserves_success_identity() {
+        let handle = boot_private_protected();
+        let previous = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        configure_live_result_capacity(packed_bound);
+        arm_live_response_owner_fault(ResponseSnapshotError::Owner);
+
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_INTERNAL
+        );
+        assert_eq!(live_response_owner_callback_calls(), 1);
+        assert!(
+            LIVE_RESPONSE_CAPTURE_FAULT.with(Cell::get).is_none(),
+            "the one-shot fault must be consumed by the admitted owner callback"
+        );
+
+        let expected_header = WebLiveResponseResult {
+            struct_size: LIVE_RESPONSE_RESULT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_INTERNAL,
+            mode: LIVE_RESPONSE_MODE_TARGET,
+            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+            result_bytes: u64::from(LIVE_RESPONSE_RESULT_BYTES),
+            ..WebLiveResponseResult::default()
+        };
+        let current = response_markers();
+        assert_eq!(current.live_result_header, expected_header);
+        assert_eq!(current.live_result_len, LIVE_RESPONSE_RESULT_BYTES as usize);
+        assert_eq!(current.live_token, previous.live_token);
+        assert_eq!(current.capture_identity, previous.capture_identity);
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let published: WebLiveResponseResult =
+                read_live_record(&staging.live_result, 0).expect("failure header");
+            assert_eq!(published, expected_header);
+        });
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_INTERNAL);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.flags, 0);
+            assert_eq!(admission.receipt, WebObservationReceipt::default());
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "an admitted owner failure spends the Ordinary attempt"
+            );
+            assert_eq!(host.side_records.application_len, 0);
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(host.side_records.completed_count, 0);
+            assert_eq!(host.side_records.reserved_mask, 0);
+        });
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_shares_ordinary_credit_with_spectrum_and_replenishes_at_render() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        let markers = seed_response_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(handle, 0, 0, 0),
+            RESULT_UNSUPPORTED
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                *host.observation_admission(),
+                WebObservationAdmission {
+                    result: RESULT_UNSUPPORTED,
+                    operation: 11,
+                    reason: 8,
+                    ingress_epoch: 1,
+                    ..WebObservationAdmission::default()
+                }
+            );
+        });
+
+        let callback_before = live_response_owner_callback_calls();
+        assert_eq!(
+            miso_engine_web_v1_track_response_capture(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_response_markers(&markers);
+        assert_eq!(
+            live_response_owner_callback_calls(),
+            callback_before,
+            "ordinary backpressure must not invoke the response sink owner callback"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.reason, 5);
+            assert_eq!(admission.requested, 2);
+            assert_eq!(admission.maximum, 1);
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+        });
+
+        render_one_protected_boundary(handle);
+        assert_ne!(
+            LIVE_HOST.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("protected live host")
+                    .host
+                    .observation_status()
+                    .flags
+            }) & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+            0,
+            "a successful render replenishes the Ordinary attempt"
+        );
+
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        assert_eq!(captured_header().snapshot_token, markers.live_token + 1);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_success_creates_no_observation_application_receipt() {
+        let handle = boot_private_protected();
+        stage_request_with_limit(b"eq0", 65_536);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.side_records.application_len, 0);
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(host.side_records.completed_count, 0);
+            assert_eq!(host.side_records.reserved_mask, 0);
+            let admission = host.observation_admission();
+            assert_eq!(admission.result, RESULT_OK);
+            assert_eq!(admission.operation, 8);
+            assert_eq!(admission.flags & crate::OBSERVATION_ADMISSION_RECEIPT, 0);
+            assert_eq!(admission.receipt, WebObservationReceipt::default());
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
     #[test]
@@ -4612,6 +7271,88 @@ pub(crate) mod live_response_ffi_tests {
 mod spectrum_ffi_tests {
     use super::*;
 
+    #[test]
+    fn cold_spectrum_capture_configuration_is_idempotent() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        let first_result = SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture());
+        let first_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
+        let capacities = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            staging.capture.as_ref().map(|capture| {
+                (
+                    capture.len(),
+                    capture.capacity(),
+                    staging.result.as_ref().map(Vec::len),
+                    staging.result.as_ref().map(Vec::capacity),
+                )
+            })
+        });
+        let second_result = if first_result.is_ok() {
+            Some(SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture()))
+        } else {
+            None
+        };
+        let second_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
+
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        match first_result {
+            Ok(()) => {
+                assert_eq!(
+                    capacities,
+                    Some((
+                        SPECTRUM_CAPTURE_BYTES,
+                        SPECTRUM_CAPTURE_BYTES,
+                        Some(SPECTRUM_CAPTURE_BYTES),
+                        Some(SPECTRUM_CAPTURE_BYTES),
+                    ))
+                );
+                assert_eq!(second_result, Some(Ok(())));
+                assert_eq!(first_entry_count, 1);
+                assert_eq!(second_entry_count, 1);
+            }
+            Err(result) => {
+                assert_eq!(result, RESULT_REFUSED_BUDGET);
+                assert_eq!(first_entry_count, 1);
+                assert_eq!(capacities, None);
+                assert_eq!(second_result, None);
+                eprintln!(
+                    "unable to assert successful cold spectrum capture configuration: allocator refused the fixed capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spectrum_capture_capacity_validator_rejects_explicit_surplus() {
+        let oversized: Vec<u8> = Vec::with_capacity(SPECTRUM_CAPTURE_BYTES + 1);
+        assert!(
+            oversized.capacity() > SPECTRUM_CAPTURE_BYTES,
+            "fixture must supply an explicitly oversized Vec"
+        );
+        assert_eq!(
+            validate_spectrum_capture_capacity(oversized.capacity()),
+            Err(RESULT_REFUSED_BUDGET)
+        );
+
+        let mut normal: Vec<u8> = Vec::new();
+        if normal.try_reserve_exact(SPECTRUM_CAPTURE_BYTES).is_ok() {
+            let expected = if normal.capacity() > SPECTRUM_CAPTURE_BYTES {
+                Err(RESULT_REFUSED_BUDGET)
+            } else {
+                Ok(())
+            };
+            assert_eq!(
+                validate_spectrum_capture_capacity(normal.capacity()),
+                expected,
+                "validator must follow the actual Vec capacity"
+            );
+        }
+    }
+
     fn stage_left_output_request() {
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
@@ -4739,19 +7480,23 @@ mod spectrum_ffi_tests {
     }
 
     #[test]
-    fn manual_spectrum_cancel_refuses_an_active_managed_stream() {
+    fn invalid_spectrum_cancel_refuses_before_touching_managed_stream() {
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.stream_active = true;
             staging.capture_len = 32;
+            staging.stream_metadata.result = RESULT_OK;
         });
-        assert_eq!(miso_engine_web_v1_spectrum_cancel(0), RESULT_WRONG_STATE);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(0),
+            RESULT_INVALID_ARGUMENT
+        );
         SPECTRUM_STAGING.with(|slot| {
             let staging = slot.borrow();
             assert!(staging.stream_active);
             assert_eq!(staging.capture_len, 32);
-            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+            assert_eq!(staging.stream_metadata.result, RESULT_OK);
         });
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
     }
@@ -5362,5 +8107,3889 @@ mod spectrum_ffi_tests {
         assert_eq!(spectrum_result_header().captured_sample, 2_048);
 
         stage_left_output_request();
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_a_tests {
+    use super::*;
+    use crate::{WebObservationIngressLimits, WebObservationWorkLimits};
+
+    pub(super) fn protected_preparation_record() -> WebObservationPreparationRecord {
+        let mut record = WebObservationPreparationRecord {
+            struct_size: crate::OBSERVATION_PREPARATION_BYTES,
+            abi_version: ABI_VERSION,
+            profile: crate::OBSERVATION_PROFILE_EQ_SPECTRUM,
+            meter_count: 0,
+            resident_taps: 0,
+            spectrum_count: 1,
+            maximum_active_observers: 1,
+            reserved0: 0,
+            activation_maximum_retained_bytes: u64::MAX,
+            work_limits: WebObservationWorkLimits {
+                struct_size: crate::OBSERVATION_WORK_LIMITS_BYTES,
+                abi_version: ABI_VERSION,
+                maximum_active_meter_channels: u64::MAX - 1,
+                maximum_meter_samples_per_block: u64::MAX - 2,
+                maximum_meter_publications_per_block: u64::MAX - 3,
+                maximum_meter_publication_bytes_per_block: u64::MAX - 4,
+                maximum_active_spectrum_captures: u64::MAX - 5,
+                maximum_capture_input_samples_per_block: u64::MAX - 6,
+                maximum_capture_copy_samples_per_block: u64::MAX - 7,
+                maximum_capture_publications_per_block: u64::MAX - 8,
+                maximum_capture_bytes_per_second: u64::MAX - 9,
+                maximum_transition_entry_visits_per_block: u64::MAX - 10,
+                maximum_retained_bytes: u64::MAX - 11,
+            },
+            ingress_limits: WebObservationIngressLimits {
+                struct_size: crate::OBSERVATION_INGRESS_LIMITS_BYTES,
+                abi_version: ABI_VERSION,
+                maximum_control_bytes: 8_192,
+                maximum_observation_rows: 32,
+                maximum_result_bytes: 65_536,
+                ordinary_operations_per_boundary: 1,
+                removal_operations_per_boundary: 1,
+                maximum_admission_entry_visits: u64::MAX - 12,
+                maximum_response_binding_visits: u64::MAX - 13,
+                maximum_response_section_visits: u64::MAX - 14,
+                maximum_response_copy_bytes: u64::MAX - 15,
+                maximum_handler_copy_bytes_per_boundary: u64::MAX - 16,
+                maximum_cleanup_entry_visits_per_boundary: u64::MAX - 17,
+                maximum_retained_bytes: u64::MAX,
+            },
+            spectrum_request: WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                channels: SPECTRUM_CHANNEL_BOTH,
+                target_id_bytes: 3,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            },
+            target_id: [0; 128],
+        };
+        record.target_id[..3].copy_from_slice(b"eq0");
+        record
+    }
+
+    pub(super) fn stage_protected_boot(document: &[u8], record: WebObservationPreparationRecord) {
+        BOOT_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            *staging.options = WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            };
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.preparation = record;
+        });
+        test_stage_document(document);
+    }
+
+    pub(super) fn protected_document() -> &'static [u8] {
+        include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json")
+    }
+
+    fn one_track_protected_document() -> String {
+        let mut model = session::parse_session_json(
+            core::str::from_utf8(protected_document()).expect("protected fixture is UTF-8"),
+        )
+        .expect("protected fixture parses");
+        assert_eq!(model.sample_rate_hz, 48_000);
+        model.quantum_frames = 128;
+        model.tracks.truncate(1);
+        model.routes.truncate(1);
+        session::canonical_session_json(&model).expect("canonical one-track protected session")
+    }
+
+    pub(super) fn no_live_host() {
+        assert!(LIVE_HOST.with(|slot| slot.borrow().is_none()));
+    }
+
+    #[test]
+    fn private_protected_boot_is_dormant_and_forwards_explicit_limits() {
+        no_live_host();
+        let record = protected_preparation_record();
+        stage_protected_boot(protected_document(), record);
+
+        let handle = boot_staged_observation_demand(protected_document().len() as u32);
+        assert_ne!(handle, 0, "valid protected preparation must boot");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("protected handle published");
+            assert_eq!(live.handle, handle);
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("private protected boot fell back to legacy storage");
+            };
+            assert!(ready.observation.legacy().is_none());
+            assert_eq!(storage.controller.spectrum_state().accepted_generation, 0);
+            assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+            assert_eq!(storage.ingress.epoch, 1);
+            assert_eq!(storage.ingress.limits.maximum_control_bytes, 8_192);
+            assert_eq!(
+                (
+                    storage.ingress.limits.maximum_observation_rows,
+                    storage.ingress.limits.maximum_result_bytes,
+                    storage.ingress.limits.ordinary_operations_per_boundary,
+                    storage.ingress.limits.removal_operations_per_boundary,
+                ),
+                (
+                    record.ingress_limits.maximum_observation_rows,
+                    record.ingress_limits.maximum_result_bytes,
+                    record.ingress_limits.ordinary_operations_per_boundary,
+                    record.ingress_limits.removal_operations_per_boundary,
+                )
+            );
+            assert_eq!(
+                (
+                    storage.ingress.limits.maximum_admission_entry_visits,
+                    storage.ingress.limits.maximum_response_binding_visits,
+                    storage.ingress.limits.maximum_response_section_visits,
+                    storage.ingress.limits.maximum_response_copy_bytes,
+                    storage
+                        .ingress
+                        .limits
+                        .maximum_handler_copy_bytes_per_boundary,
+                    storage
+                        .ingress
+                        .limits
+                        .maximum_cleanup_entry_visits_per_boundary,
+                    storage.ingress.limits.maximum_retained_bytes,
+                ),
+                (
+                    record.ingress_limits.maximum_admission_entry_visits,
+                    record.ingress_limits.maximum_response_binding_visits,
+                    record.ingress_limits.maximum_response_section_visits,
+                    record.ingress_limits.maximum_response_copy_bytes,
+                    record
+                        .ingress_limits
+                        .maximum_handler_copy_bytes_per_boundary,
+                    record
+                        .ingress_limits
+                        .maximum_cleanup_entry_visits_per_boundary,
+                    record.ingress_limits.maximum_retained_bytes,
+                )
+            );
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        let mut too_low = record;
+        too_low
+            .work_limits
+            .maximum_transition_entry_visits_per_block = 3;
+        stage_protected_boot(protected_document(), too_low);
+        assert_eq!(
+            boot_staged_observation_demand(protected_document().len() as u32),
+            0,
+            "native preparation must receive the supplied transition limit"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        no_live_host();
+    }
+
+    #[test]
+    fn public_protected_boot_forwards_owner_and_refuses_under_budget() {
+        no_live_host();
+        let document = protected_document();
+        let record = protected_preparation_record();
+        stage_protected_boot(document, record);
+
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "public protected boot must publish a handle");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+
+        let retained = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("public protected handle");
+            assert_eq!(live.host.status().state, STATE_READY);
+            let status = live.host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert_ne!(status.owner, 0);
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("public protected boot fell back to legacy storage");
+            };
+            assert_eq!(status.owner, storage.controller.owner().get());
+            storage.ingress.bounds.retained_bytes
+        });
+        assert!(retained > 0);
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        let mut too_low = record;
+        too_low.ingress_limits.maximum_retained_bytes = retained - 1;
+        stage_protected_boot(document, too_low);
+        assert_eq!(
+            miso_engine_web_v1_boot_with_observation_demand(document.len() as u32),
+            0,
+            "public protected boot must refuse one byte below retained budget"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        let diagnostic_bytes = miso_engine_web_v1_boot_diagnostic_bytes();
+        assert!(
+            diagnostic_bytes > 0,
+            "budget refusal must publish a boot diagnostic"
+        );
+        no_live_host();
+    }
+
+    #[test]
+    fn public_protected_boot_refuses_fixed_spectrum_payload_budget_floor() {
+        const PROTECTED_PAYLOAD_FLOOR_BYTES: u64 = 2_097_152;
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+
+        struct BudgetCase {
+            name: &'static str,
+            host_maximum_memory_bytes: u64,
+            ingress_maximum_retained_bytes: u64,
+            diagnostic_prefix: &'static [u8],
+        }
+
+        let cases = [
+            BudgetCase {
+                name: "host-only",
+                host_maximum_memory_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                ingress_maximum_retained_bytes: GENEROUS_BUDGET_BYTES,
+                diagnostic_prefix: b"host.budget.retained_projection\t",
+            },
+            BudgetCase {
+                name: "ingress-only",
+                host_maximum_memory_bytes: GENEROUS_BUDGET_BYTES,
+                ingress_maximum_retained_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                diagnostic_prefix: b"web.observation.ingress.maximum_retained_bytes\t",
+            },
+            BudgetCase {
+                name: "both-low",
+                host_maximum_memory_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                ingress_maximum_retained_bytes: PROTECTED_PAYLOAD_FLOOR_BYTES,
+                diagnostic_prefix: b"host.budget.retained_projection\t",
+            },
+        ];
+        let document = one_track_protected_document();
+
+        no_live_host();
+        for case in cases {
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+            let mut record = protected_preparation_record();
+            record.ingress_limits.maximum_retained_bytes = case.ingress_maximum_retained_bytes;
+            stage_protected_boot(document.as_bytes(), record);
+            BOOT_STAGING.with(|slot| {
+                slot.borrow_mut().options.maximum_memory_bytes = case.host_maximum_memory_bytes;
+            });
+            test_stage_document(document.as_bytes());
+
+            let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+            assert_eq!(
+                handle, 0,
+                "protected boot must refuse the independent payload floor for {}",
+                case.name
+            );
+            assert_eq!(
+                miso_engine_web_v1_boot_result(),
+                RESULT_REFUSED_BUDGET,
+                "protected boot result for {}",
+                case.name
+            );
+            let diagnostic = BOOT_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let length = staging.diagnostic_bytes as usize;
+                assert!(length <= staging.document.len(), "bounded boot diagnostic");
+                staging.document[..length].to_vec()
+            });
+            assert!(
+                diagnostic.starts_with(case.diagnostic_prefix),
+                "unexpected {} diagnostic: {:?}",
+                case.name,
+                String::from_utf8_lossy(&diagnostic)
+            );
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                0,
+                "under-budget {} boot entered spectrum configuration",
+                case.name
+            );
+            no_live_host();
+        }
+    }
+
+    #[test]
+    fn public_protected_boot_preserves_endpoint_on_budget_refusal_and_recovers() {
+        const PROTECTED_PAYLOAD_FLOOR_BYTES: u64 = 2_097_152;
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        let document = one_track_protected_document();
+        let mut refusal_record = protected_preparation_record();
+        refusal_record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+        stage_protected_boot(document.as_bytes(), refusal_record);
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.maximum_memory_bytes = PROTECTED_PAYLOAD_FLOOR_BYTES;
+        });
+
+        let expected_outputs = OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.endpoint.status.owner = 0x1111_2222_3333_4444;
+            staging.endpoint.admission.operation = 0x5555_6666;
+            staging.endpoint.capture_identity.snapshot_token = 0x7777_8888_9999_AAAA;
+            staging.endpoint.applications[0].sequence = 0xBBBB_CCCC_DDDD_EEEE;
+            staging.endpoint.application_count = 1;
+            staging.endpoint.handle = 0xF00D_BAAD;
+            (
+                staging.endpoint.status.owner,
+                staging.endpoint.admission.operation,
+                staging.endpoint.capture_identity.snapshot_token,
+                staging.endpoint.applications[0].sequence,
+                staging.endpoint.application_count,
+                staging.endpoint.handle,
+            )
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_boot_with_observation_demand(document.len() as u32),
+            0,
+            "under-budget protected boot must not publish a handle"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+            0,
+            "under-budget protected boot must not enter spectrum configuration"
+        );
+        no_live_host();
+        let actual_outputs = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            (
+                staging.endpoint.status.owner,
+                staging.endpoint.admission.operation,
+                staging.endpoint.capture_identity.snapshot_token,
+                staging.endpoint.applications[0].sequence,
+                staging.endpoint.application_count,
+                staging.endpoint.handle,
+            )
+        });
+        assert_eq!(actual_outputs, expected_outputs);
+
+        let mut recovery_record = protected_preparation_record();
+        recovery_record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+        stage_protected_boot(document.as_bytes(), recovery_record);
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.maximum_memory_bytes = GENEROUS_BUDGET_BYTES;
+        });
+
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "generous protected boot must recover");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+        assert_eq!(
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+            1,
+            "successful protected recovery must configure spectrum once"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("recovered protected handle");
+            let status = live.host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert!(status.owner > 0, "recovered protected owner must be real");
+            let ready = live.host.ready.as_ref().expect("recovered ready owner");
+            assert!(matches!(
+                ready.observation,
+                crate::PreparedObservationStorage::Protected(_)
+            ));
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+    }
+
+    #[test]
+    fn public_protected_boot_accepts_valid_spectrum_request_capture_budgets() {
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+        let document = one_track_protected_document();
+
+        no_live_host();
+        for maximum_capture_bytes in [1_048_576_u64, 2_097_152] {
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+            let mut record = protected_preparation_record();
+            record.spectrum_request.maximum_capture_bytes = maximum_capture_bytes;
+            record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+            stage_protected_boot(document.as_bytes(), record);
+            BOOT_STAGING.with(|slot| {
+                slot.borrow_mut().options.maximum_memory_bytes = GENEROUS_BUDGET_BYTES;
+            });
+            test_stage_document(document.as_bytes());
+
+            let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+            assert_ne!(handle, 0, "valid protected boot must publish a handle");
+            assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                1
+            );
+            LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let live = live.as_ref().expect("protected handle");
+                let status = live.host.observation_status();
+                assert!(status.owner > 0, "protected owner must be real");
+                let ready = live.host.ready.as_ref().expect("ready owner");
+                assert!(matches!(
+                    ready.observation,
+                    crate::PreparedObservationStorage::Protected(_)
+                ));
+            });
+
+            let (capture_len, capture_capacity, result_len, result_capacity) = SPECTRUM_STAGING
+                .with(|slot| {
+                    let staging = slot.borrow();
+                    let capture = staging.capture.as_ref().expect("capture staging");
+                    let result = staging.result.as_ref().expect("result staging");
+                    (
+                        capture.len(),
+                        capture.capacity(),
+                        result.len(),
+                        result.capacity(),
+                    )
+                });
+            assert_eq!(
+                (capture_len, capture_capacity, result_len, result_capacity),
+                (1_048_576, 1_048_576, 1_048_576, 1_048_576)
+            );
+
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+            no_live_host();
+            SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        }
+    }
+
+    struct ProtectedBootPreparationCase {
+        name: &'static str,
+        mutate: fn(&mut WebObservationPreparationRecord),
+    }
+
+    #[test]
+    fn public_protected_boot_rejects_nested_headers_reserved_and_padded_ids() {
+        no_live_host();
+        let cases: [ProtectedBootPreparationCase; 6] = [
+            ProtectedBootPreparationCase {
+                name: "work header",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.work_limits.struct_size = 0;
+                },
+            },
+            ProtectedBootPreparationCase {
+                name: "ingress header",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.ingress_limits.abi_version = ABI_VERSION + 1;
+                },
+            },
+            ProtectedBootPreparationCase {
+                name: "request reserved0",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.reserved0 = 1;
+                },
+            },
+            ProtectedBootPreparationCase {
+                name: "request reserved",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.reserved[0] = 1;
+                },
+            },
+            ProtectedBootPreparationCase {
+                name: "padded target id",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.target_id[3] = 1;
+                },
+            },
+            ProtectedBootPreparationCase {
+                name: "target id over maximum",
+                mutate: |record: &mut WebObservationPreparationRecord| {
+                    record.spectrum_request.target_id_bytes = 128;
+                },
+            },
+        ];
+
+        for case in cases {
+            let mut record = protected_preparation_record();
+            (case.mutate)(&mut record);
+            stage_protected_boot(protected_document(), record);
+            assert_eq!(
+                miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32),
+                0,
+                "{} must refuse without publishing a host",
+                case.name
+            );
+            assert_eq!(
+                miso_engine_web_v1_boot_result(),
+                RESULT_INVALID_ARGUMENT,
+                "{}",
+                case.name
+            );
+            no_live_host();
+        }
+    }
+
+    #[test]
+    fn public_protected_boot_retained_budget_is_inclusive() {
+        no_live_host();
+        let mut record = protected_preparation_record();
+        stage_protected_boot(protected_document(), record);
+        let first =
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32);
+        assert_ne!(first, 0, "baseline protected boot");
+        let retained = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("baseline handle");
+            let ready = live.host.ready.as_ref().expect("ready owner");
+            let crate::PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("protected owner");
+            };
+            storage.ingress.bounds.retained_bytes
+        });
+        assert_eq!(miso_engine_web_v1_dispose(first), RESULT_OK);
+
+        record.ingress_limits.maximum_retained_bytes = retained;
+        stage_protected_boot(protected_document(), record);
+        let exact =
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32);
+        assert_ne!(exact, 0, "exact retained budget must be accepted");
+        assert_eq!(miso_engine_web_v1_dispose(exact), RESULT_OK);
+
+        record.ingress_limits.maximum_retained_bytes = retained - 1;
+        stage_protected_boot(protected_document(), record);
+        assert_eq!(
+            miso_engine_web_v1_boot_with_observation_demand(protected_document().len() as u32),
+            0,
+            "one byte below retained budget must refuse"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        no_live_host();
+    }
+
+    #[test]
+    fn observation_staging_retention_adds_actual_refcell_once() {
+        let count = MAXIMUM_OBSERVATION_READS as u64;
+        let unchanged_heap_sum = count
+            * (size_of::<WebObservationSelection>() as u64
+                + size_of::<ObservationAddress>() as u64
+                + size_of::<ObservationReadValues>() as u64)
+            + count * size_of::<WebObservationResult>() as u64
+            + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+        let containing = size_of::<RefCell<ObservationStaging>>() as u64;
+        assert_eq!(
+            observation_staging_retained_bytes(),
+            unchanged_heap_sum + containing,
+            "the actual staging container is charged exactly once"
+        );
+        assert!(observation_staging_largest_allocation_bytes() >= containing);
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_b1_tests {
+    use super::*;
+    use crate::OBSERVATION_RECEIPT_STATE_PENDING;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn stage_demand(handle: u32, operation: u32, count: u32, owner: u64) {
+        assert_ne!(handle, 0);
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation,
+                count,
+                owner,
+                reserved: [0; 2],
+            };
+        });
+    }
+
+    fn owner(handle: u32) -> u64 {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        })
+    }
+
+    #[test]
+    fn additive_demand_stops_native_stream_and_repeats_pending_identity() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        assert_eq!(
+            miso_engine_web_v1_observation_preparation_bytes() as usize,
+            size_of::<WebObservationPreparationRecord>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_bytes() as usize,
+            size_of::<WebObservationDemand>()
+        );
+        assert_eq!(miso_engine_web_v1_observation_demand_capacity(), 0);
+        assert_eq!(
+            miso_engine_web_v1_observation_admission_bytes() as usize,
+            size_of::<WebObservationAdmission>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_status_bytes() as usize,
+            size_of::<WebObservationStatus>()
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_capture_identity_bytes() as usize,
+            size_of::<WebObservationCaptureIdentity>()
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let first = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(first.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(first.receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+        assert_ne!(first.receipt.sequence, 0);
+
+        // An intervening malformed removal is refused after the removal attempt was spent. The
+        // following valid StopGraph must still use the original native pending receipt.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        // The second valid StopGraph is a scalar identity shortcut. It must preserve the native
+        // pending receipt and must not copy the intervening refusal or spend another permit/native
+        // stop publication.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let repeated = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(repeated.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(repeated.result, RESULT_OK);
+        assert_eq!(repeated.reason, 0);
+        assert_eq!(repeated.receipt, first.receipt);
+        assert_eq!(
+            LIVE_HOST.with(|slot| slot
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .host
+                .side_records
+                .pending_count),
+            2
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn demand_class_credits_are_spent_by_unsupported_and_malformed_records() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        // An unsupported ordinary operation consumes the ordinary attempt before semantic
+        // classification; its retry is therefore backpressure.
+        stage_demand(handle, 1, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_UNSUPPORTED
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let ordinary = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(ordinary.operation, 1);
+        assert_eq!(ordinary.reason, 8);
+        assert_eq!(ordinary.result, RESULT_UNSUPPORTED);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        // A malformed removal record spends the removal attempt too. The owner is matching here,
+        // so the fixed header failure is observable rather than a native stop attempt.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.reason, 8);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn wrong_owner_removal_spends_credit_and_read_only_queries_do_not_poll() {
+        let handle = boot_protected();
+        let expected_owner = owner(handle);
+
+        stage_demand(
+            handle,
+            OBSERVATION_OPERATION_STOP_GRAPH,
+            0,
+            expected_owner.wrapping_add(1),
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let wrong_owner = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(wrong_owner.reason, 2);
+
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+        // Start creates one real native pending receipt. Scalar getters must leave that pending
+        // row untouched: they only project fixed scalar records and never reconcile the queue.
+        let second = boot_protected();
+        let second_owner = owner(second);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(second, 0.0),
+            RESULT_OK
+        );
+        let pending_before = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .unwrap()
+                .host
+                .side_records
+                .pending_count
+        });
+        let _ = miso_engine_web_v1_observation_admission_ptr(second);
+        let _ = miso_engine_web_v1_observation_status_ptr(second);
+        let _ = miso_engine_web_v1_observation_capture_identity_ptr(second);
+        let _ = miso_engine_web_v1_observation_preparation_ptr();
+        let _ = miso_engine_web_v1_observation_demand_ptr(second);
+        let (pending_after, status) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().unwrap().host;
+            (host.side_records.pending_count, host.observation_status())
+        });
+        assert_eq!(pending_after, pending_before);
+        assert_eq!(status.pending_count, u32::from(pending_before));
+        assert_eq!(status.owner, second_owner);
+
+        assert_eq!(miso_engine_web_v1_dispose(second), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn demand_pointer_requires_live_matching_handle() {
+        let handle = boot_protected();
+        assert!(!observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(0).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_ptr(handle.wrapping_add(1)),
+            0
+        );
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        assert!(observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
+    }
+
+    #[test]
+    fn scalar_queries_reject_live_host_borrow_conflicts_before_terminal_fallback() {
+        let handle = boot_protected();
+        assert!(!observation_admission_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_status_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_demand_ptr_for_handle(handle).is_null());
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert!(observation_admission_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_status_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+            assert!(observation_demand_ptr_for_handle(handle).is_null());
+            assert_eq!(observation_admission_ptr_for_handle(handle), 0);
+            assert_eq!(observation_status_ptr_for_handle(handle), 0);
+            assert_eq!(observation_capture_identity_ptr_for_handle(handle), 0);
+            assert_eq!(miso_engine_web_v1_observation_demand_ptr(handle), 0);
+        });
+
+        // Once the live slot is actually empty, the scalar getters may serve the matching
+        // retained endpoint mirror. An unrelated handle remains invalid.
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        assert!(!observation_admission_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_status_ptr_for_handle_raw(handle).is_null());
+        assert!(!observation_capture_identity_ptr_for_handle_raw(handle).is_null());
+        assert!(observation_demand_ptr_for_handle(handle).is_null());
+        assert!(observation_admission_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_status_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_capture_identity_ptr_for_handle_raw(handle.wrapping_add(1)).is_null());
+        assert!(observation_demand_ptr_for_handle(handle.wrapping_add(1)).is_null());
+        assert_eq!(
+            observation_admission_ptr_for_handle(handle.wrapping_add(1)),
+            0
+        );
+        assert_eq!(observation_status_ptr_for_handle(handle.wrapping_add(1)), 0);
+        assert_eq!(
+            observation_capture_identity_ptr_for_handle(handle.wrapping_add(1)),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_c1_tests {
+    use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+    use crate::{COMMAND_RECORD_BYTES, WebCommandReport};
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn boot_protected_with_console() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.console_command_queue_records = 4;
+        });
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected console fixture must boot");
+        handle
+    }
+
+    fn dispose(handle: u32) {
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    fn live_status(handle: u32) -> WebObservationStatus {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+        })
+    }
+
+    fn stage_spectrum_markers() -> (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>) {
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.capture_len = 17;
+            staging.result_len = 19;
+            staging.stream_active = true;
+            staging.stream_smoothing = Some(SpectrumSmoothingConfig::new(5.0).unwrap());
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.sequence = 41;
+            staging.stream_metadata.dropped_captures = 3;
+            (
+                staging.capture_len,
+                staging.result_len,
+                staging.stream_metadata,
+                staging.stream_active,
+                staging
+                    .stream_smoothing
+                    .map(SpectrumSmoothingConfig::smoothing_ms),
+            )
+        })
+    }
+
+    fn assert_spectrum_markers(
+        markers: (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>),
+    ) {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.capture_len, markers.0);
+            assert_eq!(staging.result_len, markers.1);
+            assert_eq!(staging.stream_metadata, markers.2);
+            assert_eq!(staging.stream_active, markers.3);
+            assert_eq!(
+                staging
+                    .stream_smoothing
+                    .map(SpectrumSmoothingConfig::smoothing_ms),
+                markers.4
+            );
+        });
+    }
+
+    fn stage_resident_markers() -> Vec<WebObservationResult> {
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.addresses.clear();
+            staging.results.clear();
+            staging.results.extend([
+                WebObservationResult {
+                    status: OBSERVATION_STATUS_READY,
+                    track_index: 96,
+                    sequence: 17,
+                    ..WebObservationResult::default()
+                },
+                WebObservationResult {
+                    status: OBSERVATION_STATUS_PENDING,
+                    track_index: 97,
+                    sequence: 19,
+                    ..WebObservationResult::default()
+                },
+            ]);
+            staging.results.clone()
+        })
+    }
+
+    fn assert_resident_markers(markers: &[WebObservationResult]) {
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.results.as_slice(), markers);
+        });
+    }
+
+    #[test]
+    fn protected_alias_host_borrow_refusal_is_terminal_before_any_staging_work() {
+        let handle = boot_protected();
+        let spectrum_markers = stage_spectrum_markers();
+        let resident_markers = stage_resident_markers();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(miso_engine_web_v1_spectrum_cancel(handle), RESULT_INTERNAL);
+            assert_eq!(
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                ),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_observation_read(handle, u32::MAX),
+                RESULT_INTERNAL
+            );
+            assert_eq!(miso_engine_web_v1_meter_lease(handle, 2), RESULT_INTERNAL);
+        });
+
+        assert_spectrum_markers(spectrum_markers);
+        assert_resident_markers(&resident_markers);
+        dispose(handle);
+    }
+
+    #[test]
+    fn invalid_alias_handle_is_terminal_before_any_staging_work() {
+        let handle = boot_protected();
+        let spectrum_markers = stage_spectrum_markers();
+        let resident_markers = stage_resident_markers();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(0, u32::MAX),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_read(0, u32::MAX),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_spectrum_markers(spectrum_markers);
+        assert_resident_markers(&resident_markers);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_unsupported_aliases_guard_before_staging_and_input_validation() {
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_cancel(handle),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.target_id[0] = 0xff;
+            let _borrow = staging;
+            assert_eq!(
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, 1),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        let markers = stage_spectrum_markers();
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                ),
+                RESULT_UNSUPPORTED
+            );
+        });
+        assert_spectrum_markers(markers);
+        dispose(handle);
+
+        let handle = boot_protected();
+        OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.addresses.push(ObservationAddress {
+                track_index: 99,
+                rack: host_core::EffectRack::Dynamic,
+                effect_index: 98,
+                tap_id: 97,
+                channels: ObservationReadChannels::Both,
+            });
+            staging.results.push(WebObservationResult {
+                status: OBSERVATION_STATUS_READY,
+                track_index: 96,
+                ..WebObservationResult::default()
+            });
+            let _borrow = staging;
+            assert_eq!(
+                miso_engine_web_v1_observation_read(handle, u32::MAX),
+                RESULT_UNSUPPORTED
+            );
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.addresses.len(), 1);
+            assert_eq!(staging.results.len(), 1);
+            assert_eq!(staging.results[0].track_index, 96);
+        });
+        dispose(handle);
+
+        let handle = boot_protected();
+        let before = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (host.meter_lease, *host.status())
+        });
+        assert_eq!(
+            miso_engine_web_v1_meter_lease(handle, 2),
+            RESULT_UNSUPPORTED,
+            "enabled validation must follow the protected guard"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!((host.meter_lease, *host.status()), before);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn each_unsupported_alias_spends_its_classified_attempt_once() {
+        let ordinary_calls: [fn(u32) -> u32; 5] = [
+            |handle| miso_engine_web_v1_spectrum_read(handle, u32::MAX),
+            |handle| miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
+            |handle| {
+                miso_engine_web_v1_spectrum_stream_select(
+                    handle,
+                    u32::MAX,
+                    u32::MAX,
+                    u32::MAX,
+                    f64::NAN,
+                )
+            },
+            |handle| miso_engine_web_v1_observation_read(handle, u32::MAX),
+            |handle| miso_engine_web_v1_meter_lease(handle, 2),
+        ];
+        for call in ordinary_calls {
+            let handle = boot_protected();
+            let before = live_status(handle);
+            assert_ne!(
+                before.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            assert_eq!(call(handle), RESULT_UNSUPPORTED);
+            let spent = live_status(handle);
+            assert_eq!(
+                spent.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            assert_eq!(spent.ingress_epoch, before.ingress_epoch);
+            assert_eq!(
+                spent.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
+            );
+            assert_eq!(call(handle), RESULT_BACKPRESSURE);
+            assert_eq!(
+                live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0
+            );
+            dispose(handle);
+        }
+
+        let handle = boot_protected();
+        let before = live_status(handle);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_UNSUPPORTED
+        );
+        assert_eq!(
+            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+            0
+        );
+        assert_eq!(
+            miso_engine_web_v1_meter_lease(handle, 0),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(
+            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+            crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+        );
+        assert_eq!(before.ingress_epoch, live_status(handle).ingress_epoch);
+        dispose(handle);
+    }
+
+    struct WireCommandInput {
+        kind: u32,
+        rack: u8,
+        channel: u8,
+        track_index: u32,
+        effect_index: u32,
+        parameter_id: u32,
+        smoothing_samples: u32,
+        values: [f32; 4],
+    }
+
+    fn wire_command(input: WireCommandInput) -> [u8; COMMAND_RECORD_BYTES as usize] {
+        let mut bytes = [0; COMMAND_RECORD_BYTES as usize];
+        bytes[0] = input.kind as u8;
+        bytes[1] = input.rack;
+        bytes[2] = input.channel;
+        for (offset, value) in [
+            (4, input.track_index),
+            (8, input.effect_index),
+            (12, input.parameter_id),
+            (16, input.smoothing_samples),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in input.values.into_iter().enumerate() {
+            let offset = 24 + index * 4;
+            bytes[offset..offset + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+        bytes
+    }
+
+    fn stage_commands(handle: u32, commands: &[[u8; COMMAND_RECORD_BYTES as usize]]) {
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let bytes = host.command_staging_mut().expect("command staging");
+            for (index, command) in commands.iter().enumerate() {
+                let start = index * COMMAND_RECORD_BYTES as usize;
+                bytes[start..start + command.len()].copy_from_slice(command);
+            }
+        });
+    }
+
+    fn stage_empty_companion(handle: u32) -> u32 {
+        const HEADER_BYTES: usize = 24;
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let generation = host.host_generation;
+            let bytes = host.prepared_companion_mut().expect("prepared staging");
+            bytes[..HEADER_BYTES].fill(0);
+            bytes[0..4].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+            bytes[8..16].copy_from_slice(&generation.to_le_bytes());
+            HEADER_BYTES as u32
+        })
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ControlStateSnapshot {
+        producer_success_count: u64,
+        producer_available_capacity: usize,
+        fader_success_count: u64,
+        fader_available_capacity: usize,
+        input_success_count: u64,
+        input_available_capacity: usize,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct InputFilterStateSnapshot {
+        committed: [f32; 4],
+        candidate: [f32; 4],
+        dirty: [bool; 4],
+        revision: u64,
+    }
+
+    struct CommandStateSnapshot {
+        command_wanted: Vec<u32>,
+        in_flight: Vec<u32>,
+        controls: Vec<ControlStateSnapshot>,
+        input_filter_shadows: Vec<InputFilterStateSnapshot>,
+        has_in_flight_commands: bool,
+        report: WebCommandReport,
+    }
+
+    fn command_state(handle: u32) -> CommandStateSnapshot {
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected console host")
+                .host;
+            let ready = host.ready.as_ref().expect("ready ownership");
+            CommandStateSnapshot {
+                command_wanted: ready.command_wanted.to_vec(),
+                in_flight: ready.in_flight.to_vec(),
+                controls: ready
+                    .controls
+                    .iter()
+                    .map(|control| ControlStateSnapshot {
+                        producer_success_count: control.producer.success_count(),
+                        producer_available_capacity: control.producer.available_capacity(),
+                        fader_success_count: control.fader.success_count(),
+                        fader_available_capacity: control.fader.available_capacity(),
+                        input_success_count: control.input.success_count(),
+                        input_available_capacity: control.input.available_capacity(),
+                    })
+                    .collect(),
+                input_filter_shadows: ready
+                    .input_filter_shadows
+                    .iter()
+                    .map(|shadow| InputFilterStateSnapshot {
+                        committed: shadow.committed,
+                        candidate: shadow.candidate,
+                        dirty: shadow.dirty,
+                        revision: shadow.revision,
+                    })
+                    .collect(),
+                has_in_flight_commands: ready.has_in_flight_commands,
+                report: *host.command_report(),
+            }
+        })
+    }
+
+    fn assert_mixed_batch_refused_before_companion(
+        handle: u32,
+        prepared: bool,
+    ) -> WebCommandReport {
+        let audio = wire_command(WireCommandInput {
+            kind: crate::COMMAND_PAN,
+            rack: u8::MAX,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
+        let observation = wire_command(WireCommandInput {
+            kind: crate::COMMAND_OBSERVE_SUBSCRIBE,
+            rack: 0,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
+        stage_commands(handle, &[audio, observation]);
+        let before = command_state(handle);
+        let result = if prepared {
+            // The companion span is deliberately malformed; raw observation classification must
+            // refuse before it is even inspected.
+            miso_engine_web_v1_prepared_command_submit(handle, 2, 1)
+        } else {
+            miso_engine_web_v1_command_submit(handle, 2)
+        };
+        assert_eq!(result, RESULT_UNSUPPORTED);
+        let after = command_state(handle);
+        assert_eq!(
+            after.command_wanted, before.command_wanted,
+            "queue room shadow changed"
+        );
+        assert_eq!(
+            after.in_flight, before.in_flight,
+            "in-flight queue shadow changed"
+        );
+        assert_eq!(after.controls, before.controls, "producer queue changed");
+        assert_eq!(
+            after.input_filter_shadows, before.input_filter_shadows,
+            "input-filter shadow changed"
+        );
+        assert_eq!(
+            after.has_in_flight_commands, before.has_in_flight_commands,
+            "in-flight flag changed"
+        );
+        let report = after.report;
+        assert_eq!(report.result, RESULT_UNSUPPORTED);
+        assert_eq!(report.reason, crate::COMMAND_REASON_UNSUPPORTED_KIND);
+        assert_eq!(report.rejected_index, 1);
+        assert_eq!(report.admitted, 0);
+        report
+    }
+
+    #[test]
+    fn both_command_submit_exports_refuse_mixed_observation_batches_before_mutation() {
+        let handle = boot_protected_with_console();
+        let _plain = assert_mixed_batch_refused_before_companion(handle, false);
+        let audio = wire_command(WireCommandInput {
+            kind: crate::COMMAND_PAN,
+            rack: u8::MAX,
+            channel: u8::MAX,
+            track_index: 0,
+            effect_index: 0,
+            parameter_id: 0,
+            smoothing_samples: 0,
+            values: [0.0; 4],
+        });
+        stage_commands(handle, &[audio]);
+        assert_eq!(
+            miso_engine_web_v1_command_submit(handle, 1),
+            RESULT_OK,
+            "audio-only command remains admissible after ordinary observation credit is spent"
+        );
+        dispose(handle);
+
+        let handle = boot_protected_with_console();
+        let _prepared = assert_mixed_batch_refused_before_companion(handle, true);
+        stage_commands(
+            handle,
+            &[wire_command(WireCommandInput {
+                kind: crate::COMMAND_PAN,
+                rack: u8::MAX,
+                channel: u8::MAX,
+                track_index: 0,
+                effect_index: 0,
+                parameter_id: 0,
+                smoothing_samples: 0,
+                values: [0.0; 4],
+            })],
+        );
+        let companion_bytes = stage_empty_companion(handle);
+        assert_eq!(
+            miso_engine_web_v1_prepared_command_submit(handle, 1, companion_bytes),
+            RESULT_OK,
+            "prepared audio-only command remains admissible after ordinary observation credit is spent"
+        );
+        dispose(handle);
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_c2a_tests {
+    use super::*;
+    use crate::OBSERVATION_RECEIPT_STATE_PENDING;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = boot_staged_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn boot_legacy() -> u32 {
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            let target_id = b"main-out";
+            *staging.request = WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_OUTPUT,
+                channels: SPECTRUM_CHANNEL_LEFT,
+                target_id_bytes: target_id.len() as u32,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            };
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
+        });
+        let document = protected_document();
+        let handle = test_boot(document, WebBootOptions::explicit_defaults());
+        assert_ne!(handle, 0, "legacy fixture must boot");
+        handle
+    }
+
+    fn dispose(handle: u32) {
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct CommittedMarkers {
+        capture: Vec<u8>,
+        capture_len: usize,
+        capture_header: WebSpectrumWindow,
+        result: Vec<u8>,
+        result_len: usize,
+        result_header: WebSpectrumResult,
+        stream_metadata: WebSpectrumStreamMetadata,
+        stream_active: bool,
+        stream_cadence: Option<SpectrumCadence>,
+        stream_smoothing: Option<SpectrumSmoothingConfig>,
+        stream_window: Option<(u64, u64, u64)>,
+        capture_identity: WebObservationCaptureIdentity,
+    }
+
+    fn stage_markers() -> CommittedMarkers {
+        let cadence = SpectrumCadence::new(48_000, 128).expect("fixture cadence");
+        let smoothing = SpectrumSmoothingConfig::new(5.0).expect("fixture smoothing");
+        let capture_len = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + 2 * SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .expect("fixture capture length");
+        let result_len = usize::try_from(SPECTRUM_RESULT_HEADER_BYTES).expect("result header");
+        let capture_header = WebSpectrumWindow {
+            struct_size: SPECTRUM_WINDOW_HEADER_BYTES,
+            abi_version: ABI_VERSION,
+            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            channels: SPECTRUM_CHANNEL_BOTH,
+            sample_rate_hz: cadence.sample_rate_hz(),
+            frames: SPECTRUM_WINDOW_FRAMES,
+            source_underrun: 1,
+            reserved0: 0,
+            captured_sample: 10_240,
+            end_sample: 12_288,
+            snapshot_token: 44,
+            left_offset: SPECTRUM_WINDOW_HEADER_BYTES,
+            right_offset: SPECTRUM_WINDOW_HEADER_BYTES
+                + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        };
+        let result_header = WebSpectrumResult {
+            struct_size: SPECTRUM_RESULT_HEADER_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            channels: SPECTRUM_CHANNEL_BOTH,
+            sample_rate_hz: cadence.sample_rate_hz(),
+            window_frames: SPECTRUM_WINDOW_FRAMES,
+            bin_count: host_core::SPECTRUM_BIN_COUNT as u32,
+            source_underrun: 1,
+            floor_db: host_core::SPECTRUM_FLOOR_DB,
+            captured_sample: capture_header.captured_sample,
+            end_sample: capture_header.end_sample,
+            snapshot_token: capture_header.snapshot_token,
+            result_bytes: SPECTRUM_RESULT_HEADER_BYTES as u64,
+            frequencies_offset: 0,
+            left_offset: 0,
+            right_offset: 0,
+            reserved0: 0,
+        };
+
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.configure_capture().expect("fixed spectrum staging");
+            let capture = staging.capture.as_mut().expect("capture bytes");
+            capture[..capture_len].fill(0xa5);
+            let left_offset = capture_header.left_offset as usize;
+            let right_offset = capture_header.right_offset as usize;
+            for (index, byte) in capture[left_offset..right_offset].iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_add(0x11);
+            }
+            for (index, byte) in capture[right_offset..capture_len].iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_add(0x77);
+            }
+            assert!(copy_live_record(capture, 0, &capture_header));
+            let result = staging.result.as_mut().expect("result bytes");
+            result[..result_len].fill(0x5a);
+            assert!(copy_live_record(result, 0, &result_header));
+            staging.capture_len = capture_len;
+            staging.result_len = result_len;
+            staging.stream_active = true;
+            staging.stream_cadence = Some(cadence);
+            staging.stream_smoothing = Some(smoothing);
+            staging.stream_window = Some(SpectrumStreamWindowFacts {
+                stream_epoch: 17,
+                sequence: 41,
+                dropped_captures: 3,
+            });
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                status: SPECTRUM_STREAM_STATUS_READY,
+                target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                channels: SPECTRUM_CHANNEL_BOTH,
+                sample_rate_hz: cadence.sample_rate_hz(),
+                quantum_frames: cadence.quantum_frames(),
+                hop_frames: cadence.hop_frames(),
+                source_underrun: 1,
+                reserved0: 0,
+                reserved1: 0,
+                capture_epoch: 17,
+                sequence: 41,
+                dropped_captures: 3,
+                windows: 42,
+                captured_sample: capture_header.captured_sample,
+                end_sample: capture_header.end_sample,
+                analysis_epoch: 9,
+                history_start_sample: 8_192,
+                smoothing_ms: smoothing.smoothing_ms(),
+            };
+        });
+        let capture_identity = stage_capture_identity();
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            CommittedMarkers {
+                capture: staging.capture.as_ref().expect("capture bytes")[..staging.capture_len]
+                    .to_vec(),
+                capture_len: staging.capture_len,
+                capture_header,
+                result: staging.result.as_ref().expect("result bytes")[..staging.result_len]
+                    .to_vec(),
+                result_len: staging.result_len,
+                result_header,
+                stream_metadata: staging.stream_metadata,
+                stream_active: staging.stream_active,
+                stream_cadence: staging.stream_cadence,
+                stream_smoothing: staging.stream_smoothing,
+                stream_window: staging.stream_window.map(|window| {
+                    (
+                        window.stream_epoch,
+                        window.sequence,
+                        window.dropped_captures,
+                    )
+                }),
+                capture_identity,
+            }
+        })
+    }
+
+    fn assert_staged_markers(markers: &CommittedMarkers) {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.capture_len, markers.capture_len);
+            assert_eq!(staging.result_len, markers.result_len);
+            assert_eq!(staging.stream_metadata, markers.stream_metadata);
+            assert_eq!(staging.stream_active, markers.stream_active);
+            assert_eq!(staging.stream_cadence, markers.stream_cadence);
+            assert_eq!(staging.stream_smoothing, markers.stream_smoothing);
+            assert_eq!(
+                staging.stream_window.map(|window| {
+                    (
+                        window.stream_epoch,
+                        window.sequence,
+                        window.dropped_captures,
+                    )
+                }),
+                markers.stream_window
+            );
+            let capture = staging.capture.as_ref().expect("capture bytes");
+            let capture_prefix = capture.len().min(markers.capture.len());
+            assert_eq!(
+                &capture[..capture_prefix],
+                &markers.capture[..capture_prefix]
+            );
+            if capture.len() >= size_of::<WebSpectrumWindow>() {
+                assert_eq!(
+                    read_live_record::<WebSpectrumWindow>(capture, 0)
+                        .expect("committed capture header"),
+                    markers.capture_header
+                );
+            }
+            let result = staging.result.as_ref().expect("result bytes");
+            assert_eq!(&result[..markers.result.len()], markers.result.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumResult>(result, 0).expect("committed result header"),
+                markers.result_header
+            );
+        });
+    }
+
+    fn assert_markers(markers: &CommittedMarkers) {
+        assert_staged_markers(markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+    }
+
+    fn stage_capture_identity() -> WebObservationCaptureIdentity {
+        let identity = WebObservationCaptureIdentity {
+            struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+            abi_version: ABI_VERSION,
+            kind: 2,
+            flags: 1,
+            owner: 41,
+            observation_generation: 42,
+            selection_epoch: 43,
+            snapshot_token: 44,
+        };
+        LIVE_HOST.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("protected live host")
+                .host
+                .side_records
+                .capture_identity = identity;
+        });
+        identity
+    }
+
+    fn capture_identity() -> WebObservationCaptureIdentity {
+        LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        })
+    }
+
+    fn render_one_block(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+    }
+
+    fn render_protected_window(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK,
+            "protected source block 0"
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle),
+            1,
+            "the protected start receipt must apply before capture"
+        );
+        for block in 1..=16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+    }
+
+    #[test]
+    fn consumed_protected_window_arithmetic_faults_preserve_committed_output() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+
+        // Obtain one actual admitted native window. The typed read consumes the queue record;
+        // only copies of this owned result are faulted below, so no rollback is implied.
+        let observed = LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live.as_mut().expect("protected host").host;
+            let permit = host
+                .begin_observation(
+                    ObservationClass::Ordinary,
+                    host.protected_spectrum_read_lengths(),
+                )
+                .expect("ordinary read permit");
+            host.read_spectrum_stream_admitted(permit)
+                .expect("real admitted native window")
+        });
+        assert_eq!(observed.window.sequence, 0);
+        assert!(observed.window.left.iter().any(|value| *value != 0.0));
+        assert!(observed.window.right.iter().any(|value| *value != 0.0));
+
+        for (fault, first_sample, sequence) in [
+            ("sequence", observed.window.first_sample, u64::MAX),
+            (
+                "end sample",
+                u64::MAX - u64::from(SPECTRUM_WINDOW_FRAMES) + 1,
+                observed.window.sequence,
+            ),
+        ] {
+            let markers = stage_markers();
+            let mut copied = observed;
+            copied.window.first_sample = first_sample;
+            copied.window.sequence = sequence;
+            let (result, admission) = LIVE_HOST.with(|slot| {
+                let mut live = slot.borrow_mut();
+                let host = &mut live.as_mut().expect("protected host").host;
+                let owner = host
+                    .protected_observation_identity()
+                    .expect("same live protected owner")
+                    .0
+                    .get();
+                let target = host.spectrum_target();
+                let channels = host.spectrum_channels();
+                let cadence = host.protected_spectrum_cadence().expect("prepared cadence");
+                let result = SPECTRUM_STAGING.with(|slot| {
+                    post_read_protected_spectrum_window(
+                        host,
+                        &mut slot.borrow_mut(),
+                        &copied,
+                        owner,
+                        target,
+                        channels,
+                        cadence,
+                    )
+                });
+                (result, *host.observation_admission())
+            });
+            assert_eq!(result, RESULT_REFUSED_BUDGET, "{fault}");
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_REFUSED_BUDGET, "{fault}");
+            assert_eq!(
+                admission.reason, 9,
+                "{fault} must record arithmetic overflow"
+            );
+            assert_markers(&markers);
+        }
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_commits_nonzero_stereo_and_matching_identity() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let (header, left, right) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("raw header");
+            let mut left = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let mut right = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            spectrum_f32_plane(bytes, header.left_offset, header.frames, &mut left)
+                .expect("left plane");
+            spectrum_f32_plane(bytes, header.right_offset, header.frames, &mut right)
+                .expect("right plane");
+            (header, left, right)
+        });
+        assert_eq!(header.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+        assert_eq!(header.channels, SPECTRUM_CHANNEL_BOTH);
+        assert_eq!(header.frames, SPECTRUM_WINDOW_FRAMES);
+        assert_eq!(header.snapshot_token, 1);
+        assert_eq!(header.end_sample, 2_048);
+        assert_eq!(header.left_offset, SPECTRUM_WINDOW_HEADER_BYTES);
+        assert_eq!(
+            header.right_offset,
+            SPECTRUM_WINDOW_HEADER_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32
+        );
+        assert!(left.iter().any(|value| *value != 0.0));
+        assert!(right.iter().any(|value| *value != 0.0));
+
+        let identity = capture_identity();
+        assert_eq!(identity.kind, 2);
+        assert_eq!(identity.flags, 1);
+        assert_eq!(
+            identity.owner,
+            LIVE_HOST.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("protected host")
+                    .host
+                    .observation_status()
+                    .owner
+            })
+        );
+        assert_ne!(identity.observation_generation, 0);
+        assert_ne!(identity.selection_epoch, 0);
+        assert_eq!(identity.snapshot_token, header.snapshot_token);
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| slot.borrow().capture_len),
+            usize::try_from(header.right_offset).unwrap()
+                + host_core::SPECTRUM_WINDOW_FRAMES * size_of::<f32>()
+        );
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_reports_generation_seek_failed_and_retains_last_ready_capture() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+
+        let (ready_capture, ready_header, ready_metadata) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("ready header");
+            let mut left = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let mut right = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            spectrum_f32_plane(bytes, header.left_offset, header.frames, &mut left)
+                .expect("ready left plane");
+            spectrum_f32_plane(bytes, header.right_offset, header.frames, &mut right)
+                .expect("ready right plane");
+            assert!(left.iter().any(|value| *value != 0.0));
+            assert!(right.iter().any(|value| *value != 0.0));
+            assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+            (
+                bytes[..staging.capture_len].to_vec(),
+                header,
+                staging.stream_metadata,
+            )
+        });
+        let ready_identity = capture_identity();
+        assert_eq!(ready_metadata.capture_epoch, 1);
+        assert_eq!(ready_metadata.sequence, 0);
+        assert_eq!(ready_metadata.windows, 1);
+        assert_eq!(ready_header.snapshot_token, 1);
+        assert_ne!(ready_identity.owner, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let analyzed_metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging
+                    .stream_history
+                    .as_ref()
+                    .expect("analysis history")
+                    .history_start_sample(),
+                Some(ready_metadata.captured_sample),
+                "analysis must populate worker history before the seek"
+            );
+        });
+        assert_eq!(
+            analyzed_metadata.history_start_sample,
+            ready_metadata.captured_sample
+        );
+
+        // Match the native seek fixture: leave a partial window in flight before changing the
+        // source generation. The next render crosses that boundary and invalidates the partial
+        // window, while the render owner remains usable.
+        for block in 17..24_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected partial source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(
+            miso_engine_web_v1_source_seek(handle, 14, 2, 2_048),
+            RESULT_OK,
+            "generation-tagged seek must be admitted"
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.75), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 2, 2_048, 2, 128, 0),
+            RESULT_OK,
+            "fresh generation source block"
+        );
+        assert_eq!(
+            miso_engine_web_v1_render(handle, 128),
+            RESULT_OK,
+            "the seek boundary is reported by the protected stream read"
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_RENDER_REJECTED
+        );
+        let failed_metadata = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_FAILED
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_RENDER_REJECTED);
+            assert_eq!(staging.stream_metadata.capture_epoch, 2);
+            assert_eq!(
+                staging.stream_metadata.capture_epoch,
+                ready_metadata.capture_epoch + 1,
+                "the failed read must publish the native stream epoch"
+            );
+            assert_eq!(staging.stream_metadata.sequence, ready_metadata.sequence);
+            assert_eq!(staging.stream_metadata.windows, ready_metadata.windows);
+            assert_eq!(
+                staging.stream_metadata.captured_sample,
+                ready_metadata.captured_sample
+            );
+            assert_eq!(
+                staging.stream_metadata.end_sample,
+                ready_metadata.end_sample
+            );
+            assert_eq!(
+                staging.stream_metadata.analysis_epoch,
+                analyzed_metadata.analysis_epoch + 1,
+                "Failed must advance the populated analysis history epoch"
+            );
+            assert_eq!(staging.stream_metadata.history_start_sample, 0);
+            assert_eq!(
+                staging
+                    .stream_history
+                    .as_ref()
+                    .expect("reset analysis history")
+                    .history_start_sample(),
+                None,
+                "Failed must clear a populated worker history"
+            );
+            assert!(staging.stream_window.is_none());
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+
+            // The failed outcome invalidates the published lengths, but must not overwrite the
+            // last committed raw bytes. Check the backing bytes directly, including their header
+            // and snapshot token, rather than relying on the now-invalid length.
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert_eq!(&bytes[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(bytes, 0).expect("retained ready header"),
+                ready_header
+            );
+            staging.stream_metadata
+        });
+        assert_eq!(failed_metadata.status, SPECTRUM_STREAM_STATUS_FAILED);
+        assert_eq!(failed_metadata.result, RESULT_RENDER_REJECTED);
+        assert_eq!(capture_identity(), ready_identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_reports_real_queue_gap_and_recovers_queued_window() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis(),
+            RESULT_OK,
+            "seed the worker history and committed result before the overrun"
+        );
+
+        let (ready_capture, ready_result, ready_header, ready_result_header, ready_metadata) =
+            SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let capture = staging.capture.as_ref().expect("protected capture");
+                let result = staging.result.as_ref().expect("protected result");
+                let capture_header: WebSpectrumWindow =
+                    read_live_record(capture, 0).expect("ready capture header");
+                let result_header: WebSpectrumResult =
+                    read_live_record(result, 0).expect("ready result header");
+                assert!(staging.capture_len > SPECTRUM_WINDOW_HEADER_BYTES as usize);
+                assert!(staging.result_len > SPECTRUM_RESULT_HEADER_BYTES as usize);
+                assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+                assert_eq!(staging.stream_metadata.capture_epoch, 1);
+                assert_eq!(staging.stream_metadata.sequence, 0);
+                assert_eq!(staging.stream_metadata.windows, 1);
+                assert_eq!(staging.stream_metadata.analysis_epoch, 0);
+                assert_eq!(staging.stream_metadata.history_start_sample, 0);
+                assert!(capture_header.snapshot_token != 0);
+                assert_eq!(capture_header.snapshot_token, result_header.snapshot_token);
+                assert!(
+                    capture
+                        [capture_header.left_offset as usize..capture_header.right_offset as usize]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                assert!(
+                    capture[capture_header.right_offset as usize..staging.capture_len]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                (
+                    capture[..staging.capture_len].to_vec(),
+                    result[..staging.result_len].to_vec(),
+                    capture_header,
+                    result_header,
+                    staging.stream_metadata,
+                )
+            });
+        let ready_identity = capture_identity();
+        assert_ne!(ready_identity.owner, 0);
+        assert_ne!(ready_identity.observation_generation, 0);
+        assert_ne!(ready_identity.selection_epoch, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        // The first fixture leaves block 16 as the first partial post-read window. Blocks 17..48
+        // complete two windows without a read, overflowing the native one-record queue and
+        // recording one dropped capture.
+        for block in 17..=48_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected overrun source block {block}"
+            );
+            assert_eq!(
+                miso_engine_web_v1_render(handle, 128),
+                RESULT_OK,
+                "protected overrun render block {block}"
+            );
+        }
+
+        // The admitted native Gap is itself a successful FFI operation. It resets worker history
+        // and invalidates published lengths, while committed backing bytes and identity remain
+        // authoritative until a later Ready window is actually packed.
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let gap_metadata = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_GAP);
+            assert_eq!(staging.stream_metadata.result, RESULT_OK);
+            assert_eq!(staging.stream_metadata.capture_epoch, 1);
+            assert_eq!(staging.stream_metadata.dropped_captures, 1);
+            assert_eq!(staging.stream_metadata.sequence, ready_metadata.sequence);
+            assert_eq!(staging.stream_metadata.windows, ready_metadata.windows);
+            assert_eq!(
+                staging.stream_metadata.analysis_epoch,
+                ready_metadata.analysis_epoch + 1
+            );
+            assert_eq!(staging.stream_metadata.history_start_sample, 0);
+            assert!(
+                staging.stream_history.is_some(),
+                "history remains allocated"
+            );
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+            let capture = staging.capture.as_ref().expect("retained capture bytes");
+            let result = staging.result.as_ref().expect("retained result bytes");
+            assert_eq!(&capture[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(&result[..ready_result.len()], ready_result.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(capture, 0).expect("retained capture header"),
+                ready_header
+            );
+            assert_eq!(
+                read_live_record::<WebSpectrumResult>(result, 0).expect("retained result header"),
+                ready_result_header
+            );
+            staging.stream_metadata
+        });
+        assert_eq!(gap_metadata.status, SPECTRUM_STREAM_STATUS_GAP);
+        assert_eq!(gap_metadata.result, RESULT_OK);
+        assert_eq!(gap_metadata.capture_epoch, 1);
+        assert_eq!(gap_metadata.dropped_captures, 1);
+        assert_eq!(capture_identity(), ready_identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_admission().operation,
+                OBSERVATION_OPERATION_READ_SPECTRUM
+            );
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+        });
+
+        // Gap consumed the current Ordinary credit. One contiguous render boundary replenishes
+        // it while leaving the queued post-gap window available for the next admitted read.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 49 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let (recovered_header, recovered_metadata, recovered_identity) =
+            SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                let capture = staging.capture.as_ref().expect("recovered capture");
+                let header: WebSpectrumWindow =
+                    read_live_record(capture, 0).expect("recovered capture header");
+                assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+                assert_eq!(staging.stream_metadata.result, RESULT_OK);
+                assert_eq!(staging.stream_metadata.capture_epoch, 1);
+                assert_eq!(staging.stream_metadata.sequence, 1);
+                // The queued sequence-1 record was published before sequence 2 overran the
+                // one-record queue, so its own captured drop counter remains zero. The admitted
+                // Gap above reported the later native cumulative drop count of one.
+                assert_eq!(staging.stream_metadata.dropped_captures, 0);
+                assert_eq!(staging.stream_metadata.windows, 2);
+                assert_eq!(staging.stream_metadata.captured_sample, 2_048);
+                assert_eq!(staging.stream_metadata.end_sample, 4_096);
+                assert_eq!(header.snapshot_token, 2);
+                assert_eq!(header.captured_sample, 2_048);
+                assert_eq!(header.end_sample, 4_096);
+                assert_eq!(header.snapshot_token, staging.stream_metadata.windows);
+                assert_eq!(header.channels, SPECTRUM_CHANNEL_BOTH);
+                assert!(staging.capture_len > SPECTRUM_WINDOW_HEADER_BYTES as usize);
+                assert!(
+                    capture[header.left_offset as usize..header.right_offset as usize]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                assert!(
+                    capture[header.right_offset as usize..staging.capture_len]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
+                (header, staging.stream_metadata, capture_identity())
+            });
+        assert_eq!(recovered_header.snapshot_token, 2);
+        assert_eq!(recovered_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(recovered_metadata.dropped_captures, 0);
+        assert_eq!(recovered_identity.owner, ready_identity.owner);
+        assert_eq!(
+            recovered_identity.observation_generation,
+            ready_identity.observation_generation
+        );
+        assert_eq!(
+            recovered_identity.selection_epoch,
+            ready_identity.selection_epoch
+        );
+        assert_eq!(recovered_identity.snapshot_token, 2);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_reports_native_pending_states_and_retains_last_ready_capture() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+
+        // The render boundary replenishes Ordinary admission while leaving the accepted graph
+        // unapplied. The typed native read must therefore report PendingApplication.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_ne!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0,
+                "PendingApplication must carry the pending-boundary flag"
+            );
+            let status = host.observation_status();
+            assert_ne!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_eq!(status.pending_count, 1);
+        });
+
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+
+        // One applied block is still short of a complete window. A second admitted read must
+        // expose the native Pending state after the application boundary.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_READ_SPECTRUM);
+            assert_eq!(admission.result, RESULT_BACKPRESSURE);
+            assert_eq!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0,
+                "an applied Pending read is no longer boundary-pending"
+            );
+            let status = host.observation_status();
+            assert_eq!(status.accepted_generation, status.applied_generation);
+            assert_eq!(status.pending_count, 0);
+        });
+
+        for block in 2..=16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let (ready_capture, ready_header, ready_identity) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("ready header");
+            assert_eq!(
+                staging.capture_len,
+                usize::try_from(header.right_offset).unwrap()
+                    + host_core::SPECTRUM_WINDOW_FRAMES * size_of::<f32>()
+            );
+            (
+                bytes[..staging.capture_len].to_vec(),
+                header,
+                capture_identity(),
+            )
+        });
+        assert_eq!(ready_header.snapshot_token, 1);
+        assert_ne!(ready_identity.owner, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        // Replenish admission without completing another window. The admitted native Pending
+        // result changes status only; the previous raw capture/header and identity stay intact.
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_PENDING
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_BACKPRESSURE);
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert_eq!(&bytes[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(bytes, 0).expect("retained ready header"),
+                ready_header
+            );
+        });
+        assert_eq!(capture_identity(), ready_identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_writes_raw_header_bytes_in_release_safe_path() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert!(
+                bytes[..SPECTRUM_WINDOW_HEADER_BYTES as usize]
+                    .iter()
+                    .any(|byte| *byte != 0),
+                "the committed header must contain raw bytes in release builds"
+            );
+            let header: WebSpectrumWindow =
+                read_live_record(bytes, 0).expect("committed protected header");
+            assert_eq!(header.struct_size, SPECTRUM_WINDOW_HEADER_BYTES);
+            assert_eq!(header.abi_version, ABI_VERSION);
+            assert_eq!(header.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+            assert_eq!(header.channels, SPECTRUM_CHANNEL_BOTH);
+            assert_eq!(header.frames, SPECTRUM_WINDOW_FRAMES);
+            assert_eq!(header.snapshot_token, 1);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_reports_native_inactive_before_and_after_stop() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let booted = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(booted),
+            RESULT_WRONG_STATE
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_WRONG_STATE);
+            assert_eq!(host.observation_admission().reason, 0);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_INACTIVE
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        dispose(booted);
+
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let stopped = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(stopped, 0.0),
+            RESULT_OK
+        );
+        render_one_block(stopped);
+        assert_eq!(miso_engine_web_v1_observation_application_take(stopped), 1);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(stopped), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(stopped),
+            RESULT_WRONG_STATE
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_WRONG_STATE);
+            assert_eq!(host.observation_admission().reason, 0);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_INACTIVE
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_WRONG_STATE);
+        });
+        dispose(stopped);
+    }
+
+    #[test]
+    fn protected_stream_read_capacity_refusal_keeps_queue_and_committed_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+        let required = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + 2 * SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(required - 1);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(
+                host.observation_admission().operation,
+                OBSERVATION_OPERATION_READ_SPECTRUM
+            );
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+            assert_eq!(host.observation_admission().reason, 3);
+        });
+
+        // The capacity refusal spends only the Ordinary ingress attempt. A successful render
+        // replenishes that credit; the exact-fit retry must still consume the queued sequence 0.
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .resize(required, 0);
+        });
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let header: WebSpectrumWindow = SPECTRUM_STAGING
+            .with(|slot| read_live_record(slot.borrow().capture.as_ref().unwrap(), 0).unwrap());
+        assert_eq!(header.snapshot_token, 1);
+        assert_eq!(header.captured_sample, 0);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_borrow_conflicts_preserve_complete_committed_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_read(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_staged_markers(&markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_read(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_staged_markers(&markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_zero_unrelated_and_disposed_handles_preserve_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        let unrelated = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(unrelated),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+
+        // Disposal clears the shared stream staging, so recreate a live protected owner and use
+        // the old handle as the disposed-handle refusal target.
+        dispose(handle);
+        let replacement = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(replacement, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(replacement);
+        let replacement_markers = stage_markers();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&replacement_markers);
+        dispose(replacement);
+    }
+
+    #[test]
+    fn protected_stream_read_header_short_capacity_refusal_preserves_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let header_bytes = usize::try_from(SPECTRUM_WINDOW_HEADER_BYTES).unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(header_bytes - 1);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+            assert_eq!(host.observation_admission().reason, 3);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_left_plane_only_capacity_refusal_preserves_complete_markers() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let left_only = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(left_only);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+            assert_eq!(host.observation_admission().reason, 3);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_read_borrow_and_spent_credit_refusals_keep_queued_window() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        SPECTRUM_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_read(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        // Unsupported ordinary selection work spends the same ingress credit. The queued native
+        // window remains available for the next admitted read after a successful render boundary.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_select(handle, 0, 0, 0),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+        let header: WebSpectrumWindow = SPECTRUM_STAGING
+            .with(|slot| read_live_record(slot.borrow().capture.as_ref().unwrap(), 0).unwrap());
+        assert_eq!(header.snapshot_token, 1);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_start_refusals_spend_ordinary_credit_without_publication_or_staging_mutation() {
+        let handle = boot_protected();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.pending_count, 0);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "invalid smoothing spends the ordinary attempt"
+            );
+            assert_eq!(host.observation_admission().operation, 4);
+            assert_eq!(host.observation_admission().result, RESULT_INVALID_ARGUMENT);
+        });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_BACKPRESSURE,
+            "a valid retry cannot publish after the invalid smoothing attempt"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_start_history_exhaustion_refuses_before_native_publication() {
+        let handle = boot_protected();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut().stream_history_exhausted_for_test = true;
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.pending_count, 0);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "history exhaustion spends the ordinary attempt"
+            );
+            assert_eq!(host.observation_admission().operation, 4);
+            assert_eq!(host.observation_admission().result, RESULT_REFUSED_BUDGET);
+        });
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_BACKPRESSURE,
+            "a valid retry cannot publish after history exhaustion"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stream_dispatch_refusals_preserve_markers_for_host_borrow_and_invalid_handles() {
+        let handle = boot_protected();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        let invalid_handle = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(invalid_handle, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(0, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn legacy_stream_dispatch_refusals_preserve_markers_for_both_host_borrow_kinds() {
+        let handle = boot_legacy();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+                RESULT_INTERNAL
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_stop(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        let invalid_handle = handle.wrapping_add(1).max(1);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(invalid_handle, 12.5),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(invalid_handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_start_publishes_one_pending_receipt_and_commits_configuration() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 12.5),
+            RESULT_OK
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = host.observation_admission();
+            assert_ne!(status.accepted_generation, 0);
+            assert_eq!(status.pending_count, 1);
+            assert_eq!(admission.operation, 4);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_ne!(admission.flags & crate::OBSERVATION_ADMISSION_RECEIPT, 0);
+            assert_ne!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0
+            );
+            assert_eq!(admission.receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(staging.stream_active);
+            assert_eq!(staging.stream_smoothing.unwrap().smoothing_ms(), 12.5);
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_WARMING
+            );
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+        });
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stop_preserves_refused_output_then_reuses_authoritative_pending_receipt() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_one_block(handle);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+
+        // A new ordinary attempt is refused, but removal credit remains independent.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
+        let first_receipt = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.side_records.pending_count, 1);
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+            assert_eq!(
+                host.observation_admission().receipt.state,
+                OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            host.observation_admission().receipt
+        });
+        assert_eq!(SPECTRUM_STAGING.with(|slot| slot.borrow().capture_len), 0);
+        assert_eq!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len), 0);
+        assert_eq!(capture_identity(), identity);
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                &staging.capture.as_ref().expect("capture bytes")[..markers.capture.len()],
+                markers.capture.as_slice()
+            );
+            assert_eq!(
+                &staging.result.as_ref().expect("result bytes")[..markers.result.len()],
+                markers.result.as_slice()
+            );
+        });
+
+        // Spend removal credit through an unrelated protected refusal. The valid repeated stop
+        // must return the original native Pending identity without another native call/permit.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+            assert_eq!(host.observation_admission().receipt, first_receipt);
+            assert_eq!(host.side_records.pending_count, 1);
+        });
+        assert_eq!(capture_identity(), identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_removal_stop_remains_admissible_after_spent_ordinary_read_credit() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        let markers = stage_markers();
+        let required = usize::try_from(
+            SPECTRUM_WINDOW_HEADER_BYTES + 2 * SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32,
+        )
+        .unwrap();
+        SPECTRUM_STAGING.with(|slot| {
+            slot.borrow_mut()
+                .capture
+                .as_mut()
+                .expect("capture staging")
+                .truncate(required - 1);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_REFUSED_BUDGET
+        );
+        assert_markers(&markers);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(handle),
+            RESULT_OK,
+            "Removal must remain available after an Ordinary read refusal"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected host").host;
+            assert_eq!(
+                host.observation_admission().operation,
+                OBSERVATION_OPERATION_STOP
+            );
+            assert_eq!(host.observation_admission().result, RESULT_OK);
+            assert_eq!(
+                host.observation_admission().receipt.state,
+                OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(host.side_records.pending_count, 1);
+        });
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert!(!staging.stream_active);
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_STOPPED
+            );
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+        });
+        assert_eq!(capture_identity(), markers.capture_identity);
+        dispose(handle);
+    }
+
+    #[test]
+    fn protected_stop_refusal_preserves_all_committed_output_markers() {
+        let handle = boot_protected();
+        let markers = stage_markers();
+        let identity = stage_capture_identity();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_UNSUPPORTED
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.side_records.pending_count, 0);
+        });
+        dispose(handle);
+    }
+}
+
+#[cfg(test)]
+mod observation_checkpoint_b2_tests {
+    use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
+    use crate::{
+        OBSERVATION_RECEIPT_STATE_APPLIED, OBSERVATION_RECEIPT_STATE_CLOSED, STATE_FAILED,
+    };
+    use builtins::Matrix2x2;
+    use builtins_compiler::TrackControlRecord;
+
+    fn boot_protected() -> u32 {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.console_command_queue_records = 4;
+        });
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "protected fixture must boot");
+        handle
+    }
+
+    fn owner(handle: u32) -> u64 {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        })
+    }
+
+    fn stage_stop(handle: u32) {
+        let owner = owner(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation: OBSERVATION_OPERATION_STOP_GRAPH,
+                count: 0,
+                owner,
+                reserved: [0; 2],
+            };
+        });
+    }
+
+    fn inject_nan_matrix(handle: u32) {
+        LIVE_HOST.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let live = slot
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host");
+            live.host.ready.as_mut().expect("ready ownership").controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: f32::NAN,
+                        ..Matrix2x2::IDENTITY
+                    },
+                    smoothing_samples: 0,
+                })
+                .expect("documented private malformed matrix fixture");
+        });
+    }
+
+    fn render_protected_spectrum_window(handle: u32) {
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, 128, 0),
+            RESULT_OK,
+            "protected source block 0"
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle),
+            1,
+            "the first real render must apply the protected start receipt"
+        );
+        for block in 1..=16_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        let read_result = miso_engine_web_v1_spectrum_stream_read(handle);
+        if read_result != RESULT_OK {
+            let (status, admission) = LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let host = &live.as_ref().expect("protected live host").host;
+                (host.observation_status(), *host.observation_admission())
+            });
+            panic!(
+                "the protected read fixture must publish one real window: result={read_result}, status={status:?}, admission={admission:?}"
+            );
+        }
+        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(metadata.capture_epoch, 1);
+        assert_eq!(metadata.sequence, 0);
+        assert_eq!(
+            metadata.end_sample - metadata.captured_sample,
+            2_048,
+            "protected read fixture must contain one complete window"
+        );
+    }
+
+    #[test]
+    fn application_take_transfers_real_same_boundary_rows_once() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_observation_application_bytes() as usize,
+            size_of::<WebObservationReceipt>()
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_capacity(), 4);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        stage_stop(handle);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        inject_nan_matrix(handle);
+        assert_eq!(
+            miso_engine_web_v1_render(handle, 128),
+            RESULT_RENDER_REJECTED
+        );
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            live.as_mut()
+                .expect("live host")
+                .host
+                .reconcile_observation_applications();
+        });
+        let expected_rows = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("live host").host;
+            assert_eq!(host.side_records.pending_count, 0);
+            let rows: Vec<_> = host
+                .side_records
+                .receipts
+                .iter()
+                .copied()
+                .filter(|row| row.state == OBSERVATION_RECEIPT_STATE_APPLIED)
+                .collect();
+            assert_eq!(rows.len(), 2);
+            rows
+        });
+
+        // Once the first real render has completed, all rows are Applied and their identities
+        // belong to the native side-records. Invalid handles and both staging-owner borrow
+        // refusals must leave those completed rows untouched for a later valid take.
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("live host").host;
+            assert_eq!(host.side_records.pending_count, 0);
+            assert_eq!(
+                host.side_records
+                    .receipts
+                    .iter()
+                    .copied()
+                    .filter(|row| row.state == OBSERVATION_RECEIPT_STATE_APPLIED)
+                    .collect::<Vec<_>>(),
+                expected_rows,
+                "refused takes must preserve completed identities"
+            );
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle),
+            2,
+            "start and stop must be applied before the same failing render returns"
+        );
+        let rows = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 2);
+            [
+                staging.endpoint.applications[0],
+                staging.endpoint.applications[1],
+            ]
+        });
+        assert_eq!(rows.as_slice(), expected_rows.as_slice());
+        assert!(rows.iter().all(|row| {
+            row.state == OBSERVATION_RECEIPT_STATE_APPLIED && row.application_sample == 0
+        }));
+        assert_eq!(
+            LIVE_HOST.with(|slot| slot.borrow().as_ref().unwrap().host.status().state),
+            STATE_FAILED
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn never_rendered_pending_row_is_closed_and_terminal_take_is_one_shot() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        let row = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(row.state, OBSERVATION_RECEIPT_STATE_CLOSED);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        let retained = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]);
+        assert_eq!(
+            retained, row,
+            "a repeated terminal take must not clear rows"
+        );
+    }
+
+    #[test]
+    fn application_take_borrow_and_invalid_handle_refusals_do_not_consume_pending_rows() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(handle.wrapping_add(1)),
+            0
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        });
+        let pending = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("live host retained")
+                .host
+                .side_records
+                .pending_count
+        });
+        assert_eq!(pending, 1);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+    }
+
+    #[test]
+    fn public_protected_lifecycle_publishes_spectrum_then_response_identity() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+
+        let (pending_status, pending_receipt) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, 4);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_eq!(
+                admission.receipt.state,
+                crate::OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(status.pending_count, 1);
+            assert_ne!(status.owner, 0);
+            assert_eq!(admission.receipt.owner, status.owner);
+            assert_ne!(admission.receipt.sequence, 0);
+            assert_eq!(admission.receipt.sequence, status.accepted_generation);
+            assert_eq!(admission.receipt.application_sample, 0);
+            (status, admission.receipt)
+        });
+
+        render_protected_spectrum_window(handle);
+
+        let applied = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(applied.state, OBSERVATION_RECEIPT_STATE_APPLIED);
+        assert_eq!(applied.result, RESULT_OK);
+        assert_eq!(applied.owner, pending_receipt.owner);
+        assert_eq!(applied.sequence, pending_receipt.sequence);
+        assert_eq!(applied.application_sample, 0);
+
+        let applied_status = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.owner, pending_status.owner);
+            assert_eq!(status.pending_count, 0);
+            assert_eq!(status.accepted_generation, pending_receipt.sequence);
+            assert_eq!(status.applied_generation, pending_receipt.sequence);
+            assert_ne!(status.selection_epoch, 0);
+            let output = host.output_pcm().expect("protected output");
+            assert_eq!(output.len() % 2, 0);
+            let midpoint = output.len() / 2;
+            assert!(output[..midpoint].iter().any(|value| *value != 0.0));
+            assert!(output[midpoint..].iter().any(|value| *value != 0.0));
+            status
+        });
+
+        let (spectrum_header, left, right) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging
+                .capture
+                .as_ref()
+                .expect("protected spectrum capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("spectrum header");
+            let mut left = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let mut right = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            spectrum_f32_plane(bytes, header.left_offset, header.frames, &mut left)
+                .expect("spectrum left plane");
+            spectrum_f32_plane(bytes, header.right_offset, header.frames, &mut right)
+                .expect("spectrum right plane");
+            (header, left, right)
+        });
+        assert_eq!(spectrum_header.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+        assert_eq!(spectrum_header.channels, SPECTRUM_CHANNEL_BOTH);
+        assert_eq!(spectrum_header.snapshot_token, 1);
+        assert!(left.iter().any(|value| *value != 0.0));
+        assert!(right.iter().any(|value| *value != 0.0));
+
+        let spectrum_identity = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(identity.kind, 2);
+            assert_eq!(identity.flags, 1);
+            assert_eq!(identity.owner, applied_status.owner);
+            assert_eq!(
+                identity.observation_generation,
+                applied_status.applied_generation
+            );
+            assert_eq!(identity.selection_epoch, applied_status.selection_epoch);
+            assert_eq!(identity.snapshot_token, spectrum_header.snapshot_token);
+            identity
+        });
+
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the admitted spectrum read spends this boundary's Ordinary credit"
+            );
+        });
+        assert_eq!(
+            test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 1, 17 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_ne!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "a render boundary must replenish Ordinary credit"
+            );
+        });
+
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..3].copy_from_slice(b"eq0");
+            staging.live_token = 0;
+            staging.live_result_len = 0;
+            *staging.live_request = WebLiveResponseRequest {
+                struct_size: LIVE_RESPONSE_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                track_id_bytes: 3,
+                grid: crate::RESPONSE_GRID_LINEAR,
+                channels: crate::RESPONSE_CHANNEL_BOTH,
+                points: 5,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+                maximum_result_bytes: 65_536,
+                reserved: [0; 3],
+            };
+        });
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+
+        let response_header = RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let header: WebLiveResponseResult =
+                read_live_record(bytes, 0).expect("response header");
+            assert_eq!(header.result, RESULT_OK);
+            assert_eq!(header.snapshot_token, 1);
+            assert!(header.owner_count > 0);
+            assert!(header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
+            assert_eq!(staging.live_result_len, header.result_bytes as usize);
+            assert!(bytes.iter().any(|byte| *byte != 0));
+            let owner_offset = header.owners_offset;
+            let owner: WebLiveResponseOwner =
+                read_live_record(bytes, owner_offset).expect("response owner");
+            let track_id = live_payload_bytes(bytes, owner.track_id_offset, owner.track_id_bytes)
+                .expect("response owner track ID");
+            assert_eq!(track_id, b"eq0");
+            header
+        });
+        let response_identity = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(identity.kind, 1);
+            assert_eq!(identity.flags, 0);
+            assert_eq!(identity.owner, spectrum_identity.owner);
+            assert_eq!(identity.observation_generation, 0);
+            assert_eq!(identity.selection_epoch, 0);
+            assert_eq!(identity.snapshot_token, response_header.snapshot_token);
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the response capture spends the replenished Ordinary credit"
+            );
+            assert_ne!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                0,
+                "the reserved removal credit remains available for stop"
+            );
+            identity
+        });
+        assert_eq!(response_identity.owner, applied_status.owner);
+        assert_eq!(response_identity.snapshot_token, 1);
+
+        let retired_handle = handle;
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(retired_handle),
+            RESULT_OK
+        );
+        let (stop_status, stop_admission, stop_receipt) = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_STOP);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_ne!(admission.flags & crate::OBSERVATION_ADMISSION_RECEIPT, 0);
+            assert_ne!(
+                admission.flags & crate::OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+                0
+            );
+            assert_eq!(
+                admission.receipt.state,
+                crate::OBSERVATION_RECEIPT_STATE_PENDING
+            );
+            assert_eq!(admission.receipt.owner, response_identity.owner);
+            assert_eq!(status.owner, response_identity.owner);
+            assert_eq!(status.pending_count, 1);
+            assert_eq!(host.side_records.pending_count, 1);
+            (status, admission, admission.receipt)
+        });
+
+        // A repeated stop is the pending identity shortcut: it must not publish another native
+        // removal or replace the authoritative Pending receipt.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_stop(retired_handle),
+            RESULT_OK
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status(), stop_status);
+            assert_eq!(*host.observation_admission(), stop_admission);
+            assert_eq!(host.side_records.pending_count, 1);
+        });
+
+        assert_eq!(
+            test_copy_staging(retired_handle, BUFFER_SOURCE_ID, b"fixture-source"),
+            RESULT_OK
+        );
+        assert_eq!(test_fill_source_pcm(retired_handle, 0.25), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(retired_handle, 14, 1, 18 * 128, 2, 128, 0),
+            RESULT_OK
+        );
+        assert_eq!(miso_engine_web_v1_render(retired_handle, 128), RESULT_OK);
+
+        let (native_terminal_status, native_terminal_admission, native_response_identity) =
+            LIVE_HOST.with(|slot| {
+                let live = slot.borrow();
+                let host = &live.as_ref().expect("protected live host").host;
+                let status = host.observation_status();
+                assert_eq!(status.owner, response_identity.owner);
+                assert_eq!(status.accepted_generation, 0);
+                assert_eq!(status.applied_generation, applied_status.applied_generation);
+                assert_eq!(status.selection_epoch, applied_status.selection_epoch);
+                assert_eq!(status.pending_count, 1);
+                assert_eq!(host.side_records.pending_count, 1);
+                (
+                    status,
+                    *host.observation_admission(),
+                    *host.observation_capture_identity(),
+                )
+            });
+        assert_eq!(native_terminal_admission, stop_admission);
+        assert_eq!(native_response_identity, response_identity);
+        assert_eq!(miso_engine_web_v1_dispose(retired_handle), RESULT_OK);
+        no_live_host();
+
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let status = staging.endpoint.status;
+            assert_eq!(status.profile, native_terminal_status.profile);
+            assert_eq!(status.owner, native_terminal_status.owner);
+            assert_eq!(status.ingress_epoch, native_terminal_status.ingress_epoch);
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_eq!(status.selection_epoch, stop_status.selection_epoch);
+            assert_ne!(status.selection_epoch, 0);
+            assert_eq!(status.pending_count, 0);
+            assert_ne!(status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+            assert_eq!(
+                status.flags
+                    & (crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                        | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+                0
+            );
+            assert_eq!(staging.endpoint.admission, native_terminal_admission);
+            assert_eq!(staging.endpoint.capture_identity, native_response_identity);
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(retired_handle),
+            1
+        );
+        let stop_application = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.application_count, 1);
+            staging.endpoint.applications[0]
+        });
+        assert_eq!(stop_application.state, OBSERVATION_RECEIPT_STATE_APPLIED);
+        assert_eq!(stop_application.result, RESULT_OK);
+        assert_eq!(stop_application.domain, stop_receipt.domain);
+        assert_eq!(stop_application.owner, stop_receipt.owner);
+        assert_eq!(stop_application.sequence, stop_receipt.sequence);
+        assert_eq!(stop_application.application_sample, 18 * 128);
+        assert_eq!(
+            miso_engine_web_v1_observation_application_take(retired_handle),
+            0
+        );
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+    }
+
+    #[test]
+    fn dispose_borrow_refusal_preserves_live_owner_and_failed_replacement_preserves_handoff() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_INVALID_ARGUMENT);
+        });
+        assert!(LIVE_HOST.with(|slot| slot.borrow().is_some()));
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        let terminal_row = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.handle, handle);
+            assert_eq!(staging.endpoint.application_count, 1);
+            assert!(staging.endpoint.terminal_application_pending);
+            staging.endpoint.applications[0]
+        });
+
+        test_stage_document(b"not-json");
+        assert_eq!(miso_engine_web_v1_boot(8), 0);
+        // A failed replacement boot cannot reset the sole retained terminal handoff. The
+        // original row remains unconsumed, with its complete owner/sequence/result identity.
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.endpoint.handle, handle);
+            assert_eq!(staging.endpoint.application_count, 1);
+            assert!(staging.endpoint.terminal_application_pending);
+            assert_eq!(staging.endpoint.applications[0], terminal_row);
+        });
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]),
+            terminal_row
+        );
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.applications[0]),
+            terminal_row,
+            "a repeated terminal take must retain the original row bytes"
+        );
+
+        let replacement = boot_protected();
+        assert_ne!(replacement, 0);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 0);
+        assert_eq!(
+            OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.application_count),
+            0
+        );
+        assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
+    }
+
+    #[test]
+    fn terminal_drop_retains_actual_status_admission_and_spectrum_identity() {
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_spectrum_window(handle);
+
+        let live_capture = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let identity = *host.observation_capture_identity();
+            assert_eq!(
+                identity.kind, 2,
+                "protected read must publish spectrum identity"
+            );
+            assert_eq!(identity.flags, 1);
+            assert_ne!(identity.owner, 0);
+            assert_ne!(identity.observation_generation, 0);
+            assert_ne!(identity.selection_epoch, 0);
+            assert_ne!(identity.snapshot_token, 0);
+            identity
+        });
+
+        stage_stop(handle);
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_OK
+        );
+        let live_admission = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let admission = *host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+            assert_eq!(admission.result, RESULT_OK);
+            assert_ne!(admission.receipt.owner, 0);
+            assert_ne!(admission.receipt.sequence, 0);
+            admission
+        });
+
+        // Apply the reserved removal at a real render boundary and consume both completed rows so
+        // terminal disposal has no hidden application work. The final status still comes from the
+        // actual native generations and selection epoch.
+        assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_observation_application_take(handle), 1);
+
+        let live_status = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert_ne!(status.owner, 0);
+            // The completed StopGraph removes the accepted spectrum. The zero generations here
+            // are the native terminal selection, while the successful capture identity above
+            // retains the nonzero generation that produced the window.
+            assert_eq!(status.accepted_generation, 0);
+            assert_eq!(status.applied_generation, 0);
+            assert_ne!(status.selection_epoch, 0);
+            assert_eq!(status.pending_count, 0);
+            status
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+
+        // Read the actual retained TLS handoff directly. No native pointer is converted through
+        // the truncated u32 ABI address in this assertion.
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let status = staging.endpoint.status;
+            assert_eq!(status.profile, live_status.profile);
+            assert_eq!(status.owner, live_status.owner);
+            assert_eq!(status.ingress_epoch, live_status.ingress_epoch);
+            assert_eq!(status.accepted_generation, live_status.accepted_generation);
+            assert_eq!(status.applied_generation, live_status.applied_generation);
+            assert_eq!(status.selection_epoch, live_status.selection_epoch);
+            assert_eq!(status.pending_count, 0);
+            assert_ne!(status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+            assert_eq!(
+                status.flags
+                    & (crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                        | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+                0
+            );
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_RENDER_FAILED,
+                0
+            );
+            assert_eq!(staging.endpoint.admission, live_admission);
+            assert_eq!(staging.endpoint.capture_identity, live_capture);
+            assert_eq!(staging.endpoint.capture_identity.kind, 2);
+            assert_eq!(staging.endpoint.capture_identity.owner, status.owner);
+            assert_ne!(staging.endpoint.capture_identity.observation_generation, 0);
+            assert_ne!(staging.endpoint.capture_identity.selection_epoch, 0);
+            assert_ne!(staging.endpoint.capture_identity.snapshot_token, 0);
+        });
+    }
+
+    #[test]
+    fn legacy_boot_fails_before_publication_when_endpoint_staging_is_borrowed() {
+        no_live_host();
+        let document = protected_document();
+        test_stage_document(document);
+        OBSERVATION_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(miso_engine_web_v1_boot(document.len() as u32), 0);
+        });
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_INTERNAL);
+        no_live_host();
     }
 }

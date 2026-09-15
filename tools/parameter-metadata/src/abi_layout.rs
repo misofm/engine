@@ -47,7 +47,7 @@
 //! inputs to that rule, not a rate-specific answer. Both are transcribed, so the SDK derives the
 //! ring from the shape the boot itself reported instead of holding a private copy of `100`.
 
-use core::mem::offset_of;
+use core::mem::{offset_of, size_of};
 
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
@@ -65,21 +65,43 @@ use host_web::{
     LIVE_RESPONSE_MAXIMUM_SECTIONS, LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
     LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES, LIVE_RESPONSE_REQUEST_BYTES,
     LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES, MAXIMUM_COMMAND_RECORDS,
-    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH,
-    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
-    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH,
-    RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL,
-    RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
-    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
-    RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT,
-    RESPONSE_TARGET_INPUT_FILTERS, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
-    RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES,
-    SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
-    SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
+    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES,
+    OBSERVATION_ADMISSION_MAXIMUM, OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+    OBSERVATION_ADMISSION_RECEIPT, OBSERVATION_ADMISSION_REQUESTED,
+    OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION, OBSERVATION_CAPTURE_KIND_RESPONSE,
+    OBSERVATION_CAPTURE_KIND_SPECTRUM, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
+    OBSERVATION_CHANNEL_RIGHT, OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+    OBSERVATION_OPERATION_COLLECTION_SELECTION, OBSERVATION_OPERATION_METER_LEASE,
+    OBSERVATION_OPERATION_METER_READ, OBSERVATION_OPERATION_ONE_SHOT,
+    OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH, OBSERVATION_OPERATION_READ_SPECTRUM,
+    OBSERVATION_OPERATION_REMOVE_METERS_TO, OBSERVATION_OPERATION_REPLACE_METERS,
+    OBSERVATION_OPERATION_RESIDENT_READ, OBSERVATION_OPERATION_RESTART_SPECTRUM,
+    OBSERVATION_OPERATION_START_SPECTRUM, OBSERVATION_OPERATION_STOP_GRAPH,
+    OBSERVATION_OPERATION_STOP_SPECTRUM, OBSERVATION_PROFILE_EQ_SPECTRUM,
+    OBSERVATION_PROFILE_LEGACY_UNPROTECTED, OBSERVATION_RECEIPT_DOMAIN_GRAPH,
+    OBSERVATION_RECEIPT_DOMAIN_RESIDENT, OBSERVATION_RECEIPT_STATE_APPLIED,
+    OBSERVATION_RECEIPT_STATE_CLOSED, OBSERVATION_RECEIPT_STATE_FAILED,
+    OBSERVATION_RECEIPT_STATE_PENDING, OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW,
+    OBSERVATION_REFUSAL_REASON_BACKPRESSURE, OBSERVATION_REFUSAL_REASON_CAPACITY,
+    OBSERVATION_REFUSAL_REASON_CLOSED, OBSERVATION_REFUSAL_REASON_CONFLICT,
+    OBSERVATION_REFUSAL_REASON_INVALID_REQUEST, OBSERVATION_REFUSAL_REASON_NONE,
+    OBSERVATION_REFUSAL_REASON_NOT_PREPARED, OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED,
+    OBSERVATION_REFUSAL_REASON_WORK_BUDGET, OBSERVATION_REFUSAL_REASON_WRONG_OWNER,
+    OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE, OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+    OBSERVATION_STATUS_FLAG_RENDER_FAILED, OBSERVATION_STATUS_FLAG_TERMINAL,
+    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
+    RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT,
+    RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
+    RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
+    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
+    RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT, RESPONSE_TARGET_INPUT_FILTERS,
+    RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
+    RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
+    RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
+    SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
+    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
     SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
     SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES,
     SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED,
@@ -90,11 +112,13 @@ use host_web::{
     STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig,
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebMeterHeader, WebObservationResult, WebObservationSelection,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
-    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
-    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebLiveResponseSection, WebMeterHeader, WebObservationAdmission, WebObservationCaptureIdentity,
+    WebObservationDemand, WebObservationIngressLimits, WebObservationPreparationRecord,
+    WebObservationReceipt, WebObservationResult, WebObservationSelection, WebObservationStatus,
+    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
+    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -128,12 +152,13 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 114] = [
+pub const EXPORTS: [&str; 131] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_boot_with_observation_demand",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
@@ -159,12 +184,26 @@ pub const EXPORTS: [&str; 114] = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_observation_admission_bytes",
+    "miso_engine_web_v1_observation_admission_ptr",
+    "miso_engine_web_v1_observation_application_bytes",
+    "miso_engine_web_v1_observation_application_capacity",
+    "miso_engine_web_v1_observation_application_ptr",
+    "miso_engine_web_v1_observation_application_take",
+    "miso_engine_web_v1_observation_capture_identity_bytes",
+    "miso_engine_web_v1_observation_capture_identity_ptr",
     "miso_engine_web_v1_observation_count",
+    "miso_engine_web_v1_observation_demand_apply",
+    "miso_engine_web_v1_observation_demand_bytes",
+    "miso_engine_web_v1_observation_demand_capacity",
+    "miso_engine_web_v1_observation_demand_ptr",
     "miso_engine_web_v1_observation_effect_index",
     "miso_engine_web_v1_observation_effect_slot_id",
     "miso_engine_web_v1_observation_id_capacity",
     "miso_engine_web_v1_observation_id_ptr",
     "miso_engine_web_v1_observation_native_effect_id",
+    "miso_engine_web_v1_observation_preparation_bytes",
+    "miso_engine_web_v1_observation_preparation_ptr",
     "miso_engine_web_v1_observation_rack",
     "miso_engine_web_v1_observation_read",
     "miso_engine_web_v1_observation_result_bytes",
@@ -172,6 +211,8 @@ pub const EXPORTS: [&str; 114] = [
     "miso_engine_web_v1_observation_selection_bytes",
     "miso_engine_web_v1_observation_selection_capacity",
     "miso_engine_web_v1_observation_selection_ptr",
+    "miso_engine_web_v1_observation_status_bytes",
+    "miso_engine_web_v1_observation_status_ptr",
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
@@ -565,6 +606,54 @@ fn observation_selection_fields() -> [Field; 8] {
     ]
 }
 
+fn observation_status_fields() -> [Field; 11] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationStatus, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationStatus, abi_version),
+            "u32",
+        ),
+        ("profile", offset_of!(WebObservationStatus, profile), "u32"),
+        ("flags", offset_of!(WebObservationStatus, flags), "u32"),
+        (
+            "pendingCount",
+            offset_of!(WebObservationStatus, pending_count),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebObservationStatus, reserved),
+            "u32",
+        ),
+        ("owner", offset_of!(WebObservationStatus, owner), "u64"),
+        (
+            "ingressEpoch",
+            offset_of!(WebObservationStatus, ingress_epoch),
+            "u64",
+        ),
+        (
+            "acceptedGeneration",
+            offset_of!(WebObservationStatus, accepted_generation),
+            "u64",
+        ),
+        (
+            "appliedGeneration",
+            offset_of!(WebObservationStatus, applied_generation),
+            "u64",
+        ),
+        (
+            "selectionEpoch",
+            offset_of!(WebObservationStatus, selection_epoch),
+            "u64",
+        ),
+    ]
+}
+
 fn observation_result_fields() -> [Field; 19] {
     [
         (
@@ -637,6 +726,756 @@ fn observation_result_fields() -> [Field; 19] {
             "reserved",
             offset_of!(WebObservationResult, reserved),
             "u32[3]",
+        ),
+    ]
+}
+
+fn observation_work_limits_fields() -> [Field; 13] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationWorkLimits, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationWorkLimits, abi_version),
+            "u32",
+        ),
+        (
+            "maximumActiveMeterChannels",
+            offset_of!(WebObservationWorkLimits, maximum_active_meter_channels),
+            "u64",
+        ),
+        (
+            "maximumMeterSamplesPerBlock",
+            offset_of!(WebObservationWorkLimits, maximum_meter_samples_per_block),
+            "u64",
+        ),
+        (
+            "maximumMeterPublicationsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_meter_publications_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumMeterPublicationBytesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_meter_publication_bytes_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumActiveSpectrumCaptures",
+            offset_of!(WebObservationWorkLimits, maximum_active_spectrum_captures),
+            "u64",
+        ),
+        (
+            "maximumCaptureInputSamplesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_input_samples_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCaptureCopySamplesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_copy_samples_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCapturePublicationsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_publications_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCaptureBytesPerSecond",
+            offset_of!(WebObservationWorkLimits, maximum_capture_bytes_per_second),
+            "u64",
+        ),
+        (
+            "maximumTransitionEntryVisitsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_transition_entry_visits_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumRetainedBytes",
+            offset_of!(WebObservationWorkLimits, maximum_retained_bytes),
+            "u64",
+        ),
+    ]
+}
+
+fn observation_ingress_limits_fields() -> [Field; 15] {
+    let removal_end =
+        offset_of!(WebObservationIngressLimits, removal_operations_per_boundary) + size_of::<u32>();
+    let admission_start = offset_of!(WebObservationIngressLimits, maximum_admission_entry_visits);
+    let alignment_padding_bytes = admission_start - removal_end;
+    assert_eq!(
+        alignment_padding_bytes, 4,
+        "the ingress record's alignment gap must be four bytes"
+    );
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationIngressLimits, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationIngressLimits, abi_version),
+            "u32",
+        ),
+        (
+            "maximumControlBytes",
+            offset_of!(WebObservationIngressLimits, maximum_control_bytes),
+            "u32",
+        ),
+        (
+            "maximumObservationRows",
+            offset_of!(WebObservationIngressLimits, maximum_observation_rows),
+            "u32",
+        ),
+        (
+            "maximumResultBytes",
+            offset_of!(WebObservationIngressLimits, maximum_result_bytes),
+            "u32",
+        ),
+        (
+            "ordinaryOperationsPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                ordinary_operations_per_boundary
+            ),
+            "u32",
+        ),
+        (
+            "removalOperationsPerBoundary",
+            offset_of!(WebObservationIngressLimits, removal_operations_per_boundary),
+            "u32",
+        ),
+        ("alignmentPadding", removal_end, "u8[4]"),
+        ("maximumAdmissionEntryVisits", admission_start, "u64"),
+        (
+            "maximumResponseBindingVisits",
+            offset_of!(WebObservationIngressLimits, maximum_response_binding_visits),
+            "u64",
+        ),
+        (
+            "maximumResponseSectionVisits",
+            offset_of!(WebObservationIngressLimits, maximum_response_section_visits),
+            "u64",
+        ),
+        (
+            "maximumResponseCopyBytes",
+            offset_of!(WebObservationIngressLimits, maximum_response_copy_bytes),
+            "u64",
+        ),
+        (
+            "maximumHandlerCopyBytesPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                maximum_handler_copy_bytes_per_boundary
+            ),
+            "u64",
+        ),
+        (
+            "maximumCleanupEntryVisitsPerBoundary",
+            offset_of!(
+                WebObservationIngressLimits,
+                maximum_cleanup_entry_visits_per_boundary
+            ),
+            "u64",
+        ),
+        (
+            "maximumRetainedBytes",
+            offset_of!(WebObservationIngressLimits, maximum_retained_bytes),
+            "u64",
+        ),
+    ]
+}
+
+const OBSERVATION_PREPARATION_WORK_LIMIT_NAMES: [&str; 13] = [
+    "workLimits.structSize",
+    "workLimits.abiVersion",
+    "workLimits.maximumActiveMeterChannels",
+    "workLimits.maximumMeterSamplesPerBlock",
+    "workLimits.maximumMeterPublicationsPerBlock",
+    "workLimits.maximumMeterPublicationBytesPerBlock",
+    "workLimits.maximumActiveSpectrumCaptures",
+    "workLimits.maximumCaptureInputSamplesPerBlock",
+    "workLimits.maximumCaptureCopySamplesPerBlock",
+    "workLimits.maximumCapturePublicationsPerBlock",
+    "workLimits.maximumCaptureBytesPerSecond",
+    "workLimits.maximumTransitionEntryVisitsPerBlock",
+    "workLimits.maximumRetainedBytes",
+];
+
+const OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES: [&str; 15] = [
+    "ingressLimits.structSize",
+    "ingressLimits.abiVersion",
+    "ingressLimits.maximumControlBytes",
+    "ingressLimits.maximumObservationRows",
+    "ingressLimits.maximumResultBytes",
+    "ingressLimits.ordinaryOperationsPerBoundary",
+    "ingressLimits.removalOperationsPerBoundary",
+    "ingressLimits.alignmentPadding",
+    "ingressLimits.maximumAdmissionEntryVisits",
+    "ingressLimits.maximumResponseBindingVisits",
+    "ingressLimits.maximumResponseSectionVisits",
+    "ingressLimits.maximumResponseCopyBytes",
+    "ingressLimits.maximumHandlerCopyBytesPerBoundary",
+    "ingressLimits.maximumCleanupEntryVisitsPerBoundary",
+    "ingressLimits.maximumRetainedBytes",
+];
+
+const OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES: [&str; 8] = [
+    "spectrumRequest.structSize",
+    "spectrumRequest.abiVersion",
+    "spectrumRequest.target",
+    "spectrumRequest.channels",
+    "spectrumRequest.targetIdBytes",
+    "spectrumRequest.reserved0",
+    "spectrumRequest.maximumCaptureBytes",
+    "spectrumRequest.reserved",
+];
+
+fn observation_preparation_fields() -> [Field; 46] {
+    let work_limits = observation_work_limits_fields();
+    let ingress_limits = observation_ingress_limits_fields();
+    let spectrum_request = spectrum_request_fields();
+
+    let work_limits_offset = offset_of!(WebObservationPreparationRecord, work_limits);
+    let ingress_limits_offset = offset_of!(WebObservationPreparationRecord, ingress_limits);
+    let spectrum_request_offset = offset_of!(WebObservationPreparationRecord, spectrum_request);
+    let target_id_offset = offset_of!(WebObservationPreparationRecord, target_id);
+
+    assert_eq!(size_of::<WebObservationPreparationRecord>(), 392);
+    assert_eq!(
+        work_limits.len(),
+        OBSERVATION_PREPARATION_WORK_LIMIT_NAMES.len()
+    );
+    assert_eq!(
+        ingress_limits.len(),
+        OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES.len()
+    );
+    assert_eq!(
+        spectrum_request.len(),
+        OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES.len()
+    );
+    assert_eq!(
+        offset_of!(
+            WebObservationPreparationRecord,
+            activation_maximum_retained_bytes
+        ) + size_of::<u64>(),
+        work_limits_offset
+    );
+    assert_eq!(
+        work_limits_offset + size_of::<WebObservationWorkLimits>(),
+        ingress_limits_offset
+    );
+    assert_eq!(
+        ingress_limits_offset + size_of::<WebObservationIngressLimits>(),
+        spectrum_request_offset
+    );
+    assert_eq!(
+        spectrum_request_offset + size_of::<WebSpectrumRequest>(),
+        target_id_offset
+    );
+    assert_eq!(
+        target_id_offset + 128,
+        size_of::<WebObservationPreparationRecord>()
+    );
+    assert_eq!(work_limits[0].1, 0);
+    assert_eq!(
+        work_limits[12].1 + size_of::<u64>(),
+        size_of::<WebObservationWorkLimits>()
+    );
+    assert_eq!(ingress_limits[0].1, 0);
+    assert_eq!(
+        ingress_limits[14].1 + size_of::<u64>(),
+        size_of::<WebObservationIngressLimits>()
+    );
+    assert_eq!(spectrum_request[0].1, 0);
+    assert_eq!(
+        spectrum_request[7].1 + size_of::<[u32; 2]>(),
+        size_of::<WebSpectrumRequest>()
+    );
+
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationPreparationRecord, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationPreparationRecord, abi_version),
+            "u32",
+        ),
+        (
+            "profile",
+            offset_of!(WebObservationPreparationRecord, profile),
+            "u32",
+        ),
+        (
+            "meterCount",
+            offset_of!(WebObservationPreparationRecord, meter_count),
+            "u32",
+        ),
+        (
+            "residentTaps",
+            offset_of!(WebObservationPreparationRecord, resident_taps),
+            "u32",
+        ),
+        (
+            "spectrumCount",
+            offset_of!(WebObservationPreparationRecord, spectrum_count),
+            "u32",
+        ),
+        (
+            "maximumActiveObservers",
+            offset_of!(WebObservationPreparationRecord, maximum_active_observers),
+            "u32",
+        ),
+        (
+            "reserved0",
+            offset_of!(WebObservationPreparationRecord, reserved0),
+            "u32",
+        ),
+        (
+            "activationMaximumRetainedBytes",
+            offset_of!(
+                WebObservationPreparationRecord,
+                activation_maximum_retained_bytes
+            ),
+            "u64",
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[0],
+            work_limits_offset + work_limits[0].1,
+            work_limits[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[1],
+            work_limits_offset + work_limits[1].1,
+            work_limits[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[2],
+            work_limits_offset + work_limits[2].1,
+            work_limits[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[3],
+            work_limits_offset + work_limits[3].1,
+            work_limits[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[4],
+            work_limits_offset + work_limits[4].1,
+            work_limits[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[5],
+            work_limits_offset + work_limits[5].1,
+            work_limits[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[6],
+            work_limits_offset + work_limits[6].1,
+            work_limits[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[7],
+            work_limits_offset + work_limits[7].1,
+            work_limits[7].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[8],
+            work_limits_offset + work_limits[8].1,
+            work_limits[8].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[9],
+            work_limits_offset + work_limits[9].1,
+            work_limits[9].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[10],
+            work_limits_offset + work_limits[10].1,
+            work_limits[10].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[11],
+            work_limits_offset + work_limits[11].1,
+            work_limits[11].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_WORK_LIMIT_NAMES[12],
+            work_limits_offset + work_limits[12].1,
+            work_limits[12].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[0],
+            ingress_limits_offset + ingress_limits[0].1,
+            ingress_limits[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[1],
+            ingress_limits_offset + ingress_limits[1].1,
+            ingress_limits[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[2],
+            ingress_limits_offset + ingress_limits[2].1,
+            ingress_limits[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[3],
+            ingress_limits_offset + ingress_limits[3].1,
+            ingress_limits[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[4],
+            ingress_limits_offset + ingress_limits[4].1,
+            ingress_limits[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[5],
+            ingress_limits_offset + ingress_limits[5].1,
+            ingress_limits[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[6],
+            ingress_limits_offset + ingress_limits[6].1,
+            ingress_limits[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[7],
+            ingress_limits_offset + ingress_limits[7].1,
+            ingress_limits[7].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[8],
+            ingress_limits_offset + ingress_limits[8].1,
+            ingress_limits[8].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[9],
+            ingress_limits_offset + ingress_limits[9].1,
+            ingress_limits[9].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[10],
+            ingress_limits_offset + ingress_limits[10].1,
+            ingress_limits[10].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[11],
+            ingress_limits_offset + ingress_limits[11].1,
+            ingress_limits[11].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[12],
+            ingress_limits_offset + ingress_limits[12].1,
+            ingress_limits[12].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[13],
+            ingress_limits_offset + ingress_limits[13].1,
+            ingress_limits[13].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_INGRESS_LIMIT_NAMES[14],
+            ingress_limits_offset + ingress_limits[14].1,
+            ingress_limits[14].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[0],
+            spectrum_request_offset + spectrum_request[0].1,
+            spectrum_request[0].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[1],
+            spectrum_request_offset + spectrum_request[1].1,
+            spectrum_request[1].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[2],
+            spectrum_request_offset + spectrum_request[2].1,
+            spectrum_request[2].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[3],
+            spectrum_request_offset + spectrum_request[3].1,
+            spectrum_request[3].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[4],
+            spectrum_request_offset + spectrum_request[4].1,
+            spectrum_request[4].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[5],
+            spectrum_request_offset + spectrum_request[5].1,
+            spectrum_request[5].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[6],
+            spectrum_request_offset + spectrum_request[6].1,
+            spectrum_request[6].2,
+        ),
+        (
+            OBSERVATION_PREPARATION_SPECTRUM_REQUEST_NAMES[7],
+            spectrum_request_offset + spectrum_request[7].1,
+            spectrum_request[7].2,
+        ),
+        ("targetId", target_id_offset, "u8[128]"),
+    ]
+}
+
+fn observation_demand_fields() -> [Field; 6] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationDemand, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationDemand, abi_version),
+            "u32",
+        ),
+        (
+            "operation",
+            offset_of!(WebObservationDemand, operation),
+            "u32",
+        ),
+        ("count", offset_of!(WebObservationDemand, count), "u32"),
+        ("owner", offset_of!(WebObservationDemand, owner), "u64"),
+        (
+            "reserved",
+            offset_of!(WebObservationDemand, reserved),
+            "u32[2]",
+        ),
+    ]
+}
+
+fn observation_receipt_fields() -> [Field; 9] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationReceipt, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationReceipt, abi_version),
+            "u32",
+        ),
+        ("domain", offset_of!(WebObservationReceipt, domain), "u32"),
+        ("state", offset_of!(WebObservationReceipt, state), "u32"),
+        ("owner", offset_of!(WebObservationReceipt, owner), "u64"),
+        (
+            "sequence",
+            offset_of!(WebObservationReceipt, sequence),
+            "u64",
+        ),
+        (
+            "applicationSample",
+            offset_of!(WebObservationReceipt, application_sample),
+            "u64",
+        ),
+        ("result", offset_of!(WebObservationReceipt, result), "u32"),
+        (
+            "reserved",
+            offset_of!(WebObservationReceipt, reserved),
+            "u32",
+        ),
+    ]
+}
+
+const OBSERVATION_ADMISSION_RECEIPT_NAMES: [&str; 9] = [
+    "receipt.structSize",
+    "receipt.abiVersion",
+    "receipt.domain",
+    "receipt.state",
+    "receipt.owner",
+    "receipt.sequence",
+    "receipt.applicationSample",
+    "receipt.result",
+    "receipt.reserved",
+];
+
+fn observation_admission_fields() -> [Field; 21] {
+    let receipt = observation_receipt_fields();
+    let limit_offset = offset_of!(WebObservationAdmission, limit);
+    let receipt_offset = offset_of!(WebObservationAdmission, receipt);
+
+    assert_eq!(size_of::<WebObservationAdmission>(), 232);
+    assert_eq!(receipt.len(), OBSERVATION_ADMISSION_RECEIPT_NAMES.len());
+    assert_eq!(receipt[0].1, 0);
+    assert_eq!(
+        receipt[receipt.len() - 1].1 + size_of::<u32>(),
+        size_of::<WebObservationReceipt>()
+    );
+    assert_eq!(
+        limit_offset + size_of::<[u8; 128]>(),
+        receipt_offset,
+        "the admission limit ends at the nested receipt"
+    );
+    assert_eq!(
+        receipt_offset + size_of::<WebObservationReceipt>(),
+        size_of::<WebObservationAdmission>()
+    );
+
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationAdmission, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationAdmission, abi_version),
+            "u32",
+        ),
+        ("result", offset_of!(WebObservationAdmission, result), "u32"),
+        (
+            "operation",
+            offset_of!(WebObservationAdmission, operation),
+            "u32",
+        ),
+        ("flags", offset_of!(WebObservationAdmission, flags), "u32"),
+        ("reason", offset_of!(WebObservationAdmission, reason), "u32"),
+        (
+            "limitBytes",
+            offset_of!(WebObservationAdmission, limit_bytes),
+            "u32",
+        ),
+        (
+            "reserved",
+            offset_of!(WebObservationAdmission, reserved),
+            "u32",
+        ),
+        (
+            "ingressEpoch",
+            offset_of!(WebObservationAdmission, ingress_epoch),
+            "u64",
+        ),
+        (
+            "requested",
+            offset_of!(WebObservationAdmission, requested),
+            "u64",
+        ),
+        (
+            "maximum",
+            offset_of!(WebObservationAdmission, maximum),
+            "u64",
+        ),
+        ("limit", limit_offset, "u8[128]"),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[0],
+            receipt_offset + receipt[0].1,
+            receipt[0].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[1],
+            receipt_offset + receipt[1].1,
+            receipt[1].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[2],
+            receipt_offset + receipt[2].1,
+            receipt[2].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[3],
+            receipt_offset + receipt[3].1,
+            receipt[3].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[4],
+            receipt_offset + receipt[4].1,
+            receipt[4].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[5],
+            receipt_offset + receipt[5].1,
+            receipt[5].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[6],
+            receipt_offset + receipt[6].1,
+            receipt[6].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[7],
+            receipt_offset + receipt[7].1,
+            receipt[7].2,
+        ),
+        (
+            OBSERVATION_ADMISSION_RECEIPT_NAMES[8],
+            receipt_offset + receipt[8].1,
+            receipt[8].2,
+        ),
+    ]
+}
+
+fn observation_capture_identity_fields() -> [Field; 8] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationCaptureIdentity, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationCaptureIdentity, abi_version),
+            "u32",
+        ),
+        (
+            "kind",
+            offset_of!(WebObservationCaptureIdentity, kind),
+            "u32",
+        ),
+        (
+            "flags",
+            offset_of!(WebObservationCaptureIdentity, flags),
+            "u32",
+        ),
+        (
+            "owner",
+            offset_of!(WebObservationCaptureIdentity, owner),
+            "u64",
+        ),
+        (
+            "observationGeneration",
+            offset_of!(WebObservationCaptureIdentity, observation_generation),
+            "u64",
+        ),
+        (
+            "selectionEpoch",
+            offset_of!(WebObservationCaptureIdentity, selection_epoch),
+            "u64",
+        ),
+        (
+            "snapshotToken",
+            offset_of!(WebObservationCaptureIdentity, snapshot_token),
+            "u64",
         ),
     ]
 }
@@ -1841,6 +2680,62 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
+        "observationStatus",
+        size_of::<WebObservationStatus>() as u32,
+        &observation_status_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationWorkLimits",
+        size_of::<WebObservationWorkLimits>() as u32,
+        &observation_work_limits_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationIngressLimits",
+        size_of::<WebObservationIngressLimits>() as u32,
+        &observation_ingress_limits_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationPreparation",
+        size_of::<WebObservationPreparationRecord>() as u32,
+        &observation_preparation_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationDemand",
+        size_of::<WebObservationDemand>() as u32,
+        &observation_demand_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationReceipt",
+        size_of::<WebObservationReceipt>() as u32,
+        &observation_receipt_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationAdmission",
+        size_of::<WebObservationAdmission>() as u32,
+        &observation_admission_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationCaptureIdentity",
+        size_of::<WebObservationCaptureIdentity>() as u32,
+        &observation_capture_identity_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
         "observationResult",
         OBSERVATION_RESULT_BYTES,
         &observation_result_fields(),
@@ -2008,6 +2903,120 @@ pub fn render() -> String {
     render_named_constants(&mut out, "bufferKinds", &buffers);
     render_named_constants(&mut out, "wireCommandKinds", &wire_command_kinds);
     render_named_constants(&mut out, "commandReasons", &command_reasons);
+    render_named_constants(
+        &mut out,
+        "observationProfiles",
+        &[
+            (OBSERVATION_PROFILE_LEGACY_UNPROTECTED, "legacyUnprotected"),
+            (OBSERVATION_PROFILE_EQ_SPECTRUM, "eqSpectrum"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationOperations",
+        &[
+            (OBSERVATION_OPERATION_REPLACE_METERS, "replaceMeters"),
+            (OBSERVATION_OPERATION_REMOVE_METERS_TO, "removeMetersTo"),
+            (OBSERVATION_OPERATION_STOP_GRAPH, "stopGraph"),
+            (OBSERVATION_OPERATION_START_SPECTRUM, "startSpectrum"),
+            (OBSERVATION_OPERATION_RESTART_SPECTRUM, "restartSpectrum"),
+            (OBSERVATION_OPERATION_READ_SPECTRUM, "readSpectrum"),
+            (OBSERVATION_OPERATION_STOP_SPECTRUM, "stopSpectrum"),
+            (OBSERVATION_OPERATION_CAPTURE_RESPONSE, "captureResponse"),
+            (
+                OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH,
+                "rawObservationBatch",
+            ),
+            (OBSERVATION_OPERATION_ONE_SHOT, "oneShot"),
+            (
+                OBSERVATION_OPERATION_COLLECTION_SELECTION,
+                "collectionSelection",
+            ),
+            (OBSERVATION_OPERATION_METER_LEASE, "meterLease"),
+            (OBSERVATION_OPERATION_METER_READ, "meterRead"),
+            (OBSERVATION_OPERATION_RESIDENT_READ, "residentRead"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationReceiptDomains",
+        &[
+            (OBSERVATION_RECEIPT_DOMAIN_GRAPH, "graph"),
+            (OBSERVATION_RECEIPT_DOMAIN_RESIDENT, "resident"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationReceiptStates",
+        &[
+            (OBSERVATION_RECEIPT_STATE_PENDING, "pending"),
+            (OBSERVATION_RECEIPT_STATE_APPLIED, "applied"),
+            (OBSERVATION_RECEIPT_STATE_CLOSED, "closed"),
+            (OBSERVATION_RECEIPT_STATE_FAILED, "failed"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationAdmissionFlags",
+        &[
+            (OBSERVATION_ADMISSION_RECEIPT, "receiptPresent"),
+            (OBSERVATION_ADMISSION_REQUESTED, "requestedPresent"),
+            (OBSERVATION_ADMISSION_MAXIMUM, "maximumPresent"),
+            (OBSERVATION_ADMISSION_PENDING_BOUNDARY, "pendingBoundary"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationStatusFlags",
+        &[
+            (
+                OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                "ordinaryAvailable",
+            ),
+            (
+                OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                "removalAvailable",
+            ),
+            (OBSERVATION_STATUS_FLAG_TERMINAL, "terminal"),
+            (OBSERVATION_STATUS_FLAG_RENDER_FAILED, "renderFailed"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationCaptureKinds",
+        &[
+            (OBSERVATION_CAPTURE_KIND_RESPONSE, "response"),
+            (OBSERVATION_CAPTURE_KIND_SPECTRUM, "spectrum"),
+        ],
+    );
+    render_named_constants(
+        &mut out,
+        "observationCaptureFlags",
+        &[(OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION, "graphGeneration")],
+    );
+    render_named_constants(
+        &mut out,
+        "observationRefusalReasons",
+        &[
+            (OBSERVATION_REFUSAL_REASON_NONE, "none"),
+            (OBSERVATION_REFUSAL_REASON_NOT_PREPARED, "notPrepared"),
+            (OBSERVATION_REFUSAL_REASON_WRONG_OWNER, "wrongOwner"),
+            (OBSERVATION_REFUSAL_REASON_CAPACITY, "capacity"),
+            (OBSERVATION_REFUSAL_REASON_WORK_BUDGET, "workBudget"),
+            (OBSERVATION_REFUSAL_REASON_BACKPRESSURE, "backpressure"),
+            (OBSERVATION_REFUSAL_REASON_CONFLICT, "conflict"),
+            (OBSERVATION_REFUSAL_REASON_CLOSED, "closed"),
+            (OBSERVATION_REFUSAL_REASON_INVALID_REQUEST, "invalidRequest"),
+            (
+                OBSERVATION_REFUSAL_REASON_ARITHMETIC_OVERFLOW,
+                "arithmeticOverflow",
+            ),
+            (
+                OBSERVATION_REFUSAL_REASON_REVISION_EXHAUSTED,
+                "revisionExhausted",
+            ),
+        ],
+    );
     render_named_constants(
         &mut out,
         "observationChannels",

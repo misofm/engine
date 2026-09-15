@@ -1,6 +1,7 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
+use engine::realtime::{ResponseSnapshotOwnerInfo, ResponseSnapshotSection};
 use host_core::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, InputFilterPreparer,
 };
@@ -8260,4 +8261,1435 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     assert!(no_console.prepared_companion_mut().is_none());
     assert_eq!(no_console.prepared_companion_capacity(), 0);
     assert!(no_console.eq_target_config().is_none());
+}
+
+fn protected_eq_preparation(
+    request: &SpectrumCaptureCollectionRequest,
+) -> WebObservationPreparation<'_> {
+    WebObservationPreparation {
+        profile: WebObservationProfile::EqSpectrum,
+        demand: host_core::HostObservationPreparation {
+            meters: &[],
+            spectrum: Some(request),
+            activation: graph::GraphObservationActivationConfig {
+                maximum_active_observers: 1,
+                maximum_retained_bytes: u64::MAX,
+            },
+            work_limits: host_core::ObservationWorkLimits {
+                maximum_active_meter_channels: u64::MAX,
+                maximum_meter_samples_per_block: u64::MAX,
+                maximum_meter_publications_per_block: u64::MAX,
+                maximum_meter_publication_bytes_per_block: u64::MAX,
+                maximum_active_spectrum_captures: u64::MAX,
+                maximum_capture_input_samples_per_block: u64::MAX,
+                maximum_capture_copy_samples_per_block: u64::MAX,
+                maximum_capture_publications_per_block: u64::MAX,
+                maximum_capture_bytes_per_second: u64::MAX,
+                maximum_transition_entry_visits_per_block: u64::MAX,
+                maximum_retained_bytes: u64::MAX,
+            },
+        },
+        ingress: ObservationIngressLimits {
+            maximum_control_bytes: 8192,
+            maximum_observation_rows: 32,
+            maximum_result_bytes: 65536,
+            ordinary_operations_per_boundary: 1,
+            removal_operations_per_boundary: 1,
+            maximum_admission_entry_visits: u64::MAX,
+            maximum_response_binding_visits: u64::MAX,
+            maximum_response_section_visits: u64::MAX,
+            maximum_response_copy_bytes: u64::MAX,
+            maximum_handler_copy_bytes_per_boundary: u64::MAX,
+            maximum_cleanup_entry_visits_per_boundary: u64::MAX,
+            maximum_retained_bytes: u64::MAX,
+        },
+    }
+}
+
+fn protected_eq_request() -> SpectrumCaptureCollectionRequest {
+    SpectrumCaptureCollectionRequest {
+        entries: vec![host_core::SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+            channels: SpectrumChannels::Stereo,
+        }],
+        maximum_capture_bytes: u64::MAX,
+    }
+}
+
+fn protected_eq_console_host() -> AudioWorkletEngineHost {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        WebBootOptions {
+            console_command_queue_records: 4,
+            ..boot_options(128)
+        },
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected console boot")
+}
+
+fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    (
+        storage.ingress.epoch,
+        storage.ingress.ordinary_used,
+        storage.ingress.removal_used,
+    )
+}
+
+struct CountingResponseSink {
+    calls: usize,
+    error: Option<ResponseSnapshotError>,
+}
+
+impl CountingResponseSink {
+    fn accepting() -> Self {
+        Self {
+            calls: 0,
+            error: None,
+        }
+    }
+
+    fn failing(error: ResponseSnapshotError) -> Self {
+        Self {
+            calls: 0,
+            error: Some(error),
+        }
+    }
+}
+
+impl engine::realtime::ResponseSnapshotSink for CountingResponseSink {
+    fn copy_owner(
+        &mut self,
+        _owner: ResponseSnapshotOwnerInfo<'_>,
+        _left: &[ResponseSnapshotSection],
+        _right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError> {
+        self.calls += 1;
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+#[test]
+fn protected_response_admission_captures_once_without_side_records() {
+    let mut host = protected_eq_console_host();
+    let identity_before = *host.observation_capture_identity();
+    let receipts_before = host.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+
+    let capture = host
+        .copy_response_snapshot("eq0", &mut sink)
+        .expect("selected protected response");
+    assert_eq!(capture.captured_sample, 0);
+    assert!(capture.owners > 0);
+    assert!(sink.calls > 0);
+    assert_eq!(
+        host.observation_admission().operation,
+        OBSERVATION_OPERATION_RESPONSE
+    );
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_eq!(host.observation_admission().flags, 0);
+    assert_eq!(host.side_records.receipts, receipts_before);
+    assert_eq!(*host.observation_capture_identity(), identity_before);
+    assert!(protected_ingress_state(&host).1);
+}
+
+#[test]
+fn protected_response_rejections_call_sink_zero_times_and_preserve_identity() {
+    let mut invalid = protected_eq_console_host();
+    let identity_before = *invalid.observation_capture_identity();
+    let receipts_before = invalid.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+    assert_eq!(
+        invalid.copy_response_snapshot("", &mut sink),
+        Err(ResponseSnapshotError::InvalidShape)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        invalid.observation_admission().operation,
+        OBSERVATION_OPERATION_RESPONSE
+    );
+    assert_eq!(
+        invalid.observation_admission().result,
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(invalid.observation_admission().reason, 8);
+    assert_eq!(invalid.side_records.receipts, receipts_before);
+    assert_eq!(*invalid.observation_capture_identity(), identity_before);
+
+    let mut mismatched = protected_eq_console_host();
+    let identity_before = *mismatched.observation_capture_identity();
+    let receipts_before = mismatched.side_records.receipts;
+    let mut sink = CountingResponseSink::accepting();
+    assert_eq!(
+        mismatched.copy_response_snapshot("missing", &mut sink),
+        Err(ResponseSnapshotError::MissingTrack)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        mismatched.observation_admission().result,
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(mismatched.observation_admission().reason, 0);
+    assert_eq!(mismatched.side_records.receipts, receipts_before);
+    assert_eq!(*mismatched.observation_capture_identity(), identity_before);
+
+    let mut exhausted = protected_eq_console_host();
+    let mut sink = CountingResponseSink::accepting();
+    assert!(
+        exhausted
+            .copy_response_snapshot("missing", &mut sink)
+            .is_err()
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        exhausted.copy_response_snapshot("eq0", &mut sink),
+        Err(ResponseSnapshotError::Capacity)
+    );
+    assert_eq!(sink.calls, 0);
+    assert_eq!(
+        exhausted.observation_admission().result,
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(exhausted.observation_admission().reason, 5);
+}
+
+#[test]
+fn protected_response_preserves_sink_error_and_shares_ordinary_credit_with_spectrum() {
+    let mut failing = protected_eq_console_host();
+    let identity_before = *failing.observation_capture_identity();
+    let mut sink = CountingResponseSink::failing(ResponseSnapshotError::Owner);
+    assert_eq!(
+        failing.copy_response_snapshot("eq0", &mut sink),
+        Err(ResponseSnapshotError::Owner)
+    );
+    assert_eq!(sink.calls, 1);
+    assert_eq!(failing.observation_admission().result, RESULT_INTERNAL);
+    assert_eq!(*failing.observation_capture_identity(), identity_before);
+
+    let mut shared = protected_eq_console_host();
+    let mut sink = CountingResponseSink::accepting();
+    shared
+        .copy_response_snapshot("eq0", &mut sink)
+        .expect("response admission");
+    assert_eq!(
+        shared.start_spectrum_stream(),
+        Err(RESULT_BACKPRESSURE),
+        "response and spectrum consume the same ordinary credit"
+    );
+    assert_eq!(sink.calls, 1);
+}
+
+#[test]
+fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
+    let mut host = protected_eq_console_host();
+    let admission_before = *host.observation_admission();
+    let ingress_before = protected_ingress_state(&host);
+
+    assert_eq!(
+        host.read_observations(&[]),
+        Err(ObservationReadError::Unsupported)
+    );
+    let malformed = [ObservationSelection {
+        track_id: "missing",
+        rack: EffectRack::Dynamic,
+        effect_slot_id: "missing",
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    }];
+    assert_eq!(
+        host.read_observations(&malformed),
+        Err(ObservationReadError::Unsupported)
+    );
+    let oversized = vec![malformed[0]; MAXIMUM_OBSERVATION_READS + 1];
+    assert_eq!(
+        host.read_observations(&oversized),
+        Err(ObservationReadError::Unsupported)
+    );
+    let address = ObservationAddress {
+        track_index: u32::MAX,
+        rack: EffectRack::Dynamic,
+        effect_index: u32::MAX,
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    };
+    assert_eq!(
+        host.read_observation_addresses(&[address]),
+        Err(ObservationReadError::Unsupported)
+    );
+    let sentinel = ObservationReadValues {
+        status: ObservationReadStatus::Ready,
+        sample_rate_hz: 48_000,
+        left: Some(3.5),
+        right: Some(-2.0),
+        ..ObservationReadValues::default()
+    };
+    let mut output = [sentinel];
+    assert_eq!(
+        host.read_observation_addresses_into(&[address], &mut output[..0]),
+        Err(ObservationReadError::Unsupported)
+    );
+    assert_eq!(output, [sentinel]);
+    assert_eq!(
+        host.spectrum_selection_would_change(
+            &SpectrumTarget::TrackPostMatrix("missing".into()),
+            SpectrumChannels::Stereo,
+        ),
+        Err(RESULT_UNSUPPORTED)
+    );
+    assert_eq!(host.observation_binding_count(), 0);
+    assert_eq!(host.observation_binding(u32::MAX), None);
+    assert_eq!(host.observation_armed_taps(), 0);
+    assert!(!host.observation_attached());
+    assert!(host.meter_frame().is_empty());
+    assert_eq!(host.meter_header(), &EMPTY_METER_HEADER);
+    assert_eq!(host.meter_windows(), 0);
+    assert!(!host.meters_attached());
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(protected_ingress_state(&host), ingress_before);
+    assert_eq!(host.observation_admission(), &admission_before);
+
+    assert_eq!(host.arm_spectrum(), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().reason, 8);
+    assert!(protected_ingress_state(&host).1);
+    assert_eq!(host.status().last_result, RESULT_OK);
+    assert!(
+        matches!(host.read_spectrum(), Err(RESULT_BACKPRESSURE)),
+        "a second ordinary alias spends no second permit"
+    );
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+
+    assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 10);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(protected_ingress_state(&host).2);
+    assert_eq!(host.render_next(), RESULT_OK);
+
+    assert_eq!(
+        host.select_spectrum(
+            &SpectrumTarget::TrackPostMatrix("missing".into()),
+            SpectrumChannels::Stereo,
+        ),
+        RESULT_UNSUPPORTED
+    );
+    assert_eq!(host.observation_admission().operation, 11);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 12);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().operation, 12);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+}
+
+#[test]
+fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
+    let mut host = protected_eq_console_host();
+    let before = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let solo = host.console_solo().expect("solo state");
+        (
+            ready.controls[0].producer.success_count(),
+            ready
+                .command_decoded
+                .iter()
+                .map(|entry| (entry.queue_slot, entry.original_wire_index))
+                .collect::<Vec<_>>(),
+            ready
+                .input_filter_shadows
+                .iter()
+                .map(|shadow| {
+                    (
+                        shadow.committed.map(f32::to_bits),
+                        shadow.candidate.map(f32::to_bits),
+                        shadow.dirty,
+                        shadow.revision,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            (
+                solo.solo(0),
+                solo.user_mute(0, 0),
+                solo.emitted_mute(0, 0),
+                solo.transaction_open(),
+            ),
+        )
+    };
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_SOLO,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(3), RESULT_UNSUPPORTED);
+    assert_eq!(host.command_report().result, RESULT_UNSUPPORTED);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(host.command_report().rejected_index, 1);
+    assert_eq!(host.command_report().admitted, 0);
+    assert_eq!(host.observation_admission().operation, 9);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert_eq!(host.observation_admission().reason, 8);
+    assert!(protected_ingress_state(&host).1);
+    let after = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let solo = host.console_solo().expect("solo state");
+        (
+            ready.controls[0].producer.success_count(),
+            ready
+                .command_decoded
+                .iter()
+                .map(|entry| (entry.queue_slot, entry.original_wire_index))
+                .collect::<Vec<_>>(),
+            ready
+                .input_filter_shadows
+                .iter()
+                .map(|shadow| {
+                    (
+                        shadow.committed.map(f32::to_bits),
+                        shadow.candidate.map(f32::to_bits),
+                        shadow.dirty,
+                        shadow.revision,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            (
+                solo.solo(0),
+                solo.user_mute(0, 0),
+                solo.emitted_mute(0, 0),
+                solo.transaction_open(),
+            ),
+        )
+    };
+    assert_eq!(after, before);
+
+    let mut prepared = protected_eq_console_host();
+    stage_command(
+        &mut prepared,
+        0,
+        COMMAND_OBSERVE_UNSUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(
+        prepared.submit_prepared_commands(1, 1),
+        RESULT_UNSUPPORTED,
+        "raw observation refusal precedes malformed companion parsing"
+    );
+    assert_eq!(
+        prepared.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    assert_eq!(prepared.command_report().rejected_index, 0);
+    assert_eq!(prepared.observation_admission().operation, 9);
+    assert_eq!(prepared.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&prepared).1);
+    assert!(protected_ingress_state(&prepared).2);
+}
+
+#[test]
+fn protected_audio_only_commands_skip_observation_credit_after_refusal() {
+    let mut host = protected_eq_console_host();
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        0,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
+    let admission = *host.observation_admission();
+    assert!(protected_ingress_state(&host).1);
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+    assert_eq!(host.command_report().admitted, 1);
+    assert_eq!(host.observation_admission(), &admission);
+}
+
+#[test]
+fn protected_eq_boot_is_dormant_and_retained_limit_is_inclusive() {
+    const PROTECTED_SPECTRUM_PAYLOAD_BYTES: u64 = 2_097_152;
+    const PROTECTED_SPECTRUM_BUFFER_BYTES: u64 = 1_048_576;
+
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut preparation = protected_eq_preparation(&request);
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &preparation,
+    )
+    .unwrap();
+    let ready = host.ready.as_ref().unwrap();
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert_eq!(storage.controller.spectrum_state().accepted_generation, 0);
+    assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+    assert_eq!(storage.ingress.epoch, 1);
+    assert!(ready.meters.is_empty());
+    assert!(ready.observation.legacy().is_none());
+    let retained = storage.ingress.bounds.retained_bytes;
+    let native_reserved = ready
+        .host
+        .report
+        .observation_demand_resources
+        .reserved_bytes;
+    let legacy = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(128)).unwrap();
+    let overlap = size_of::<HostObservationController>() as u64;
+    let target_bytes = match &storage.spectrum_demand.target {
+        SpectrumTarget::TrackPostMatrix(target) => target.len() as u64,
+        _ => panic!("protected EQ target kind"),
+    };
+    let expected_bridge_metadata = legacy
+        .resources
+        .bridge_metadata_bytes
+        .checked_sub(overlap)
+        .and_then(|bytes| bytes.checked_add(target_bytes))
+        .and_then(|bytes| bytes.checked_add(PROTECTED_SPECTRUM_PAYLOAD_BYTES))
+        .expect("protected bridge metadata arithmetic");
+    let expected_bridge_retained = legacy
+        .resources
+        .bridge_retained_bytes
+        .checked_sub(overlap)
+        .and_then(|bytes| bytes.checked_add(target_bytes))
+        .and_then(|bytes| bytes.checked_add(PROTECTED_SPECTRUM_PAYLOAD_BYTES))
+        .expect("protected bridge retained arithmetic");
+    assert_eq!(
+        host.resources.bridge_metadata_bytes,
+        expected_bridge_metadata
+    );
+    assert_eq!(
+        host.resources.bridge_retained_bytes,
+        expected_bridge_retained
+    );
+    assert_eq!(
+        retained,
+        native_reserved
+            .checked_add(expected_bridge_retained)
+            .expect("protected ingress retained arithmetic")
+    );
+    assert_eq!(
+        host.resources.largest_bridge_allocation_bytes,
+        legacy
+            .resources
+            .largest_bridge_allocation_bytes
+            .max(PROTECTED_SPECTRUM_BUFFER_BYTES)
+    );
+    assert_eq!(
+        host.resources.largest_named_allocation_bytes,
+        legacy
+            .resources
+            .largest_named_allocation_bytes
+            .max(PROTECTED_SPECTRUM_BUFFER_BYTES)
+    );
+    #[cfg(feature = "test-support")]
+    host_core::test_only_reset_spectrum_operation_counts();
+    assert_eq!(host.render_next(), RESULT_OK);
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        host_core::test_only_spectrum_operation_counts(),
+        host_core::SpectrumOperationCounts::default()
+    );
+    preparation.ingress.maximum_retained_bytes = retained;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &preparation
+        )
+        .is_ok()
+    );
+    preparation.ingress.maximum_retained_bytes = retained - 1;
+    let failure = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &preparation,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.result, RESULT_REFUSED_BUDGET);
+}
+
+#[test]
+fn protected_eq_boot_rejects_incompatible_options_and_target() {
+    let document = one_track_resource_session(128);
+    let mut request = protected_eq_request();
+    let preparation = protected_eq_preparation(&request);
+    let mut options = boot_options(128);
+    options.console_meter_blocks = 1;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            options,
+            &preparation
+        )
+        .is_err()
+    );
+    request.entries[0].channels = SpectrumChannels::Left;
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &protected_eq_preparation(&request)
+        )
+        .is_err()
+    );
+    request.entries[0].channels = SpectrumChannels::Stereo;
+    request.entries[0].target = SpectrumTarget::TrackPostMatrix("missing".into());
+    assert!(
+        AudioWorkletEngineHost::boot_with_observation_demand(
+            document.as_bytes(),
+            boot_options(128),
+            &protected_eq_preparation(&request)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn protected_eq_controls_use_native_receipts_and_fixed_metadata() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+
+    assert_eq!(host.spectrum_target(), SPECTRUM_TARGET_TRACK_POST_MATRIX);
+    assert_eq!(host.spectrum_channels(), SPECTRUM_CHANNEL_BOTH);
+    assert_eq!(host.spectrum_selection_epoch(), 0);
+    assert_eq!(host.spectrum_stream_cadence(), None);
+    assert_eq!(host.spectrum_stream_epoch(), None);
+    {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        assert_eq!(storage.history_epoch, None);
+        assert_eq!(storage.history_dropped_captures, 0);
+    }
+
+    let cadence = host.start_spectrum_stream().expect("native start");
+    assert_eq!(host.spectrum_stream_cadence(), Some(cadence));
+    assert_eq!(host.spectrum_stream_epoch(), Some(1));
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    assert_eq!(host.side_records.pending_count, 1);
+    assert_eq!(host.side_records.completed_count, 0);
+    assert_eq!(host.observation_admission().operation, 4);
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_RECEIPT,
+        0
+    );
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+        0
+    );
+    let start_receipt = host.observation_admission().receipt;
+    assert_eq!(start_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(start_receipt.sequence, 1);
+
+    // Ordinary exhaustion cannot consume the removal credit or prevent a pending stop.
+    assert_eq!(host.restart_spectrum_stream(), RESULT_BACKPRESSURE);
+    assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+    let stop_receipt = host.observation_admission().receipt;
+    assert_eq!(
+        host.observation_admission().operation,
+        OBSERVATION_OPERATION_STOP
+    );
+    assert_eq!(stop_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(stop_receipt.sequence, 2);
+    assert_eq!(host.side_records.pending_count, 2);
+
+    let ingress_before_repeat = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+            storage.ingress.epoch,
+        )
+    };
+    assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+    assert_eq!(host.observation_admission().receipt, stop_receipt);
+    let ingress_after_repeat = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+            storage.ingress.epoch,
+        )
+    };
+    assert_eq!(ingress_after_repeat, ingress_before_repeat);
+
+    // Both graph publications apply at one real boundary. The stop leaves the prepared profile
+    // available while reporting inactive cadence/epoch from C's accepted state.
+    #[cfg(feature = "test-support")]
+    host_core::test_only_reset_spectrum_operation_counts();
+    assert_eq!(host.render_next(), RESULT_OK);
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 2);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[1].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].application_sample, 0);
+    assert_eq!(applications[1].application_sample, 0);
+    assert_eq!(applications[0].sequence, start_receipt.sequence);
+    assert_eq!(applications[1].sequence, stop_receipt.sequence);
+    assert_eq!(host.spectrum_stream_cadence(), None);
+    assert_eq!(host.spectrum_stream_epoch(), None);
+    assert_eq!(host.spectrum_target(), SPECTRUM_TARGET_TRACK_POST_MATRIX);
+    assert_eq!(host.spectrum_channels(), SPECTRUM_CHANNEL_BOTH);
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        host_core::test_only_spectrum_operation_counts(),
+        host_core::SpectrumOperationCounts::default()
+    );
+    assert_eq!(host.side_records.pending_count, 0);
+    assert_eq!(host.side_records.completed_count, 0);
+}
+
+#[test]
+fn protected_eq_restart_refusal_releases_row_and_same_target_restart_resets_history() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+
+    host.start_spectrum_stream().expect("native start");
+    assert_eq!(host.render_next(), RESULT_OK);
+    let before_refusal = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.history_epoch,
+            storage.history_dropped_captures,
+            storage.controller.spectrum_state(),
+        )
+    };
+
+    // The host has not reconciled the first native publication yet. C therefore refuses the
+    // restart; the browser reservation is released and the accepted metadata remains intact.
+    assert_eq!(host.restart_spectrum_stream(), RESULT_BACKPRESSURE);
+    assert_eq!(host.side_records.reserved_mask, 0);
+    assert_eq!(host.side_records.pending_count, 1);
+    assert_eq!(host.observation_admission().operation, 5);
+    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+    let after_refusal = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.history_epoch,
+            storage.history_dropped_captures,
+            storage.controller.spectrum_state(),
+        )
+    };
+    assert_eq!(after_refusal, before_refusal);
+
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 1);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].sequence, 1);
+    assert_eq!(host.render_next(), RESULT_OK);
+
+    assert_eq!(host.restart_spectrum_stream(), RESULT_OK);
+    assert_eq!(host.observation_admission().operation, 5);
+    assert_eq!(host.observation_admission().result, RESULT_OK);
+    assert_eq!(
+        host.observation_admission().receipt.state,
+        OBSERVATION_RECEIPT_STATE_PENDING
+    );
+    assert_eq!(host.observation_admission().receipt.sequence, 2);
+    assert_eq!(host.spectrum_selection_epoch(), 1);
+    assert_eq!(host.spectrum_stream_epoch(), Some(1));
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert_eq!(storage.history_epoch, Some(1));
+    assert_eq!(storage.history_dropped_captures, 0);
+}
+
+#[test]
+fn protected_eq_permit_classes_spend_before_lengths_and_reset_only_on_success() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+
+    let too_large = ObservationLengths {
+        control_bytes: 8193,
+        rows: 0,
+        result_bytes: 0,
+    };
+    let refusal = host
+        .begin_observation(ObservationClass::Ordinary, too_large)
+        .expect_err("ordinary length ceiling");
+    assert_eq!(refusal.reason, ObservationRefusalReason::WorkBudget);
+    let seeded_identity = WebObservationCaptureIdentity {
+        struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+        abi_version: ABI_VERSION,
+        kind: OBSERVATION_CAPTURE_KIND_SPECTRUM,
+        flags: OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION,
+        owner: 71,
+        observation_generation: 72,
+        selection_epoch: 73,
+        snapshot_token: 74,
+    };
+    host.commit_observation_capture_identity(seeded_identity);
+    assert!(
+        host.begin_observation(
+            ObservationClass::Ordinary,
+            ObservationLengths {
+                control_bytes: 0,
+                rows: 0,
+                result_bytes: 0,
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(host.observation_capture_identity(), &seeded_identity);
+    let _removal = host
+        .begin_observation(
+            ObservationClass::Removal,
+            ObservationLengths {
+                control_bytes: 0,
+                rows: 0,
+                result_bytes: 0,
+            },
+        )
+        .expect("removal credit is independent");
+    let before = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.epoch,
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+        )
+    };
+    assert_eq!(host.render_next(), RESULT_OK);
+    let after = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.epoch,
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+        )
+    };
+    assert_eq!(after.0, before.0 + 1);
+    assert!(!after.1);
+    assert!(!after.2);
+    assert!(
+        host.begin_observation(
+            ObservationClass::Ordinary,
+            ObservationLengths {
+                control_bytes: 0,
+                rows: 0,
+                result_bytes: 0,
+            },
+        )
+        .is_ok()
+    );
+    assert!(
+        host.begin_observation(
+            ObservationClass::Removal,
+            ObservationLengths {
+                control_bytes: 0,
+                rows: 0,
+                result_bytes: 0,
+            },
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn protected_eq_failed_render_does_not_replenish_or_overflow_epoch() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let lengths = ObservationLengths {
+        control_bytes: 0,
+        rows: 0,
+        result_bytes: 0,
+    };
+    let _permit = host
+        .begin_observation(ObservationClass::Ordinary, lengths)
+        .expect("ordinary permit");
+    host.status.next_absolute_sample = u64::MAX;
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(host.status().state, STATE_FAILED);
+    assert!(
+        host.begin_observation(ObservationClass::Ordinary, lengths)
+            .is_err()
+    );
+
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    {
+        let ready = host.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage.ingress.epoch = u64::MAX;
+        storage.ingress.ordinary_used = true;
+        storage.ingress.removal_used = true;
+    }
+    assert_eq!(host.render_next(), RESULT_OK);
+    let refusal = host
+        .begin_observation(ObservationClass::Ordinary, lengths)
+        .expect_err("overflowed epoch remains exhausted");
+    assert_eq!(refusal.reason, ObservationRefusalReason::RevisionExhausted);
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert!(storage.ingress.exhausted);
+    assert_eq!(storage.ingress.epoch, u64::MAX);
+    assert!(storage.ingress.ordinary_used);
+    assert!(storage.ingress.removal_used);
+}
+
+#[test]
+fn protected_eq_capture_identity_uses_native_window_scalars_and_checked_token() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let owner = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        storage.controller.owner()
+    };
+    host.spectrum_token = u64::MAX;
+    let window = ObservedContinuousSpectrumWindow {
+        owner,
+        observation_generation: 17,
+        selection_epoch: 23,
+        window: SpectrumContinuousWindow {
+            left: [0.0; host_core::SPECTRUM_WINDOW_FRAMES],
+            right: [0.0; host_core::SPECTRUM_WINDOW_FRAMES],
+            first_sample: 4096,
+            channels: SpectrumChannels::Stereo,
+            source_underrun: false,
+            stream_epoch: 9,
+            sequence: 41,
+            dropped_captures: 2,
+        },
+    };
+    let identity =
+        AudioWorkletEngineHost::spectrum_capture_identity(&window).expect("representable identity");
+    assert_eq!(identity.kind, OBSERVATION_CAPTURE_KIND_SPECTRUM);
+    assert_eq!(identity.flags, OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION);
+    assert_eq!(identity.owner, owner.get());
+    assert_eq!(identity.observation_generation, 17);
+    assert_eq!(identity.selection_epoch, 23);
+    assert_eq!(identity.snapshot_token, 42);
+    host.commit_observation_capture_identity(identity);
+    assert_eq!(host.observation_capture_identity(), &identity);
+
+    let mut overflowing_token = window;
+    overflowing_token.window.sequence = u64::MAX;
+    assert_eq!(
+        AudioWorkletEngineHost::spectrum_capture_identity(&overflowing_token),
+        Err(RESULT_REFUSED_BUDGET)
+    );
+    let mut overflowing_end = window;
+    overflowing_end.window.first_sample = u64::MAX;
+    assert_eq!(
+        AudioWorkletEngineHost::spectrum_capture_identity(&overflowing_end),
+        Err(RESULT_REFUSED_BUDGET)
+    );
+}
+
+#[test]
+fn protected_eq_admission_diagnostic_maps_refusal_and_preserves_headers() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    host.record_observation_admission(
+        4,
+        RESULT_REFUSED_BUDGET,
+        Some(ObservationRefusal {
+            reason: ObservationRefusalReason::WorkBudget,
+            limit: Some("maximum_result_bytes"),
+            requested: Some(8193),
+            maximum: Some(8192),
+        }),
+        None,
+        true,
+    );
+    let admission = host.observation_admission();
+    assert_eq!(
+        admission.struct_size,
+        size_of::<WebObservationAdmission>() as u32
+    );
+    assert_eq!(admission.abi_version, ABI_VERSION);
+    assert_eq!(admission.result, RESULT_REFUSED_BUDGET);
+    assert_eq!(admission.operation, 4);
+    assert_eq!(admission.reason, 4);
+    assert_eq!(
+        admission.flags,
+        OBSERVATION_ADMISSION_REQUESTED
+            | OBSERVATION_ADMISSION_MAXIMUM
+            | OBSERVATION_ADMISSION_PENDING_BOUNDARY
+    );
+    assert_eq!(admission.requested, 8193);
+    assert_eq!(admission.maximum, 8192);
+    assert_eq!(admission.limit_bytes, 20);
+    assert_eq!(&admission.limit[..20], b"maximum_result_bytes");
+    assert!(admission.limit[20..].iter().all(|byte| *byte == 0));
+
+    host.record_observation_admission(
+        10,
+        RESULT_UNSUPPORTED,
+        Some(ObservationRefusal {
+            reason: ObservationRefusalReason::InvalidRequest,
+            limit: None,
+            requested: None,
+            maximum: None,
+        }),
+        None,
+        false,
+    );
+    let admission = host.observation_admission();
+    assert_eq!(admission.result, RESULT_UNSUPPORTED);
+    assert_eq!(admission.reason, 8);
+}
+
+#[test]
+fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        WebBootOptions {
+            console_command_queue_records: 4,
+            ..boot_options(128)
+        },
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let demand = host_core::HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: host_core::HostSpectrumMode::Continuous,
+    };
+    let held0 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("first ordinary reservation");
+    let held1 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("second ordinary reservation");
+    let held2 = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("third ordinary reservation");
+    let refusal = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect_err("ordinary reservation must retain two free rows");
+    assert_eq!(refusal.reason, ObservationRefusalReason::Backpressure);
+    assert_eq!(refusal.limit, Some("observation.application_capacity"));
+    assert_eq!(refusal.requested, Some(5));
+    assert_eq!(refusal.maximum, Some(4));
+    host.release_receipt(held0);
+    host.release_receipt(held1);
+    host.release_receipt(held2);
+    let start_slot = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("ordinary receipt reservation");
+    let accepted_start = {
+        let ready = host.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage
+            .controller
+            .replace_spectrum(&demand)
+            .expect("native start admission")
+    };
+    host.commit_receipt(start_slot, accepted_start, 4);
+
+    let stop_slot = host
+        .reserve_receipt(ObservationClass::Removal)
+        .expect("removal receipt reservation");
+    let accepted_stop = {
+        let ready = host.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        match storage
+            .controller
+            .stop_spectrum()
+            .expect("native stop admission")
+        {
+            host_core::ObservationStop::Pending(accepted) => accepted,
+            host_core::ObservationStop::Quiescent => panic!("spectrum stop must publish"),
+        }
+    };
+    host.commit_receipt(stop_slot, accepted_stop, OBSERVATION_OPERATION_STOP);
+    assert_eq!(host.side_records.pending_count, 2);
+    assert!(host.take_observation_applications().is_empty());
+    assert_eq!(host.side_records.pending_count, 2);
+    assert!(host.take_observation_applications().is_empty());
+    assert_eq!(host.side_records.pending_count, 2);
+
+    assert_eq!(
+        host.ready.as_ref().expect("ready ownership").controls.len(),
+        1
+    );
+    host.ready.as_mut().expect("ready ownership").controls[0]
+        .producer
+        .try_push(TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..Matrix2x2::IDENTITY
+            },
+            smoothing_samples: 0,
+        })
+        .expect("test-only malformed matrix record");
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(host.status().state, STATE_FAILED);
+    assert_eq!(host.status().rendered_quanta, 0);
+    assert_eq!(host.status().next_absolute_sample, 0);
+    let applications = host.take_observation_applications();
+    assert_eq!(applications.len(), 2);
+    assert_eq!(applications[0].application_sample, 0);
+    assert_eq!(applications[1].application_sample, 0);
+    assert_eq!(applications[0].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[1].state, OBSERVATION_RECEIPT_STATE_APPLIED);
+    assert_eq!(applications[0].owner, applications[1].owner);
+    assert_eq!(
+        applications[0].application_sample,
+        applications[1].application_sample
+    );
+    assert_ne!(applications[0].sequence, applications[1].sequence);
+    assert_eq!(host.side_records.pending_count, 0);
+    assert_eq!(host.side_records.completed_count, 0);
+    let reused_slot = host
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("completed rows released by take");
+    host.release_receipt(reused_slot);
+
+    host.dispose();
+    assert!(host.take_observation_applications().is_empty());
+
+    let mut pending = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("protected boot");
+    let slot = pending
+        .reserve_receipt(ObservationClass::Removal)
+        .expect("pending receipt reservation");
+    let accepted_pending = {
+        let ready = pending.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage
+            .controller
+            .replace_spectrum(&demand)
+            .expect("native start admission")
+    };
+    pending.commit_receipt(slot, accepted_pending, OBSERVATION_OPERATION_STOP_GRAPH);
+    pending.dispose();
+    let terminal = pending.take_observation_applications();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].state, OBSERVATION_RECEIPT_STATE_CLOSED);
+    assert_eq!(terminal[0].result, RESULT_WRONG_STATE);
+}
+
+#[test]
+fn protected_eq_reads_preserve_pending_windows_and_native_fault_identity() {
+    let mut model = parse_session_json(&one_track_resource_session(128)).unwrap();
+    model.sources[0].frames = 48_000;
+    let document = canonical_session_json(&model).unwrap();
+    let request = protected_eq_request();
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .unwrap();
+    host.start_spectrum_stream().unwrap();
+    let accepted = host.observation_admission().receipt;
+    for block in 0..16 {
+        feed_compressor_block(&mut host, 128, block);
+    }
+    assert_eq!(
+        host.read_protected_spectrum_stream().unwrap_err(),
+        ProtectedSpectrumReadError::Native(HostSpectrumReadError::PendingApplication)
+    );
+    assert_ne!(
+        host.observation_admission().flags & OBSERVATION_ADMISSION_PENDING_BOUNDARY,
+        0
+    );
+    assert_eq!(host.take_observation_applications().len(), 1);
+    let before = *host.observation_capture_identity();
+    assert!(matches!(
+        host.read_protected_spectrum_stream(),
+        Err(ProtectedSpectrumReadError::Refused(ObservationRefusal {
+            reason: ObservationRefusalReason::Backpressure,
+            ..
+        }))
+    ));
+    assert_eq!(*host.observation_capture_identity(), before);
+    feed_compressor_block(&mut host, 128, 16);
+    let first = host.read_spectrum_stream().unwrap();
+    assert_eq!(first.first_sample, 0);
+    assert!(first.left.iter().any(|sample| *sample != 0.0));
+    let committed = *host.observation_capture_identity();
+    assert_eq!(committed.owner, accepted.owner);
+    assert_eq!(committed.observation_generation, accepted.sequence);
+    assert_eq!(committed.selection_epoch, host.spectrum_selection_epoch());
+    assert_eq!(committed.snapshot_token, first.sequence + 1);
+
+    // Overfill the existing one-window queue. Gap reports retain its queued window and the last
+    // successfully published identity; the following admitted read returns that same old window.
+    for block in 17..48 {
+        feed_compressor_block(&mut host, 128, block);
+    }
+    let gap = host.read_protected_spectrum_stream().unwrap_err();
+    assert!(matches!(
+        gap,
+        ProtectedSpectrumReadError::Native(HostSpectrumReadError::Gap {
+            stream_epoch: 1,
+            dropped_captures: 1,
+            ..
+        })
+    ));
+    assert_eq!(*host.observation_capture_identity(), committed);
+    feed_compressor_block(&mut host, 128, 48);
+    let observed = host.read_protected_spectrum_stream().unwrap();
+    assert_eq!(observed.owner.get(), accepted.owner);
+    assert_eq!(observed.observation_generation, accepted.sequence);
+    assert_eq!(observed.selection_epoch, committed.selection_epoch);
+    assert_eq!(observed.window.first_sample, 2048);
+    assert!(observed.window.left.iter().any(|sample| *sample != 0.0));
+
+    // A real source-generation change invalidates partial capture while keeping the host usable.
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    let plane = [0.5_f32; 128];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            2,
+            0,
+            48_000,
+            &[&plane, &plane],
+            128,
+            false
+        ),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert!(matches!(
+        host.read_protected_spectrum_stream(),
+        Err(ProtectedSpectrumReadError::Native(
+            HostSpectrumReadError::Failed {
+                stream_epoch: 2,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(host.spectrum_stream_epoch(), Some(2));
+    assert_eq!(*host.observation_capture_identity(), committed);
+}
+
+#[test]
+fn protected_status_is_scalar_and_retains_native_terminal_identity() {
+    let mut host = protected_eq_console_host();
+    let owner = {
+        let ready = host.ready.as_ref().expect("ready owner");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        storage.controller.owner().get()
+    };
+
+    host.start_spectrum_stream().expect("native start");
+    let pending = host.observation_status();
+    assert_eq!(pending.owner, owner);
+    assert_eq!(pending.ingress_epoch, 1);
+    assert_eq!(pending.accepted_generation, 1);
+    assert_eq!(pending.applied_generation, 0);
+    assert_eq!(pending.selection_epoch, 1);
+    assert_eq!(pending.pending_count, 1);
+    assert_eq!(pending.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+    assert_ne!(pending.flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE, 0);
+
+    // The graph application is already available after this boundary, but status projection must
+    // not poll it. The pending row remains pending until the bounded application-take path.
+    assert_eq!(host.render_next(), RESULT_OK);
+    let applied_native = {
+        let ready = host.ready.as_ref().expect("ready owner");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        storage.controller.spectrum_state()
+    };
+    assert_eq!(applied_native.accepted_generation, 1);
+    assert_eq!(applied_native.applied_generation, 0);
+    let scalar = host.observation_status();
+    assert_eq!(
+        scalar.pending_count, 1,
+        "status must not poll native receipts"
+    );
+    assert_eq!(scalar.owner, owner);
+    assert_eq!(
+        scalar.accepted_generation,
+        applied_native.accepted_generation
+    );
+    assert_eq!(scalar.applied_generation, applied_native.applied_generation);
+    assert_eq!(scalar.selection_epoch, applied_native.selection_epoch);
+
+    // Make the same boundary fail after native application. The final status must retain the
+    // native owner and generation scalars while preserving the render-failed bit.
+    host.ready.as_mut().expect("ready owner").controls[0]
+        .producer
+        .try_push(TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..Matrix2x2::IDENTITY
+            },
+            smoothing_samples: 0,
+        })
+        .expect("malformed matrix fixture");
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    let failed = host.observation_status();
+    assert_eq!(failed.owner, owner);
+    assert_eq!(failed.accepted_generation, 1);
+    assert_eq!(failed.applied_generation, 0);
+    assert_eq!(failed.selection_epoch, 1);
+    assert_eq!(failed.pending_count, 1);
+    assert_ne!(failed.flags & OBSERVATION_STATUS_FLAG_RENDER_FAILED, 0);
+    assert_eq!(failed.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+
+    assert_eq!(host.dispose(), RESULT_OK);
+    let terminal = host.observation_status();
+    assert_eq!(terminal.owner, owner);
+    assert_eq!(terminal.ingress_epoch, 2);
+    assert_eq!(terminal.accepted_generation, 1);
+    assert_eq!(terminal.applied_generation, 1);
+    assert_eq!(terminal.selection_epoch, 1);
+    assert_eq!(terminal.pending_count, 0);
+    assert_ne!(terminal.flags & OBSERVATION_STATUS_FLAG_TERMINAL, 0);
+    assert_ne!(terminal.flags & OBSERVATION_STATUS_FLAG_RENDER_FAILED, 0);
+    assert_eq!(
+        terminal.flags
+            & (OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+                | OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE),
+        0
+    );
 }
