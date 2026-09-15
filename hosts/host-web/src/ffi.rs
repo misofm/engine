@@ -7071,61 +7071,68 @@ mod observation_checkpoint_a_tests {
         no_live_host();
     }
 
+    struct ProtectedBootPreparationCase {
+        name: &'static str,
+        mutate: fn(&mut WebObservationPreparationRecord),
+    }
+
     #[test]
     fn private_protected_boot_rejects_nested_headers_reserved_and_padded_ids() {
         no_live_host();
-        let cases: [(&str, fn(&mut WebObservationPreparationRecord)); 6] = [
-            (
-                "work header",
-                |record: &mut WebObservationPreparationRecord| {
+        let cases: [ProtectedBootPreparationCase; 6] = [
+            ProtectedBootPreparationCase {
+                name: "work header",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.work_limits.struct_size = 0;
                 },
-            ),
-            (
-                "ingress header",
-                |record: &mut WebObservationPreparationRecord| {
+            },
+            ProtectedBootPreparationCase {
+                name: "ingress header",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.ingress_limits.abi_version = ABI_VERSION + 1;
                 },
-            ),
-            (
-                "request reserved0",
-                |record: &mut WebObservationPreparationRecord| {
+            },
+            ProtectedBootPreparationCase {
+                name: "request reserved0",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.spectrum_request.reserved0 = 1;
                 },
-            ),
-            (
-                "request reserved",
-                |record: &mut WebObservationPreparationRecord| {
+            },
+            ProtectedBootPreparationCase {
+                name: "request reserved",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.spectrum_request.reserved[0] = 1;
                 },
-            ),
-            (
-                "padded target id",
-                |record: &mut WebObservationPreparationRecord| {
+            },
+            ProtectedBootPreparationCase {
+                name: "padded target id",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.target_id[3] = 1;
                 },
-            ),
-            (
-                "target id over maximum",
-                |record: &mut WebObservationPreparationRecord| {
+            },
+            ProtectedBootPreparationCase {
+                name: "target id over maximum",
+                mutate: |record: &mut WebObservationPreparationRecord| {
                     record.spectrum_request.target_id_bytes = 128;
                 },
-            ),
+            },
         ];
 
-        for (name, mutate) in cases {
+        for case in cases {
             let mut record = protected_preparation_record();
-            mutate(&mut record);
+            (case.mutate)(&mut record);
             stage_protected_boot(protected_document(), record);
             assert_eq!(
                 boot_staged_observation_demand(protected_document().len() as u32),
                 0,
-                "{name} must refuse without publishing a host"
+                "{} must refuse without publishing a host",
+                case.name
             );
             assert_eq!(
                 miso_engine_web_v1_boot_result(),
                 RESULT_INVALID_ARGUMENT,
-                "{name}"
+                "{}",
+                case.name
             );
             no_live_host();
         }

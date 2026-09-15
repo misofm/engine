@@ -8396,7 +8396,7 @@ fn protected_response_admission_captures_once_without_side_records() {
     assert_eq!(host.observation_admission().flags, 0);
     assert_eq!(host.side_records.receipts, receipts_before);
     assert_eq!(*host.observation_capture_identity(), identity_before);
-    assert_eq!(protected_ingress_state(&host).1, true);
+    assert!(protected_ingress_state(&host).1);
 }
 
 #[test]
