@@ -279,7 +279,7 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
     pub runtime_owner_field_bytes: u64,
     pub runtime_owner_allocation_bytes: u64,
-    /// The actual containing [`GraphExecutor`] layout delta occupied by observation activation
+    /// The actual containing `GraphExecutor` layout delta occupied by observation activation
     /// state. This inline runtime term is charged for every graph, including graphs without an
     /// activation controller, and overlaps the activation report's `runtime_state_bytes` field.
     pub observation_runtime_state_bytes: u64,

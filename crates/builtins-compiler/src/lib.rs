@@ -11739,8 +11739,12 @@ mod tests {
         // than read off the report, and the boundary classes stay exact because they are stated
         // relative to the report rather than as literals -- case 32 admits at the payload and case
         // 33 rejects one byte below it, whatever the payload is.
+        // Issue #816 adds the controlled flag to GraphNodeObserverBinding: its native layout
+        // grows from 80 to 88 bytes. The actual-layout meter projection therefore adds eight
+        // bytes per request to the meter and retained caps recorded by classes 34-37. All
+        // generated cases and expected outcomes remain unchanged; only their resource limits move.
         assert_eq!(
-            transcript_hash, 12_634_700_477_153_627_939,
+            transcript_hash, 17_221_471_506_974_483_219,
             "updated only through a deliberate frozen-case change"
         );
     }

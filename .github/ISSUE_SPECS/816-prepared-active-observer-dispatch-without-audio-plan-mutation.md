@@ -345,3 +345,19 @@ without inventing a removal receipt. Luna validation: graph library 81/81, rt9
 8/8, strict all-target Clippy, graph check, formatting/diff, realtime policy and
 its mutation tests passed. Root also passed Wasm graph compilation after the
 accounting change. Independent attempt-2 review remains pending.
+
+Attempt 2 native adversarial review: fresh Astra XHIGH records PASS for b7b0a1ce
+(81 library + 8 rt9 independently passed; realtime policy and diff clean).
+CI integration remains pending. Its first run found a stale source-worklet pin,
+a private rustdoc link and layout-sensitive builtin fixtures. The independent
+old/current observer-binding layout probe is 80/88 native bytes. The existing
+10,000-case builtin compiler matrix now records the additional eight bytes in
+its meter/retained resource caps; cases and expected outcomes are unchanged and
+the focused matrix passes. Strict graph rustdoc passes after plain-text wording.
+A reproducible rebuild matches CI worklet digest
+a4a4171fe175caa3f2445b9118d022696ed4a1e30a7834c8ff8c590065b76b51.
+The required audit corpus still pins the old observer-binding ABI; authorize a
+bounded mechanical refresh of tools/audit/src/fixture_builtins.rs and only the
+existing resource corpus rows/dependent manifest identity affected by that layout.
+No DSP fixtures, test cases, outcomes, or checker acceptance rules may be weakened.
+Native PASS is not yet whole-issue CI completion.
