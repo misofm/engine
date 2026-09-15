@@ -47,7 +47,7 @@
 //! inputs to that rule, not a rate-specific answer. Both are transcribed, so the SDK derives the
 //! ring from the shape the boot itself reported instead of holding a private copy of `100`.
 
-use core::mem::offset_of;
+use core::mem::{offset_of, size_of};
 
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
@@ -91,10 +91,10 @@ use host_web::{
     WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
     WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
     WebLiveResponseSection, WebMeterHeader, WebObservationResult, WebObservationSelection,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
-    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
-    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebObservationWorkLimits, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
+    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -637,6 +637,94 @@ fn observation_result_fields() -> [Field; 19] {
             "reserved",
             offset_of!(WebObservationResult, reserved),
             "u32[3]",
+        ),
+    ]
+}
+
+fn observation_work_limits_fields() -> [Field; 13] {
+    [
+        (
+            "structSize",
+            offset_of!(WebObservationWorkLimits, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebObservationWorkLimits, abi_version),
+            "u32",
+        ),
+        (
+            "maximumActiveMeterChannels",
+            offset_of!(WebObservationWorkLimits, maximum_active_meter_channels),
+            "u64",
+        ),
+        (
+            "maximumMeterSamplesPerBlock",
+            offset_of!(WebObservationWorkLimits, maximum_meter_samples_per_block),
+            "u64",
+        ),
+        (
+            "maximumMeterPublicationsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_meter_publications_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumMeterPublicationBytesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_meter_publication_bytes_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumActiveSpectrumCaptures",
+            offset_of!(WebObservationWorkLimits, maximum_active_spectrum_captures),
+            "u64",
+        ),
+        (
+            "maximumCaptureInputSamplesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_input_samples_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCaptureCopySamplesPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_copy_samples_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCapturePublicationsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_capture_publications_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumCaptureBytesPerSecond",
+            offset_of!(WebObservationWorkLimits, maximum_capture_bytes_per_second),
+            "u64",
+        ),
+        (
+            "maximumTransitionEntryVisitsPerBlock",
+            offset_of!(
+                WebObservationWorkLimits,
+                maximum_transition_entry_visits_per_block
+            ),
+            "u64",
+        ),
+        (
+            "maximumRetainedBytes",
+            offset_of!(WebObservationWorkLimits, maximum_retained_bytes),
+            "u64",
         ),
     ]
 }
@@ -1837,6 +1925,13 @@ pub fn render() -> String {
         "observationSelection",
         OBSERVATION_SELECTION_BYTES,
         &observation_selection_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "observationWorkLimits",
+        size_of::<WebObservationWorkLimits>() as u32,
+        &observation_work_limits_fields(),
         true,
     );
     render_structure(

@@ -230,6 +230,7 @@ STRUCTURES = {
     "meterHeader": 64,
     "commandReport": 48,
     "observationSelection": 32,
+    "observationWorkLimits": 96,
     "observationResult": 96,
     "responseRequest": 128,
     "responseParameter": 16,
@@ -330,6 +331,16 @@ SPECTRUM_STREAM_METADATA_FIELDS = [
 OBSERVATION_SELECTION_FIELDS = [
     "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
     "reserved",
+]
+OBSERVATION_WORK_LIMITS_FIELDS = [
+    "structSize", "abiVersion", "maximumActiveMeterChannels", "maximumMeterSamplesPerBlock",
+    "maximumMeterPublicationsPerBlock", "maximumMeterPublicationBytesPerBlock",
+    "maximumActiveSpectrumCaptures", "maximumCaptureInputSamplesPerBlock",
+    "maximumCaptureCopySamplesPerBlock", "maximumCapturePublicationsPerBlock",
+    "maximumCaptureBytesPerSecond", "maximumTransitionEntryVisitsPerBlock", "maximumRetainedBytes",
+]
+OBSERVATION_WORK_LIMITS_TYPES = [
+    "u32", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64", "u64",
 ]
 OBSERVATION_RESULT_FIELDS = [
     "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
@@ -475,6 +486,11 @@ def validate(document: object) -> None:
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
+    work_limits = structures["observationWorkLimits"]["fields"]
+    require([row["name"] for row in work_limits] == OBSERVATION_WORK_LIMITS_FIELDS,
+            f"observationWorkLimits names exactly {OBSERVATION_WORK_LIMITS_FIELDS}")
+    require([row["type"] for row in work_limits] == OBSERVATION_WORK_LIMITS_TYPES,
+            f"observationWorkLimits types exactly {OBSERVATION_WORK_LIMITS_TYPES}")
 
     constants = document["constants"]
     require(isinstance(constants, dict), "constants is an object")

@@ -226,6 +226,24 @@
         { "name": "reserved", "offset": 28, "type": "u32" }
       ]
     },
+    "observationWorkLimits": {
+      "bytes": 96,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "maximumActiveMeterChannels", "offset": 8, "type": "u64" },
+        { "name": "maximumMeterSamplesPerBlock", "offset": 16, "type": "u64" },
+        { "name": "maximumMeterPublicationsPerBlock", "offset": 24, "type": "u64" },
+        { "name": "maximumMeterPublicationBytesPerBlock", "offset": 32, "type": "u64" },
+        { "name": "maximumActiveSpectrumCaptures", "offset": 40, "type": "u64" },
+        { "name": "maximumCaptureInputSamplesPerBlock", "offset": 48, "type": "u64" },
+        { "name": "maximumCaptureCopySamplesPerBlock", "offset": 56, "type": "u64" },
+        { "name": "maximumCapturePublicationsPerBlock", "offset": 64, "type": "u64" },
+        { "name": "maximumCaptureBytesPerSecond", "offset": 72, "type": "u64" },
+        { "name": "maximumTransitionEntryVisitsPerBlock", "offset": 80, "type": "u64" },
+        { "name": "maximumRetainedBytes", "offset": 88, "type": "u64" }
+      ]
+    },
     "observationResult": {
       "bytes": 96,
       "fields": [
