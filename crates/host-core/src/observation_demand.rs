@@ -1,8 +1,8 @@
 //! Native selected-observation identity and work accounting.
 //!
 //! This module owns the native selected-meter preparation boundary and its checked work records.
-//! The graph endpoint and meter consumers stay private to the owner; later admission tranches add
-//! the bounded mutation and read operations without changing that ownership seam.
+//! The graph endpoint and meter consumers stay private to the owner, which admits bounded
+//! mutations, reconciles application receipts, and filters reads by the applied generation.
 
 use core::{
     alloc::Layout,
@@ -173,7 +173,7 @@ struct PendingApplication {
 /// Private owner of one prepared native selected-meter catalog and its graph activation transport.
 ///
 /// Keeping the graph controller and meter consumers private from the preparation boundary ensures
-/// that no raw observer endpoint can bypass owner identity or its future ledger.
+/// that no raw observer endpoint can bypass owner identity or its work ledger.
 pub struct HostObservationController {
     owner: ObservationOwnerId,
     graph: Option<GraphObservationController>,
