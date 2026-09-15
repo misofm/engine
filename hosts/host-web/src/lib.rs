@@ -529,14 +529,13 @@ pub const OBSERVATION_OPERATION_STOP: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
 /// Compatibility spelling for [`OBSERVATION_OPERATION_CAPTURE_RESPONSE`].
 pub const OBSERVATION_OPERATION_RESPONSE: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
 
-/// Protected observation profile and status flags.
-#[allow(missing_docs)]
+/// A status flag indicating that ordinary observation admission is available.
 pub const OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE: u32 = 1;
-#[allow(missing_docs)]
+/// A status flag indicating that removal observation admission is available.
 pub const OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE: u32 = 1 << 1;
-#[allow(missing_docs)]
+/// A status flag indicating that the protected observation owner is terminal.
 pub const OBSERVATION_STATUS_FLAG_TERMINAL: u32 = 1 << 2;
-#[allow(missing_docs)]
+/// A status flag indicating that rendering failed for the protected observation owner.
 pub const OBSERVATION_STATUS_FLAG_RENDER_FAILED: u32 = 1 << 3;
 
 /// Scalar observation demand submitted through the protected browser endpoint.
@@ -675,17 +674,32 @@ struct ObservationSideRecords {
     terminal_finalized: bool,
 }
 
-const OBSERVATION_ADMISSION_RECEIPT: u32 = 1;
-const OBSERVATION_ADMISSION_REQUESTED: u32 = 1 << 1;
-const OBSERVATION_ADMISSION_MAXIMUM: u32 = 1 << 2;
-const OBSERVATION_ADMISSION_PENDING_BOUNDARY: u32 = 1 << 3;
-const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
-const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
-const OBSERVATION_RECEIPT_DOMAIN_GRAPH: u32 = 1;
-const OBSERVATION_RECEIPT_STATE_PENDING: u32 = 1;
-const OBSERVATION_RECEIPT_STATE_APPLIED: u32 = 2;
-const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
-const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
+/// A graph-domain observation receipt.
+pub const OBSERVATION_RECEIPT_DOMAIN_GRAPH: u32 = 1;
+/// A resident-domain observation receipt reserved by the wire vocabulary.
+pub const OBSERVATION_RECEIPT_DOMAIN_RESIDENT: u32 = 2;
+/// A pending observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_PENDING: u32 = 1;
+/// An applied observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_APPLIED: u32 = 2;
+/// A closed observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
+/// A failed observation receipt.
+pub const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
+/// Admission metadata includes an observation receipt.
+pub const OBSERVATION_ADMISSION_RECEIPT: u32 = 1;
+/// Admission metadata includes the requested value.
+pub const OBSERVATION_ADMISSION_REQUESTED: u32 = 1 << 1;
+/// Admission metadata includes the maximum value.
+pub const OBSERVATION_ADMISSION_MAXIMUM: u32 = 1 << 2;
+/// Admission metadata records a pending render-boundary application.
+pub const OBSERVATION_ADMISSION_PENDING_BOUNDARY: u32 = 1 << 3;
+/// A protected response capture identity.
+pub const OBSERVATION_CAPTURE_KIND_RESPONSE: u32 = 1;
+/// A protected spectrum capture identity.
+pub const OBSERVATION_CAPTURE_KIND_SPECTRUM: u32 = 2;
+/// A capture identity carries graph-generation fields.
+pub const OBSERVATION_CAPTURE_FLAG_GRAPH_GENERATION: u32 = 1;
 /// A protected continuous-spectrum read preserves either its exact admission refusal or the
 /// complete native availability outcome. The public Rust compatibility facade maps this typed
 /// seam back to [`SpectrumContinuousReadError`] after the native result has been retained.

@@ -29,6 +29,7 @@ use crate::{
     OBSERVATION_OPERATION_REMOVE_METERS_TO, OBSERVATION_OPERATION_RESIDENT_READ,
     OBSERVATION_OPERATION_START_SPECTRUM, OBSERVATION_OPERATION_STOP_GRAPH,
     OBSERVATION_OPERATION_STOP_SPECTRUM, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_CAPTURE_KIND_RESPONSE,
     OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
     ObservationAddress, ObservationClass, ObservationIngressLimits, ObservationLengths,
     ObservationReadChannels, ObservationReadError, ObservationReadValues,
@@ -1808,8 +1809,6 @@ fn run_protected_live_response_capture(
     staging: &mut ResponseStaging,
 ) -> u32 {
     const OPERATION: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
-    const RESPONSE_CAPTURE_KIND: u32 = 1;
-
     // Copy fixed scalars before any request interpretation. The ordinary attempt is classified
     // from these declared lengths, so an oversized request spends the attempt before refusal.
     let request = *staging.live_request;
@@ -2001,7 +2000,7 @@ fn run_protected_live_response_capture(
     host.commit_observation_capture_identity(WebObservationCaptureIdentity {
         struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
         abi_version: ABI_VERSION,
-        kind: RESPONSE_CAPTURE_KIND,
+        kind: OBSERVATION_CAPTURE_KIND_RESPONSE,
         flags: 0,
         owner: owner.get(),
         observation_generation: 0,
