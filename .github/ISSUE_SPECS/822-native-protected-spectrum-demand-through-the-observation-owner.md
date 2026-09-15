@@ -3,6 +3,49 @@
 Status: Astra XHIGH design approved by coordinator for five bounded Luna MAX assignments. Depends on closed #820 (PR #821, merge e907b632).
 
 
+## Authoritative continuous-first contract
+
+Fresh Astra XHIGH reviewed this reduction against the approved browser EQ contract; root approved it on 2026-09-15. This section supersedes every conflicting one-shot delivery/cache/API/gate requirement in the detailed preparation notes below. C2 private paired-slot machinery stays unchanged.
+
+**Coordinator-approved scope: close #822 for protected continuous spectrum; protected one-shot follows the working browser EQ milestone.** Replace every conflicting one-shot/last-result requirement in #822 with this amendment. The closable capability is exact prepared-target continuous replace, same-target restart, reserved stop, generation-fenced continuous reads, and zero graph dispatch after applied stop. Preserve paired slots, private ownership, complete meter/spectrum unions, capture identity, budget equations, bounded retirement and receipt authority. Legacy permanent one-shot remains unchanged. C1/C2 may proceed unchanged; private one-shot machinery already shared with legacy capture need not be removed.
+
+## Exact API and refusal
+
+Keep `HostSpectrumDemand`, `ObservedContinuousSpectrumWindow`, `replace_spectrum`, `restart_spectrum`, `stop_spectrum`, and `try_read_continuous_spectrum`. Defer protected `ObservedSpectrumWindow` and `try_read_spectrum`; do not implement placeholder methods. Retain `HostSpectrumMode::{OneShot, Continuous}` if C2 uses it. Following the existing terminal-owner check, `replace_spectrum(OneShot)` returns exactly:
+
+```rust
+ObservationRefusal {
+    reason: ObservationRefusalReason::InvalidRequest,
+    limit: None,
+    requested: None,
+    maximum: None,
+}
+```
+
+Refuse before target lookup, slot staging or graph publication; preserve accepted/applied state, queues, work and identity counters. No new native refusal variant or numeric mapping is needed. The protected browser endpoint continues its already specified `Unsupported` result before invoking C; its alias policy does not depend on native one-shot support.
+
+## Last-result contract
+
+**No native continuous result cache is required.** Continuous reads transfer a single generation-stamped window to the caller; neither approved browser contract requests native replay or last-result access. Their preserved previous values are existing ABI committed output and SDK publication state, maintained independently when admission/read does not succeed.
+
+Delete #822's native tagged last-result-cell guarantee explicitly, including retention through accepted replacement. A refused replacement preserves the active capture and any unread queued record. An accepted replacement never resets the old active slot before application; subsequent reads report PendingApplication until the accepted generation applies. Successfully returned old windows remain caller-owned and distinguishable by identity. Stop/application fences future delivery and performs bounded retired-queue cleanup. No duplicated payload storage, cache validity flag or extra native result copy is necessary.
+
+## Replacement handoffs and gates
+
+**C3:** Keep real preparation, complete-set selections/scratch and checked meter-plus-spectrum cost composition. Omit inline last-result storage and pending-one-shot-delivery metadata; derive retained bytes from actual reduced layouts. Keep all existing C3 preparation, union-capacity, exact/one-below, overflow, no-raw-control and dormant-work gates.
+
+**C4:** Implement continuous replace/restart/stop, meter-union preservation, `stop_all`, and bounded `try_applied` reconciliation. Remove result-cell initialization/invalidation and mode-transition behavior. Replace the mode-change gate with atomic OneShot refusal. Preserve A→B, same-A restart, no pre-boundary mutation, failed-publication queue/state preservation, ordinary-plus-removal receipts, repeated-stop identity, terminal closure and applied-stop zero-dispatch gates. Reads consume no receipts; only `try_applied` reconciles application.
+
+**C5:** Implement only fenced continuous reading, with one entry-bounded queue pop, independent selection/generation/stream identities and existing Failed/Gap metadata. Retain applicable state errors; omit one-shot delivery and `CleanupRefused`. Remove automatic-removal retries, cleanup-admission exhaustion and undelivered-one-shot gates. Preserve stale-record rejection before projection, pending-generation nonconsumption, stream-epoch collisions, failed render/full queue, PCM parity, resident/planar operation counts, Q>2048, realtime guards and the proportional native/Wasm closure gates. Continuous reads never publish removal; explicit stop remains mandatory.
+
+
+The protected read error for this slice is `HostSpectrumReadError::{Inactive, PendingApplication, Warming, Pending, Closed, Failed { owner: ObservationOwnerId, observation_generation: u64, stream_epoch: u64 }, Gap { owner: ObservationOwnerId, observation_generation: u64, stream_epoch: u64, dropped_captures: u64 }}`. No protected one-shot API, Invalid, WrongMode, or CleanupRefused variant is introduced here.
+
+Successor scope, to be numbered at this issue boundary: protected OneShot admission/read, automatic reserved removal, one retained undelivered result, retry/exhaustion/closure semantics, exact storage accounting and representative contention gates. It follows the working browser EQ milestone and remains part of the overall production rollout. No native continuous replay/cache is promised.
+
+## Detailed preparation and implementation notes
+
+
 Depends on #820. Smallest closable result: the native demand owner supports the existing fixed 2048 one-shot/continuous spectrum and exact prepared-target selection, including same-target restart, with one admitted spectrum producer. Last stop removes graph dispatch. No overlap, custom hop/FFT, extra workers or simultaneous jobs. Scope: existing `crates/host-core/src/spectrum.rs`, `observation_demand.rs`, preparation/export glue and existing spectrum/host tests.
 
 ## Capture identity, ownership and render hooks
