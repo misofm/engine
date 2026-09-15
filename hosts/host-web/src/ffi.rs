@@ -13,6 +13,8 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(test)]
+use crate::OBSERVATION_OPERATION_STOP;
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
@@ -21,11 +23,15 @@ use crate::{
     LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
     LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
     MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH,
-    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_OPERATION_READ_SPECTRUM,
-    OBSERVATION_OPERATION_STOP, OBSERVATION_OPERATION_STOP_GRAPH, OBSERVATION_RESULT_BYTES,
-    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationClass, ObservationIngressLimits,
-    ObservationLengths, ObservationReadChannels, ObservationReadError, ObservationReadValues,
+    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+    OBSERVATION_OPERATION_COLLECTION_SELECTION, OBSERVATION_OPERATION_METER_LEASE,
+    OBSERVATION_OPERATION_ONE_SHOT, OBSERVATION_OPERATION_READ_SPECTRUM,
+    OBSERVATION_OPERATION_REMOVE_METERS_TO, OBSERVATION_OPERATION_RESIDENT_READ,
+    OBSERVATION_OPERATION_START_SPECTRUM, OBSERVATION_OPERATION_STOP_GRAPH,
+    OBSERVATION_OPERATION_STOP_SPECTRUM, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
+    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
+    ObservationAddress, ObservationClass, ObservationIngressLimits, ObservationLengths,
+    ObservationReadChannels, ObservationReadError, ObservationReadValues,
     ProtectedResponseCaptureError, ProtectedSpectrumReadError, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
     RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
     RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL,
@@ -1801,7 +1807,7 @@ fn run_protected_live_response_capture(
     host: &mut AudioWorkletEngineHost,
     staging: &mut ResponseStaging,
 ) -> u32 {
-    const OPERATION: u32 = 8;
+    const OPERATION: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
     const RESPONSE_CAPTURE_KIND: u32 = 1;
 
     // Copy fixed scalars before any request interpretation. The ordinary attempt is classified
@@ -3125,7 +3131,11 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
-    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11) {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_COLLECTION_SELECTION,
+    ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3267,7 +3277,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 11) {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_COLLECTION_SELECTION,
+    ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3287,7 +3301,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
-    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 10) {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_ONE_SHOT,
+    ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3416,7 +3434,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothin
 /// and target-ID buffers are deliberately not consulted. Native acceptance is the transaction
 /// boundary for every FFI-visible stream field, including analysis history reset.
 fn protected_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
-    const OPERATION: u32 = 4;
+    const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
     LIVE_HOST.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -4142,7 +4160,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
 /// lengths are invalidated only after native acceptance; the backing bytes and host capture
 /// identity remain untouched for C2b's read/packing path.
 fn protected_spectrum_stream_stop(handle: u32) -> u32 {
-    const OPERATION: u32 = OBSERVATION_OPERATION_STOP;
+    const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
     LIVE_HOST.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
@@ -4220,7 +4238,11 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    match refuse_protected_observation_alias(handle, ObservationClass::Removal, 10) {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Removal,
+        OBSERVATION_OPERATION_ONE_SHOT,
+    ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -4531,7 +4553,9 @@ pub extern "C" fn miso_engine_web_v1_observation_demand_capacity() -> u32 {
 
 fn observation_demand_class(operation: u32) -> ObservationClass {
     match operation {
-        2 | OBSERVATION_OPERATION_STOP_GRAPH => ObservationClass::Removal,
+        OBSERVATION_OPERATION_REMOVE_METERS_TO | OBSERVATION_OPERATION_STOP_GRAPH => {
+            ObservationClass::Removal
+        }
         _ => ObservationClass::Ordinary,
     }
 }
@@ -4632,7 +4656,7 @@ fn apply_observation_demand(
     // The native helper owns receipt reservation and the single stop publication. Its admission
     // record remains authoritative; only the wire operation tag is retagged after that call.
     let result = host.stop_spectrum_stream_admitted(permit);
-    if host.observation_admission().operation == OBSERVATION_OPERATION_STOP {
+    if host.observation_admission().operation == OBSERVATION_OPERATION_STOP_SPECTRUM {
         host.side_records.admission.operation = OBSERVATION_OPERATION_STOP_GRAPH;
     }
     result
@@ -5457,7 +5481,7 @@ pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u
     } else {
         ObservationClass::Ordinary
     };
-    match refuse_protected_observation_alias(handle, class, 12) {
+    match refuse_protected_observation_alias(handle, class, OBSERVATION_OPERATION_METER_LEASE) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -5650,7 +5674,11 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    match refuse_protected_observation_alias(handle, ObservationClass::Ordinary, 14) {
+    match refuse_protected_observation_alias(
+        handle,
+        ObservationClass::Ordinary,
+        OBSERVATION_OPERATION_RESIDENT_READ,
+    ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }

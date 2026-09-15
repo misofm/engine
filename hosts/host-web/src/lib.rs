@@ -427,7 +427,7 @@ impl Default for WebObservationPreparationRecord {
         Self {
             struct_size: size_of::<Self>() as u32,
             abi_version: ABI_VERSION,
-            profile: 0,
+            profile: OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
             meter_count: 0,
             resident_taps: 0,
             spectrum_count: 0,
@@ -469,7 +469,7 @@ impl Default for WebObservationStatus {
         Self {
             struct_size: size_of::<Self>() as u32,
             abi_version: ABI_VERSION,
-            profile: 0,
+            profile: OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
             flags: 0,
             pending_count: 0,
             reserved: 0,
@@ -491,9 +491,45 @@ pub const OBSERVATION_INGRESS_LIMITS_BYTES: u32 = size_of::<WebObservationIngres
 pub const OBSERVATION_PREPARATION_BYTES: u32 = size_of::<WebObservationPreparationRecord>() as u32;
 #[allow(missing_docs)]
 pub const OBSERVATION_STATUS_BYTES: u32 = size_of::<WebObservationStatus>() as u32;
-/// Protected observation profile and status flags.
-#[allow(missing_docs)]
+/// Unprotected legacy observation profile (`observationProfiles.legacyUnprotected`).
+pub const OBSERVATION_PROFILE_LEGACY_UNPROTECTED: u32 = 0;
+/// Protected EQ spectrum observation profile (`observationProfiles.eqSpectrum`).
 pub const OBSERVATION_PROFILE_EQ_SPECTRUM: u32 = 1;
+/// Replace the meter observation set (`observationOperations.replaceMeters`).
+pub const OBSERVATION_OPERATION_REPLACE_METERS: u32 = 1;
+/// Remove meter observations through the requested boundary (`observationOperations.removeMetersTo`).
+pub const OBSERVATION_OPERATION_REMOVE_METERS_TO: u32 = 2;
+/// Stop the protected observation graph (`observationOperations.stopGraph`).
+pub const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
+/// Start a continuous spectrum observation (`observationOperations.startSpectrum`).
+pub const OBSERVATION_OPERATION_START_SPECTRUM: u32 = 4;
+/// Restart a continuous spectrum observation (`observationOperations.restartSpectrum`).
+pub const OBSERVATION_OPERATION_RESTART_SPECTRUM: u32 = 5;
+/// Read a continuous spectrum observation (`observationOperations.readSpectrum`).
+pub const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
+/// Stop a continuous spectrum observation (`observationOperations.stopSpectrum`).
+pub const OBSERVATION_OPERATION_STOP_SPECTRUM: u32 = 7;
+/// Capture a response observation (`observationOperations.captureResponse`).
+pub const OBSERVATION_OPERATION_CAPTURE_RESPONSE: u32 = 8;
+/// Submit a raw observation batch (`observationOperations.rawObservationBatch`).
+pub const OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH: u32 = 9;
+/// Read a one-shot observation (`observationOperations.oneShot`).
+pub const OBSERVATION_OPERATION_ONE_SHOT: u32 = 10;
+/// Select a spectrum collection entry (`observationOperations.collectionSelection`).
+pub const OBSERVATION_OPERATION_COLLECTION_SELECTION: u32 = 11;
+/// Acquire or release the meter lease (`observationOperations.meterLease`).
+pub const OBSERVATION_OPERATION_METER_LEASE: u32 = 12;
+/// Read a meter observation (`observationOperations.meterRead`).
+pub const OBSERVATION_OPERATION_METER_READ: u32 = 13;
+/// Read resident observations (`observationOperations.residentRead`).
+pub const OBSERVATION_OPERATION_RESIDENT_READ: u32 = 14;
+
+/// Compatibility spelling for [`OBSERVATION_OPERATION_STOP_SPECTRUM`].
+pub const OBSERVATION_OPERATION_STOP: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
+/// Compatibility spelling for [`OBSERVATION_OPERATION_CAPTURE_RESPONSE`].
+pub const OBSERVATION_OPERATION_RESPONSE: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
+
+/// Protected observation profile and status flags.
 #[allow(missing_docs)]
 pub const OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE: u32 = 1;
 #[allow(missing_docs)]
@@ -650,11 +686,6 @@ const OBSERVATION_RECEIPT_STATE_PENDING: u32 = 1;
 const OBSERVATION_RECEIPT_STATE_APPLIED: u32 = 2;
 const OBSERVATION_RECEIPT_STATE_CLOSED: u32 = 3;
 const OBSERVATION_RECEIPT_STATE_FAILED: u32 = 4;
-const OBSERVATION_OPERATION_STOP_GRAPH: u32 = 3;
-const OBSERVATION_OPERATION_STOP: u32 = 7;
-const OBSERVATION_OPERATION_READ_SPECTRUM: u32 = 6;
-const OBSERVATION_OPERATION_RESPONSE: u32 = 8;
-
 /// A protected continuous-spectrum read preserves either its exact admission refusal or the
 /// complete native availability outcome. The public Rust compatibility facade maps this typed
 /// seam back to [`SpectrumContinuousReadError`] after the native result has been retained.
@@ -2861,7 +2892,7 @@ impl AudioWorkletEngineHost {
         &mut self,
         permit: ObservationPermit,
     ) -> Result<SpectrumCadence, u32> {
-        const OPERATION: u32 = 4;
+        const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
         self.validate_admitted_observation_permit(&permit, ObservationClass::Ordinary, OPERATION)?;
         let cadence = match self.protected_spectrum_cadence() {
             Ok(cadence) => cadence,
@@ -2906,7 +2937,7 @@ impl AudioWorkletEngineHost {
 
     /// Execute one admitted protected continuous-spectrum restart.
     fn restart_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
-        const OPERATION: u32 = 5;
+        const OPERATION: u32 = OBSERVATION_OPERATION_RESTART_SPECTRUM;
         if let Err(result) = self.validate_admitted_observation_permit(
             &permit,
             ObservationClass::Ordinary,
@@ -2951,7 +2982,7 @@ impl AudioWorkletEngineHost {
 
     /// Execute one admitted protected continuous-spectrum stop.
     fn stop_spectrum_stream_admitted(&mut self, permit: ObservationPermit) -> u32 {
-        const OPERATION: u32 = OBSERVATION_OPERATION_STOP;
+        const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
         if let Err(result) =
             self.validate_admitted_observation_permit(&permit, ObservationClass::Removal, OPERATION)
         {
@@ -3235,7 +3266,7 @@ impl AudioWorkletEngineHost {
         self.side_records.pending_count += 1;
         if matches!(
             operation,
-            OBSERVATION_OPERATION_STOP_GRAPH | OBSERVATION_OPERATION_STOP
+            OBSERVATION_OPERATION_STOP_GRAPH | OBSERVATION_OPERATION_STOP_SPECTRUM
         ) {
             self.side_records.pending_stop_slot = Some(slot);
         }
@@ -3498,7 +3529,7 @@ impl AudioWorkletEngineHost {
         track_id: &str,
         sink: &mut dyn ResponseSnapshotSink,
     ) -> Result<engine::realtime::ResponseSnapshotCapture, ProtectedResponseCaptureError> {
-        const OPERATION: u32 = OBSERVATION_OPERATION_RESPONSE;
+        const OPERATION: u32 = OBSERVATION_OPERATION_CAPTURE_RESPONSE;
 
         let (owner, epoch) = match self.protected_observation_identity() {
             Ok(identity) => identity,
@@ -3700,7 +3731,10 @@ impl AudioWorkletEngineHost {
                         requested: None,
                         maximum: None,
                     };
-                    self.record_observation_refusal(OBSERVATION_OPERATION_RESPONSE, refusal);
+                    self.record_observation_refusal(
+                        OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                        refusal,
+                    );
                     return Err(legacy_response_refusal(refusal));
                 }
             };
@@ -3724,7 +3758,10 @@ impl AudioWorkletEngineHost {
             ) {
                 Ok(permit) => permit,
                 Err(refusal) => {
-                    self.record_observation_refusal(OBSERVATION_OPERATION_RESPONSE, refusal);
+                    self.record_observation_refusal(
+                        OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                        refusal,
+                    );
                     return Err(legacy_response_refusal(refusal));
                 }
             };
@@ -3802,7 +3839,7 @@ impl AudioWorkletEngineHost {
             matches!(&ready.observation, PreparedObservationStorage::Protected(_))
         });
         if protected {
-            const OPERATION: u32 = 4;
+            const OPERATION: u32 = OBSERVATION_OPERATION_START_SPECTRUM;
             let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
             let permit = match self.begin_observation(
                 ObservationClass::Ordinary,
@@ -3844,7 +3881,7 @@ impl AudioWorkletEngineHost {
             matches!(&ready.observation, PreparedObservationStorage::Protected(_))
         });
         if protected {
-            const OPERATION: u32 = 5;
+            const OPERATION: u32 = OBSERVATION_OPERATION_RESTART_SPECTRUM;
             let target_bytes = self.protected_spectrum_target_bytes().unwrap_or_default();
             let permit = match self.begin_observation(
                 ObservationClass::Ordinary,
@@ -3936,7 +3973,7 @@ impl AudioWorkletEngineHost {
             matches!(&ready.observation, PreparedObservationStorage::Protected(_))
         });
         if protected {
-            const OPERATION: u32 = OBSERVATION_OPERATION_STOP;
+            const OPERATION: u32 = OBSERVATION_OPERATION_STOP_SPECTRUM;
             if let Some(receipt) = self.pending_stop_receipt() {
                 self.record_observation_admission(OPERATION, RESULT_OK, None, Some(receipt), true);
                 return RESULT_OK;
@@ -4863,7 +4900,7 @@ impl AudioWorkletEngineHost {
             }
         };
         if let Some((class, index)) = observation {
-            const OPERATION: u32 = 9;
+            const OPERATION: u32 = OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH;
             let control_bytes = u64::from(count)
                 .checked_mul(u64::from(COMMAND_RECORD_BYTES))
                 .and_then(|bytes| bytes.checked_add(u64::from(companion_bytes.unwrap_or(0))));
