@@ -8371,6 +8371,125 @@ mod observation_checkpoint_c2a_tests {
     }
 
     #[test]
+    fn protected_stream_read_reports_generation_seek_failed_and_retains_last_ready_capture() {
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        let handle = boot_protected();
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        render_protected_window(handle);
+        assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+
+        let (ready_capture, ready_header, ready_metadata) = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            let header: WebSpectrumWindow = read_live_record(bytes, 0).expect("ready header");
+            let mut left = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            let mut right = [0.0_f32; host_core::SPECTRUM_WINDOW_FRAMES];
+            spectrum_f32_plane(bytes, header.left_offset, header.frames, &mut left)
+                .expect("ready left plane");
+            spectrum_f32_plane(bytes, header.right_offset, header.frames, &mut right)
+                .expect("ready right plane");
+            assert!(left.iter().any(|value| *value != 0.0));
+            assert!(right.iter().any(|value| *value != 0.0));
+            assert_eq!(staging.stream_metadata.status, SPECTRUM_STREAM_STATUS_READY);
+            (
+                bytes[..staging.capture_len].to_vec(),
+                header,
+                staging.stream_metadata,
+            )
+        });
+        let ready_identity = capture_identity();
+        assert_eq!(ready_metadata.capture_epoch, 1);
+        assert_eq!(ready_metadata.sequence, 0);
+        assert_eq!(ready_metadata.windows, 1);
+        assert_eq!(ready_header.snapshot_token, 1);
+        assert_ne!(ready_identity.owner, 0);
+        assert_eq!(ready_identity.snapshot_token, ready_header.snapshot_token);
+
+        // Match the native seek fixture: leave a partial window in flight before changing the
+        // source generation. The next render crosses that boundary and invalidates the partial
+        // window, while the render owner remains usable.
+        for block in 17..24_u64 {
+            assert_eq!(
+                miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                RESULT_OK,
+                "protected partial source block {block}"
+            );
+            assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+        }
+        assert_eq!(
+            miso_engine_web_v1_source_seek(handle, 14, 2, 2_048),
+            RESULT_OK,
+            "generation-tagged seek must be admitted"
+        );
+        assert_eq!(test_fill_source_pcm(handle, 0.75), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_source_submit(handle, 14, 2, 2_048, 2, 128, 0),
+            RESULT_OK,
+            "fresh generation source block"
+        );
+        assert_eq!(
+            miso_engine_web_v1_render(handle, 128),
+            RESULT_OK,
+            "the seek boundary is reported by the protected stream read"
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_RENDER_REJECTED
+        );
+        let failed_metadata = SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(
+                staging.stream_metadata.status,
+                SPECTRUM_STREAM_STATUS_FAILED
+            );
+            assert_eq!(staging.stream_metadata.result, RESULT_RENDER_REJECTED);
+            assert_eq!(staging.stream_metadata.capture_epoch, 2);
+            assert_eq!(
+                staging.stream_metadata.capture_epoch,
+                ready_metadata.capture_epoch + 1,
+                "the failed read must publish the native stream epoch"
+            );
+            assert_eq!(staging.stream_metadata.sequence, ready_metadata.sequence);
+            assert_eq!(staging.stream_metadata.windows, ready_metadata.windows);
+            assert_eq!(
+                staging.stream_metadata.captured_sample,
+                ready_metadata.captured_sample
+            );
+            assert_eq!(
+                staging.stream_metadata.end_sample,
+                ready_metadata.end_sample
+            );
+            assert_eq!(
+                staging.stream_metadata.analysis_epoch,
+                ready_metadata.analysis_epoch
+            );
+            assert_eq!(staging.stream_metadata.history_start_sample, 0);
+            assert!(staging.stream_window.is_none());
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+
+            // The failed outcome invalidates the published lengths, but must not overwrite the
+            // last committed raw bytes. Check the backing bytes directly, including their header
+            // and snapshot token, rather than relying on the now-invalid length.
+            let bytes = staging.capture.as_ref().expect("protected capture");
+            assert_eq!(&bytes[..ready_capture.len()], ready_capture.as_slice());
+            assert_eq!(
+                read_live_record::<WebSpectrumWindow>(bytes, 0).expect("retained ready header"),
+                ready_header
+            );
+            staging.stream_metadata
+        });
+        assert_eq!(failed_metadata.status, SPECTRUM_STREAM_STATUS_FAILED);
+        assert_eq!(failed_metadata.result, RESULT_RENDER_REJECTED);
+        assert_eq!(capture_identity(), ready_identity);
+        dispose(handle);
+    }
+
+    #[test]
     fn protected_stream_read_reports_native_pending_states_and_retains_last_ready_capture() {
         SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
         let handle = boot_protected();
