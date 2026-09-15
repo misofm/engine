@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { StructView } from "../src/core/abi.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
@@ -46,6 +47,74 @@ function wordAt(block, name) {
   const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
   return row.type === "u64" ? view.getBigUint64(row.offset, true) : view.getUint32(row.offset, true);
 }
+
+test("protected observation generated offsets preserve BigInt", () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const leaves = [
+    { structure: "observationCaptureIdentity", name: "owner", value: 0x0020_0000_0000_0001n },
+    { structure: "observationCaptureIdentity", name: "observationGeneration", value: 0x0040_0000_0000_0003n },
+    { structure: "observationCaptureIdentity", name: "selectionEpoch", value: 0x0080_0000_0000_0005n },
+    { structure: "observationCaptureIdentity", name: "snapshotToken", value: 0x0100_0000_0000_0007n },
+    { structure: "observationPreparation", name: "ingressLimits.maximumRetainedBytes", value: 0x0200_0000_0000_0009n },
+    { structure: "observationAdmission", name: "receipt.owner", value: 0x0400_0000_0000_000bn },
+    { structure: "observationAdmission", name: "receipt.sequence", value: 0xffff_ffff_ffff_ffd1n },
+    { structure: "observationAdmission", name: "receipt.applicationSample", value: 0xffff_ffff_ffff_fff1n },
+  ];
+  const structures = [...new Set(leaves.map(({ structure }) => structure))];
+  const pointers = new Map();
+  let nextPointer = 1;
+  for (const structure of structures) {
+    pointers.set(structure, nextPointer);
+    nextPointer += ABI_LAYOUT.structures[structure].bytes;
+  }
+
+  const ranges = structures.map((structure) => ({
+    structure,
+    pointer: pointers.get(structure),
+    end: pointers.get(structure) + ABI_LAYOUT.structures[structure].bytes,
+  }));
+  for (const range of ranges) {
+    assert.ok(range.pointer > 0, `${range.structure} must use a nonzero pointer`);
+  }
+  for (let index = 0; index < ranges.length; index += 1) {
+    for (let other = index + 1; other < ranges.length; other += 1) {
+      assert.ok(
+        ranges[index].end <= ranges[other].pointer || ranges[other].end <= ranges[index].pointer,
+        `${ranges[index].structure} and ${ranges[other].structure} must be disjoint`,
+      );
+    }
+  }
+
+  const views = new Map(
+    structures.map((structure) => [
+      structure,
+      new StructView(memory, structure, pointers.get(structure)),
+    ]),
+  );
+  const generatedLeaves = leaves.map((leaf) => {
+    const layout = ABI_LAYOUT.structures[leaf.structure];
+    assert.ok(layout, `${leaf.structure} must exist in the generated ABI`);
+    const row = layout.fields.find(({ name }) => name === leaf.name);
+    assert.ok(row, `${leaf.structure}.${leaf.name} must exist in the generated ABI`);
+    assert.equal(row.type, "u64", `${leaf.structure}.${leaf.name} must be a scalar u64`);
+    return { ...leaf, row };
+  });
+
+  for (const leaf of generatedLeaves) {
+    const data = new DataView(
+      memory.buffer,
+      pointers.get(leaf.structure),
+      ABI_LAYOUT.structures[leaf.structure].bytes,
+    );
+    data.setBigUint64(leaf.row.offset, leaf.value, true);
+  }
+
+  for (const leaf of generatedLeaves) {
+    const view = views.get(leaf.structure);
+    assert.equal(view.u64(leaf.name), leaf.value, `${leaf.structure}.${leaf.name}`);
+    assert.equal(view.snapshot()[leaf.name], leaf.value, `${leaf.structure}.${leaf.name} snapshot`);
+  }
+});
 
 describe("finding 3 -- the scratch and worklet boots agree on every policy word", () => {
   test("the two option blocks are byte-equal with the two require_* words masked", () => {
