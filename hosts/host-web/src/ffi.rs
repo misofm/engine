@@ -6477,6 +6477,46 @@ pub(crate) mod live_response_ffi_tests {
         });
     }
 
+    fn protected_response_packed_bound() -> usize {
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            usize::try_from(
+                host.response_capture_preflight("eq0")
+                    .expect("prepared response target bound"),
+            )
+            .expect("packed response bound fits usize")
+        })
+    }
+
+    fn configure_live_result_capacity(capacity: usize) {
+        configure_live_request(|request| {
+            request.maximum_result_bytes =
+                u32::try_from(capacity).expect("test response capacity fits u32");
+        });
+    }
+
+    fn truncate_live_result_for_test(
+        before: &ResponseMarkers,
+        actual_capacity: usize,
+    ) -> ResponseMarkers {
+        assert!(actual_capacity <= before.raw_result.len());
+        let surviving_prefix = before.raw_result[..actual_capacity].to_vec();
+        // This deliberately truncates the control-side fixture Vec to model a short actual
+        // staging region. Production response staging remains fixed; compare every surviving
+        // byte before invoking the protected FFI refusal.
+        RESPONSE_STAGING.with(|slot| {
+            slot.borrow_mut().live_result.truncate(actual_capacity);
+        });
+        let truncated = response_markers();
+        assert_eq!(truncated.raw_result, surviving_prefix);
+        assert_eq!(truncated.live_result_len, before.live_result_len);
+        assert_eq!(truncated.live_token, before.live_token);
+        assert_eq!(truncated.live_result_header, before.live_result_header);
+        assert_eq!(truncated.capture_identity, before.capture_identity);
+        truncated
+    }
+
     fn run_real_response_refusal(case: &str, configure: impl FnOnce(), expected: u32) {
         let handle = boot_private_protected();
         let markers = real_response_markers_after_boundary(handle);
@@ -6540,6 +6580,96 @@ pub(crate) mod live_response_ffi_tests {
             || configure_live_track_id(b"eq1", 3),
             RESULT_INVALID_ARGUMENT,
         );
+    }
+
+    #[test]
+    fn ffi_protected_response_declared_capacity_one_byte_short_preserves_real_markers() {
+        let handle = boot_private_protected();
+        let markers = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        assert!(packed_bound > 0);
+        configure_live_result_capacity(packed_bound - 1);
+
+        assert_real_response_refusal(
+            "declared response capacity one byte short",
+            handle,
+            &markers,
+            RESULT_REFUSED_BUDGET,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_actual_capacity_one_byte_short_preserves_surviving_markers() {
+        let handle = boot_private_protected();
+        let complete = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        assert!(packed_bound > 0);
+        let markers = truncate_live_result_for_test(&complete, packed_bound - 1);
+        configure_live_result_capacity(packed_bound);
+
+        assert_real_response_refusal(
+            "actual response staging capacity one byte short",
+            handle,
+            &markers,
+            RESULT_INVALID_ARGUMENT,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_declared_capacity_over_actual_staging_preserves_markers() {
+        let handle = boot_private_protected();
+        let complete = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        let actual_capacity = packed_bound;
+        let declared_capacity = packed_bound + 1;
+        assert!(declared_capacity <= complete.raw_result.len());
+        let markers = truncate_live_result_for_test(&complete, actual_capacity);
+        configure_live_result_capacity(declared_capacity);
+
+        assert_real_response_refusal(
+            "declared response capacity exceeds actual staging",
+            handle,
+            &markers,
+            RESULT_INVALID_ARGUMENT,
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_exact_packed_capacity_advances_and_packs_complete_result() {
+        let handle = boot_private_protected();
+        let previous = real_response_markers_after_boundary(handle);
+        let packed_bound = protected_response_packed_bound();
+        configure_live_result_capacity(packed_bound);
+
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let current = response_markers();
+        assert_eq!(current.live_token, previous.live_token + 1);
+        assert_eq!(current.live_result_header.result, RESULT_OK);
+        assert_eq!(
+            current.live_result_len,
+            current.live_result_header.result_bytes as usize
+        );
+        assert!(current.live_result_len <= packed_bound);
+        assert_eq!(current.capture_identity.kind, 1);
+        assert_eq!(current.capture_identity.flags, 0);
+        assert_eq!(
+            current.capture_identity.owner,
+            previous.capture_identity.owner
+        );
+        assert_eq!(current.capture_identity.observation_generation, 0);
+        assert_eq!(current.capture_identity.selection_epoch, 0);
+        assert_eq!(current.capture_identity.snapshot_token, current.live_token);
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let (snapshot, token) =
+                parse_live_snapshot(&staging).expect("exact-fit response is complete");
+            assert_eq!(token, current.live_token);
+            assert!(!snapshot.owners.is_empty());
+        });
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
     #[test]
