@@ -437,3 +437,12 @@ ownership/realtime predicate. Its new record checksum is
 replacing its single da78dc3e resource-manifest identity with the prior9161d2ca
 identity restores exact prior checksum3a5ae262. No other record byte changed.
 All other CI34923128333 jobs passed; these were its only remaining failures.
+
+## Merged delivery
+
+Required qualification34923842113 passed every required job at8255b37c.
+PR #817 merged as a4e2d8ca16cc9940505906f866ae871b11ef177f; GitHub #816 is
+verified CLOSED. This delivers immutable prepared controlled catalogs, bounded
+activation/removal, exact application receipts, active-only graph dispatch and
+accounted dormant runtime storage. Controlled peak-meter compiler adoption is
+#818; host/SDK/browser/frontend migration remains under open parent #763.
