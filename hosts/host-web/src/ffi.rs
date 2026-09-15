@@ -8421,6 +8421,100 @@ mod observation_checkpoint_a_tests {
         }
     }
 
+    #[test]
+    fn public_protected_boot_preserves_endpoint_on_budget_refusal_and_recovers() {
+        const PROTECTED_PAYLOAD_FLOOR_BYTES: u64 = 2_097_152;
+        const GENEROUS_BUDGET_BYTES: u64 = 67_108_864;
+
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+
+        let document = one_track_protected_document();
+        let mut refusal_record = protected_preparation_record();
+        refusal_record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+        stage_protected_boot(document.as_bytes(), refusal_record);
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.maximum_memory_bytes = PROTECTED_PAYLOAD_FLOOR_BYTES;
+        });
+
+        let expected_outputs = OBSERVATION_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.endpoint.status.owner = 0x1111_2222_3333_4444;
+            staging.endpoint.admission.operation = 0x5555_6666;
+            staging.endpoint.capture_identity.snapshot_token = 0x7777_8888_9999_AAAA;
+            staging.endpoint.applications[0].sequence = 0xBBBB_CCCC_DDDD_EEEE;
+            staging.endpoint.application_count = 1;
+            staging.endpoint.handle = 0xF00D_BAAD;
+            (
+                staging.endpoint.status.owner,
+                staging.endpoint.admission.operation,
+                staging.endpoint.capture_identity.snapshot_token,
+                staging.endpoint.applications[0].sequence,
+                staging.endpoint.application_count,
+                staging.endpoint.handle,
+            )
+        });
+
+        assert_eq!(
+            miso_engine_web_v1_boot_with_observation_demand(document.len() as u32),
+            0,
+            "under-budget protected boot must not publish a handle"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+            0,
+            "under-budget protected boot must not enter spectrum configuration"
+        );
+        no_live_host();
+        let actual_outputs = OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            (
+                staging.endpoint.status.owner,
+                staging.endpoint.admission.operation,
+                staging.endpoint.capture_identity.snapshot_token,
+                staging.endpoint.applications[0].sequence,
+                staging.endpoint.application_count,
+                staging.endpoint.handle,
+            )
+        });
+        assert_eq!(actual_outputs, expected_outputs);
+
+        let mut recovery_record = protected_preparation_record();
+        recovery_record.ingress_limits.maximum_retained_bytes = GENEROUS_BUDGET_BYTES;
+        stage_protected_boot(document.as_bytes(), recovery_record);
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options.maximum_memory_bytes = GENEROUS_BUDGET_BYTES;
+        });
+
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0, "generous protected boot must recover");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+        assert_eq!(
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+            1,
+            "successful protected recovery must configure spectrum once"
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let live = live.as_ref().expect("recovered protected handle");
+            let status = live.host.observation_status();
+            assert_eq!(status.profile, crate::OBSERVATION_PROFILE_EQ_SPECTRUM);
+            assert!(status.owner > 0, "recovered protected owner must be real");
+            let ready = live.host.ready.as_ref().expect("recovered ready owner");
+            assert!(matches!(
+                ready.observation,
+                crate::PreparedObservationStorage::Protected(_)
+            ));
+        });
+
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        no_live_host();
+        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+    }
+
     struct ProtectedBootPreparationCase {
         name: &'static str,
         mutate: fn(&mut WebObservationPreparationRecord),
