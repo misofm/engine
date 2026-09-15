@@ -19,7 +19,7 @@
 //! checks at all.
 #![allow(missing_docs)]
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use core::cell::Cell;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
@@ -4418,6 +4418,7 @@ pub struct MeterSnapshot {
     pub handle: MeterHandle,
     pub present_metrics: MeterMetricSet,
     pub reset_generation: u64,
+    pub observation_generation: u64,
     pub window_sequence: u64,
     pub start_sample: u64,
     pub end_sample: u64,
@@ -4452,6 +4453,7 @@ pub struct MeterAccumulator {
     cumulative_sanitized: u64,
     discontinuities: u64,
     dropped: u64,
+    observation_generation: u64,
     producer: Producer<MeterSnapshot>,
 }
 
@@ -4467,6 +4469,24 @@ mod meter_work_probe {
     pub(super) static COUNTS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static HELD: AtomicUsize = AtomicUsize::new(0);
     pub(super) static SQRT: AtomicUsize = AtomicUsize::new(0);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static METER_PEAK_SAMPLES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_peak_samples() {
+    METER_PEAK_SAMPLES.with(|samples| samples.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_peak_samples() -> u64 {
+    METER_PEAK_SAMPLES.with(Cell::get)
 }
 
 impl MeterAccumulator {
@@ -4517,6 +4537,7 @@ impl MeterAccumulator {
                 cumulative_sanitized: 0,
                 discontinuities: 0,
                 dropped: 0,
+                observation_generation: 0,
                 producer,
             },
             consumer,
@@ -4682,6 +4703,24 @@ impl MeterAccumulator {
             self.dropped = 0;
         }
     }
+
+    /// Starts a fresh observation window for a controlled activation.
+    ///
+    /// The configured queue generation and all lifetime counters remain unchanged. This only
+    /// discards the partial scalar window so it cannot span an inactive interval.
+    pub fn restart_observation(&mut self, generation: u64) {
+        self.observation_generation = generation;
+        self.start = None;
+        self.frames = 0;
+        self.left = meter_lane();
+        self.right = meter_lane();
+    }
+
+    #[must_use]
+    pub const fn observation_generation(&self) -> u64 {
+        self.observation_generation
+    }
+
     #[must_use]
     pub const fn dropped_snapshots(&self) -> u64 {
         self.dropped
@@ -4711,6 +4750,7 @@ impl MeterAccumulator {
             handle: self.handle,
             present_metrics: self.metrics,
             reset_generation: self.config.reset_generation,
+            observation_generation: self.observation_generation,
             window_sequence: self.sequence,
             start_sample: start,
             end_sample: end,
@@ -4826,6 +4866,8 @@ fn observe_selected_segment(
     if metrics.contains(MeterMetricSet::SAMPLE_PEAK) {
         let mut peak = lane.peak;
         for sample in samples.clone() {
+            #[cfg(any(test, feature = "test-support"))]
+            METER_PEAK_SAMPLES.with(|samples| samples.set(samples.get().saturating_add(1)));
             let sample = if normal_or_zero(sample) { sample } else { 0.0 };
             let absolute = sample.abs();
             peak = if absolute > peak { absolute } else { peak };

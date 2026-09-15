@@ -9,6 +9,9 @@ publish.workspace = true
 [lib]
 name = "builtins"
 
+[features]
+test-support = []
+
 [dependencies]
 engine.workspace = true
 effect-contract.workspace = true

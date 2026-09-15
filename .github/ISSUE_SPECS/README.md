@@ -320,3 +320,5 @@ Issue [#796](https://github.com/misofm/engine/issues/796), **Own browser meter a
 ## Demand-driven observation delivery
 
 Issue [#816](https://github.com/misofm/engine/issues/816), **Prepared active observer dispatch without audio-plan mutation**, starts the user-approved demand-driven feed delivery under #763. Astra XHIGH freezes specs; fresh, bounded Luna MAX agents implement exact tranches; root coordinates checkpoints, integration and production release. A fresh Astra XHIGH agent receives a coordinator brief for final independent verification. Model choices here supersede historical defaults for this work.
+
+Issue [#818](https://github.com/misofm/engine/issues/818), **Controlled peak-meter compiler capability**, follows closed #816. It adds fresh-generation meter activation, additive controlled preparation and transactional sealed bind forwarding in three bounded Luna MAX assignments. Host work admission and SDK/frontend adoption remain successors.

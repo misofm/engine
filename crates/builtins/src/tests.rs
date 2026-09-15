@@ -76,6 +76,7 @@ fn meter_metric_subsets_match_full_and_peak_only_omits_work() {
     super::meter_work_probe::COUNTS.store(0, Ordering::Relaxed);
     super::meter_work_probe::HELD.store(0, Ordering::Relaxed);
     super::meter_work_probe::SQRT.store(0, Ordering::Relaxed);
+    super::test_only_reset_peak_samples();
     let peak = selected_snapshot(super::MeterMetricSet::SAMPLE_PEAK);
     assert_eq!(
         peak.left.sample_peak.to_bits(),
@@ -85,6 +86,7 @@ fn meter_metric_subsets_match_full_and_peak_only_omits_work() {
     assert_eq!(super::meter_work_probe::COUNTS.load(Ordering::Relaxed), 0);
     assert_eq!(super::meter_work_probe::HELD.load(Ordering::Relaxed), 0);
     assert_eq!(super::meter_work_probe::SQRT.load(Ordering::Relaxed), 0);
+    assert_eq!(super::test_only_peak_samples(), 16);
 }
 
 #[test]
