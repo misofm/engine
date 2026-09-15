@@ -1,17 +1,17 @@
 //! Preparation and admission gates for the native selected-meter owner.
 
-use builtins::{MeterMetricSet, MeterTap};
+use builtins::{MeterHandle, MeterMetricSet, MeterTap};
 use core::{
     mem::size_of,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 use graph::{GraphObservationActivationConfig, GraphObservationController};
 use host_core::{
-    HostConsoleRequest, HostMeterRequest, HostObservationController, HostObservationPreparation,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, ObservationWorkCost,
-    ObservationWorkLimits, PreparedHostMeter, SpectrumCaptureCollectionEntry,
-    SpectrumCaptureCollectionRequest, SpectrumChannels, SpectrumTarget, compile_host_session,
-    prepare_host_runtime_with_observation_demand,
+    HostConsoleRequest, HostMeterId, HostMeterRequest, HostObservationController,
+    HostObservationPreparation, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    ObservationRefusalReason, ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter,
+    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumChannels,
+    SpectrumTarget, compile_host_session, prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
 };
 
@@ -98,6 +98,10 @@ fn common_admission_bytes(report: HostPrepareReport) -> u64 {
         + observation
             .graph_activation
             .map_or(0, |graph| graph.retained_bytes - graph.runtime_state_bytes)
+}
+
+fn owner_ids(owner: &HostObservationController) -> Vec<HostMeterId> {
+    owner.meters().iter().map(|meter| meter.id).collect()
 }
 
 #[test]
@@ -295,4 +299,167 @@ fn unsupported_families_are_explicit_refusals() {
         String::from_utf8_lossy(error.as_bytes())
             .contains("host.observation.spectrum_not_supported")
     );
+}
+
+#[test]
+fn paused_admission_accepts_without_render_work_and_preserves_ordinary_backpressure() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let base_demand = demand(&requests);
+    let (_host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+
+    builtins::test_only_reset_peak_samples();
+    bench_support::alloc::assert_installed();
+    let allocation_mark = bench_support::alloc::current_thread_counters();
+    let accepted = owner.replace_meters(&ids).expect("ordinary admission");
+    assert_eq!(
+        bench_support::alloc::current_thread_delta_since(allocation_mark),
+        bench_support::alloc::Counters::default()
+    );
+    assert_eq!(accepted.revision, 1);
+    assert_eq!(accepted.work.active_meter_channels, 4);
+    assert_eq!(accepted.work.meter_samples_per_block, 4 * 128);
+    assert_eq!(builtins::test_only_peak_samples(), 0);
+    assert_eq!(owner.work(), accepted.work);
+
+    let refusal = owner
+        .replace_meters(&ids[..1])
+        .expect_err("ordinary credit remains pending");
+    assert_eq!(refusal.reason, ObservationRefusalReason::Backpressure);
+    assert_eq!(owner.work(), accepted.work);
+}
+
+#[test]
+fn reserved_removal_can_follow_one_ordinary_and_second_removal_is_refused() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let demand = demand(&requests);
+    let (_host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+
+    let ordinary = owner.replace_meters(&ids).expect("ordinary admission");
+    let removal = owner
+        .remove_meters_to(&ids[..1])
+        .expect("reserved removal may pass ordinary");
+    assert_eq!(ordinary.revision, 1);
+    assert_eq!(removal.revision, 2);
+    assert_eq!(owner.work().active_meter_channels, 2);
+    assert_eq!(owner.work().meter_samples_per_block, 2 * 128);
+
+    let refusal = owner
+        .remove_meters_to(&[])
+        .expect_err("only one removal obligation is reserved");
+    assert_eq!(refusal.reason, ObservationRefusalReason::Backpressure);
+    let refusal = owner
+        .replace_meters(&ids[..1])
+        .expect_err("ordinary remains blocked while removal is pending");
+    assert_eq!(refusal.reason, ObservationRefusalReason::Backpressure);
+    assert_eq!(owner.work().active_meter_channels, 2);
+}
+
+#[test]
+fn typed_identity_subset_capacity_and_work_refusals_preserve_state() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let requests = meters();
+    let base_demand = demand(&requests);
+
+    let (_host, _, mut owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    let ids = owner_ids(&owner);
+    let initial_work = owner.work();
+    let mut unknown = ids[0];
+    unknown.handle = MeterHandle(NonZeroU64::new(99).unwrap());
+    assert_eq!(
+        owner
+            .replace_meters(&[unknown])
+            .expect_err("unknown prepared handle")
+            .reason,
+        ObservationRefusalReason::NotPrepared
+    );
+    assert_eq!(
+        owner
+            .replace_meters(&[ids[0], ids[0]])
+            .expect_err("duplicate handle")
+            .reason,
+        ObservationRefusalReason::InvalidRequest
+    );
+    assert_eq!(owner.work(), initial_work);
+
+    let (_foreign_host, _, foreign_owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    assert_eq!(
+        owner
+            .replace_meters(&[foreign_owner.meters()[0].id])
+            .expect_err("foreign owner handle")
+            .reason,
+        ObservationRefusalReason::WrongOwner
+    );
+    assert_eq!(owner.work(), initial_work);
+
+    let ordinary = owner.replace_meters(&ids).expect("establish accepted set");
+    let removal = owner
+        .remove_meters_to(&[ids[0]])
+        .expect("reserved removal follows ordinary");
+    assert_eq!(removal.work.active_meter_channels, 2);
+    assert_eq!(owner.work().active_meter_channels, 2);
+
+    let (_subset_host, _, mut subset_owner) =
+        prepare_host_runtime_with_observation_demand(&compiled, &caps(), &console(), &base_demand)
+            .unwrap();
+    let subset_ids = owner_ids(&subset_owner);
+    subset_owner
+        .replace_meters(&subset_ids[..1])
+        .expect("subset baseline admission");
+    let subset_refusal = subset_owner
+        .remove_meters_to(&subset_ids[1..])
+        .expect_err("removal must be a subset of the accepted set");
+    assert_eq!(subset_refusal.reason, ObservationRefusalReason::Conflict);
+    assert_eq!(subset_owner.work().active_meter_channels, 2);
+
+    // A fresh owner keeps each refusal independent of the two occupied publication records.
+    let mut limited_demand = demand(&requests);
+    limited_demand.activation.maximum_active_observers = 1;
+    let (_capacity_host, _, mut capacity_owner) = prepare_host_runtime_with_observation_demand(
+        &compiled,
+        &caps(),
+        &console(),
+        &limited_demand,
+    )
+    .unwrap();
+    let capacity_ids = owner_ids(&capacity_owner);
+    let capacity_refusal = capacity_owner
+        .replace_meters(&capacity_ids)
+        .expect_err("controlled capacity");
+    assert_eq!(capacity_refusal.reason, ObservationRefusalReason::Capacity);
+    assert_eq!(capacity_owner.work().active_meter_channels, 0);
+    assert_eq!(capacity_owner.work().transition_entry_visits_per_block, 4);
+
+    let mut limited_demand = demand(&requests);
+    limited_demand.work_limits.maximum_active_meter_channels = 2;
+    let (_work_host, _, mut work_owner) = prepare_host_runtime_with_observation_demand(
+        &compiled,
+        &caps(),
+        &console(),
+        &limited_demand,
+    )
+    .unwrap();
+    let work_ids = owner_ids(&work_owner);
+    let work_refusal = work_owner
+        .replace_meters(&work_ids)
+        .expect_err("meter-channel work budget");
+    assert_eq!(work_refusal.reason, ObservationRefusalReason::WorkBudget);
+    assert_eq!(work_refusal.limit, Some("maximum_active_meter_channels"));
+    assert_eq!(work_owner.work().active_meter_channels, 0);
+    assert_eq!(work_owner.work().transition_entry_visits_per_block, 12);
+
+    // The accepted and latest pending records remain the values established before a refused
+    // request. The ordinary and removal records are both still occupied here.
+    assert_eq!(ordinary.revision, 1);
 }

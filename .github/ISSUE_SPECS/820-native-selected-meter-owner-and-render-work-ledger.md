@@ -294,3 +294,7 @@ existing host test suite and checks with/without control-provider PASS. Formatti
 and diff PASS. A scoped argument-count lint allowance retains the frozen shared
 preparation seam instead of introducing another preparation architecture.
 B2.2 admission and B2.3/B2.4 lifecycle/read methods remain pending.
+
+### B2.2 admission checkpoint
+
+Fresh Luna MAX implemented complete-set meter candidate validation, ordinary/reserved-removal publication, graph refusal mapping, and infallible generation/pending/accepted/budget commit after graph acceptance. Paused real-host tests cover zero sample work, occupied ordinary credit, reserved removal passing ordinary, second removal refusal, and typed identity/subset/capacity/work refusals. Root reviewed publication ordering and added the existing thread-local audited allocator assertion around actual admission; no new harness. Focused observation integration tests pass in default/native and control-provider modes (7 each), format and diff checks pass. Generation continuity/reactivation will be qualified against actual published snapshots in B2.4, rather than a redundant private-state oracle. Receipt reconciliation, cleanup, stop and reads remain the next bounded tasks; no browser/SDK capability claimed.

@@ -15,7 +15,7 @@ use builtins::{MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::MeterConsumer;
 use graph::{
     GraphObservationActivationConfig, GraphObservationActivationResources,
-    GraphObservationController,
+    GraphObservationAdmissionError, GraphObservationController,
 };
 
 /// The process-local identity of one prepared observation owner.
@@ -116,6 +116,21 @@ struct MeterSelection {
     len: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationKind {
+    Ordinary,
+    Removal,
+}
+
+impl PublicationKind {
+    const fn pending_index(self) -> usize {
+        match self {
+            Self::Ordinary => 0,
+            Self::Removal => 1,
+        }
+    }
+}
+
 impl MeterSelection {
     fn empty() -> Self {
         Self {
@@ -137,6 +152,14 @@ impl MeterSelection {
             entries: entries.into_boxed_slice(),
             len: 0,
         })
+    }
+
+    fn entries(&self) -> &[MeterSelectionEntry] {
+        &self.entries[..self.len]
+    }
+
+    fn entries_mut(&mut self) -> &mut [MeterSelectionEntry] {
+        &mut self.entries[..self.len]
     }
 }
 
@@ -382,6 +405,60 @@ fn invalid_request() -> ObservationRefusal {
     }
 }
 
+fn not_prepared() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::NotPrepared,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn wrong_owner() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::WrongOwner,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn capacity() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::Capacity,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn backpressure() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::Backpressure,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn conflict() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::Conflict,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
+fn closed() -> ObservationRefusal {
+    ObservationRefusal {
+        reason: ObservationRefusalReason::Closed,
+        limit: None,
+        requested: None,
+        maximum: None,
+    }
+}
+
 fn allocation_failure() -> ObservationRefusal {
     ObservationRefusal {
         reason: ObservationRefusalReason::Capacity,
@@ -397,6 +474,24 @@ fn work_budget(limit: &'static str, requested: u64, maximum: u64) -> Observation
         limit: Some(limit),
         requested: Some(requested),
         maximum: Some(maximum),
+    }
+}
+
+fn map_graph_refusal(error: GraphObservationAdmissionError) -> ObservationRefusal {
+    match error {
+        GraphObservationAdmissionError::UnknownHandle => not_prepared(),
+        GraphObservationAdmissionError::DuplicateHandle => invalid_request(),
+        GraphObservationAdmissionError::ActiveCapacity
+        | GraphObservationAdmissionError::RetainedBytes => capacity(),
+        GraphObservationAdmissionError::InvalidRemoval => conflict(),
+        GraphObservationAdmissionError::Backpressure => backpressure(),
+        GraphObservationAdmissionError::RevisionExhausted => ObservationRefusal {
+            reason: ObservationRefusalReason::RevisionExhausted,
+            limit: None,
+            requested: None,
+            maximum: None,
+        },
+        GraphObservationAdmissionError::OwnerClosed => closed(),
     }
 }
 
@@ -654,6 +749,159 @@ impl HostObservationController {
                 .graph
                 .as_ref()
                 .is_some_and(GraphObservationController::is_closed)
+    }
+
+    /// Replace the complete selected-meter set with an ordinary graph publication.
+    ///
+    /// The candidate is built entirely in the preallocated scratch storage. The graph endpoint is
+    /// the final fallible operation; after it accepts, all owner-side assignments are bounded
+    /// copies into storage reserved during preparation.
+    #[allow(clippy::result_large_err)]
+    pub fn replace_meters(
+        &mut self,
+        meters: &[HostMeterId],
+    ) -> Result<ObservationAccepted, ObservationRefusal> {
+        self.publish_meter_candidate(meters, PublicationKind::Ordinary)
+    }
+
+    /// Remove meters to the complete selected subset using the reserved removal publication.
+    ///
+    /// A removal may pass one outstanding ordinary publication, but cannot overlap another
+    /// removal. It is validated against the latest accepted set rather than the last applied set,
+    /// so the two graph credits remain useful for a bounded ordinary-then-removal sequence.
+    #[allow(clippy::result_large_err)]
+    pub fn remove_meters_to(
+        &mut self,
+        remaining: &[HostMeterId],
+    ) -> Result<ObservationAccepted, ObservationRefusal> {
+        self.publish_meter_candidate(remaining, PublicationKind::Removal)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn publish_meter_candidate(
+        &mut self,
+        requested: &[HostMeterId],
+        kind: PublicationKind,
+    ) -> Result<ObservationAccepted, ObservationRefusal> {
+        // An empty prepared catalog has no graph endpoint. Keep this distinction from a terminal
+        // endpoint: the inert owner is live, but there is nothing to publish into.
+        if self.graph.is_none() {
+            return Err(not_prepared());
+        }
+        if self.is_closed() {
+            return Err(closed());
+        }
+
+        // Check owner identity before handle lookup. A numerically matching handle from another
+        // prepared owner must never address this owner's consumer.
+        if requested.iter().any(|meter| meter.owner != self.owner) {
+            return Err(wrong_owner());
+        }
+        if requested.len() > self.candidate.entries.len() {
+            return Err(capacity());
+        }
+
+        // Resolve each handle into the preallocated candidate scratch and reject duplicates. The
+        // immutable prepared catalog is scanned on the control side; no lookup map is retained by
+        // the owner.
+        for (index, meter) in requested.iter().enumerate() {
+            let prepared_index = self
+                .meters
+                .iter()
+                .position(|prepared| prepared.id.handle == meter.handle)
+                .ok_or_else(not_prepared)?;
+            if requested[..index]
+                .iter()
+                .any(|previous| previous.handle == meter.handle)
+            {
+                return Err(invalid_request());
+            }
+            self.candidate.entries[index] = MeterSelectionEntry {
+                prepared_index,
+                generation: self
+                    .accepted
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.prepared_index == prepared_index)
+                    .map_or(0, |entry| entry.generation),
+            };
+        }
+        self.candidate.len = requested.len();
+
+        if matches!(kind, PublicationKind::Removal)
+            && self.candidate.entries().iter().any(|entry| {
+                !self
+                    .accepted
+                    .entries()
+                    .iter()
+                    .any(|accepted| accepted.prepared_index == entry.prepared_index)
+            })
+        {
+            return Err(conflict());
+        }
+
+        let work = self
+            .budget
+            .preflight_graph_demand(self.candidate.len, ObservationWorkCost::ZERO)?;
+
+        // Ordinary demand consumes the ordinary credit and is serialized against the reserved
+        // removal record. Removal demand consumes only the removal credit, allowing it to follow
+        // one ordinary publication before either has reached an application boundary.
+        let pending_index = kind.pending_index();
+        if self.pending[pending_index].accepted.is_some()
+            || (matches!(kind, PublicationKind::Ordinary)
+                && self.pending[PublicationKind::Removal.pending_index()]
+                    .accepted
+                    .is_some())
+        {
+            return Err(backpressure());
+        }
+
+        self.candidate
+            .entries_mut()
+            .sort_unstable_by_key(|entry| self.meters[entry.prepared_index].id.handle.0.get());
+        for (index, entry) in self.candidate.entries().iter().enumerate() {
+            self.candidate_handles[index] = self.meters[entry.prepared_index].id.handle.0.get();
+        }
+
+        // `graph.replace`/`remove_to` is deliberately the last fallible operation. The candidate
+        // storage and handle slice were both prepared above, so graph acceptance leaves only
+        // infallible generation filling, bounded copies and budget assignment.
+        let graph_accepted = {
+            let graph = self.graph.as_mut().expect("graph checked above");
+            match kind {
+                PublicationKind::Ordinary => {
+                    graph.replace(&self.candidate_handles[..self.candidate.len])
+                }
+                PublicationKind::Removal => {
+                    graph.remove_to(&self.candidate_handles[..self.candidate.len])
+                }
+            }
+        }
+        .map_err(map_graph_refusal)?;
+
+        let revision = graph_accepted.revision;
+        for entry in self.candidate.entries_mut() {
+            if entry.generation == 0 {
+                entry.generation = revision;
+            }
+        }
+        let accepted = ObservationAccepted {
+            owner: self.owner,
+            revision,
+            work,
+        };
+        let candidate_len = self.candidate.len;
+        let pending = &mut self.pending[pending_index];
+        pending.selection.entries[..candidate_len]
+            .copy_from_slice(&self.candidate.entries[..candidate_len]);
+        pending.selection.len = candidate_len;
+        pending.accepted = Some(accepted);
+        self.accepted.entries[..candidate_len]
+            .copy_from_slice(&self.candidate.entries[..candidate_len]);
+        self.accepted.len = candidate_len;
+        self.budget.commit_graph_demand(work);
+        Ok(accepted)
     }
 }
 
