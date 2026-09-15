@@ -24,10 +24,18 @@ use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions, WebObservationAdmission,
-    WebObservationCaptureIdentity, WebObservationDemand, WebObservationIngressLimits,
-    WebObservationPreparationRecord, WebObservationReceipt, WebObservationStatus,
-    WebObservationWorkLimits, default_source_ring_frames,
+    COMMAND_RECORD_BYTES, OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+    OBSERVATION_OPERATION_COLLECTION_SELECTION, OBSERVATION_OPERATION_METER_LEASE,
+    OBSERVATION_OPERATION_METER_READ, OBSERVATION_OPERATION_ONE_SHOT,
+    OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH, OBSERVATION_OPERATION_READ_SPECTRUM,
+    OBSERVATION_OPERATION_REMOVE_METERS_TO, OBSERVATION_OPERATION_REPLACE_METERS,
+    OBSERVATION_OPERATION_RESIDENT_READ, OBSERVATION_OPERATION_RESTART_SPECTRUM,
+    OBSERVATION_OPERATION_START_SPECTRUM, OBSERVATION_OPERATION_STOP_GRAPH,
+    OBSERVATION_OPERATION_STOP_SPECTRUM, OBSERVATION_PROFILE_EQ_SPECTRUM,
+    OBSERVATION_PROFILE_LEGACY_UNPROTECTED, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
+    WebObservationAdmission, WebObservationCaptureIdentity, WebObservationDemand,
+    WebObservationIngressLimits, WebObservationPreparationRecord, WebObservationReceipt,
+    WebObservationStatus, WebObservationWorkLimits, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -359,6 +367,71 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
             .len(),
         11,
         "the base ladder is the eleven frozen result codes"
+    );
+}
+
+/// The published protected observation vocabulary is the shared host-web authority, in order.
+#[test]
+fn observation_profiles_and_operations_are_exactly_the_shared_constants() {
+    let document = render();
+    assert_eq!(
+        named_constants(&document, "observationProfiles"),
+        vec![
+            (
+                OBSERVATION_PROFILE_LEGACY_UNPROTECTED,
+                "legacyUnprotected".to_owned()
+            ),
+            (OBSERVATION_PROFILE_EQ_SPECTRUM, "eqSpectrum".to_owned()),
+        ]
+    );
+    assert_eq!(
+        named_constants(&document, "observationOperations"),
+        vec![
+            (
+                OBSERVATION_OPERATION_REPLACE_METERS,
+                "replaceMeters".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_REMOVE_METERS_TO,
+                "removeMetersTo".to_owned()
+            ),
+            (OBSERVATION_OPERATION_STOP_GRAPH, "stopGraph".to_owned()),
+            (
+                OBSERVATION_OPERATION_START_SPECTRUM,
+                "startSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_RESTART_SPECTRUM,
+                "restartSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_READ_SPECTRUM,
+                "readSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_STOP_SPECTRUM,
+                "stopSpectrum".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_CAPTURE_RESPONSE,
+                "captureResponse".to_owned()
+            ),
+            (
+                OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH,
+                "rawObservationBatch".to_owned()
+            ),
+            (OBSERVATION_OPERATION_ONE_SHOT, "oneShot".to_owned()),
+            (
+                OBSERVATION_OPERATION_COLLECTION_SELECTION,
+                "collectionSelection".to_owned()
+            ),
+            (OBSERVATION_OPERATION_METER_LEASE, "meterLease".to_owned()),
+            (OBSERVATION_OPERATION_METER_READ, "meterRead".to_owned()),
+            (
+                OBSERVATION_OPERATION_RESIDENT_READ,
+                "residentRead".to_owned()
+            ),
+        ]
     );
 }
 
