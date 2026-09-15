@@ -1274,8 +1274,8 @@ fn continuous_reads_fence_pending_and_preserve_generation_selection_and_sibling_
         Some(HostSpectrumReadError::Pending)
     );
 
-    // A meter-only publication keeps the spectrum observer in the complete set. Its old queued
-    // window remains readable after the sibling generation applies.
+    // A meter-only publication keeps the spectrum observer in the complete set. With no new
+    // complete window yet, the applied sibling publication leaves its reader pending.
     let sibling = owner
         .replace_meters(&meter_ids[..1])
         .expect("sibling meter admission");
