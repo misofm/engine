@@ -6098,6 +6098,125 @@ pub(crate) mod live_response_ffi_tests {
         RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
     }
 
+    #[derive(Clone, Debug, PartialEq)]
+    struct ResponseMarkers {
+        raw_result: Vec<u8>,
+        live_result_len: usize,
+        live_token: u64,
+        live_result_header: WebLiveResponseResult,
+        capture_identity: WebObservationCaptureIdentity,
+    }
+
+    fn response_markers() -> ResponseMarkers {
+        let (raw_result, live_result_len, live_token, live_result_header) =
+            RESPONSE_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                (
+                    staging.live_result.clone(),
+                    staging.live_result_len,
+                    staging.live_token,
+                    staging.live_result_header,
+                )
+            });
+        let capture_identity = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        });
+        ResponseMarkers {
+            raw_result,
+            live_result_len,
+            live_token,
+            live_result_header,
+            capture_identity,
+        }
+    }
+
+    fn seed_response_markers() -> ResponseMarkers {
+        let snapshot_token = 41;
+        let result_bytes = LIVE_RESPONSE_CAPTURE_BYTES;
+        let seeded_header = WebLiveResponseResult {
+            struct_size: LIVE_RESPONSE_RESULT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            mode: LIVE_RESPONSE_MODE_TARGET,
+            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+            channels: crate::RESPONSE_CHANNEL_BOTH,
+            points: 5,
+            owner_count: 1,
+            excluded_count: 1,
+            sample_rate_hz: 48_000,
+            captured_sample: 12_288,
+            snapshot_token,
+            result_bytes: result_bytes as u64,
+            owners_offset: LIVE_RESPONSE_RESULT_BYTES,
+            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
+            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
+            ..WebLiveResponseResult::default()
+        };
+        RESPONSE_STAGING.with(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_result.fill(0xa5);
+            assert!(copy_live_record(
+                &mut staging.live_result,
+                0,
+                &seeded_header
+            ));
+            staging.live_result_header = seeded_header;
+            staging.live_result_len = result_bytes;
+            staging.live_token = snapshot_token;
+        });
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        LIVE_HOST.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("protected live host")
+                .host
+                .commit_observation_capture_identity(WebObservationCaptureIdentity {
+                    struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
+                    abi_version: ABI_VERSION,
+                    kind: 1,
+                    flags: 1,
+                    owner,
+                    observation_generation: 42,
+                    selection_epoch: 43,
+                    snapshot_token,
+                });
+        });
+        response_markers()
+    }
+
+    fn assert_response_markers(markers: &ResponseMarkers) {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.live_result, markers.raw_result);
+            assert_eq!(staging.live_result_len, markers.live_result_len);
+            assert_eq!(staging.live_token, markers.live_token);
+            assert_eq!(staging.live_result_header, markers.live_result_header);
+        });
+        LIVE_HOST.with(|slot| {
+            assert_eq!(
+                *slot
+                    .borrow()
+                    .as_ref()
+                    .expect("protected live host")
+                    .host
+                    .observation_capture_identity(),
+                markers.capture_identity
+            );
+        });
+    }
+
     fn boot_private_protected() -> u32 {
         no_live_host();
         RESPONSE_STAGING.with(|slot| slot.borrow_mut().reset());
@@ -6155,78 +6274,39 @@ pub(crate) mod live_response_ffi_tests {
     fn ffi_protected_response_preflight_refusal_preserves_committed_markers() {
         let handle = boot_private_protected();
         stage_request_with_limit(b"missing", 65_536);
-        let seeded_header = WebLiveResponseResult {
-            struct_size: LIVE_RESPONSE_RESULT_BYTES,
-            abi_version: ABI_VERSION,
-            result: RESULT_OK,
-            mode: LIVE_RESPONSE_MODE_TARGET,
-            meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
-            channels: crate::RESPONSE_CHANNEL_BOTH,
-            snapshot_token: 41,
-            result_bytes: LIVE_RESPONSE_RESULT_BYTES as u64,
-            owner_record_bytes: LIVE_RESPONSE_OWNER_BYTES,
-            section_record_bytes: LIVE_RESPONSE_SECTION_BYTES,
-            ..WebLiveResponseResult::default()
-        };
-        let identity = WebObservationCaptureIdentity {
-            struct_size: size_of::<WebObservationCaptureIdentity>() as u32,
-            abi_version: ABI_VERSION,
-            kind: 2,
-            flags: 1,
-            owner: 41,
-            observation_generation: 42,
-            selection_epoch: 43,
-            snapshot_token: 41,
-        };
-        RESPONSE_STAGING.with(|slot| {
-            let mut staging = slot.borrow_mut();
-            staging.live_result.fill(0xa5);
-            assert!(copy_live_record(
-                &mut staging.live_result,
-                0,
-                &seeded_header
-            ));
-            staging.live_result_header = seeded_header;
-            staging.live_result_len = size_of::<WebLiveResponseResult>();
-            staging.live_token = seeded_header.snapshot_token;
-        });
-        LIVE_HOST.with(|slot| {
-            slot.borrow_mut()
-                .as_mut()
-                .expect("protected live host")
-                .host
-                .commit_observation_capture_identity(identity);
-        });
-        let before_bytes = RESPONSE_STAGING.with(|slot| {
-            let staging = slot.borrow();
-            staging.live_result[..staging.live_result_len].to_vec()
-        });
+        let markers = seed_response_markers();
 
         assert_eq!(
             miso_engine_web_v1_track_response_capture(handle),
             RESULT_INVALID_ARGUMENT
         );
-        RESPONSE_STAGING.with(|slot| {
-            let staging = slot.borrow();
-            assert_eq!(staging.live_result_header, seeded_header);
-            assert_eq!(staging.live_result_len, before_bytes.len());
-            assert_eq!(
-                &staging.live_result[..staging.live_result_len],
-                before_bytes
-            );
-            assert_eq!(staging.live_token, seeded_header.snapshot_token);
-        });
+        assert_response_markers(&markers);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn ffi_protected_response_dispatch_borrow_conflicts_preserve_committed_markers() {
+        let handle = boot_private_protected();
+        stage_request(b"eq0");
+        let markers = seed_response_markers();
+
         LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow();
             assert_eq!(
-                *slot
-                    .borrow()
-                    .as_ref()
-                    .expect("protected live host")
-                    .host
-                    .observation_capture_identity(),
-                identity
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
             );
         });
+        assert_response_markers(&markers);
+
+        LIVE_HOST.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_track_response_capture(handle),
+                RESULT_INTERNAL
+            );
+        });
+        assert_response_markers(&markers);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
