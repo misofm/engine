@@ -33,10 +33,10 @@ use effect_contract::{
 use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
-    InputFilterEditErrorKind, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    SourceControlError, SourceSubmission, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
+    HostConsoleRequest, HostMeterRequest, HostObservationController, HostPrepareCaps,
+    HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, apply_input_filter_edit,
+    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -274,6 +274,53 @@ pub struct WebSpectrumCollectionEntry {
     pub channels: u32,
     pub target_id_bytes: u32,
     pub reserved: [u32; 3],
+}
+
+/// Protected browser observation preparation profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebObservationProfile {
+    /// One continuous stereo spectrum target after one prepared track's matrix stage.
+    EqSpectrum,
+}
+
+/// Explicit bounded ingress limits for a protected observation owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationIngressLimits {
+    /// Inclusive maximum encoded observation control bytes.
+    pub maximum_control_bytes: u32,
+    /// Inclusive maximum observation rows in one bounded result or application batch.
+    pub maximum_observation_rows: u32,
+    /// Inclusive maximum copied observation result bytes.
+    pub maximum_result_bytes: u32,
+    /// Inclusive ordinary operation attempts per successful render boundary.
+    pub ordinary_operations_per_boundary: u32,
+    /// Inclusive removal operation attempts per successful render boundary.
+    pub removal_operations_per_boundary: u32,
+    /// Inclusive admission entry visits per boundary.
+    pub maximum_admission_entry_visits: u64,
+    /// Inclusive prepared response-binding visits per capture.
+    pub maximum_response_binding_visits: u64,
+    /// Inclusive response section visits per capture.
+    pub maximum_response_section_visits: u64,
+    /// Inclusive response copy bytes per capture.
+    pub maximum_response_copy_bytes: u64,
+    /// Inclusive handler copy bytes per boundary.
+    pub maximum_handler_copy_bytes_per_boundary: u64,
+    /// Inclusive cleanup entry visits per boundary.
+    pub maximum_cleanup_entry_visits_per_boundary: u64,
+    /// Inclusive retained protected-observation bytes.
+    pub maximum_retained_bytes: u64,
+}
+
+/// Rust-side protected observation preparation supplied before the host is published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebObservationPreparation<'a> {
+    /// The protected browser profile to prepare.
+    pub profile: WebObservationProfile,
+    /// The shared native observation demand and its explicit work limits.
+    pub demand: host_core::HostObservationPreparation<'a>,
+    /// The explicit browser ingress and copy limits.
+    pub ingress: ObservationIngressLimits,
 }
 
 /// Raw one-shot 2048-frame spectrum window header.
@@ -1294,6 +1341,82 @@ impl PreparedSpectrumCapture {
     }
 }
 
+/// Checked source-derived ingress bounds cached by a protected owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
+struct ObservationIngressBounds {
+    admission_entry_visits: u64,
+    response_binding_visits: u64,
+    response_section_visits: u64,
+    response_copy_bytes: u64,
+    handler_copy_bytes_per_boundary: u64,
+    cleanup_entry_visits_per_boundary: u64,
+    retained_bytes: u64,
+}
+
+/// Scalar protected ingress state prepared for the later operation-mediation checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
+struct ObservationIngressState {
+    epoch: u64,
+    ordinary_used: bool,
+    removal_used: bool,
+    limits: ObservationIngressLimits,
+    bounds: ObservationIngressBounds,
+}
+
+#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
+impl ObservationIngressState {
+    const INITIAL_EPOCH: u64 = 1;
+
+    const fn new(limits: ObservationIngressLimits, bounds: ObservationIngressBounds) -> Self {
+        Self {
+            epoch: Self::INITIAL_EPOCH,
+            ordinary_used: false,
+            removal_used: false,
+            limits,
+            bounds,
+        }
+    }
+}
+
+/// Protected preparation ownership. Operation permits and receipts are added by the next slice.
+#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
+struct ProtectedObservationStorage {
+    controller: HostObservationController,
+    ingress: ObservationIngressState,
+    /// Prepared target identity retained off render for later response/spectrum mediation.
+    target_track_id: Box<str>,
+}
+
+/// The only spectrum/observation owner a ready host may carry.
+#[allow(dead_code)]
+// Private preparation is wired in the next bounded #825 checkpoint.
+// Keep the single prepared owner inline; the full containing allocation is resource-accounted.
+#[allow(clippy::large_enum_variant)]
+enum PreparedObservationStorage {
+    /// Existing public one-shot/continuous capture compatibility owner.
+    Legacy(Option<PreparedSpectrumCapture>),
+    /// Private protected owner prepared through host-core's observation controller.
+    Protected(ProtectedObservationStorage),
+}
+
+impl PreparedObservationStorage {
+    fn legacy(&self) -> Option<&PreparedSpectrumCapture> {
+        match self {
+            Self::Legacy(capture) => capture.as_ref(),
+            Self::Protected(_) => None,
+        }
+    }
+
+    fn legacy_mut(&mut self) -> Option<&mut PreparedSpectrumCapture> {
+        match self {
+            Self::Legacy(capture) => capture.as_mut(),
+            Self::Protected(_) => None,
+        }
+    }
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
@@ -1341,9 +1464,9 @@ struct ReadyOwnership {
     /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
     /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
     rack_effects: Box<[[u32; 3]]>,
-    /// The optional one-shot spectrum observer or atomically selectable collection. It is
-    /// declared before the prepared host so consumers are released before the plan's producers.
-    spectrum_capture: Option<PreparedSpectrumCapture>,
+    /// The legacy capture or private protected observation owner. It is declared before the
+    /// prepared host so consumers/controllers are released before the plan's producers.
+    observation: PreparedObservationStorage,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
     /// when `console_meter_blocks` was zero, in which case no observer exists at all.
@@ -2040,7 +2163,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_ref() else {
+        let Some(capture) = ready.observation.legacy() else {
             return RESULT_UNSUPPORTED;
         };
         match capture.arm() {
@@ -2057,7 +2180,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(RESULT_UNSUPPORTED);
         };
         match capture.try_read() {
@@ -2085,7 +2208,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(RESULT_UNSUPPORTED);
         };
         capture
@@ -2110,7 +2233,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         let result = match capture {
@@ -2135,7 +2258,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return Err(SpectrumContinuousReadError::NotActive);
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return Err(SpectrumContinuousReadError::NotActive);
         };
         capture.try_read_continuous()
@@ -2149,7 +2272,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         capture.stop_continuous();
@@ -2161,7 +2284,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_cadence(&self) -> Option<SpectrumCadence> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(|ready| ready.observation.legacy())
             .and_then(PreparedSpectrumCapture::cadence)
     }
 
@@ -2170,7 +2293,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_stream_epoch(&self) -> Option<u64> {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(|ready| ready.observation.legacy())
             .and_then(PreparedSpectrumCapture::stream_epoch)
     }
 
@@ -2182,7 +2305,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         capture.cancel();
@@ -2194,7 +2317,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_target(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(|ready| ready.observation.legacy())
             .and_then(PreparedSpectrumCapture::target)
             .map(spectrum_target_raw)
             .unwrap_or(0)
@@ -2205,7 +2328,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_channels(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(|ready| ready.observation.legacy())
             .and_then(PreparedSpectrumCapture::channels)
             .map(spectrum_channels_raw)
             .unwrap_or(0)
@@ -2222,7 +2345,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        let Some(capture) = ready.spectrum_capture.as_mut() else {
+        let Some(capture) = ready.observation.legacy_mut() else {
             return RESULT_UNSUPPORTED;
         };
         let PreparedSpectrumCapture::Collection(capture) = capture else {
@@ -2248,7 +2371,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_ref() else {
             return Err(RESULT_WRONG_STATE);
         };
-        let Some(capture) = ready.spectrum_capture.as_ref() else {
+        let Some(capture) = ready.observation.legacy() else {
             return Err(RESULT_UNSUPPORTED);
         };
         let PreparedSpectrumCapture::Collection(capture) = capture else {
@@ -2271,7 +2394,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_selection_epoch(&self) -> u64 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum_capture.as_ref())
+            .and_then(|ready| ready.observation.legacy())
             .map_or(0, |capture| match capture {
                 PreparedSpectrumCapture::Single(_) => 0,
                 PreparedSpectrumCapture::Collection(capture) => capture.selection_epoch(),
@@ -6031,7 +6154,7 @@ fn compile_ready(
         sample_rate_hz: session.sample_rate().0,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
-        spectrum_capture,
+        observation: PreparedObservationStorage::Legacy(spectrum_capture),
         host,
         meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(track_count)?,

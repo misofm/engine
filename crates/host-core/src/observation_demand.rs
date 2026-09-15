@@ -82,6 +82,21 @@ pub struct ObservedContinuousSpectrumWindow {
     pub window: SpectrumContinuousWindow,
 }
 
+/// Read-only spectrum selection state projected from the native observation owner.
+///
+/// The generations are the graph revisions accepted by and applied to the owner. A missing
+/// selection is represented by generation zero; the selection epoch remains the owner's persisted
+/// identity counter and is not synthesized by this projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostSpectrumState {
+    /// Accepted graph observation generation, or zero when no spectrum is accepted.
+    pub accepted_generation: u64,
+    /// Applied graph observation generation, or zero when no spectrum is applied.
+    pub applied_generation: u64,
+    /// Persisted public target-selection epoch.
+    pub selection_epoch: u64,
+}
+
 /// One meter in the prepared, immutable observation catalog.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedHostMeter {
@@ -969,6 +984,22 @@ impl HostObservationController {
     #[must_use]
     pub fn work(&self) -> ObservationWorkCost {
         self.budget.accepted()
+    }
+
+    /// Project the accepted/applied spectrum generations and persisted selection epoch.
+    #[must_use]
+    pub fn spectrum_state(&self) -> HostSpectrumState {
+        HostSpectrumState {
+            accepted_generation: self
+                .accepted
+                .spectrum
+                .map_or(0, |selection| selection.generation),
+            applied_generation: self
+                .applied
+                .spectrum
+                .map_or(0, |selection| selection.generation),
+            selection_epoch: self.spectrum_selection_epoch,
+        }
     }
 
     /// Whether the graph endpoint has reached terminal closure.

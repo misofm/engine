@@ -96,3 +96,13 @@ Closure requires independent review PASS, required CI, merged source/evidence an
 ### Root source seam ruling
 
 The current native owner exposes owner/work/closure but no accepted/applied spectrum state getter. Add `HostSpectrumState { accepted_generation: u64, applied_generation: u64, selection_epoch: u64 }` and `HostObservationController::spectrum_state(&self) -> HostSpectrumState` as the narrow read-only projection needed by the browser status. Missing accepted/applied selections project generation0; selection_epoch is the existing persisted counter. No receipt polling, graph query, queue read, new stored counter, or mutable status cache. Export the type through host-core. It may land with preparation checkpoint (a), and existing owner fixtures can assert the scalar projection at their existing boundaries.
+
+## Storage checkpoint and bounded rescope
+
+The initial private-preparation assignment was reduced before it grew further. It delivered the public preparation/limit types, private mutually exclusive Legacy/Protected storage, existing legacy method forwarding, and the native read-only HostSpectrumState getter. Root completed the existing constructor adaptation. Protected preparation and public protected boot are not enabled. Narrow temporary dead-code annotations identify storage to be wired in subsequent checkpoints; the inline owner is intentional and the actual containing allocation is charged.
+
+Root's eight existing spectrum ABI cases passed, including continuous and collection behavior; formatting/diff and warning-denying host-web library Clippy passed. Shipped artifact repinning waits for completed native/ABI implementation. No new native review attempt has begun.
+
+Source-derived overlap ruling: project_buffers charges the full AudioWorkletEngineHost shell, now containing the full native owner H. Native graph_session_plus_plan_bytes already includes H through (H-C)+(A-R), where A contains C. Protected bridge metadata/retained accounting must deduct full sizeof(HostObservationController) exactly once, not just the native owner_inline_bytes H-C. Largest allocation retains full actual shell size; the browser target identity allocation is separate and charged once. Legacy has no owner deduction.
+
+The remaining preparation work is split into exact checked ingress projection, private boot wiring, then protected operation mediation. Astra XHIGH is supplying the missing code-ready projection arithmetic so fresh Luna tasks do not have to discover architectural budget rules while implementing. This refines execution order; the frozen endpoint contract is unchanged.
