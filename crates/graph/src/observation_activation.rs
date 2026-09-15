@@ -16,6 +16,33 @@ use engine::realtime::{
     Consumer, Producer, QueueGeneration, bounded_spsc_move, bounded_spsc_retained_payload,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_OBSERVATION_TRANSITION_ENTRIES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Return the number of old/new snapshot entries consumed by the most recent boundary merge.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_observation_transition_entries() -> u64 {
+    TEST_ONLY_OBSERVATION_TRANSITION_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_reset_observation_transition_entries() {
+    TEST_ONLY_OBSERVATION_TRANSITION_ENTRIES.with(|value| value.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_record_observation_transition_entries(consumed: u64) {
+    TEST_ONLY_OBSERVATION_TRANSITION_ENTRIES.with(|value| {
+        value.set(value.get().saturating_add(consumed));
+    });
+}
+
 /// Preparation limits for controlled graph observation activation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphObservationActivationConfig {
@@ -509,6 +536,8 @@ impl RealtimeObservationActivation {
     where
         F: FnMut(ActivationEntry, bool, u64, u64),
     {
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_reset_observation_transition_entries();
         let pending_count = usize::from(self.pending.is_some());
         let removal_count = self
             .removal
@@ -686,10 +715,14 @@ fn notify_changes<F>(
                 Ordering::Less => {
                     on_changed(*old_entry, false, revision, first_sample);
                     old_index += 1;
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_record_observation_transition_entries(1);
                 }
                 Ordering::Greater => {
                     on_changed(*new_entry, true, revision, first_sample);
                     new_index += 1;
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_record_observation_transition_entries(1);
                 }
                 Ordering::Equal => {
                     if old_entry != new_entry {
@@ -698,15 +731,21 @@ fn notify_changes<F>(
                     }
                     old_index += 1;
                     new_index += 1;
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_record_observation_transition_entries(2);
                 }
             },
             (Some(old_entry), None) => {
                 on_changed(*old_entry, false, revision, first_sample);
                 old_index += 1;
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_record_observation_transition_entries(1);
             }
             (None, Some(new_entry)) => {
                 on_changed(*new_entry, true, revision, first_sample);
                 new_index += 1;
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_record_observation_transition_entries(1);
             }
             (None, None) => break,
         }
@@ -918,6 +957,124 @@ mod tests {
         );
         assert_eq!(controller.try_applied(), None);
         controller.replace(&[20]).expect("ordinary credit recycled");
+    }
+
+    #[test]
+    fn transition_entries_count_both_unchanged_merges_and_leave_permanent_rows_untouched() {
+        let catalog = (1..=3)
+            .map(|ordinal| ActivationBinding {
+                handle: ordinal as u64,
+                entry: ActivationEntry {
+                    unit: 1,
+                    member: None,
+                    observer: ordinal,
+                    ordinal,
+                },
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let permanent = [
+            ActivationEntry {
+                unit: 0,
+                member: None,
+                observer: 0,
+                ordinal: 0,
+            },
+            ActivationEntry {
+                unit: 2,
+                member: None,
+                observer: 0,
+                ordinal: 4,
+            },
+        ];
+        let (mut controller, mut realtime) = prepare_activation(
+            catalog,
+            &permanent,
+            GraphObservationActivationConfig {
+                maximum_active_observers: 3,
+                maximum_retained_bytes: u64::MAX,
+            },
+        )
+        .expect("activation");
+
+        controller.replace(&[1, 2, 3]).expect("initial active set");
+        realtime.apply_boundary(0, |_, _, _, _| {});
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: 1,
+                first_sample: 0,
+            })
+        );
+
+        let mut changes = Vec::new();
+        controller
+            .replace(&[1, 2, 3])
+            .expect("unchanged ordinary replacement");
+        controller.remove_to(&[1, 2, 3]).expect("unchanged removal");
+        realtime.apply_boundary(480, |entry, active, revision, sample| {
+            changes.push((entry.ordinal, active, revision, sample));
+        });
+        assert_eq!(test_only_observation_transition_entries(), 20);
+        assert!(changes.is_empty(), "unchanged entries do not invoke hooks");
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: 2,
+                first_sample: 480,
+            })
+        );
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: 3,
+                first_sample: 480,
+            })
+        );
+
+        controller
+            .replace(&[1, 3])
+            .expect("ordinary changed replacement");
+        controller.remove_to(&[1]).expect("changed removal");
+        changes.clear();
+        realtime.apply_boundary(960, |entry, active, revision, sample| {
+            changes.push((entry.ordinal, active, revision, sample));
+        });
+        assert_eq!(test_only_observation_transition_entries(), 16);
+        assert!(
+            changes
+                .iter()
+                .all(|(ordinal, _, _, _)| *ordinal != 0 && *ordinal != 4),
+            "unchanged permanent rows never invoke transition hooks"
+        );
+    }
+
+    #[test]
+    fn closing_endpoint_keeps_applied_receipt_and_drops_unapplied_removal() {
+        let (mut controller, mut realtime) =
+            prepare_activation(catalog(), &[], config()).expect("activation");
+        let ordinary = controller.replace(&[10]).expect("ordinary");
+        realtime.apply_boundary(480, |_, _, _, _| {});
+        let removal = controller.remove_to(&[10]).expect("reserved removal");
+        drop(realtime);
+        assert!(controller.is_closed());
+        assert_eq!(
+            controller.try_applied(),
+            Some(GraphObservationApplied {
+                revision: ordinary.revision,
+                first_sample: 480,
+            })
+        );
+        assert_eq!(controller.try_applied(), None, "removal was never applied");
+        assert_ne!(ordinary.revision, removal.revision);
+        assert_eq!(
+            controller.replace(&[]),
+            Err(GraphObservationAdmissionError::OwnerClosed)
+        );
+        assert_eq!(
+            controller.remove_to(&[]),
+            Err(GraphObservationAdmissionError::OwnerClosed)
+        );
     }
 
     #[test]

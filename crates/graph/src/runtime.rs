@@ -55,6 +55,43 @@ thread_local! {
     static TEST_ONLY_RESIDENT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
     static TEST_ONLY_METER_RESIDENT_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_ONLY_METER_INPUT_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+    static TEST_ONLY_OBSERVATION_DISPATCH_COUNTS: std::cell::Cell<[u64; 2]> =
+        const { std::cell::Cell::new([0; 2]) };
+}
+
+/// Reset the test-only counts of prepared observer and bank-member object accesses.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_observation_dispatch_reset() {
+    TEST_ONLY_OBSERVATION_DISPATCH_COUNTS.with(|value| value.set([0; 2]));
+}
+
+/// Return `[observer object accesses, bank member accesses]` from prepared dispatch.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_observation_dispatch_counts() -> [u64; 2] {
+    TEST_ONLY_OBSERVATION_DISPATCH_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_observation_dispatch_observer_access() {
+    TEST_ONLY_OBSERVATION_DISPATCH_COUNTS.with(|value| {
+        let mut counts = value.get();
+        counts[0] += 1;
+        value.set(counts);
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_observation_dispatch_member_access() {
+    TEST_ONLY_OBSERVATION_DISPATCH_COUNTS.with(|value| {
+        let mut counts = value.get();
+        counts[1] += 1;
+        value.set(counts);
+    });
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1913,6 +1950,8 @@ impl Runtime {
                 let final_start = members.len().checked_sub(population);
                 let chain: &BankChain = chain;
                 for (index, member) in members.iter_mut().enumerate() {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_observation_dispatch_member_access();
                     let resident = if eligible {
                         final_start
                             .and_then(|start| index.checked_sub(start))
@@ -2068,6 +2107,8 @@ fn observe_active_entry<'a>(
                 .observers
                 .get_mut(entry.observer)
                 .ok_or(RenderError::InvalidEnvelope)?;
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_observation_dispatch_observer_access();
             observe_one(
                 observer,
                 lease,
@@ -2115,11 +2156,15 @@ fn observe_active_entry<'a>(
             let member = members
                 .get_mut(member_index)
                 .ok_or(RenderError::InvalidEnvelope)?;
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_observation_dispatch_member_access();
             let output = member.output;
             let observer = member
                 .observers
                 .get_mut(entry.observer)
                 .ok_or(RenderError::InvalidEnvelope)?;
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_observation_dispatch_observer_access();
             observe_one(
                 observer,
                 lease,
@@ -2354,6 +2399,8 @@ fn observe(
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
     let mut planar = None;
     for observer in op.observers.iter_mut() {
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_observation_dispatch_observer_access();
         if let Some(lane) = resident {
             #[cfg(any(test, feature = "test-support"))]
             TEST_ONLY_METER_INPUT_COUNTS.with(|value| {

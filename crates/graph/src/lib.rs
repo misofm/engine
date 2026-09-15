@@ -28,11 +28,16 @@ pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
     test_only_arm_failed_buffer_capture, test_only_completion_disabled,
     test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
     test_only_split_pair_table_witness,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use observation_activation::test_only_observation_transition_entries;
 
 use core::cell::Cell;
 use std::any::Any;

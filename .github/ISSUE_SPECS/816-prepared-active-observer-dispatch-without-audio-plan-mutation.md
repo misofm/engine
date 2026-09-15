@@ -334,3 +334,14 @@ combined accounting. Luna accounting validation: graph library 79/79,
 graph-compiler library 73/73, graph check, all-target Clippy with warnings denied,
 formatting and diff checks passed. Dispatch discriminators and the independent
 attempt-2 verdict remain pending; this is not an issue completion claim.
+
+Attempt 2 discriminator checkpoint: test-only operation-site counters now cover
+observer/member accesses and consumed transition entries. The mixed direct/alias
+fixture preserves identical fixed/candidate handles, verifies permanent output
+and PCM, and asserts callback order under stop/reactivation. Two unchanged
+transitions consume exactly 20 entries with no hooks. Selected failure runs under
+the existing allocator guard; pending owner close preserves prior applied receipts
+without inventing a removal receipt. Luna validation: graph library 81/81, rt9
+8/8, strict all-target Clippy, graph check, formatting/diff, realtime policy and
+its mutation tests passed. Root also passed Wasm graph compilation after the
+accounting change. Independent attempt-2 review remains pending.
