@@ -361,3 +361,18 @@ bounded mechanical refresh of tools/audit/src/fixture_builtins.rs and only the
 existing resource corpus rows/dependent manifest identity affected by that layout.
 No DSP fixtures, test cases, outcomes, or checker acceptance rules may be weakened.
 Native PASS is not yet whole-issue CI completion.
+
+Final integration checkpoint: the audit observer-binding ABI is now 88 bytes.
+Only the existing resource grid's meter/retained totals, its manifest row and
+joined-manifest identity changed. Fresh Luna verified the two issue064 tests
+(including all 24 corruptions) and issue067 PDC/dependent identity test; generated
+scratch parity confirms only resources.jsonl/MANIFEST.tsv changed. No audio
+fixture or checker acceptance rule changed. Formatting/diff checks passed.
+
+Root ran the existing all-browser qualification with mutation gates against the
+exact CI-built a4a4171f artifact from candidate78d5d65b: Chromium151.0.7922.34,
+Firefox153.0 and WebKit26.5 all PASS. The current matrix/results were generated
+by that actual run; only candidate and artifact lineage changed. Native review
+PASS plus focused integration gates are complete. Required PR qualification
+and merged GitHub synchronization are the remaining closure steps. Parent763
+and production host/SDK/frontend observation migration remain open.
