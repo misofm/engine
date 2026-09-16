@@ -110,18 +110,22 @@ self-test, formatting, and diff checks: PASS. The agent additionally reports exa
 export inspection and render-callgraph PASS. The artifact digest is expected to change and remains
 deferred to B4. Worker-side explicit-metadata validation is the remaining B1 subtask.
 
-**B1b Worker-side imported-cadence validation — complete in two Luna MAX rounds.** The native
-analysis instance now reconstructs the cadence from the already validated stream metadata with
-`SpectrumCadence::with_hop`, so H256, H512, H1024, and H2048 are the only accepted effective
-values and no competing default is derived. Existing structure, ABI, status, target, channel,
+**B1b Worker-side imported-cadence validation — complete after bounded Sol correction.** The native
+analysis instance now accepts either the exact legacy cadence derived from the already validated
+sample rate and quantum or H256, H512, H1024, and H2048 through `SpectrumCadence::with_hop`; every
+other value refuses and no competing default is substituted. Existing structure, ABI, status, target, channel,
 reserved-zero, epoch, span, capture-header, snapshot-token, and capture-length checks still run
 before configuration is committed. Focused tests exercise H256 and H1024 through configuration
-and analysis, retain the existing H2048/default path, and prove that zero and H300 refuse without
-partially changing stream analysis state. Round 1's implementation and behavior tests passed, but
-root's independent audit caught one rustfmt discrepancy; round 2 corrected formatting without a
-semantic change. Root reran the focused tests, strict host-web library Clippy, wasm32 compilation,
-formatting, and diff checks: PASS. This closes the Rust/ABI B1 slice; SDK capability enforcement
-and transport remain B2.
+and analysis, retain H2048/default behavior, and prove that zero and H300 refuse without partially
+changing stream analysis state. Round 1's implementation and behavior tests passed, but root's
+independent audit caught one rustfmt discrepancy; round 2 corrected formatting without a semantic
+change. During B2 review, root then found that an unconditional explicit-hop constructor rejected
+valid high-rate legacy defaults such as 96 kHz/128-frame H3200. Both Luna rounds were exhausted, so
+the directed Sol-high escalation changed the branch to exact-derived-default-or-explicit logic,
+added a successful H3200 configure/analyze regression, and added transactional rejection for
+forged 96 kHz H3072. Root reran all four focused tests, strict host-web library Clippy, wasm32
+compilation, formatting, and diff checks: PASS. This closes the corrected Rust/ABI B1 slice; SDK
+capability enforcement and transport remain B2.
 
 **B2a shared/headless boot contract — complete in two Luna MAX rounds.** `BootOptions` now accepts
 the literal preparation value `spectrumHopFrames` for H256, H512, H1024, or H2048. The SDK copies

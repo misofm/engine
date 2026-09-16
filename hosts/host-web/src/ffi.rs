@@ -1270,12 +1270,18 @@ fn imported_stream_configuration(
         return Err(RESULT_INVALID_ARGUMENT);
     }
     spectrum_channels(metadata.channels)?;
-    let cadence = SpectrumCadence::with_hop(
-        metadata.sample_rate_hz,
-        metadata.quantum_frames,
-        metadata.hop_frames,
-    )
-    .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let default_cadence = SpectrumCadence::new(metadata.sample_rate_hz, metadata.quantum_frames)
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    let cadence = if metadata.hop_frames == default_cadence.hop_frames() {
+        default_cadence
+    } else {
+        SpectrumCadence::with_hop(
+            metadata.sample_rate_hz,
+            metadata.quantum_frames,
+            metadata.hop_frames,
+        )
+        .map_err(|_| RESULT_INVALID_ARGUMENT)?
+    };
     let smoothing =
         SpectrumSmoothingConfig::new(metadata.smoothing_ms).map_err(|_| RESULT_INVALID_ARGUMENT)?;
     let bytes = staging
@@ -8327,11 +8333,40 @@ mod spectrum_ffi_tests {
     }
 
     #[test]
+    fn imported_stream_analysis_accepts_high_rate_derived_default_hop() {
+        let cadence = SpectrumCadence::new(96_000, 128).expect("launch default cadence");
+        assert_eq!(cadence.hop_frames(), 3_200);
+        stage_left_output_request();
+        stage_imported_left_window(0, 96_000, 1, 0.25);
+        stage_imported_stream_metadata_with_hop(0, 0, 96_000, 0.0, cadence.hop_frames());
+
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis_configure(),
+            RESULT_OK,
+        );
+        assert_eq!(
+            SPECTRUM_STAGING.with(|slot| {
+                slot.borrow()
+                    .stream_cadence
+                    .expect("configured stream cadence")
+                    .hop_frames()
+            }),
+            3_200,
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
+        assert_eq!(metadata.hop_frames, 3_200);
+        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        stage_left_output_request();
+    }
+
+    #[test]
     fn imported_stream_analysis_rejects_unsupported_hops_transactionally() {
-        for hop_frames in [0_u32, 300] {
+        for (sample_rate_hz, hop_frames) in [(48_000_u32, 0_u32), (48_000, 300), (96_000, 3_072)] {
             stage_left_output_request();
-            stage_imported_left_window(0, 48_000, 1, 0.25);
-            stage_imported_stream_metadata_with_hop(0, 0, 48_000, 0.0, hop_frames);
+            stage_imported_left_window(0, sample_rate_hz, 1, 0.25);
+            stage_imported_stream_metadata_with_hop(0, 0, sample_rate_hz, 0.0, hop_frames);
             let before = SPECTRUM_STAGING.with(|slot| {
                 let staging = slot.borrow();
                 (
