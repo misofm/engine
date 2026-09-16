@@ -1708,6 +1708,110 @@ async function testMainRealm() {
           if (addModuleGate === gate) addModuleGate = null;
         }
       }
+
+      {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const spectrum = {
+          target: "trackPostMatrix", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
+        };
+        const options = {
+          sourceRingFrames: 0,
+          maximumMemoryBytes: 0n,
+          consoleCommandQueueRecords: 0n,
+          consoleMeterBlocks: 7n,
+          consoleObservationTaps: 0n,
+          consoleMasterTrackPlusOne: 0n,
+          spectrum,
+          spectrumCollection: null,
+        };
+        const expectedOptions = { ...options, spectrum: { ...spectrum } };
+        const factory = makeFactory({ options, workletModuleUrl: "single-spectrum.js" });
+        let hostValue;
+        const previousMixedSuccess = mixedSuccess;
+        try {
+          const boot = createMisoAudioWorkletHost(factory);
+          await gate.started;
+          spectrum.targetId = "mutated-spectrum";
+          options.consoleMeterBlocks = 99n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.simd128ModuleUrl = "mutated-simd.wasm";
+          factory.workletModuleUrl = "mutated-processor.js";
+          gate.release();
+          hostValue = await boot;
+          const node = FakeNode.latest;
+          const captured = node.options.processorOptions.options;
+          assert.equal(hostValue.resources.sampleRateHz, 48000);
+          assert.equal(hostValue.resources.quantumFrames, 64);
+          assert.deepEqual(captured, expectedOptions, "single spectrum boot values are captured");
+          assert.equal(captured.spectrumCollection, null);
+          assert.notEqual(captured, options, "single spectrum boot snapshot is fresh");
+          assert.notEqual(captured.spectrum, spectrum, "single spectrum snapshot is fresh");
+          assert.deepEqual(
+            events.slice(-2),
+            [["compile", "simd.wasm"], ["addModule", "single-spectrum.js"]],
+            "single spectrum loading inputs are captured",
+          );
+
+          mixedSuccess = true;
+          holdAll = true;
+          const heldSources = Array.from({ length: 77 }, (_value, index) => {
+            const buffer = new ArrayBuffer(4);
+            const request = hostValue.submitSource({
+              sourceId: "single-source", generation: 1n, startFrame: BigInt(index),
+              sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 1,
+              endOfRegion: false,
+            });
+            assert.equal(buffer.byteLength, 0, `single source ${index} transferred`);
+            return request;
+          });
+          const beforeSourceOverflow = events.length;
+          const overflowBuffer = new ArrayBuffer(4);
+          await localErrorResult(hostValue.submitSource({
+            sourceId: "single-source", generation: 1n, startFrame: 77n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
+            endOfRegion: false,
+          }), 6);
+          assert.equal(events.length, beforeSourceOverflow, "source capacity refusal posted no event");
+          assert.equal(overflowBuffer.byteLength, 4, "source refusal retained caller storage");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const sourceAcks = await Promise.all(heldSources);
+          assert(sourceAcks.every((ack) => ack.result === 0), "all default-depth sources accepted");
+          const nextSourceBuffer = new ArrayBuffer(4);
+          const nextSource = hostValue.submitSource({
+            sourceId: "single-source", generation: 1n, startFrame: 78n,
+            sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 1,
+            endOfRegion: false,
+          });
+          const nextSourceAck = await nextSource;
+          assert.equal(nextSourceAck.requestId, sourceAcks.at(-1).requestId + 1,
+            "source capacity refusal did not burn an ID");
+
+          const localCommand = {
+            kind: 1, rack: 255, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 0,
+            smoothingSamples: 64, values: [0, 0, 0, 0],
+          };
+          holdAll = true;
+          const heldCommand = hostValue.command({ commands: [localCommand] });
+          const beforeCommandOverflow = events.length;
+          await localErrorResult(hostValue.command({ commands: [localCommand] }), 6);
+          assert.equal(events.length, beforeCommandOverflow, "command capacity refusal posted no event");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const commandAck = await heldCommand;
+          const nextCommand = await hostValue.command({ commands: [localCommand] });
+          assert.equal(nextCommand.requestId, commandAck.requestId + 1,
+            "command capacity refusal did not burn an ID");
+        } finally {
+          gate.release();
+          if (addModuleGate === gate) addModuleGate = null;
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          mixedSuccess = previousMixedSuccess;
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
     };
 
     const host = await createMisoAudioWorkletHost({
