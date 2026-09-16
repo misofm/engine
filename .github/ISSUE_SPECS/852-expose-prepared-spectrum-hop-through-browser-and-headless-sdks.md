@@ -248,3 +248,13 @@ all three exports and proves legacy boot occurs without a capability probe. Focu
 26/26, the exact-candidate headless gate passed 278/278, and the actual #851 asset accepts omission
 while refusing explicit H256. Generated/type and diff gates pass. A fresh Astra medium re-review is
 required before final PASS.
+
+**Fresh Astra medium final verdict — PASS at `c9184b4dba57ad5c1db695ccc02d42156318cfd4`.**
+The reviewer reproduced successful omission and typed explicit-H256 refusal against the actual #851
+artifact, verified that the optional inventory is exactly the three new additive exports, and removed
+each of the 131 pre-existing required exports independently to confirm every one still refuses. The
+exact #852 candidate passed the full 278/278 headless gate and focused boot tests 26/26; generated
+surface, strict types, seven-file membership, candidate digest, companion source-byte identity,
+diff, HEAD, and clean-tree checks pass. Only the correction and this evidence changed after the
+prior review, so its native/browser/resource/package PASS evidence remains applicable. No blocker
+remains.
