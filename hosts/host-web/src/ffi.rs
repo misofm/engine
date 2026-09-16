@@ -6930,6 +6930,28 @@ pub(crate) mod live_response_ffi_tests {
             );
         });
 
+        // Unsupported selection is not a protected admission. Spend the Ordinary credit through
+        // a genuine malformed stream start before exercising response backpressure.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
+            RESULT_INVALID_ARGUMENT
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_START_SPECTRUM);
+            assert_eq!(admission.result, RESULT_INVALID_ARGUMENT);
+            assert_eq!(admission.reason, 8);
+            assert_eq!(status.ingress_epoch, 1);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the genuine malformed stream start spends Ordinary credit"
+            );
+        });
+
         let callback_before = live_response_owner_callback_calls();
         assert_eq!(
             miso_engine_web_v1_track_response_capture(handle),
@@ -9667,6 +9689,28 @@ mod observation_checkpoint_c2a_tests {
         handle
     }
 
+    fn stage_stop_demand(handle: u32) {
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation: OBSERVATION_OPERATION_STOP_GRAPH,
+                count: 0,
+                owner,
+                reserved: [0; 2],
+            };
+        });
+    }
+
     fn boot_legacy() -> u32 {
         no_live_host();
         SPECTRUM_STAGING.with(|slot| {
@@ -9879,6 +9923,19 @@ mod observation_checkpoint_c2a_tests {
 
     fn assert_markers(markers: &CommittedMarkers) {
         assert_staged_markers(markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+    }
+
+    fn assert_stopped_output(markers: &CommittedMarkers) {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+            let capture = staging.capture.as_ref().expect("capture bytes");
+            let result = staging.result.as_ref().expect("result bytes");
+            assert_eq!(&capture[..markers.capture.len()], markers.capture.as_slice());
+            assert_eq!(&result[..markers.result.len()], markers.result.as_slice());
+        });
         assert_eq!(capture_identity(), markers.capture_identity);
     }
 
@@ -10890,12 +10947,33 @@ mod observation_checkpoint_c2a_tests {
         assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
-        // Unsupported ordinary selection work spends the same ingress credit. The queued native
-        // window remains available for the next admitted read after a successful render boundary.
+        // The staging-borrow refusal already spends Ordinary credit. Unsupported selection must
+        // leave that spent state alone; the queued native window remains available for the next
+        // admitted read after a successful render boundary.
+        let spent_after_borrow = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "a staging-borrow refusal spends the Ordinary attempt"
+            );
+            (status.ingress_epoch, status.flags)
+        });
         assert_eq!(
             miso_engine_web_v1_spectrum_select(handle, 0, 0, 0),
-            RESULT_BACKPRESSURE
+            RESULT_UNSUPPORTED
         );
+        let after_selection = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            (status.ingress_epoch, status.flags)
+        });
+        assert_eq!(after_selection, spent_after_borrow);
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
         assert_eq!(
             miso_engine_web_v1_spectrum_stream_read(handle),
             RESULT_BACKPRESSURE
@@ -11198,18 +11276,53 @@ mod observation_checkpoint_c2a_tests {
             );
         });
 
-        // Spend removal credit through an unrelated protected refusal. The valid repeated stop
-        // must return the original native Pending identity without another native call/permit.
+        // Unsupported cancel must not spend Removal or disturb the Pending row.
         assert_eq!(
             miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_UNSUPPORTED
+        );
+        assert_stopped_output(&markers);
+
+        // A malformed genuine StopGraph is refused against the already-spent Removal credit. The
+        // valid repeated stop must return the original native Pending identity.
+        stage_stop_demand(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_BACKPRESSURE
         );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(malformed.result, RESULT_BACKPRESSURE);
+        assert_eq!(malformed.reason, 5);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.side_records.pending_count, 1);
+            assert!(
+                host.side_records
+                    .receipts
+                    .iter()
+                    .any(|receipt| *receipt == first_receipt),
+                "the authoritative Pending receipt survives the intervening refusal"
+            );
+        });
+        assert_stopped_output(&markers);
+
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().expect("protected live host").host;
             assert_eq!(host.observation_admission().result, RESULT_OK);
             assert_eq!(host.observation_admission().receipt, first_receipt);
+            assert_eq!(host.observation_admission().receipt.owner, first_receipt.owner);
+            assert_eq!(
+                host.observation_admission().receipt.sequence,
+                first_receipt.sequence
+            );
             assert_eq!(host.side_records.pending_count, 1);
         });
         assert_eq!(capture_identity(), identity);
@@ -11280,10 +11393,65 @@ mod observation_checkpoint_c2a_tests {
         let handle = boot_protected();
         let markers = stage_markers();
         let identity = stage_capture_identity();
+        let before = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
         assert_eq!(
             miso_engine_web_v1_spectrum_cancel(handle),
             RESULT_UNSUPPORTED
         );
+
+        // A matching-owner malformed genuine StopGraph spends Removal but cannot publish a row.
+        stage_stop_demand(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(malformed.result, RESULT_INVALID_ARGUMENT);
+        assert_eq!(malformed.reason, 8);
+        let after_malformed = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
+        assert_eq!(after_malformed, before);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().applied_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+            assert_eq!(
+                host.observation_status().flags
+                    & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                0
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
         assert_eq!(
             miso_engine_web_v1_spectrum_stream_stop(handle),
             RESULT_BACKPRESSURE
@@ -11296,6 +11464,19 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(host.observation_status().accepted_generation, 0);
             assert_eq!(host.side_records.pending_count, 0);
         });
+        let after_stop = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
+        assert_eq!(after_stop, before);
         dispose(handle);
     }
 }
