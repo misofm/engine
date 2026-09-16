@@ -43,6 +43,8 @@ Fresh independent Astra MEDIUM verdict on clean/upstream evidence HEAD `ab952623
 
 Successor [#844](https://github.com/misofm/engine/issues/844) adopts a deliberately narrower plain-data input contract on clean main. It does not resume this attempt ledger or claim that #843's broad accessor and shadowed-method compatibility contract passed. Keep #843 open and exhausted until #844 independently passes and its evidence is upstream; only then close #843 as superseded/not planned while preserving all four FAILs.
 
+Successor #844 candidate 2 received fresh independent Astra MEDIUM PASS at frozen evidence revision `1715b7ec`; `/tmp/miso-844-astra-medium-c2.md`. The narrower plain-data contract passed without retroactively passing this issue's broad accessor/shadowed-method contract. Close #843 as superseded/not planned only after #844's PASS evidence is merged and required qualification succeeds.
+
 This issue does not expose protected native boot or establish protected browser EQ delivery.
 
 **Frozen implementation boundary.**  
