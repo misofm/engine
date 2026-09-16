@@ -1270,11 +1270,12 @@ fn imported_stream_configuration(
         return Err(RESULT_INVALID_ARGUMENT);
     }
     spectrum_channels(metadata.channels)?;
-    let cadence = SpectrumCadence::new(metadata.sample_rate_hz, metadata.quantum_frames)
-        .map_err(|_| RESULT_INVALID_ARGUMENT)?;
-    if cadence.hop_frames() != metadata.hop_frames {
-        return Err(RESULT_INVALID_ARGUMENT);
-    }
+    let cadence = SpectrumCadence::with_hop(
+        metadata.sample_rate_hz,
+        metadata.quantum_frames,
+        metadata.hop_frames,
+    )
+    .map_err(|_| RESULT_INVALID_ARGUMENT)?;
     let smoothing =
         SpectrumSmoothingConfig::new(metadata.smoothing_ms).map_err(|_| RESULT_INVALID_ARGUMENT)?;
     let bytes = staging
@@ -8249,6 +8250,22 @@ mod spectrum_ffi_tests {
         sample_rate_hz: u32,
         smoothing_ms: f64,
     ) {
+        stage_imported_stream_metadata_with_hop(
+            first_sample,
+            sequence,
+            sample_rate_hz,
+            smoothing_ms,
+            2_048,
+        );
+    }
+
+    fn stage_imported_stream_metadata_with_hop(
+        first_sample: u64,
+        sequence: u64,
+        sample_rate_hz: u32,
+        smoothing_ms: f64,
+        hop_frames: u32,
+    ) {
         SPECTRUM_STAGING.with(|slot| {
             let mut staging = slot.borrow_mut();
             let end_sample = first_sample
@@ -8263,7 +8280,7 @@ mod spectrum_ffi_tests {
                 channels: SPECTRUM_CHANNEL_LEFT,
                 sample_rate_hz,
                 quantum_frames: 128,
-                hop_frames: 2_048,
+                hop_frames,
                 capture_epoch: 1,
                 sequence,
                 windows: sequence.checked_add(1).expect("test window count"),
@@ -8273,6 +8290,88 @@ mod spectrum_ffi_tests {
                 ..WebSpectrumStreamMetadata::default()
             };
         });
+    }
+
+    #[test]
+    fn imported_stream_analysis_accepts_explicit_hops() {
+        for hop_frames in [256_u32, 1_024] {
+            stage_left_output_request();
+            stage_imported_left_window(0, 48_000, 1, 0.25);
+            stage_imported_stream_metadata_with_hop(0, 0, 48_000, 0.0, hop_frames);
+
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_analysis_configure(),
+                RESULT_OK,
+                "H{hop_frames} import configuration",
+            );
+            assert_eq!(
+                SPECTRUM_STAGING.with(|slot| {
+                    slot.borrow()
+                        .stream_cadence
+                        .expect("configured stream cadence")
+                        .hop_frames()
+                }),
+                hop_frames,
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_analysis(),
+                RESULT_OK,
+                "H{hop_frames} imported window analysis",
+            );
+            let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+            assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
+            assert_eq!(metadata.hop_frames, hop_frames);
+            assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        }
+        stage_left_output_request();
+    }
+
+    #[test]
+    fn imported_stream_analysis_rejects_unsupported_hops_transactionally() {
+        for hop_frames in [0_u32, 300] {
+            stage_left_output_request();
+            stage_imported_left_window(0, 48_000, 1, 0.25);
+            stage_imported_stream_metadata_with_hop(0, 0, 48_000, 0.0, hop_frames);
+            let before = SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                (
+                    staging.capture_len,
+                    staging.result_len,
+                    staging.stream_active,
+                    staging.stream_cadence,
+                    staging.stream_smoothing,
+                    staging.stream_history.is_some(),
+                    staging
+                        .stream_window
+                        .map(|facts| (facts.stream_epoch, facts.sequence, facts.dropped_captures)),
+                )
+            });
+
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_analysis_configure(),
+                RESULT_INVALID_ARGUMENT,
+                "unsupported H{hop_frames} import",
+            );
+            let after = SPECTRUM_STAGING.with(|slot| {
+                let staging = slot.borrow();
+                (
+                    staging.capture_len,
+                    staging.result_len,
+                    staging.stream_active,
+                    staging.stream_cadence,
+                    staging.stream_smoothing,
+                    staging.stream_history.is_some(),
+                    staging
+                        .stream_window
+                        .map(|facts| (facts.stream_epoch, facts.sequence, facts.dropped_captures)),
+                )
+            });
+            assert_eq!(
+                after, before,
+                "unsupported H{hop_frames} partially configured state"
+            );
+        }
+        stage_left_output_request();
     }
 
     fn spectrum_result_header() -> WebSpectrumResult {

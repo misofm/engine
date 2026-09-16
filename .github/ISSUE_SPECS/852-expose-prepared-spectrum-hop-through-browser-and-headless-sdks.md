@@ -109,3 +109,16 @@ and 5 round-trip tests, strict host-web library Clippy, wasm32 compilation, the 
 self-test, formatting, and diff checks: PASS. The agent additionally reports exact 134/134 Wasm
 export inspection and render-callgraph PASS. The artifact digest is expected to change and remains
 deferred to B4. Worker-side explicit-metadata validation is the remaining B1 subtask.
+
+**B1b Worker-side imported-cadence validation — complete in two Luna MAX rounds.** The native
+analysis instance now reconstructs the cadence from the already validated stream metadata with
+`SpectrumCadence::with_hop`, so H256, H512, H1024, and H2048 are the only accepted effective
+values and no competing default is derived. Existing structure, ABI, status, target, channel,
+reserved-zero, epoch, span, capture-header, snapshot-token, and capture-length checks still run
+before configuration is committed. Focused tests exercise H256 and H1024 through configuration
+and analysis, retain the existing H2048/default path, and prove that zero and H300 refuse without
+partially changing stream analysis state. Round 1's implementation and behavior tests passed, but
+root's independent audit caught one rustfmt discrepancy; round 2 corrected formatting without a
+semantic change. Root reran the focused tests, strict host-web library Clippy, wasm32 compilation,
+formatting, and diff checks: PASS. This closes the Rust/ABI B1 slice; SDK capability enforcement
+and transport remain B2.
