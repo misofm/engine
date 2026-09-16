@@ -25,9 +25,9 @@ const COMPANION_SOURCE_PATHS = Object.freeze({
 const WASM_PIN_PATH = path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-artifact.sha256");
 const SOURCE_LAYOUT_PATH = path.join(ROOT, "sdk", "assets", LAYOUT_ARTIFACT);
 const RESULTS_PATH = path.join(HERE, "results.json");
-const SOURCE_COMMIT = "f2355988c0e51f4d283dd028bb98ce17f5038113";
+const SOURCE_COMMIT = "35b0ff7514e31964a0f0b7c6869aeecfc135a18f";
 const EXPECTED_WASM_SHA256 =
-  "18b9dbfa61ae1188fcb00f18317702e37feb37c4843ac2b885194a4c77322cab";
+  "b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61";
 const EXPECTED_LAYOUT_SHA256 =
   "8cd125f03d7bd5e98d93c4756af3bfe3282d709bceed1b55772140d5b57cb25d";
 const PLAYWRIGHT_PACKAGE_PATH = path.join(HERE, "node_modules", "playwright", "package.json");
