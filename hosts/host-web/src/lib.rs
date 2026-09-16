@@ -33,12 +33,14 @@ use effect_contract::{
 use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    HostConsoleRequest, HostMeterRequest, HostObservationController, HostPrepareCaps,
-    HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind, PrepareDiagnostics,
-    PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, apply_input_filter_edit,
-    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
+    HostConsoleRequest, HostMeterRequest, HostObservationController,
+    HostObservationPreparationConfig, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
+    InputFilterEditErrorKind, PrepareDiagnostics, PrepareRejection, PreparedHost,
+    SourceControlError, SourceSubmission, apply_input_filter_edit, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_console_and_spectrum,
     prepare_host_runtime_with_observation_demand_between_render_calls,
+    prepare_host_runtime_with_observation_demand_between_render_calls_config,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
@@ -49,7 +51,7 @@ use host_core::{
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumTarget, SpectrumWindow,
+    SpectrumHop, SpectrumTarget, SpectrumWindow,
 };
 use session::CompileCaps;
 
@@ -1835,6 +1837,22 @@ impl PreparedSpectrumCapture {
         }
     }
 
+    fn start_continuous_with_hop(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+        hop: SpectrumHop,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        match self {
+            Self::Single(capture) => {
+                capture.start_continuous_with_hop(sample_rate_hz, quantum_frames, hop)
+            }
+            Self::Collection(capture) => {
+                capture.start_continuous_with_hop(sample_rate_hz, quantum_frames, hop)
+            }
+        }
+    }
+
     fn try_read_continuous(
         &mut self,
     ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
@@ -1958,6 +1976,7 @@ fn validate_protected_options(options: WebBootOptions) -> Result<(), BootFailure
 fn protected_preparation_facts(
     session: &CompiledSession,
     preparation: &WebObservationPreparation<'_>,
+    spectrum_hop: Option<SpectrumHop>,
 ) -> Result<ProtectedPreparationFacts, BootFailure> {
     if preparation.profile != WebObservationProfile::EqSpectrum {
         return Err(BootFailure::fixed(
@@ -2044,7 +2063,13 @@ fn protected_preparation_facts(
     }
     let all_tracks = u64::try_from(session.normalized_model().tracks.len())
         .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
-    let spectrum_cadence = SpectrumCadence::new(session.sample_rate().0, session.quantum().0)
+    let spectrum_cadence = spectrum_hop
+        .map_or_else(
+            || SpectrumCadence::new(session.sample_rate().0, session.quantum().0),
+            |hop| {
+                SpectrumCadence::with_hop(session.sample_rate().0, session.quantum().0, hop.get())
+            },
+        )
         .map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_OPTIONS, "web.observation.spectrum_cadence")
         })?;
@@ -2494,6 +2519,8 @@ pub struct AudioWorkletEngineHost {
     host_generation: u64,
     /// Host-scoped monotonic token for completed spectrum windows.
     spectrum_token: u64,
+    /// Optional prepared cadence for an ordinary legacy spectrum capture.
+    spectrum_hop: Option<SpectrumHop>,
     diagnostic_len: usize,
 }
 
@@ -2525,7 +2552,16 @@ impl AudioWorkletEngineHost {
         options: WebBootOptions,
         preparation: &WebObservationPreparation<'_>,
     ) -> Result<Self, BootFailure> {
-        Self::boot_transaction(document, options, None, Some(preparation))
+        Self::boot_with_observation_demand_config(document, options, preparation, None)
+    }
+
+    fn boot_with_observation_demand_config(
+        document: &[u8],
+        options: WebBootOptions,
+        preparation: &WebObservationPreparation<'_>,
+        spectrum_hop: Option<SpectrumHop>,
+    ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, None, Some(preparation), spectrum_hop)
     }
 
     /// Prepare one optional graph spectrum observer alongside the existing console/meter plan.
@@ -2537,7 +2573,16 @@ impl AudioWorkletEngineHost {
         options: WebBootOptions,
         spectrum_request: Option<SpectrumPreparationRequest>,
     ) -> Result<Self, BootFailure> {
-        Self::boot_transaction(document, options, spectrum_request, None)
+        Self::boot_with_spectrum_config(document, options, spectrum_request, None)
+    }
+
+    pub(crate) fn boot_with_spectrum_config(
+        document: &[u8],
+        options: WebBootOptions,
+        spectrum_request: Option<SpectrumPreparationRequest>,
+        spectrum_hop: Option<SpectrumHop>,
+    ) -> Result<Self, BootFailure> {
+        Self::boot_transaction(document, options, spectrum_request, None, spectrum_hop)
     }
 
     fn boot_transaction(
@@ -2545,6 +2590,7 @@ impl AudioWorkletEngineHost {
         options: WebBootOptions,
         spectrum_request: Option<SpectrumPreparationRequest>,
         observation_preparation: Option<&WebObservationPreparation<'_>>,
+        spectrum_hop: Option<SpectrumHop>,
     ) -> Result<Self, BootFailure> {
         if spectrum_request.is_some() && observation_preparation.is_some() {
             return Err(BootFailure::fixed(
@@ -2607,7 +2653,7 @@ impl AudioWorkletEngineHost {
             ));
         }
         let protected_facts = observation_preparation
-            .map(|preparation| protected_preparation_facts(&session, preparation))
+            .map(|preparation| protected_preparation_facts(&session, preparation, spectrum_hop))
             .transpose()?;
         let source_ring_frames = if options.source_ring_frames == 0 {
             default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
@@ -2686,7 +2732,7 @@ impl AudioWorkletEngineHost {
             options,
             projection.report,
             spectrum_request.as_ref(),
-            observation_preparation,
+            observation_preparation.map(|preparation| (preparation, spectrum_hop)),
             protected_facts,
         )?;
         let exact_retained = exact_retained_bytes(&resources)?;
@@ -2725,6 +2771,7 @@ impl AudioWorkletEngineHost {
             side_records: ObservationSideRecords::default(),
             host_generation,
             spectrum_token: 0,
+            spectrum_hop: spectrum_request.as_ref().and(spectrum_hop),
             diagnostic_len: 0,
         })
     }
@@ -3925,18 +3972,26 @@ impl AudioWorkletEngineHost {
         let Some(capture) = ready.observation.legacy_mut() else {
             return Err(RESULT_UNSUPPORTED);
         };
-        capture
-            .start_continuous(self.status.sample_rate_hz, self.status.quantum_frames)
-            .map_err(|error| match error {
-                SpectrumContinuousCaptureError::Busy => RESULT_BACKPRESSURE,
-                SpectrumContinuousCaptureError::Cadence(error) => match error {
-                    host_core::SpectrumCadenceError::UnsupportedRate => RESULT_UNSUPPORTED,
-                    host_core::SpectrumCadenceError::ZeroQuantum => RESULT_INVALID_ARGUMENT,
-                    host_core::SpectrumCadenceError::UnsupportedHop => RESULT_INVALID_ARGUMENT,
-                    host_core::SpectrumCadenceError::HopOverflow => RESULT_REFUSED_BUDGET,
-                },
-                SpectrumContinuousCaptureError::EpochOverflow => RESULT_REFUSED_BUDGET,
-            })
+        let started = match self.spectrum_hop {
+            Some(hop) => capture.start_continuous_with_hop(
+                self.status.sample_rate_hz,
+                self.status.quantum_frames,
+                hop,
+            ),
+            None => {
+                capture.start_continuous(self.status.sample_rate_hz, self.status.quantum_frames)
+            }
+        };
+        started.map_err(|error| match error {
+            SpectrumContinuousCaptureError::Busy => RESULT_BACKPRESSURE,
+            SpectrumContinuousCaptureError::Cadence(error) => match error {
+                host_core::SpectrumCadenceError::UnsupportedRate => RESULT_UNSUPPORTED,
+                host_core::SpectrumCadenceError::ZeroQuantum => RESULT_INVALID_ARGUMENT,
+                host_core::SpectrumCadenceError::UnsupportedHop => RESULT_INVALID_ARGUMENT,
+                host_core::SpectrumCadenceError::HopOverflow => RESULT_REFUSED_BUDGET,
+            },
+            SpectrumContinuousCaptureError::EpochOverflow => RESULT_REFUSED_BUDGET,
+        })
     }
 
     /// Restart the active managed stream at a fresh capture epoch without a fallible stop/start
@@ -7663,7 +7718,7 @@ fn compile_ready(
     options: WebBootOptions,
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
-    observation_preparation: Option<&WebObservationPreparation<'_>>,
+    protected_preparation: Option<(&WebObservationPreparation<'_>, Option<SpectrumHop>)>,
     protected_facts: Option<ProtectedPreparationFacts>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
@@ -7683,7 +7738,7 @@ fn compile_ready(
         Vec::new()
     };
     let (host, handles, spectrum_capture, protected_controller) =
-        match (spectrum_request, observation_preparation) {
+        match (spectrum_request, protected_preparation) {
             (Some(_), Some(_)) => {
                 return Err(BootFailure::fixed(
                     RESULT_REFUSED_OPTIONS,
@@ -7715,15 +7770,26 @@ fn compile_ready(
                     None,
                 )
             }
-            (None, Some(preparation)) => {
-                let (host, handles, controller) =
+            (None, Some((preparation, spectrum_hop))) => {
+                let (host, handles, controller) = if let Some(hop) = spectrum_hop {
+                    let preparation = HostObservationPreparationConfig::new(preparation.demand)
+                        .with_spectrum_hop(hop);
+                    prepare_host_runtime_with_observation_demand_between_render_calls_config(
+                        &session,
+                        caps,
+                        &console,
+                        &preparation,
+                    )
+                    .map_err(BootFailure::preparation)?
+                } else {
                     prepare_host_runtime_with_observation_demand_between_render_calls(
                         &session,
                         caps,
                         &console,
                         &preparation.demand,
                     )
-                    .map_err(BootFailure::preparation)?;
+                    .map_err(BootFailure::preparation)?
+                };
                 (host, handles, None, Some(controller))
             }
             (None, None) => {
@@ -8098,12 +8164,8 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
-    let observation = match (
-        observation_preparation,
-        protected_controller,
-        protected_facts,
-    ) {
-        (Some(preparation), Some(controller), Some(facts)) => {
+    let observation = match (protected_preparation, protected_controller, protected_facts) {
+        (Some((preparation, _)), Some(controller), Some(facts)) => {
             let target_bytes = u64::try_from(facts.target_track_id.len())
                 .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
             let bridge = ObservationIngressBridge {

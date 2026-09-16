@@ -11,7 +11,7 @@ import { after, before, describe, test } from "node:test";
 
 import { MisoEngineAsset, sha256Hex } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { hexLower } from "../src/core/hex.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
@@ -760,6 +760,202 @@ describe("eval 8 -- lifecycle", () => {
     assert.throws(() => engine.shape(), /disposed/);
     // Dispose is idempotent: the ABI treats handle 0 as an explicit no-op.
     engine.dispose();
+  });
+});
+
+describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
+  const capabilityExport = "miso_engine_web_v1_spectrum_hop_capability";
+  const hopBootExport = "miso_engine_web_v1_boot_with_spectrum_hop";
+  const observationHopBootExport =
+    "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop";
+
+  function proxiedAsset({
+    abiVersion = ABI_LAYOUT.abiVersion,
+    capability = 1,
+    capabilityMissing = false,
+    hopBoot = true,
+    observationHopBoot = true,
+    throwOnCapability = false,
+  } = {}) {
+    const calls = { instantiates: 0, capability: 0, legacy: 0, hop: [] };
+    const fake = {
+      instantiate: async () => {
+        calls.instantiates += 1;
+        const instance = await asset.instantiate();
+        const real = instance.exports;
+        const exports = new Proxy(
+          Object.fromEntries(Object.keys(real).map((name) => [name, real[name]])),
+          {
+            get(target, name, receiver) {
+              if (name === "miso_engine_web_v1_abi_version") {
+                return () => abiVersion;
+              }
+              if (name === capabilityExport) {
+                calls.capability += 1;
+                if (capabilityMissing) return undefined;
+                if (throwOnCapability) throw new Error("capability probe failed");
+                return () => capability;
+              }
+              if (name === hopBootExport) {
+                if (!hopBoot) return undefined;
+                return (length, hop) => {
+                  calls.hop.push([length, hop]);
+                  return target.miso_engine_web_v1_boot(length);
+                };
+              }
+              if (name === observationHopBootExport && !observationHopBoot) return undefined;
+              if (name === "miso_engine_web_v1_boot") {
+                return (...args) => {
+                  calls.legacy += 1;
+                  return target.miso_engine_web_v1_boot(...args);
+                };
+              }
+              return Reflect.get(target, name, receiver);
+            },
+          },
+        );
+        return new Proxy(instance, {
+          get(target, name, receiver) {
+            return name === "exports" ? exports : Reflect.get(target, name, receiver);
+          },
+        });
+      },
+    };
+    return { fake, calls };
+  }
+
+  const document = new TextEncoder().encode(sessionDocument());
+
+  test("all four explicit hops reach only the additive boot export", async () => {
+    for (const hop of [256, 512, 1024, 2048]) {
+      const { fake, calls } = proxiedAsset();
+      const boundary = await WasmBoundary.boot(fake, document, { spectrumHopFrames: hop });
+      try {
+        assert.deepEqual(calls.hop, [[document.byteLength, hop]]);
+        assert.equal(calls.legacy, 0);
+      } finally {
+        boundary.dispose();
+      }
+    }
+  });
+
+  test("old assets with all additive exports omitted still use legacy boot", async () => {
+    const { fake, calls } = proxiedAsset({
+      capabilityMissing: true,
+      hopBoot: false,
+      observationHopBoot: false,
+      throwOnCapability: true,
+    });
+    const boundary = await WasmBoundary.boot(fake, document);
+    try {
+      assert.equal(calls.capability, 0);
+      assert.equal(calls.legacy, 1);
+      assert.deepEqual(calls.hop, []);
+    } finally {
+      boundary.dispose();
+    }
+  });
+
+  test("invalid hops refuse before instantiate", async () => {
+    for (const hop of [0, 255, 256.5, "1024", null, NaN]) {
+      const { fake, calls } = proxiedAsset();
+      const pending = WasmBoundary.boot(fake, document, { spectrumHopFrames: hop });
+      assert.equal(calls.instantiates, 0, `invalid hop ${String(hop)} reached instantiate`);
+      await assert.rejects(pending, MisoUsageError);
+    }
+  });
+
+  test("missing or wrong capability and missing additive export refuse without fallback", async () => {
+    const cases = [
+      { name: "missing capability", capabilityMissing: true },
+      { name: "wrong capability", capability: 0 },
+      { name: "missing additive export", capability: 1, hopBoot: false },
+    ];
+    for (const refusal of cases) {
+      const { fake, calls } = proxiedAsset(refusal);
+      await assert.rejects(
+        () => WasmBoundary.boot(fake, document, { spectrumHopFrames: 256 }),
+        (error) => {
+          assert.ok(error instanceof MisoEngineError, refusal.name);
+          assert.equal(error.phase, "asset");
+          assert.equal(error.code, "abiMismatch");
+          assert.equal(error.diagnosticCode, "sdk.asset.capability");
+          return true;
+        },
+      );
+      assert.equal(calls.legacy, 0, `${refusal.name} fell back to legacy boot`);
+      assert.deepEqual(calls.hop, [], `${refusal.name} invoked additive boot`);
+    }
+  });
+
+  test("wrong ABI is reported before an explicit capability refusal", async () => {
+    const { fake, calls } = proxiedAsset({ abiVersion: 0, capabilityMissing: true });
+    await assert.rejects(
+      () => WasmBoundary.boot(fake, document, { spectrumHopFrames: 256 }),
+      (error) => {
+        assert.ok(error instanceof MisoEngineError);
+        assert.equal(error.phase, "asset");
+        assert.equal(error.code, "abiMismatch");
+        assert.equal(error.diagnosticCode, "sdk.asset.abi_version");
+        assert.equal(error.diagnosticPath, "0");
+        return true;
+      },
+    );
+    assert.equal(calls.capability, 0, "wrong ABI reached the optional capability probe");
+    assert.equal(calls.legacy, 0);
+    assert.deepEqual(calls.hop, []);
+  });
+
+  test("explicit reboot preflights unsupported capability and keeps the live session", async () => {
+    const { fake, calls } = proxiedAsset({ capabilityMissing: true });
+    const boundary = await WasmBoundary.boot(fake, document);
+    try {
+      assert.throws(
+        () => boundary.reboot(document, { spectrumHopFrames: 256 }),
+        (error) => error instanceof MisoEngineError
+          && error.phase === "asset"
+          && error.code === "abiMismatch",
+      );
+      assert.equal(boundary.state(), "ready");
+      assert.equal(calls.legacy, 1, "unsupported reboot booted or disposed the live session");
+    } finally {
+      boundary.dispose();
+    }
+  });
+
+  test("explicit reboot dispatches the additive export with its captured hop", async () => {
+    const { fake, calls } = proxiedAsset();
+    const boundary = await WasmBoundary.boot(fake, document);
+    try {
+      boundary.reboot(document, { spectrumHopFrames: 512 });
+      assert.deepEqual(calls.hop, [[document.byteLength, 512]]);
+      assert.equal(calls.legacy, 1, "the initial omitted boot should use the legacy export");
+      assert.equal(boundary.state(), "ready");
+    } finally {
+      boundary.dispose();
+    }
+  });
+
+  test("caller mutation after boot invocation cannot change the copied hop", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { fake, calls } = proxiedAsset();
+    const delayed = {
+      instantiate: async () => {
+        await gate;
+        return fake.instantiate();
+      },
+    };
+    const options = { spectrumHopFrames: 1024 };
+    const pending = WasmBoundary.boot(delayed, document, options);
+    options.spectrumHopFrames = 256;
+    release();
+    const boundary = await pending;
+    try {
+      assert.deepEqual(calls.hop, [[document.byteLength, 1024]]);
+    } finally {
+      boundary.dispose();
+    }
   });
 });
 

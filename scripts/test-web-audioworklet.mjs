@@ -150,7 +150,7 @@ async function localErrorResult(promise, result) {
 
 const REAL_STAGE_TIMEOUT_MS = 5000;
 const REAL_PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
-const REAL_WASM_SHA256 = "b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61";
+const REAL_WASM_SHA256 = "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106";
 const REAL_WASM_FILE = "miso-engine-v1-audio-worklet.simd128.wasm";
 const REAL_ARTIFACT_NAMES = Object.freeze([
   "miso-engine-v1-abi-layout.json",
@@ -652,6 +652,7 @@ async function ordinaryRealLifecycle(artifact, workletUrl, facade, label, state)
   assert.deepEqual([...snapshot.processorOptions.document], [...document], `${label}: document snapshot`);
   assert.deepEqual(snapshot.processorOptions.options, {
     ...options,
+    spectrumHopFrames: 0,
     spectrum: null,
     spectrumCollection: null,
   }, `${label}: boot option snapshot`);
@@ -1187,6 +1188,7 @@ async function testMainRealm() {
       });
       const expected = {
         ...limits,
+        spectrumHopFrames: 0,
         spectrum: null,
         spectrumCollection: {
           entries: [
@@ -1464,6 +1466,36 @@ async function testMainRealm() {
             "nonnull collection entry remains effective");
         },
       );
+      for (const hop of [256, 1024]) {
+        await assertAccepted(
+          `explicit spectrum hop ${hop}`,
+          makeFactory({
+            options: {
+              ...limits,
+              spectrumHopFrames: hop,
+              spectrum: null,
+              spectrumCollection: null,
+            },
+          }),
+          (_host, options) => {
+            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
+            assert.equal(options.spectrum, null);
+            assert.equal(options.spectrumCollection, null);
+          },
+        );
+      }
+      for (const hop of [256, 1024]) {
+        await assertAccepted(
+          `explicit spectrum hop ${hop} without optional fields`,
+          makeFactory({ options: { ...limits, spectrumHopFrames: hop } }),
+          (_host, options) => {
+            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
+            assert.equal(options.spectrum, null, "omitted spectrum normalizes to null");
+            assert.equal(options.spectrumCollection, null,
+              "omitted spectrum collection normalizes to null");
+          },
+        );
+      }
       {
         const first = Object.freeze(makeEntry());
         const second = Object.freeze(makeEntry());
@@ -1600,6 +1632,9 @@ async function testMainRealm() {
           consoleCommandQueueRecords: 0n, consoleObservationTaps: 1n,
         })],
         ["master dependency", plainOptions({ consoleObservationTaps: 0n })],
+        ["spectrum hop unsupported", plainOptions({
+          spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
+        })],
         ["invalid spectrum target", singleSpectrumOptions({ target: "unknown" })],
         ["invalid spectrum channel", singleSpectrumOptions({ channels: "center" })],
         ["empty spectrum ID", singleSpectrumOptions({ targetId: "" })],
@@ -1773,6 +1808,7 @@ async function testMainRealm() {
           consoleMeterBlocks: 7n,
           consoleObservationTaps: 0n,
           consoleMasterTrackPlusOne: 0n,
+          spectrumHopFrames: 256,
           spectrum,
           spectrumCollection: null,
         };
@@ -1806,6 +1842,7 @@ async function testMainRealm() {
           boot = createMisoAudioWorkletHost(factory);
           await addGate.started;
           spectrum.targetId = "mutated-spectrum-before-construction";
+          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 128;
           options.consoleCommandQueueRecords = 8n;
           options.consoleMeterBlocks = 99n;
@@ -1820,6 +1857,7 @@ async function testMainRealm() {
           context.sampleRate = 44100;
           context.renderQuantumSize = 128;
           spectrum.targetId = "mutated-spectrum-while-ready";
+          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 256;
           options.consoleCommandQueueRecords = 4n;
           options.consoleMeterBlocks = 101n;
@@ -1827,6 +1865,7 @@ async function testMainRealm() {
           readyPause.release();
           await abiPause.started;
           spectrum.targetId = "mutated-spectrum-while-abi";
+          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 64;
           options.consoleCommandQueueRecords = 2n;
           options.consoleMeterBlocks = 103n;
@@ -2800,7 +2839,8 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
-    sourceResult: 0, bootResult: 0,
+    sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
+    spectrumHopCapabilityResult: 1,
   };
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
@@ -2861,20 +2901,29 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   calls.commandResult = 0;
   calls.meterLease = [];
   calls.meterWindows = 0;
+  const boot = () => {
+    const options = new DataView(memory.buffer, 512, 64);
+    if (options.getUint32(8, true) !== status.getUint32(20, true)
+        || options.getUint32(12, true) !== status.getUint32(24, true)) {
+      calls.bootResult = 9;
+      return 0;
+    }
+    calls.bootResult = 0;
+    return 1;
+  };
   const exports = {
     memory,
     miso_engine_web_v1_abi_version: () => 0x00010000,
     miso_engine_web_v1_boot_options_ptr: () => 512,
     miso_engine_web_v1_document_ptr: () => 2048,
-    miso_engine_web_v1_boot: () => {
-      const options = new DataView(memory.buffer, 512, 64);
-      if (options.getUint32(8, true) !== status.getUint32(20, true)
-          || options.getUint32(12, true) !== status.getUint32(24, true)) {
-        calls.bootResult = 9;
-        return 0;
-      }
-      calls.bootResult = 0;
-      return 1;
+    miso_engine_web_v1_boot: (...args) => { calls.boot.push(args); return boot(); },
+    miso_engine_web_v1_spectrum_hop_capability: () => {
+      calls.spectrumHopCapability += 1;
+      return calls.spectrumHopCapabilityResult;
+    },
+    miso_engine_web_v1_boot_with_spectrum_hop: (...args) => {
+      calls.bootWithSpectrumHop.push(args);
+      return boot();
     },
     miso_engine_web_v1_boot_result: () => calls.bootResult,
     miso_engine_web_v1_boot_diagnostic_bytes: () => 0,
@@ -3352,13 +3401,13 @@ async function testProcessor() {
   try {
     await import(`${workletUrl.href}?processor-test`);
     assert.equal(typeof registered, "function");
-    const construct = (fake) => {
+    const construct = (fake, options = limits) => {
       nextFake = fake;
       return new registered({
         processorOptions: {
           module: {},
           document: processorSessionDocument,
-          options: limits,
+          options,
         },
       });
     };
@@ -3371,6 +3420,86 @@ async function testProcessor() {
       });
       return { processor, fake };
     };
+
+    const explicitHopOptions = (spectrumHopFrames) => ({
+      ...limits,
+      spectrumHopFrames,
+      spectrum: null,
+      spectrumCollection: null,
+    });
+
+    for (const hop of [256, 1024]) {
+      const fake = createFakeExports(64);
+      const processor = construct(fake, explicitHopOptions(hop));
+      assert.equal(processor.port.posts[0].message.result, 0,
+        `H${hop} additive boot is ready`);
+      assert.deepEqual(fake.calls.boot, [], `H${hop} never calls legacy boot`);
+      assert.deepEqual(
+        fake.calls.bootWithSpectrumHop,
+        [[processorSessionDocument.byteLength, hop]],
+        `H${hop} additive boot arguments`,
+      );
+      assert.equal(fake.calls.spectrumHopCapability, 1, `H${hop} probes capability once`);
+    }
+
+    {
+      const fake = createFakeExports(64);
+      const processor = construct(fake);
+      assert.equal(processor.port.posts[0].message.result, 0, "omitted hop uses legacy boot");
+      assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
+        "omitted hop legacy boot arguments");
+      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "omitted hop skips additive boot");
+      assert.equal(fake.calls.spectrumHopCapability, 0, "omitted hop skips capability probe");
+    }
+
+    {
+      const fake = createFakeExports(64);
+      const oldSpectrumOptions = {
+        ...limits, spectrum: null, spectrumCollection: null,
+      };
+      const processor = construct(fake, oldSpectrumOptions);
+      assert.equal(processor.port.posts[0].message.result, 0, "old spectrum shape remains accepted");
+      assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
+        "old spectrum shape uses legacy boot");
+      assert.equal(fake.calls.spectrumHopCapability, 0, "old spectrum shape skips capability probe");
+    }
+
+    for (const [label, mutate] of [
+      ["missing capability", (fake) => { delete fake.exports.miso_engine_web_v1_spectrum_hop_capability; }],
+      ["wrong capability", (fake) => {
+        fake.calls.spectrumHopCapabilityResult = 0;
+      }],
+      ["throwing capability", (fake) => {
+        fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
+          fake.calls.spectrumHopCapability += 1;
+          throw new Error("synthetic capability failure");
+        };
+      }],
+      ["missing additive boot", (fake) => {
+        delete fake.exports.miso_engine_web_v1_boot_with_spectrum_hop;
+      }],
+    ]) {
+      const fake = createFakeExports(64);
+      mutate(fake);
+      const processor = construct(fake, explicitHopOptions(256));
+      assert.equal(processor.port.posts[0].message.result, 2, `${label} is typed ABI refusal`);
+      assert.deepEqual(fake.calls.boot, [], `${label} never calls legacy boot`);
+      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], `${label} never calls additive boot`);
+      assert.equal(fake.calls.dispose, 0, `${label} publishes no handle to dispose`);
+    }
+
+    {
+      const fake = createFakeExports(64);
+      fake.exports.miso_engine_web_v1_abi_version = () => 0x00020000;
+      fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
+        throw new Error("ABI check must win");
+      };
+      const processor = construct(fake, explicitHopOptions(256));
+      assert.equal(processor.port.posts[0].message.result, 2, "ABI mismatch wins before capability");
+      assert.equal(fake.calls.spectrumHopCapability, 0, "ABI mismatch does not probe capability");
+      assert.deepEqual(fake.calls.boot, [], "ABI mismatch never calls legacy boot");
+      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "ABI mismatch never calls additive boot");
+    }
 
     {
       const before = instanceCount;

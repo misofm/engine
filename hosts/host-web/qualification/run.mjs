@@ -29,7 +29,8 @@ const MUTATIONS = [
   // transport would produce.
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
-  "sdk-response", "sdk-observation", "sdk-spectrum",
+  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
+  "sdk-spectrum-hop-wrong",
 ];
 
 function option(name) {
@@ -459,9 +460,23 @@ function validateSdkResponse(browserName, response) {
   "continuous spectrum did not prove warmup, shared ownership, capture loss, or close lifecycle");
   gate(browserName, "sdk-spectrum-continuous", continuous?.statuses?.includes("ready") === true
     && continuous?.statuses?.includes("gap") === true
+    && continuous?.hopFrames === 256
+    && continuous?.nativeStart?.hopFrames === 256
+    && continuous?.nativeStart?.smoothingMs === 0
+    && Array.isArray(continuous?.nativeReadHopFrames)
+    && continuous.nativeReadHopFrames.length > 0
+    && continuous.nativeReadHopFrames.every((hop) => hop === 256)
+    && Array.isArray(continuous?.publicationHopFrames)
+    && continuous.publicationHopFrames.length > 0
+    && continuous.publicationHopFrames.every((hop) => hop === 256)
+    && Array.isArray(continuous?.publicationSmoothingMs)
+    && continuous.publicationSmoothingMs.length > 0
+    && continuous.publicationSmoothingMs.every((smoothing) => smoothing === 0)
     && continuousFirst?.sampleRateHz === 48_000
     && continuousFirst?.windowFrames === 2_048
     && continuousFirst?.binCount === 1_025
+    && continuousFirst?.hopFrames === 256
+    && continuousFirst?.smoothingMs === 0
     && continuousFirst?.peakBins?.[0] === 32 && continuousFirst?.peakBins?.[1] === 32
     && Math.abs(continuousFirst?.peakHz?.[0] - 750) < 0.01
     && Math.abs(continuousFirst?.peakHz?.[1] - 750) < 0.01
@@ -516,6 +531,45 @@ function validateSdkResponse(browserName, response) {
     && collection?.finite === true && collection?.owned === true
     && collection?.audioContinued === true,
   `spectrum collection did not return distinct owned A/B/A known-signal spans while audio continued: ${JSON.stringify(collection)}`);
+  const configuredHop = spectrum?.configuredHop;
+  const configuredPublications = Array.isArray(configuredHop?.publications)
+    ? configuredHop.publications : [];
+  gate(browserName, "sdk-spectrum-hop", configuredHop?.requestHopFrames === 1_024
+    && configuredHop?.boundsHopFrames === 1_024
+    && configuredHop?.nativeStart?.hopFrames === 1_024
+    && configuredHop?.nativeStart?.sampleRateHz === 48_000
+    && configuredHop?.nativeStart?.quantumFrames === 128
+    && configuredHop?.nativeStart?.smoothingMs === 37.5
+    && Array.isArray(configuredHop?.nativeRead)
+    && configuredHop.nativeRead.length > 0
+    && configuredHop.nativeRead.every((metadata) => metadata?.hopFrames === 1_024
+      && metadata?.smoothingMs === 37.5)
+    && configuredHop?.publicationCount >= 2
+    && Array.isArray(configuredHop?.notificationHops)
+    && configuredHop.notificationHops.length >= 2
+    && configuredHop.notificationHops.every((hop) => hop === 1_024)
+    && Array.isArray(configuredHop?.notificationSmoothingMs)
+    && configuredHop.notificationSmoothingMs.length >= 2
+    && configuredHop.notificationSmoothingMs.every((smoothing) => smoothing === 37.5)
+    && configuredPublications.length === 2
+    && configuredPublications.every((publication) => publication?.metadata?.hopFrames === 1_024
+      && publication.metadata.smoothingMs === 37.5
+      && publication.metadata.sampleRateHz === 48_000
+      && publication.metadata.quantumFrames === 128
+      && publication.metadata.endSample > publication.metadata.capturedSample
+      && publication.result?.windowFrames === 2_048
+      && publication.result?.binCount === 1_025
+      && publication.result?.capturedSample === publication.metadata.capturedSample
+      && publication.result?.endSample === publication.metadata.endSample
+      && publication.result?.finite === true
+      && publication.result?.ownedArrays === true)
+    && configuredHop?.startDelta === "1024"
+    && configuredHop?.firstSpan === "2048"
+    && configuredHop?.secondSpan === "2048"
+    && configuredHop?.resultHopFrames === 1_024
+    && configuredHop?.resultSmoothingMs === 37.5
+    && configuredHop?.ownedArrays === true,
+  "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership");
 }
 
 function mutate(result, mutation) {
@@ -543,6 +597,12 @@ function mutate(result, mutation) {
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
+  if (mutation === "sdk-spectrum-hop-missing") {
+    delete copy.sdkResponse.spectrum.configuredHop.nativeStart.hopFrames;
+  }
+  if (mutation === "sdk-spectrum-hop-wrong") {
+    copy.sdkResponse.spectrum.continuous.first.hopFrames = 2_048;
+  }
   return copy;
 }
 
@@ -688,8 +748,19 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       }
     }, sdkEnabled);
     if (sdkEnabled) {
-      // Resume the real collection AudioContext with a trusted gesture across browsers.
-      await Promise.race([execution, page.locator("#spectrum-collection-resume").click()]);
+      // Resume each real AudioContext with a trusted gesture across browsers. The SDK
+      // qualification creates these controls in execution order; racing completion keeps
+      // a preceding failure from turning into a locator timeout that hides its diagnostic.
+      const completion = execution.then((value) => ({ kind: "complete", value }));
+      for (const selector of ["#spectrum-collection-resume", "#spectrum-hop-resume"]) {
+        const click = page.locator(selector).click().then(
+          () => ({ kind: "clicked" }),
+          (error) => ({ kind: "click-error", error }),
+        );
+        const outcome = await Promise.race([completion, click]);
+        if (outcome.kind === "complete") break;
+        if (outcome.kind === "click-error") throw outcome.error;
+      }
     }
     const result = await execution;
     gate(browserName, "browser-execution", result.qualificationError === undefined,

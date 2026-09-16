@@ -71,6 +71,65 @@ test("default context + host preserve exact context, URLs and mapped policy", as
     assert.deepEqual(globalThis.__sdkBootRequests.slice(1), ["dispose"]); assert.equal(candidate.closed, 1);
   } finally { if (previous === undefined) delete globalThis.AudioContext; else globalThis.AudioContext = previous; delete globalThis.__sdkBootRequests; }
 });
+
+for (const hop of [256, 1_024]) {
+  test(`browser policy carries explicit spectrum H${hop} to both boots and the shipped host`, () => {
+    const policy = { spectrumHopFrames: hop };
+    assert.equal(scratchBootOptions(policy).spectrumHopFrames, hop);
+    assert.equal(workletBootOptions(policy, shape).spectrumHopFrames, hop);
+    assert.equal(toWebBootOptions(workletBootOptions(policy, shape)).spectrumHopFrames, hop);
+  });
+}
+
+test("omitted browser spectrum hop maps to the shipped host default sentinel", () => {
+  assert.equal(toWebBootOptions(workletBootOptions({}, shape)).spectrumHopFrames, 0);
+});
+
+for (const hop of [0, "1024", 1_024.5]) {
+  test(`invalid browser spectrum H${String(hop)} refuses before any boot dependency is called`, async () => {
+    let scratchCalls = 0;
+    let contextCalls = 0;
+    let hostCalls = 0;
+    const pending = createEngine({
+      document: "opaque",
+      policy: { spectrumHopFrames: hop },
+      scratchBoot: async () => { scratchCalls += 1; return shape; },
+      createContext: () => { contextCalls += 1; return context(); },
+      createHost: async () => { hostCalls += 1; return { async dispose() {} }; },
+    });
+    await assert.rejects(pending, error => error instanceof MisoUsageError);
+    assert.deepEqual([scratchCalls, contextCalls, hostCalls], [0, 0, 0]);
+  });
+}
+
+test("createEngine snapshots browser spectrum hop before asynchronous scratch work", async () => {
+  const policy = { spectrumHopFrames: 256 };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let scratchHop;
+  let hostHop;
+  const pending = createEngine({
+    document: "opaque",
+    policy,
+    scratchBoot: async request => {
+      scratchHop = request.options.spectrumHopFrames;
+      await gate;
+      return shape;
+    },
+    createContext: () => context(),
+    createHost: async request => {
+      hostHop = request.options.spectrumHopFrames;
+      return { async dispose() {} };
+    },
+  });
+  policy.spectrumHopFrames = 1_024;
+  release();
+  const engine = await pending;
+  assert.equal(scratchHop, 256);
+  assert.equal(hostHop, 256);
+  await engine.close();
+});
+
 test("injected context and host independently retain default scratch worker", async () => {
   const worker = new FakeWorker(); const candidate = context(); let request;
   worker.onPost = value => { request = value; worker.emit("message", result); };

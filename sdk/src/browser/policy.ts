@@ -6,7 +6,7 @@ import {
 } from "../core/abi.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
-import { MisoEngineError } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { SourceSpec } from "../core/types.ts";
 import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 
@@ -36,7 +36,20 @@ import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
   readonly maximumMemoryBytes?: bigint;
+  /** Optional native continuous-spectrum hop selected during browser preparation. */
+  readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   readonly console?: BootOptions["console"];
+}
+
+export type BrowserSpectrumHopFrames = NonNullable<BrowserBootPolicy["spectrumHopFrames"]>;
+
+/** Validate the browser-only preparation selector before any asynchronous boot work begins. */
+export function validateBrowserSpectrumHopFrames(value: unknown): BrowserSpectrumHopFrames | undefined {
+  if (value === undefined) return undefined;
+  if (value === 256 || value === 512 || value === 1024 || value === 2048) {
+    return value;
+  }
+  throw new MisoUsageError("spectrumHopFrames must be one of 256, 512, 1024, or 2048");
 }
 
 /**
@@ -73,6 +86,8 @@ function withRequiredShape(
   if (policy.maximumMemoryBytes !== undefined) {
     options.maximumMemoryBytes = policy.maximumMemoryBytes;
   }
+  const spectrumHopFrames = validateBrowserSpectrumHopFrames(policy.spectrumHopFrames);
+  if (spectrumHopFrames !== undefined) options.spectrumHopFrames = spectrumHopFrames;
   if (policy.console !== undefined) options.console = policy.console;
   if (spectrum !== undefined) options.spectrum = spectrum;
   if (spectrumCollection !== undefined) options.spectrumCollection = spectrumCollection;

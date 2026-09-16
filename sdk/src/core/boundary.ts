@@ -86,9 +86,24 @@ type ExportTable = Record<ExportName, (...args: (number | bigint)[]) => number |
   readonly memory: WebAssembly.Memory;
 };
 
+const SPECTRUM_HOP_CAPABILITY = "miso_engine_web_v1_spectrum_hop_capability";
+const SPECTRUM_HOP_BOOT = "miso_engine_web_v1_boot_with_spectrum_hop";
+const OBSERVATION_SPECTRUM_HOP_BOOT =
+  "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop";
+const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
+  SPECTRUM_HOP_CAPABILITY,
+  SPECTRUM_HOP_BOOT,
+  OBSERVATION_SPECTRUM_HOP_BOOT,
+]);
+type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
+type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
+
 function exportsOf(instance: WebAssembly.Instance): ExportTable {
   const table = instance.exports as Record<string, unknown>;
   for (const name of ABI_LAYOUT.exports) {
+    // These are additive spectrum-hop exports. An older asset remains valid for the legacy boot
+    // path and is checked only when a caller explicitly requests the prepared spectrum hop.
+    if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
         phase: "asset",
@@ -107,6 +122,109 @@ function exportsOf(instance: WebAssembly.Instance): ExportTable {
     });
   }
   return table as unknown as ExportTable;
+}
+
+function optionalExport(exports: ExportTable, name: string): ExportFunction | undefined {
+  try {
+    const value = (exports as Record<string, unknown>)[name];
+    return typeof value === "function" ? value as ExportFunction : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function spectrumHopRefusal(name: string, reason: string): MisoEngineError {
+  return new MisoEngineError(
+    `the engine asset cannot honor an explicit spectrum hop: ${reason}`,
+    {
+      phase: "asset",
+      code: "abiMismatch",
+      result: constantValue("resultCodes", "abiMismatch"),
+      diagnostics: [{ code: "sdk.asset.capability", path: name }],
+    },
+  );
+}
+
+function requireSpectrumHopCapability(
+  exports: ExportTable,
+  spectrumHopFrames: SpectrumHopFrames | undefined,
+): ExportFunction | undefined {
+  if (spectrumHopFrames === undefined) return undefined;
+
+  const capability = optionalExport(exports, SPECTRUM_HOP_CAPABILITY);
+  if (capability === undefined) {
+    throw spectrumHopRefusal(SPECTRUM_HOP_CAPABILITY, "the capability export is missing");
+  }
+  let value: number | bigint;
+  try {
+    value = capability();
+  } catch (error) {
+    throw spectrumHopRefusal(
+      SPECTRUM_HOP_CAPABILITY,
+      `the capability export could not be queried: ${(error as Error).message}`,
+    );
+  }
+  if (value !== 1) {
+    throw spectrumHopRefusal(
+      SPECTRUM_HOP_CAPABILITY,
+      `the capability export returned ${String(value)} instead of 1`,
+    );
+  }
+  const spectrumHopBoot = optionalExport(exports, SPECTRUM_HOP_BOOT);
+  if (spectrumHopBoot === undefined) {
+    throw spectrumHopRefusal(SPECTRUM_HOP_BOOT, "the spectrum-hop boot export is missing");
+  }
+  return spectrumHopBoot;
+}
+
+function validateSpectrumHopFrames(value: unknown): SpectrumHopFrames | undefined {
+  if (value === undefined) return undefined;
+  if (value === 256 || value === 512 || value === 1024 || value === 2048) {
+    return value;
+  }
+  throw new MisoUsageError("spectrumHopFrames must be one of 256, 512, 1024, or 2048");
+}
+
+interface BootSnapshot {
+  readonly options: BootOptions;
+  readonly spectrumHopFrames: SpectrumHopFrames | undefined;
+  readonly spectrumQuery: SpectrumQuery | undefined;
+  readonly spectrumCollection: SpectrumCollection | undefined;
+}
+
+function snapshotBootOptions(options: BootOptions): BootSnapshot {
+  // Read and validate the plain preparation value before any caller-visible suspension. The
+  // spectrum objects retain their existing deep copies, while the surrounding options object and
+  // console words become private snapshots for the later instantiate/stage sequence.
+  const spectrumHopFrames = validateSpectrumHopFrames(options.spectrumHopFrames);
+  const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
+  const spectrumCollection = options.spectrumCollection === undefined
+    ? undefined : cloneSpectrumCollection(options.spectrumCollection);
+  if (spectrumQuery !== undefined && spectrumCollection !== undefined) {
+    throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
+  }
+  const consoleOptions = options.console === undefined ? undefined : (() => {
+    const {
+      commandQueueRecords,
+      meterBlocks,
+      observationTaps,
+      masterTrackPlusOne,
+    } = options.console!;
+    return Object.freeze({
+      ...(commandQueueRecords === undefined ? {} : { commandQueueRecords }),
+      ...(meterBlocks === undefined ? {} : { meterBlocks }),
+      ...(observationTaps === undefined ? {} : { observationTaps }),
+      ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
+    });
+  })();
+  const bootOptions: BootOptions = Object.freeze({
+    ...options,
+    ...(consoleOptions === undefined ? {} : { console: consoleOptions }),
+    ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
+    ...(spectrumQuery === undefined ? {} : { spectrum: spectrumQuery }),
+    ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
+  });
+  return { options: bootOptions, spectrumHopFrames, spectrumQuery, spectrumCollection };
 }
 
 /** The shape the boot itself reported. Nothing here was read from the document's text. */
@@ -225,28 +343,16 @@ export class WasmBoundary {
     document: Uint8Array,
     options: BootOptions = {},
   ): Promise<WasmBoundary> {
-    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
-    const spectrumCollection = options.spectrumCollection === undefined
-      ? undefined : cloneSpectrumCollection(options.spectrumCollection);
-    if (spectrumQuery !== undefined && spectrumCollection !== undefined) {
-      throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
-    }
-    const bootOptions = spectrumQuery === undefined && spectrumCollection === undefined
-      ? options
-      : {
-        ...options,
-        ...(spectrumQuery === undefined ? {} : { spectrum: spectrumQuery }),
-        ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
-      };
+    const snapshot = snapshotBootOptions(options);
     const exports = exportsOf(await asset.instantiate());
-    const staged = stage(exports, document, bootOptions);
+    const staged = stage(exports, document, snapshot.options, snapshot.spectrumHopFrames);
     return new WasmBoundary(
       exports,
       staged.handle,
       staged.optionBytes,
-      (bootOptions.console?.meterBlocks ?? 0) > 0,
-      spectrumQuery,
-      spectrumCollection,
+      (snapshot.options.console?.meterBlocks ?? 0) > 0,
+      snapshot.spectrumQuery,
+      snapshot.spectrumCollection,
     );
   }
 
@@ -262,27 +368,25 @@ export class WasmBoundary {
    * boot v1 has no verb that mutates a live session's document.
    */
   reboot(document: Uint8Array, options: BootOptions = {}): void {
-    const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
-    const spectrumCollection = options.spectrumCollection === undefined
-      ? undefined : cloneSpectrumCollection(options.spectrumCollection);
-    if (spectrumQuery !== undefined && spectrumCollection !== undefined) {
-      throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
-    }
-    const bootOptions = spectrumQuery === undefined && spectrumCollection === undefined
-      ? options
-      : {
-        ...options,
-        ...(spectrumQuery === undefined ? {} : { spectrum: spectrumQuery }),
-        ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
-      };
+    const snapshot = snapshotBootOptions(options);
+    // Capability refusal must happen while the current handle is still live. The validated
+    // additive export is passed into `stage`, so this preflight also avoids a second probe after
+    // the current session has been disposed.
+    const spectrumHopBoot = requireSpectrumHopCapability(this.#exports, snapshot.spectrumHopFrames);
     this.dispose();
-    const staged = stage(this.#exports, document, bootOptions);
+    const staged = stage(
+      this.#exports,
+      document,
+      snapshot.options,
+      snapshot.spectrumHopFrames,
+      spectrumHopBoot,
+    );
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
-    this.#metersAttached = (bootOptions.console?.meterBlocks ?? 0) > 0;
-    this.#spectrumQuery = spectrumQuery;
-    this.#spectrumCollection = spectrumCollection;
-    this.#spectrumActiveQuery = spectrumQuery;
+    this.#metersAttached = (snapshot.options.console?.meterBlocks ?? 0) > 0;
+    this.#spectrumQuery = snapshot.spectrumQuery;
+    this.#spectrumCollection = snapshot.spectrumCollection;
+    this.#spectrumActiveQuery = snapshot.spectrumQuery;
   }
 
   /** The exact bytes written to the options block, for the scratch/worklet equality rule. */
@@ -1255,6 +1359,8 @@ function stage(
   exports: ExportTable,
   document: Uint8Array,
   options: BootOptions,
+  spectrumHopFrames: SpectrumHopFrames | undefined,
+  preflightedSpectrumHopBoot?: ExportFunction,
 ): { handle: number; optionBytes: Uint8Array } {
   // 1. `abi_version` -- already pinned by `asset.instantiate()`, re-read here so this function is
   //    the published sequence rather than an abbreviation of it.
@@ -1267,6 +1373,12 @@ function stage(
       diagnostics: [{ code: "sdk.asset.abi_version", path: String(version) }],
     });
   }
+
+  // The additive capability is checked after the ABI guard but before any options or document
+  // staging. Reboot supplies its pre-disposal result here so a failed explicit probe cannot
+  // destroy the current live session.
+  const spectrumHopBoot = preflightedSpectrumHopBoot
+    ?? requireSpectrumHopCapability(exports, spectrumHopFrames);
 
   // 2. `boot_options_ptr` -- module-owned, zero-default, stable for the module's lifetime.
   const optionsPointer = Number(exports.miso_engine_web_v1_boot_options_ptr());
@@ -1287,7 +1399,12 @@ function stage(
   new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
 
   // 4. `boot(len)`.
-  const handle = Number(exports.miso_engine_web_v1_boot(document.byteLength));
+  const handle = spectrumHopFrames === undefined
+    ? Number(exports.miso_engine_web_v1_boot(document.byteLength))
+    : Number((spectrumHopBoot as ExportFunction)(
+      document.byteLength,
+      spectrumHopFrames,
+    ));
   if (handle === 0) {
     throw bootFailure(exports, documentPointer, "the engine refused to boot the document");
   }

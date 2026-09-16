@@ -109,6 +109,8 @@ EXPORTS = [
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_boot_with_observation_demand",
+    "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop",
+    "miso_engine_web_v1_boot_with_spectrum_hop",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
@@ -203,6 +205,7 @@ EXPORTS = [
     "miso_engine_web_v1_spectrum_collection_request_ptr",
     "miso_engine_web_v1_spectrum_collection_target_ids_capacity",
     "miso_engine_web_v1_spectrum_collection_target_ids_ptr",
+    "miso_engine_web_v1_spectrum_hop_capability",
     "miso_engine_web_v1_spectrum_read",
     "miso_engine_web_v1_spectrum_request_bytes",
     "miso_engine_web_v1_spectrum_request_ptr",
@@ -811,6 +814,15 @@ def self_test() -> int:
         except ValueError as error:
             raise AssertionError("the protected boot export exists in the valid fixture") from error
 
+    def drop_spectrum_hop_capability_export(document: dict) -> None:
+        export = "miso_engine_web_v1_spectrum_hop_capability"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError(
+                "the spectrum-hop capability export exists in the valid fixture"
+            ) from error
+
     def unsorted_exports(document: dict) -> None:
         document["exports"].reverse()
 
@@ -877,6 +889,7 @@ def self_test() -> int:
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
         ("the protected observation boot export is dropped", drop_protected_boot_export),
+        ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),

@@ -37,6 +37,7 @@ const _returnsShippedOptions: Exact<ReturnType<typeof toWebBootOptions>, MisoWeb
 const _adapted: MisoWebBootOptions = toWebBootOptions({
   sourceRingFrames: 0,
   maximumMemoryBytes: 0n,
+  spectrumHopFrames: 256,
   console: { commandQueueRecords: 64, meterBlocks: 12, observationTaps: 0, masterTrackPlusOne: 0 },
 } satisfies BootOptions);
 

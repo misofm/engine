@@ -6,7 +6,7 @@ import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
-import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+import { digestPlanes, effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 const WINDOW_FRAMES = 2_048;
 const CHANNELS = "both";
@@ -48,6 +48,13 @@ function queryFor(target, channels = CHANNELS) {
     channels,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
   };
+}
+
+let candidateAssetPromise;
+
+function candidateAsset() {
+  candidateAssetPromise ??= moduleBytes().then((bytes) => MisoEngineAsset.load(bytes));
+  return candidateAssetPromise;
 }
 
 function feedAndRender(engine, block) {
@@ -99,17 +106,18 @@ function assertSpectrumResult(result, query, expectedSample) {
   }
 }
 
-async function makeEngine(asset, query) {
+async function makeEngine(asset, query, spectrumHopFrames) {
   return createOfflineEngine(spectrumDocument(), {
     asset,
     spectrum: query,
+    ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
   });
 }
 
 test("candidate Wasm spectrum query captures all graph targets through explicit renders", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const asset = await candidateAsset();
   const queries = [
     queryFor({ kind: "trackPostInputBuiltins", trackId: "t" }),
     queryFor({ kind: "trackPostMatrix", trackId: "t" }),
@@ -175,7 +183,7 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
 test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusals", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const asset = await candidateAsset();
   const query = queryFor({ kind: "trackPostMatrix", trackId: "t" });
   const engine = await makeEngine(asset, query);
   assert.equal(engine.armSpectrum().ok, true);
@@ -194,7 +202,7 @@ test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusa
 test("candidate Wasm spectrum honors a selected channel and explicit capture limit", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const asset = await candidateAsset();
   const query = queryFor({ kind: "trackPostMatrix", trackId: "t" }, "left");
   const engine = await makeEngine(asset, query);
   try {
@@ -215,7 +223,7 @@ test("candidate Wasm spectrum honors a selected channel and explicit capture lim
 test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const asset = await candidateAsset();
   const query = queryFor({ kind: "output", outputId: "out" });
   const engine = await makeEngine(asset, query);
   let subscription;
@@ -238,6 +246,222 @@ test("candidate Wasm managed spectrum subscribes and pumps one owned window", {
     assertSpectrumResult(result, query, 0);
     assert.notEqual(result.frequenciesHz, result.leftDb);
     assert.notEqual(result.leftDb, result.rightDb);
+  } finally {
+    await subscription?.close();
+    engine.dispose();
+  }
+});
+
+function assertManagedReady(subscription, notification, query, hopFrames, smoothingMs, sequence) {
+  assert.ok(notification);
+  assert.equal(notification.status, "ready");
+  assert.equal(notification.available, true);
+  assert.equal(notification.nativeMissedWindows, 0n);
+  assert.equal(notification.skippedPublications, 0n);
+  const firstSample = BigInt(sequence * hopFrames);
+  const metadata = notification.metadata;
+  assert.deepEqual(metadata.target, query.target);
+  assert.equal(metadata.channels, query.channels);
+  assert.equal(metadata.sampleRateHz, 48_000);
+  assert.equal(metadata.quantumFrames, 128);
+  assert.equal(metadata.hopFrames, hopFrames);
+  assert.equal(metadata.sourceUnderrun, false);
+  assert.equal(metadata.captureEpoch, 1n);
+  assert.equal(metadata.sequence, BigInt(sequence));
+  assert.equal(metadata.droppedCaptures, 0n);
+  assert.equal(metadata.windows, BigInt(sequence + 1));
+  assert.equal(metadata.capturedSample, firstSample);
+  assert.equal(metadata.endSample, firstSample + BigInt(WINDOW_FRAMES));
+  assert.equal(metadata.analysisEpoch, 0n);
+  assert.equal(metadata.historyStartSample, 0n);
+  assert.equal(metadata.smoothingMs, smoothingMs);
+  const result = subscription.readLatest();
+  assert.ok(result);
+  assertSpectrumResult(result, query, Number(firstSample));
+  assert.equal(result.endSample - result.capturedSample, BigInt(WINDOW_FRAMES));
+  return result;
+}
+
+test("candidate Wasm managed spectrum honors exact H256 and H1024 spans, bounds, smoothing, and ownership", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await candidateAsset();
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const smoothingMs = 37.5;
+  for (const hopFrames of [256, 1_024]) {
+    const engine = await makeEngine(asset, query, hopFrames);
+    let subscription;
+    try {
+      subscription = await engine.subscribeSpectrum({ ...query, smoothingMs, cadenceMs: 1 });
+      assert.deepEqual(subscription.configuration, {
+        target: query.target,
+        channels: "both",
+        spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+        smoothingMs,
+        cadenceMs: 1,
+      });
+      assert.deepEqual(subscription.bounds, {
+        maximumHandles: 64,
+        maximumRetainedBytes: 16 * 1024 * 1024,
+        maximumDeliveredBytesPerSecond: 16 * 1024 * 1024,
+        maximumCadenceMs: 60_000,
+        maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+        maximumResultBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+        hopFrames,
+      });
+
+      const blocksPerHop = hopFrames / engine.shape().quantumFrames;
+      const totalBlocks = WINDOW_FRAMES / engine.shape().quantumFrames + blocksPerHop;
+      const notifications = [];
+      let first;
+      let firstFrequencyValues;
+      let firstLeftValues;
+      let firstRightValues;
+      for (let block = 0; block < totalBlocks; block += 1) {
+        feedAndRender(engine, block);
+        const notification = await subscription.pump();
+        const complete = block + 1 === WINDOW_FRAMES / engine.shape().quantumFrames
+          || block + 1 === totalBlocks;
+        if (!complete) {
+          assert.equal(notification, undefined,
+            `H${hopFrames} must keep incomplete windows pending at block ${block + 1}`);
+          continue;
+        }
+        notifications.push(notification);
+        const result = assertManagedReady(
+          subscription, notification, query, hopFrames, smoothingMs, notifications.length - 1,
+        );
+        if (first === undefined) {
+          first = result;
+          firstFrequencyValues = first.frequenciesHz.slice();
+          firstLeftValues = first.leftDb?.slice();
+          firstRightValues = first.rightDb?.slice();
+        }
+      }
+      assert.equal(notifications.length, 2);
+      const second = subscription.readLatest();
+      assert.ok(first);
+      assert.ok(second);
+      assert.notEqual(first.frequenciesHz, second.frequenciesHz);
+      assert.notEqual(first.leftDb, second.leftDb);
+      assert.notEqual(first.rightDb, second.rightDb);
+      assert.deepEqual(first.frequenciesHz, firstFrequencyValues,
+        `H${hopFrames} frequency ownership must survive the next window`);
+      assert.deepEqual(first.leftDb, firstLeftValues,
+        `H${hopFrames} left analysis ownership must survive the next window`);
+      assert.deepEqual(first.rightDb, firstRightValues,
+        `H${hopFrames} right analysis ownership must survive the next window`);
+      assert.equal(second.endSample - second.capturedSample, BigInt(WINDOW_FRAMES),
+        `H${hopFrames} keeps the FFT span fixed while starts advance by H`);
+      assert.equal(second.capturedSample, BigInt(hopFrames));
+    } finally {
+      await subscription?.close();
+      engine.dispose();
+    }
+  }
+});
+
+test("candidate Wasm omitted spectrum hop keeps the derived H2048 profile and PCM identity", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await candidateAsset();
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const omitted = await makeEngine(asset, query);
+  const explicit = await makeEngine(asset, query, 256);
+  let subscription;
+  try {
+    subscription = await omitted.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 1 });
+    assert.equal(subscription.bounds.hopFrames, WINDOW_FRAMES);
+    assert.equal(subscription.configuration.smoothingMs, 0);
+    const omittedBlocks = [];
+    const explicitBlocks = [];
+    const totalBlocks = 2 * WINDOW_FRAMES / omitted.shape().quantumFrames;
+    const ready = [];
+    for (let block = 0; block < totalBlocks; block += 1) {
+      omittedBlocks.push(feedAndRender(omitted, block));
+      const notification = await subscription.pump();
+      explicitBlocks.push(feedAndRender(explicit, block));
+      const complete = block + 1 === WINDOW_FRAMES / omitted.shape().quantumFrames
+        || block + 1 === totalBlocks;
+      if (!complete) {
+        assert.equal(notification, undefined,
+          `the omitted profile must keep block ${block + 1} pending`);
+      } else {
+        ready.push(notification);
+        assertManagedReady(subscription, notification, query, WINDOW_FRAMES, 0, ready.length - 1);
+      }
+    }
+    assert.equal(ready.length, 2);
+    assert.equal(ready[0].metadata.hopFrames, 2_048);
+    assert.equal(ready[1].metadata.capturedSample, 2_048n);
+    assert.equal(digestPlanes(omittedBlocks), digestPlanes(explicitBlocks),
+      "preparing H256 must preserve PCM output bit-for-bit");
+    for (let block = 0; block < totalBlocks; block += 1) {
+      assert.deepEqual(omittedBlocks[block].left, explicitBlocks[block].left);
+      assert.deepEqual(omittedBlocks[block].right, explicitBlocks[block].right);
+    }
+  } finally {
+    await subscription?.close();
+    omitted.dispose();
+    explicit.dispose();
+  }
+});
+
+test("candidate Wasm H256 reports bounded capture drops and recovers with finite progress", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await candidateAsset();
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const engine = await makeEngine(asset, query, 256);
+  let subscription;
+  try {
+    subscription = await engine.subscribeSpectrum({ ...query, smoothingMs: 0, cadenceMs: 1 });
+    // Twenty-six explicit 128-frame renders complete six H256 windows. The one-record native
+    // queue retains the first, so the following five captures are truthfully reported dropped.
+    const fastCaptureBlocks = 26;
+    for (let block = 0; block < fastCaptureBlocks; block += 1) feedAndRender(engine, block);
+    const gap = await subscription.pump();
+    assert.ok(gap);
+    assert.equal(gap.status, "gap");
+    assert.equal(gap.available, false);
+    assert.equal(gap.nativeMissedWindows, 5n);
+    assert.equal(gap.skippedPublications, 0n);
+    assert.deepEqual(gap.metadata.target, query.target);
+    assert.equal(gap.metadata.channels, "both");
+    assert.equal(gap.metadata.sampleRateHz, 48_000);
+    assert.equal(gap.metadata.quantumFrames, 128);
+    assert.equal(gap.metadata.hopFrames, 256);
+    assert.equal(gap.metadata.sourceUnderrun, false);
+    assert.equal(gap.metadata.captureEpoch, 1n);
+    assert.equal(gap.metadata.smoothingMs, 0);
+    assert.equal(gap.metadata.sequence, 0n);
+    assert.equal(gap.metadata.windows, 0n);
+    assert.equal(gap.metadata.droppedCaptures, 5n);
+    assert.equal(gap.metadata.capturedSample, 0n);
+    assert.equal(gap.metadata.endSample, 0n);
+    assert.equal(subscription.readLatest(), undefined);
+
+    const recovered = await subscription.pump();
+    assertManagedReady(subscription, recovered, query, 256, 0, 0);
+    assert.equal(recovered.nativeMissedWindows, 0n);
+    assert.equal(recovered.metadata.droppedCaptures, 0n);
+
+    // Two more explicit renders complete the next window after the bounded recovery read.
+    feedAndRender(engine, fastCaptureBlocks);
+    feedAndRender(engine, fastCaptureBlocks + 1);
+    const resumed = await subscription.pump();
+    assert.ok(resumed);
+    assert.equal(resumed.status, "ready");
+    assert.equal(resumed.available, true);
+    assert.equal(resumed.nativeMissedWindows, 0n);
+    assert.equal(resumed.metadata.hopFrames, 256);
+    assert.equal(resumed.metadata.sequence, 6n);
+    assert.equal(resumed.metadata.windows, 7n);
+    assert.equal(resumed.metadata.capturedSample, 1_536n);
+    assert.equal(resumed.metadata.endSample, 3_584n);
+    assert.equal(resumed.metadata.droppedCaptures, 5n);
+    assert.equal(resumed.metadata.analysisEpoch, 1n);
+    assertSpectrumResult(subscription.readLatest(), query, 1_536);
   } finally {
     await subscription?.close();
     engine.dispose();
@@ -531,7 +755,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
 test("managed spectrum capture limits refuse before native activation and leave one-shot usable", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const asset = await candidateAsset();
   const query = queryFor({ kind: "output", outputId: "out" });
   const engine = await makeEngine(asset, query);
   try {

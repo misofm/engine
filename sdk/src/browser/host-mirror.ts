@@ -3,6 +3,7 @@ import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
 import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
+import { validateBrowserSpectrumHopFrames } from "./policy.ts";
 
 /**
  * The bridge from the SDK's `BootOptions` to the shipped host factory's `MisoWebBootOptions`.
@@ -43,6 +44,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   const observationTaps = word("console.observationTaps", console?.observationTaps);
   const commandQueueRecords = word("console.commandQueueRecords", console?.commandQueueRecords);
   const masterTrackPlusOne = word("console.masterTrackPlusOne", console?.masterTrackPlusOne);
+  const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
 
   // The engine refuses these combinations at boot with `web.options.console`. Catching them here
   // turns a boot-time refusal into a caller-time message that says which pair is inconsistent,
@@ -86,6 +88,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     consoleMeterBlocks: word("console.meterBlocks", console?.meterBlocks),
     consoleObservationTaps: observationTaps,
     consoleMasterTrackPlusOne: masterTrackPlusOne,
+    spectrumHopFrames,
     spectrum,
     spectrumCollection,
   };
