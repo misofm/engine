@@ -2909,15 +2909,7 @@ impl AudioWorkletEngineHost {
         result
     }
 
-    fn refuse_unsupported_observation(&mut self, class: ObservationClass, operation: u32) -> u32 {
-        let lengths = ObservationLengths {
-            control_bytes: 0,
-            rows: 0,
-            result_bytes: 0,
-        };
-        if let Err(refusal) = self.begin_observation(class, lengths) {
-            return self.record_observation_refusal(operation, refusal);
-        }
+    fn refuse_unsupported_observation(&mut self, operation: u32) -> u32 {
         self.record_observation_admission(
             operation,
             RESULT_UNSUPPORTED,
@@ -3857,7 +3849,7 @@ impl AudioWorkletEngineHost {
     /// Arm the prepared one-shot spectrum observer for its next complete window.
     pub fn arm_spectrum(&mut self) -> u32 {
         if self.protected_observation_prepared() {
-            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 10);
+            return self.refuse_unsupported_observation(10);
         }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
@@ -3877,7 +3869,7 @@ impl AudioWorkletEngineHost {
     /// Read the completed spectrum window, if the observer has finished its fixed capture.
     pub fn read_spectrum(&mut self) -> Result<Option<(SpectrumWindow, u64)>, u32> {
         if self.protected_observation_prepared() {
-            return Err(self.refuse_unsupported_observation(ObservationClass::Ordinary, 10));
+            return Err(self.refuse_unsupported_observation(10));
         }
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
@@ -4108,7 +4100,7 @@ impl AudioWorkletEngineHost {
     /// Cancel a pending spectrum capture and discard any completed window.
     pub fn cancel_spectrum(&mut self) -> u32 {
         if self.protected_observation_prepared() {
-            return self.refuse_unsupported_observation(ObservationClass::Removal, 10);
+            return self.refuse_unsupported_observation(10);
         }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
@@ -4163,7 +4155,7 @@ impl AudioWorkletEngineHost {
     /// refusal therefore leaves the old stream, queued window and effective configuration intact.
     pub fn select_spectrum(&mut self, target: &SpectrumTarget, channels: SpectrumChannels) -> u32 {
         if self.protected_observation_prepared() {
-            return self.refuse_unsupported_observation(ObservationClass::Ordinary, 11);
+            return self.refuse_unsupported_observation(11);
         }
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
@@ -4456,12 +4448,7 @@ impl AudioWorkletEngineHost {
     /// would be worse than saying so.
     pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
         if self.protected_observation_prepared() {
-            let class = if enabled {
-                ObservationClass::Ordinary
-            } else {
-                ObservationClass::Removal
-            };
-            return self.refuse_unsupported_observation(class, 12);
+            return self.refuse_unsupported_observation(12);
         }
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -4971,52 +4958,10 @@ impl AudioWorkletEngineHost {
                 None
             }
         };
-        if let Some((class, index)) = observation {
+        if let Some((_, index)) = observation {
             const OPERATION: u32 = OBSERVATION_OPERATION_RAW_OBSERVATION_BATCH;
-            let control_bytes = u64::from(count)
-                .checked_mul(u64::from(COMMAND_RECORD_BYTES))
-                .and_then(|bytes| bytes.checked_add(u64::from(companion_bytes.unwrap_or(0))));
-            let Some(control_bytes) = control_bytes else {
-                return self.finish_commands(
-                    RESULT_REFUSED_BUDGET,
-                    COMMAND_REASON_BACKPRESSURE,
-                    index,
-                    0,
-                );
-            };
-            let permit = match self.begin_observation(
-                class,
-                ObservationLengths {
-                    control_bytes,
-                    rows: u64::from(count),
-                    result_bytes: 0,
-                },
-            ) {
-                Ok(permit) => permit,
-                Err(refusal) => {
-                    let result = self.record_observation_refusal(OPERATION, refusal);
-                    return self.finish_commands(result, COMMAND_REASON_BACKPRESSURE, index, 0);
-                }
-            };
-            let _permit = permit;
-            self.record_observation_admission(
-                OPERATION,
-                RESULT_UNSUPPORTED,
-                Some(ObservationRefusal {
-                    reason: ObservationRefusalReason::InvalidRequest,
-                    limit: None,
-                    requested: None,
-                    maximum: None,
-                }),
-                None,
-                false,
-            );
-            return self.finish_commands(
-                RESULT_UNSUPPORTED,
-                COMMAND_REASON_UNSUPPORTED_KIND,
-                index,
-                0,
-            );
+            let result = self.refuse_unsupported_observation(OPERATION);
+            return self.finish_commands(result, COMMAND_REASON_UNSUPPORTED_KIND, index, 0);
         }
         // Disjoint borrows: the staged bytes live in `buffers`, the console lives in `ready`.
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {

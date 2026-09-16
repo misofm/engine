@@ -8486,7 +8486,7 @@ fn protected_response_preserves_sink_error_and_shares_ordinary_credit_with_spect
 }
 
 #[test]
-fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
+fn protected_native_alias_guards_are_empty_and_do_not_spend_credit() {
     let mut host = protected_eq_console_host();
     let admission_before = *host.observation_admission();
     let ingress_before = protected_ingress_state(&host);
@@ -8558,19 +8558,19 @@ fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
     assert_eq!(host.observation_admission().operation, 10);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().reason, 8);
-    assert!(protected_ingress_state(&host).1);
+    assert!(!protected_ingress_state(&host).1);
     assert_eq!(host.status().last_result, RESULT_OK);
     assert!(
-        matches!(host.read_spectrum(), Err(RESULT_BACKPRESSURE)),
-        "a second ordinary alias spends no second permit"
+        matches!(host.read_spectrum(), Err(RESULT_UNSUPPORTED)),
+        "a repeated unsupported ordinary alias does not become backpressure"
     );
     assert_eq!(host.observation_admission().operation, 10);
-    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
 
     assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 10);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
-    assert!(protected_ingress_state(&host).2);
+    assert!(!protected_ingress_state(&host).2);
     assert_eq!(host.render_next(), RESULT_OK);
 
     assert_eq!(
@@ -8582,18 +8582,45 @@ fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
     );
     assert_eq!(host.observation_admission().operation, 11);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).1);
     assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 12);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).2);
     assert_eq!(host.render_next(), RESULT_OK);
     assert_eq!(host.set_meter_lease(true), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 12);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).1);
+}
+
+#[test]
+fn protected_unsupported_meter_release_preserves_removal_credit_for_no_render_stop() {
+    let mut host = protected_eq_console_host();
+    assert!(host.start_spectrum_stream().is_ok());
+    let after_start = protected_ingress_state(&host);
+    assert!(
+        !after_start.2,
+        "the real start must leave removal credit free"
+    );
+
+    assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
+    assert_eq!(
+        protected_ingress_state(&host),
+        after_start,
+        "unsupported meter release must not spend removal credit"
+    );
+    assert_eq!(
+        host.stop_spectrum_stream(),
+        RESULT_OK,
+        "a no-render stop must remain admissible after the unsupported release"
+    );
 }
 
 #[test]
 fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     let mut host = protected_eq_console_host();
+    let ingress_before = protected_ingress_state(&host);
     let before = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let solo = host.console_solo().expect("solo state");
@@ -8671,7 +8698,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(host.observation_admission().operation, 9);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().reason, 8);
-    assert!(protected_ingress_state(&host).1);
+    assert_eq!(protected_ingress_state(&host), ingress_before);
     let after = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let solo = host.console_solo().expect("solo state");
@@ -8705,6 +8732,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(after, before);
 
     let mut prepared = protected_eq_console_host();
+    let prepared_ingress_before = protected_ingress_state(&prepared);
     stage_command(
         &mut prepared,
         0,
@@ -8729,8 +8757,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(prepared.command_report().rejected_index, 0);
     assert_eq!(prepared.observation_admission().operation, 9);
     assert_eq!(prepared.observation_admission().result, RESULT_UNSUPPORTED);
-    assert!(!protected_ingress_state(&prepared).1);
-    assert!(protected_ingress_state(&prepared).2);
+    assert_eq!(protected_ingress_state(&prepared), prepared_ingress_before);
 }
 
 #[test]
@@ -8750,7 +8777,7 @@ fn protected_audio_only_commands_skip_observation_credit_after_refusal() {
     );
     assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
     let admission = *host.observation_admission();
-    assert!(protected_ingress_state(&host).1);
+    assert!(!protected_ingress_state(&host).1);
 
     stage_command(
         &mut host,

@@ -645,15 +645,11 @@ fn with_host_mut<R>(
 
 /// Refuse an unsupported protected alias before it touches caller-owned staging or input.
 ///
-/// The native owner records the classified attempt and diagnostic. `Ok(None)` means that a
+/// The native owner records the unsupported attempt and diagnostic. `Ok(None)` means that a
 /// successfully inspected matching handle is legacy, so the existing alias path remains
 /// responsible for its legacy behavior. A failed live-host borrow or invalid handle is terminal
 /// and must return before any alias-owned staging is touched.
-fn refuse_protected_observation_alias(
-    handle: u32,
-    class: ObservationClass,
-    operation: u32,
-) -> Result<Option<u32>, u32> {
+fn refuse_protected_observation_alias(handle: u32, operation: u32) -> Result<Option<u32>, u32> {
     if handle == 0 {
         return Err(RESULT_INVALID_ARGUMENT);
     }
@@ -664,9 +660,7 @@ fn refuse_protected_observation_alias(
             .filter(|live| live.handle == handle)
             .ok_or(RESULT_INVALID_ARGUMENT)?;
         if live.host.protected_observation_prepared() {
-            Ok(Some(
-                live.host.refuse_unsupported_observation(class, operation),
-            ))
+            Ok(Some(live.host.refuse_unsupported_observation(operation)))
         } else {
             Ok(None)
         }
@@ -3153,11 +3147,7 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_COLLECTION_SELECTION,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_COLLECTION_SELECTION) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3299,11 +3289,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_COLLECTION_SELECTION,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_COLLECTION_SELECTION) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3323,11 +3309,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_ONE_SHOT,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_ONE_SHOT) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -4260,11 +4242,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Removal,
-        OBSERVATION_OPERATION_ONE_SHOT,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_ONE_SHOT) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -4616,6 +4594,31 @@ fn apply_observation_demand(
     let header_valid = demand.struct_size == size_of::<WebObservationDemand>() as u32
         && demand.abi_version == ABI_VERSION
         && demand.reserved == [0; 2];
+
+    // These meter operations are known but unsupported in V1. Validate their fixed header and
+    // owner first so their diagnostics retain the established precedence, then refuse without
+    // acquiring either protected credit.
+    if matches!(
+        operation,
+        crate::OBSERVATION_OPERATION_REPLACE_METERS | OBSERVATION_OPERATION_REMOVE_METERS_TO
+    ) {
+        if !header_valid {
+            return observation_demand_refusal(
+                host,
+                operation,
+                ObservationRefusalReason::InvalidRequest,
+            );
+        }
+        if demand.owner != owner.get() {
+            return observation_demand_refusal(
+                host,
+                operation,
+                ObservationRefusalReason::WrongOwner,
+            );
+        }
+        return host.refuse_unsupported_observation(operation);
+    }
+
     let valid_stop = header_valid
         && operation == OBSERVATION_OPERATION_STOP_GRAPH
         && demand.count == 0
@@ -5498,12 +5501,7 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
-    let class = if enabled == 0 {
-        ObservationClass::Removal
-    } else {
-        ObservationClass::Ordinary
-    };
-    match refuse_protected_observation_alias(handle, class, OBSERVATION_OPERATION_METER_LEASE) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_METER_LEASE) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -5696,11 +5694,7 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_RESIDENT_READ,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_RESIDENT_READ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -8743,6 +8737,17 @@ mod observation_checkpoint_b1_tests {
         })
     }
 
+    fn status(handle: u32) -> WebObservationStatus {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+        })
+    }
+
     #[test]
     fn additive_demand_stops_native_stream_and_repeats_pending_identity() {
         let handle = boot_protected();
@@ -8826,30 +8831,49 @@ mod observation_checkpoint_b1_tests {
     }
 
     #[test]
-    fn demand_class_credits_are_spent_by_unsupported_and_malformed_records() {
+    fn known_meter_demands_do_not_spend_credit_but_stop_still_does() {
         let handle = boot_protected();
         let expected_owner = owner(handle);
+        let available = crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+            | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE;
+        let before = status(handle);
 
-        // An unsupported ordinary operation consumes the ordinary attempt before semantic
-        // classification; its retry is therefore backpressure.
-        stage_demand(handle, 1, 0, expected_owner);
+        // Known meter replacement is unsupported after its fixed fields are classified, without
+        // consuming the ordinary attempt; its retry remains a typed unsupported refusal.
+        stage_demand(
+            handle,
+            crate::OBSERVATION_OPERATION_REPLACE_METERS,
+            0,
+            expected_owner,
+        );
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_UNSUPPORTED
         );
         let _ = miso_engine_web_v1_observation_admission_ptr(handle);
         let ordinary = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
-        assert_eq!(ordinary.operation, 1);
+        assert_eq!(
+            ordinary.operation,
+            crate::OBSERVATION_OPERATION_REPLACE_METERS
+        );
         assert_eq!(ordinary.reason, 8);
         assert_eq!(ordinary.result, RESULT_UNSUPPORTED);
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
-            RESULT_BACKPRESSURE
+            RESULT_UNSUPPORTED
         );
+        let after_replace = status(handle);
+        assert_eq!(after_replace.flags & available, before.flags & available);
+        assert_eq!(after_replace.ingress_epoch, before.ingress_epoch);
 
-        // A malformed removal record spends the removal attempt too. The owner is matching here,
-        // so the fixed header failure is observable rather than a native stop attempt.
-        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        // Header validation remains ahead of owner validation for the known removal operation,
+        // and neither diagnostic consumes removal credit.
+        stage_demand(
+            handle,
+            OBSERVATION_OPERATION_REMOVE_METERS_TO,
+            0,
+            expected_owner.wrapping_add(1),
+        );
         OBSERVATION_STAGING.with(|slot| {
             slot.borrow_mut().endpoint.demand.struct_size = 0;
         });
@@ -8860,6 +8884,46 @@ mod observation_checkpoint_b1_tests {
         let _ = miso_engine_web_v1_observation_admission_ptr(handle);
         let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
         assert_eq!(malformed.reason, 8);
+        let after_malformed_meter = status(handle);
+        assert_eq!(
+            after_malformed_meter.flags & available,
+            before.flags & available
+        );
+        assert_eq!(after_malformed_meter.ingress_epoch, before.ingress_epoch);
+
+        stage_demand(
+            handle,
+            OBSERVATION_OPERATION_REMOVE_METERS_TO,
+            0,
+            expected_owner,
+        );
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_UNSUPPORTED
+        );
+        let after_remove = status(handle);
+        assert_eq!(after_remove.flags & available, before.flags & available);
+        assert_eq!(after_remove.ingress_epoch, before.ingress_epoch);
+
+        // A malformed genuine StopGraph still spends its removal attempt, preserving protected
+        // admission semantics for an actual protected operation.
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed_stop = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed_stop.reason, 8);
+        assert_eq!(
+            status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+            0
+        );
+
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_BACKPRESSURE
@@ -9273,7 +9337,7 @@ mod observation_checkpoint_c1_tests {
     }
 
     #[test]
-    fn each_unsupported_alias_spends_its_classified_attempt_once() {
+    fn each_unsupported_alias_does_not_spend_its_classified_attempt() {
         let ordinary_calls: [fn(u32) -> u32; 5] = [
             |handle| miso_engine_web_v1_spectrum_read(handle, u32::MAX),
             |handle| miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
@@ -9297,20 +9361,20 @@ mod observation_checkpoint_c1_tests {
                 0
             );
             assert_eq!(call(handle), RESULT_UNSUPPORTED);
-            let spent = live_status(handle);
+            let after = live_status(handle);
             assert_eq!(
-                spent.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-                0
+                after.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                before.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
             );
-            assert_eq!(spent.ingress_epoch, before.ingress_epoch);
             assert_eq!(
-                spent.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
-                crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
+                after.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                before.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
             );
-            assert_eq!(call(handle), RESULT_BACKPRESSURE);
+            assert_eq!(after.ingress_epoch, before.ingress_epoch);
+            assert_eq!(call(handle), RESULT_UNSUPPORTED);
             assert_eq!(
                 live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-                0
+                before.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
             );
             dispose(handle);
         }
@@ -9323,11 +9387,11 @@ mod observation_checkpoint_c1_tests {
         );
         assert_eq!(
             live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
-            0
+            before.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
         );
         assert_eq!(
             miso_engine_web_v1_meter_lease(handle, 0),
-            RESULT_BACKPRESSURE
+            RESULT_UNSUPPORTED
         );
         assert_eq!(
             live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
@@ -9496,6 +9560,7 @@ mod observation_checkpoint_c1_tests {
         });
         stage_commands(handle, &[audio, observation]);
         let before = command_state(handle);
+        let ingress_before = live_status(handle);
         let result = if prepared {
             // The companion span is deliberately malformed; raw observation classification must
             // refuse before it is even inspected.
@@ -9504,6 +9569,14 @@ mod observation_checkpoint_c1_tests {
             miso_engine_web_v1_command_submit(handle, 2)
         };
         assert_eq!(result, RESULT_UNSUPPORTED);
+        let ingress_after = live_status(handle);
+        let available = crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+            | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE;
+        assert_eq!(
+            ingress_after.flags & available,
+            ingress_before.flags & available
+        );
+        assert_eq!(ingress_after.ingress_epoch, ingress_before.ingress_epoch);
         let after = command_state(handle);
         assert_eq!(
             after.command_wanted, before.command_wanted,
@@ -9548,7 +9621,7 @@ mod observation_checkpoint_c1_tests {
         assert_eq!(
             miso_engine_web_v1_command_submit(handle, 1),
             RESULT_OK,
-            "audio-only command remains admissible after ordinary observation credit is spent"
+            "audio-only command remains admissible after unsupported observation refusal"
         );
         dispose(handle);
 
@@ -9571,7 +9644,7 @@ mod observation_checkpoint_c1_tests {
         assert_eq!(
             miso_engine_web_v1_prepared_command_submit(handle, 1, companion_bytes),
             RESULT_OK,
-            "prepared audio-only command remains admissible after ordinary observation credit is spent"
+            "prepared audio-only command remains admissible after unsupported observation refusal"
         );
         dispose(handle);
     }
