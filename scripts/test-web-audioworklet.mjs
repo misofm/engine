@@ -1013,6 +1013,7 @@ async function testMainRealm() {
       this.port = new FakePort();
       this.onprocessorerror = null;
       this.options = options;
+      this.constructionQuantumFrames = context.renderQuantumSize ?? 128;
       if (bootDataTestMode !== null) {
         const constructorDocument = options.processorOptions.document;
         this.constructionContext = context;
@@ -1035,7 +1036,7 @@ async function testMainRealm() {
         let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: "simd128",
-          resources: resourceReport(1, 64),
+          resources: resourceReport(1, this.constructionQuantumFrames),
           memoryBytes: 65536,
         };
         if (readyMutation !== null) data = readyMutation(data);
@@ -1268,6 +1269,20 @@ async function testMainRealm() {
         assert.equal(events.length, before[0], `${label}: compile/addModule occurred`);
         assert.equal(FakeNode.count, before[2], `${label}: node constructed`);
       };
+      const assertAccepted = async (label, factory, check = () => {}) => {
+        let host;
+        let node;
+        try {
+          host = await createMisoAudioWorkletHost(factory);
+          node = FakeNode.latest;
+          check(host, node.options.processorOptions.options);
+        } finally {
+          if (host !== undefined) {
+            await host.dispose();
+            assert.equal(node.disconnectCount, 1, `${label}: host was disposed`);
+          }
+        }
+      };
 
       const descriptorCases = [
         ["factory", () => { const f = makeFactory(); return [f, f, "context"]; }],
@@ -1357,6 +1372,215 @@ async function testMainRealm() {
       ];
       for (const [label, makeCase] of refusalCases) {
         await assertRefusal(label, makeCase());
+      }
+
+      const literalOptions = { ...limits };
+      await assertAccepted("same-realm literal records", makeFactory({ options: literalOptions }));
+      {
+        const options = Object.assign(Object.create(null), limits);
+        const factory = Object.assign(Object.create(null), makeFactory({ options }));
+        await assertAccepted("null-prototype records", factory);
+      }
+      {
+        const spectrum = Object.assign(Object.create(null), makeSpectrum());
+        const spectrumOptions = Object.assign(Object.create(null), limits, {
+          spectrum, spectrumCollection: null,
+        });
+        await assertAccepted(
+          "null-prototype spectrum record",
+          makeFactory({ options: spectrumOptions }),
+        );
+        const entry = Object.assign(Object.create(null), makeEntry());
+        const collection = Object.assign(Object.create(null), {
+          entries: [entry], maximumCaptureBytes: 4096,
+        });
+        const collectionOptions = Object.assign(Object.create(null), limits, {
+          spectrum: null, spectrumCollection: collection,
+        });
+        await assertAccepted(
+          "null-prototype collection and entry records",
+          makeFactory({ options: collectionOptions }),
+        );
+      }
+      {
+        const options = Object.freeze({ ...limits });
+        await assertAccepted("frozen records", Object.freeze(makeFactory({ options })));
+      }
+      await assertAccepted(
+        "legacy six-field shape",
+        makeFactory({ options: { ...limits } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "legacy spectrum normalizes to null");
+          assert.equal(options.spectrumCollection, null,
+            "legacy spectrum collection normalizes to null");
+        },
+      );
+      await assertAccepted(
+        "extended eight-field shape and null normalization",
+        makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: null } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "explicit spectrum null is preserved");
+          assert.equal(options.spectrumCollection, null, "explicit collection null is preserved");
+        },
+      );
+      {
+        const first = Object.freeze(makeEntry());
+        const second = Object.freeze(makeEntry());
+        const entries = new Array(3);
+        Object.defineProperty(entries, "0", {
+          value: first, writable: false, enumerable: false, configurable: false,
+        });
+        entries[2] = second;
+        Object.freeze(entries);
+        const collection = Object.freeze({ entries, maximumCaptureBytes: 4096 });
+        const options = Object.freeze({
+          ...limits, spectrum: null, spectrumCollection: collection,
+        });
+        await assertAccepted(
+          "frozen sparse exact entries",
+          Object.freeze(makeFactory({ options })),
+          (_host, captured) => {
+            const copiedCollection = captured.spectrumCollection;
+            const copiedEntries = copiedCollection.entries;
+            assert.equal(copiedEntries.length, 3, "sparse entries length captured");
+            assert.equal(Object.hasOwn(copiedEntries, 0), true, "sparse index is present");
+            assert.equal(Object.hasOwn(copiedEntries, 1), false, "sparse hole is retained");
+            assert.equal(
+              Object.getOwnPropertyDescriptor(copiedEntries, "0").enumerable,
+              false,
+              "hidden index enumerability is retained",
+            );
+            assert.equal(
+              Object.getOwnPropertyDescriptor(copiedEntries, "2").enumerable,
+              true,
+              "visible index enumerability is retained",
+            );
+            assert.notEqual(copiedCollection, collection, "collection snapshot is fresh");
+            assert.notEqual(copiedEntries, entries, "entries snapshot is fresh");
+            assert.notEqual(copiedEntries[0], first, "nested entry snapshot is fresh");
+            assert.notEqual(copiedEntries[2], second, "second nested snapshot is fresh");
+          },
+        );
+      }
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrumCollection", {
+          value: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          enumerable: false,
+        });
+        await assertAccepted(
+          "hidden collection remains effective",
+          makeFactory({ options }),
+          (_host, captured) => {
+            assert.equal(captured.spectrumCollection.entries.length, 1);
+            assert.equal(captured.spectrumCollection.entries[0].target, "output");
+          },
+        );
+      }
+
+      await assertRefusal(
+        "exact seven-field shape",
+        makeFactory({ options: { ...limits, spectrum: null } }),
+      );
+      await assertRefusal(
+        "enumerable undefined spectrum shape",
+        makeFactory({ options: { ...limits, spectrum: undefined } }),
+      );
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrum", {
+          value: makeSpectrum(), enumerable: false,
+        });
+        await assertRefusal("hidden nonnull spectrum", makeFactory({ options }));
+      }
+      {
+        const enumerableUndefined = makeFactory();
+        enumerableUndefined.preparedModule = undefined;
+        await assertRefusal("enumerable undefined prepared module", enumerableUndefined);
+        const enumerableNull = makeFactory();
+        enumerableNull.preparedModule = null;
+        await assertRefusal("enumerable null prepared module", enumerableNull);
+        const hiddenUndefined = makeFactory();
+        Object.defineProperty(hiddenUndefined, "preparedModule", { value: undefined });
+        await assertAccepted("hidden undefined prepared module", hiddenUndefined);
+        const hiddenDefined = makeFactory();
+        Object.defineProperty(hiddenDefined, "preparedModule", {
+          value: unsupportedPreparationModule,
+        });
+        await assertRefusal("hidden defined prepared module", hiddenDefined);
+      }
+      {
+        const collection = { maximumCaptureBytes: 4096 };
+        Object.defineProperty(collection, "entries", {
+          value: [makeEntry()], enumerable: false,
+        });
+        await assertRefusal(
+          "hidden required collection entries",
+          makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: collection } }),
+        );
+      }
+      await assertRefusal(
+        "mutually exclusive spectrum settings",
+        makeFactory({
+          options: {
+            ...limits,
+            spectrum: makeSpectrum(),
+            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          },
+        }),
+      );
+
+      const plainOptions = (overrides = {}) => ({ ...limits, ...overrides });
+      const singleSpectrumOptions = (overrides = {}) => ({
+        ...limits, spectrum: { ...makeSpectrum(), ...overrides }, spectrumCollection: null,
+      });
+      const collectionDomainOptions = (overrides = {}) => ({
+        ...limits,
+        spectrum: null,
+        spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096, ...overrides },
+      });
+      const domainRefusals = [
+        ["u32 type", plainOptions({ sourceRingFrames: "256" })],
+        ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
+        ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
+        ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
+        ["command queue bound", plainOptions({ consoleCommandQueueRecords: 257n })],
+        ["observation taps bound", plainOptions({ consoleObservationTaps: 17n })],
+        ["observation taps dependency", plainOptions({
+          consoleCommandQueueRecords: 0n, consoleObservationTaps: 1n,
+        })],
+        ["master dependency", plainOptions({ consoleObservationTaps: 0n })],
+        ["invalid spectrum target", singleSpectrumOptions({ target: "unknown" })],
+        ["invalid spectrum channel", singleSpectrumOptions({ channels: "center" })],
+        ["empty spectrum ID", singleSpectrumOptions({ targetId: "" })],
+        ["oversize UTF-8 spectrum ID", singleSpectrumOptions({ targetId: "é".repeat(64) })],
+        ["single capture zero", singleSpectrumOptions({ maximumCaptureBytes: 0 })],
+        ["single capture bound", singleSpectrumOptions({ maximumCaptureBytes: 1_048_577 })],
+        ["collection capture zero", collectionDomainOptions({ maximumCaptureBytes: 0 })],
+      ];
+      for (const [label, options] of domainRefusals) {
+        await assertRefusal(label, makeFactory({ options }));
+      }
+      await assertAccepted(
+        "collection capture above single limit",
+        makeFactory({ options: collectionDomainOptions({ maximumCaptureBytes: 1_048_577 }) }),
+      );
+      {
+        const savedQuantum = context.renderQuantumSize;
+        try {
+          delete context.renderQuantumSize;
+          await assertAccepted(
+            "default context quantum",
+            makeFactory(),
+            (host) => {
+              assert.equal(host.resources.quantumFrames, 128, "default quantum is captured");
+              assert.equal(FakeNode.latest.constructionQuantumFrames, 128,
+                "construction uses captured default quantum");
+            },
+          );
+        } finally {
+          context.renderQuantumSize = savedQuantum;
+        }
       }
 
       await assertRefusal("SharedArrayBuffer document", makeFactory({
