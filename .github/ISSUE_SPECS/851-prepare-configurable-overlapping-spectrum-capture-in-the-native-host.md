@@ -121,3 +121,15 @@ two required execution-mode functions, one cadence accessor and the `SpectrumHop
 Focused explicit-hop tests and strict Clippy pass under root. Implementer reports locked complete
 host-core all-feature/no-default suites, doctests, wasm32 host-core check, host-web all-feature check,
 formatting and diff checks PASS. Fresh Astra medium native review remains required before delivery.
+
+**Astra medium integrated native verdict at `f11e710a`: FAIL, one blocker.** Cadence, window
+scheduling, queue ownership/loss, validity/failure fencing, smoothing, lifecycle, retained storage,
+PCM, realtime policy and portability passed. Copy-work admission did not: the projection charged
+`C*Q + attempts*4*N`, while each completion reconstructs selected history into persistent buffers
+(`C*N`), copies both buffers into the owned record (`2*N`), then moves both planes into queue
+storage (`2*N`). Stereo Q128/H256 can therefore perform 12,544 logical sample copies under an
+8,448 admitted bound. Existing probes omitted reconstruction writes and repeated the low formula.
+N1 and N2 exhausted their two Luna rounds, so the bounded correction escalates per user direction
+to one Sol high round: charge the actual conservative term (or eliminate a proved copy), add an
+independent reconstruction/queue discriminator, and update exact/one-below admission gates. A
+fresh Astra medium rereview is required afterward; browser issue #852 remains unstarted.
