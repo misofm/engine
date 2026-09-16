@@ -285,40 +285,6 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
-function validCapturedSpectrumBoot(snapshot) {
-  const options = snapshot.value;
-  if (options === null || options === undefined) return snapshot.validShape;
-  return snapshot.validShape
-    && SPECTRUM_TARGETS.has(options.target)
-    && typeof options.targetId === "string"
-    && options.targetId.length > 0
-    && new TextEncoder().encode(options.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-    && SPECTRUM_CHANNELS.has(options.channels)
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0
-    && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
-}
-
-function validCapturedSpectrumCollectionEntry(entry) {
-  return SPECTRUM_TARGETS.has(entry.target)
-    && typeof entry.targetId === "string"
-    && entry.targetId.length > 0
-    && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-    && SPECTRUM_CHANNELS.has(entry.channels);
-}
-
-function validCapturedSpectrumCollectionBoot(snapshot) {
-  const options = snapshot.value;
-  if (options === null || options === undefined) return snapshot.validShape;
-  return snapshot.validShape
-    && Array.isArray(options.entries)
-    && options.entries.length > 0
-    && options.entries.every((entry, index) => snapshot.entryShapes[index]
-      && validCapturedSpectrumCollectionEntry(entry))
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0;
-}
-
 function validSpectrumStreamMetadata(metadata) {
   return hasExactFields(metadata, [
     "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
@@ -343,29 +309,6 @@ function validSpectrumStreamMetadata(metadata) {
     && validU64(metadata.analysisEpoch) && validU64(metadata.historyStartSample)
     && typeof metadata.smoothingMs === "number" && Number.isFinite(metadata.smoothingMs)
     && metadata.smoothingMs >= 0 && metadata.smoothingMs <= 10_000;
-}
-
-function validBootOptions(snapshot) {
-  const options = snapshot.value;
-  if (options === null || typeof options !== "object") return false;
-  if (!snapshot.extendedFields
-      && !(options.spectrum === undefined && snapshot.legacyFields)) return false;
-  return validU32(options.sourceRingFrames)
-    && validU64(options.maximumMemoryBytes)
-    && validU64(options.consoleCommandQueueRecords)
-    && options.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
-    && validU64(options.consoleMeterBlocks)
-    && options.consoleMeterBlocks <= 0xffffffffn
-    && validU64(options.consoleObservationTaps)
-    && options.consoleObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && (options.consoleObservationTaps === 0n || options.consoleCommandQueueRecords !== 0n)
-    && validU64(options.consoleMasterTrackPlusOne)
-    && options.consoleMasterTrackPlusOne <= 0xffffffffn
-    && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n)
-    && validCapturedSpectrumBoot(snapshot.spectrum)
-    && validCapturedSpectrumCollectionBoot(snapshot.spectrumCollection)
-    && (options.spectrum === null || options.spectrum === undefined
-      || options.spectrumCollection === null || options.spectrumCollection === undefined);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -440,104 +383,143 @@ function snapshotDocument(document) {
 }
 
 function snapshotSpectrumBoot(input) {
-  if (input === null || input === undefined) return { value: input, validShape: true };
+  if (input === null || input === undefined) return { value: input, valid: true };
   if (typeof input !== "object" || !hasExactFields(input, SPECTRUM_BOOT_FIELDS)) {
-    return { value: null, validShape: false };
+    return { value: null, valid: false };
+  }
+  const target = input.target;
+  if (!SPECTRUM_TARGETS.has(target)) return { value: null, valid: false };
+  const targetId = input.targetId;
+  if (typeof targetId !== "string" || targetId.length === 0
+      || new TextEncoder().encode(targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES) {
+    return { value: null, valid: false };
+  }
+  const channels = input.channels;
+  if (!SPECTRUM_CHANNELS.has(channels)) return { value: null, valid: false };
+  const maximumCaptureBytes = input.maximumCaptureBytes;
+  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes <= 0
+      || maximumCaptureBytes > SPECTRUM_MAXIMUM_BYTES) {
+    return { value: null, valid: false };
   }
   return {
-    value: {
-      target: input.target,
-      targetId: input.targetId,
-      channels: input.channels,
-      maximumCaptureBytes: input.maximumCaptureBytes,
-    },
-    validShape: true,
+    value: { target, targetId, channels, maximumCaptureBytes },
+    valid: true,
   };
 }
 
 function snapshotSpectrumCollectionEntry(input) {
   if (input === null || typeof input !== "object"
       || !hasExactFields(input, SPECTRUM_COLLECTION_ENTRY_FIELDS)) {
-    return { value: undefined, validShape: false };
+    return { value: undefined, valid: false };
   }
+  const target = input.target;
+  if (!SPECTRUM_TARGETS.has(target)) return { value: undefined, valid: false };
+  const targetId = input.targetId;
+  if (typeof targetId !== "string" || targetId.length === 0
+      || new TextEncoder().encode(targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES) {
+    return { value: undefined, valid: false };
+  }
+  const channels = input.channels;
+  if (!SPECTRUM_CHANNELS.has(channels)) return { value: undefined, valid: false };
   return {
-    value: {
-      target: input.target,
-      targetId: input.targetId,
-      channels: input.channels,
-    },
-    validShape: true,
+    value: { target, targetId, channels },
+    valid: true,
   };
 }
 
 function snapshotSpectrumCollectionBoot(input) {
   if (input === null || input === undefined) {
-    return { value: input, validShape: true, entryShapes: [] };
+    return { value: input, valid: true };
   }
   if (typeof input !== "object" || !hasExactFields(input, SPECTRUM_COLLECTION_FIELDS)) {
-    return { value: null, validShape: false, entryShapes: [] };
+    return { value: null, valid: false };
   }
   const entries = input.entries;
-  if (!Array.isArray(entries) || entries.length === 0) {
-    return { value: null, validShape: false, entryShapes: [] };
+  if (!Array.isArray(entries)) return { value: null, valid: false };
+  const entriesLength = entries.length;
+  if (entriesLength === 0) return { value: null, valid: false };
+  // Do not dispatch a caller's `map`, `constructor`, or array species while taking ownership.
+  // Setting the length first keeps every absent index sparse in the ordinary private Array.
+  const capturedEntries = [];
+  capturedEntries.length = entriesLength;
+  for (let index = 0; index < entriesLength; index += 1) {
+    if (!(index in entries)) continue;
+    const snapshot = snapshotSpectrumCollectionEntry(entries[index]);
+    if (!snapshot.valid) return { value: null, valid: false };
+    capturedEntries[index] = snapshot.value;
   }
-  const entryShapes = [];
-  const capturedEntries = entries.map((entry, index) => {
-    const snapshot = snapshotSpectrumCollectionEntry(entry);
-    entryShapes[index] = snapshot.validShape;
-    return snapshot.value;
-  });
+  const maximumCaptureBytes = input.maximumCaptureBytes;
+  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes <= 0) {
+    return { value: null, valid: false };
+  }
   return {
-    value: {
-      entries: capturedEntries,
-      maximumCaptureBytes: input.maximumCaptureBytes,
-    },
-    validShape: true,
-    entryShapes,
+    value: { entries: capturedEntries, maximumCaptureBytes },
+    valid: true,
   };
 }
 
 function snapshotBootOptions(input) {
   if (input === null || typeof input !== "object") {
-    return {
-      value: input,
-      extendedFields: false,
-      legacyFields: false,
-      spectrum: { value: null, validShape: false },
-      spectrumCollection: { value: null, validShape: false, entryShapes: [] },
-    };
+    return { value: input, valid: false };
   }
   const extendedFields = hasExactFields(input, BOOT_OPTION_FIELDS);
-  const spectrumInput = input.spectrum;
-  const legacyFields = !extendedFields
-    && spectrumInput === undefined
+  // Baseline reads `spectrum` early only while deciding whether a non-extended shape is the legacy
+  // six-field form. Cache that read; an exact extended record reaches it only after all scalar and
+  // dependency checks have passed.
+  let spectrumInput;
+  if (!extendedFields) spectrumInput = input.spectrum;
+  const legacyFields = !extendedFields && spectrumInput === undefined
     && hasExactFields(input, LEGACY_BOOT_OPTION_FIELDS);
   if (!extendedFields && !legacyFields) {
-    return {
-      value: null,
-      extendedFields,
-      legacyFields,
-      spectrum: { value: null, validShape: false },
-      spectrumCollection: { value: null, validShape: false, entryShapes: [] },
-    };
+    return { value: null, valid: false };
   }
+
+  const sourceRingFrames = input.sourceRingFrames;
+  if (!validU32(sourceRingFrames)) return { value: null, valid: false };
+  const maximumMemoryBytes = input.maximumMemoryBytes;
+  if (!validU64(maximumMemoryBytes)) return { value: null, valid: false };
+  const consoleCommandQueueRecords = input.consoleCommandQueueRecords;
+  if (!validU64(consoleCommandQueueRecords)
+      || consoleCommandQueueRecords > BigInt(MAXIMUM_COMMAND_RECORDS)) {
+    return { value: null, valid: false };
+  }
+  const consoleMeterBlocks = input.consoleMeterBlocks;
+  if (!validU64(consoleMeterBlocks) || consoleMeterBlocks > 0xffffffffn) {
+    return { value: null, valid: false };
+  }
+  const consoleObservationTaps = input.consoleObservationTaps;
+  if (!validU64(consoleObservationTaps)
+      || consoleObservationTaps > BigInt(MAXIMUM_OBSERVATION_TAPS)
+      || (consoleObservationTaps !== 0n && consoleCommandQueueRecords === 0n)) {
+    return { value: null, valid: false };
+  }
+  const consoleMasterTrackPlusOne = input.consoleMasterTrackPlusOne;
+  if (!validU64(consoleMasterTrackPlusOne) || consoleMasterTrackPlusOne > 0xffffffffn
+      || (consoleMasterTrackPlusOne !== 0n && consoleObservationTaps === 0n)) {
+    return { value: null, valid: false };
+  }
+
+  if (extendedFields) spectrumInput = input.spectrum;
   const spectrum = snapshotSpectrumBoot(spectrumInput);
+  if (!spectrum.valid) return { value: null, valid: false };
   const spectrumCollection = snapshotSpectrumCollectionBoot(input.spectrumCollection);
+  if (!spectrumCollection.valid) return { value: null, valid: false };
+  if (spectrum.value !== null && spectrum.value !== undefined
+      && spectrumCollection.value !== null && spectrumCollection.value !== undefined) {
+    return { value: null, valid: false };
+  }
   return {
     value: {
-      sourceRingFrames: input.sourceRingFrames,
-      maximumMemoryBytes: input.maximumMemoryBytes,
-      consoleCommandQueueRecords: input.consoleCommandQueueRecords,
-      consoleMeterBlocks: input.consoleMeterBlocks,
-      consoleObservationTaps: input.consoleObservationTaps,
-      consoleMasterTrackPlusOne: input.consoleMasterTrackPlusOne,
+      sourceRingFrames,
+      maximumMemoryBytes,
+      consoleCommandQueueRecords,
+      consoleMeterBlocks,
+      consoleObservationTaps,
+      consoleMasterTrackPlusOne,
       spectrum: spectrum.value,
       spectrumCollection: spectrumCollection.value,
     },
-    extendedFields,
-    legacyFields,
-    spectrum,
-    spectrumCollection,
+    valid: true,
   };
 }
 
@@ -1475,7 +1457,7 @@ export async function createMisoAudioWorkletHost(options) {
       || !validU32(quantumFrames) || quantumFrames === 0
       || !validU32(sampleRateHz) || sampleRateHz === 0
       || documentSnapshot === undefined
-      || !validBootOptions(bootSnapshot)
+      || !bootSnapshot.valid
       || typeof simd128ModuleUrl !== "string"
       || typeof workletModuleUrl !== "string") {
     throw webError(1);

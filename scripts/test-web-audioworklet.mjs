@@ -1392,6 +1392,82 @@ async function testMainRealm() {
         if (addModuleGate === getterGate) addModuleGate = null;
         if (getterHost !== undefined) await getterHost.dispose().catch(() => undefined);
       }
+
+      const undefinedMapEntries = [
+        { target: "output", targetId: "map-undefined", channels: "both" },
+      ];
+      Object.defineProperty(undefinedMapEntries, "map", {
+        configurable: true, enumerable: false, value: undefined, writable: true,
+      });
+      await runSnapshotAccepted(
+        "snapshot.nested.map-undefined-accepted",
+        snapshotFactory({ options: {
+          ...limits,
+          spectrum: null,
+          spectrumCollection: { entries: undefinedMapEntries, maximumCaptureBytes: 4096 },
+        } }),
+        (snapshot) => {
+          assert.equal(
+            snapshot.processorOptions.options.spectrumCollection.entries[0].targetId,
+            "map-undefined",
+            "snapshot.nested.map-undefined-reaches-construction",
+          );
+        },
+      );
+
+      let hostileMapCalls = 0;
+      const hostileEntry = { target: "output", targetId: "hostile-captured", channels: "both" };
+      const hostileEntries = [hostileEntry];
+      Object.defineProperty(hostileEntries, "map", {
+        configurable: true,
+        enumerable: false,
+        value(capture) {
+          hostileMapCalls += 1;
+          for (let index = 0; index < this.length; index += 1) {
+            if (index in this) this[index] = capture(this[index], index);
+          }
+          return this;
+        },
+        writable: true,
+      });
+      const hostileGate = snapshotGate();
+      addModuleGate = hostileGate;
+      const hostileFactory = snapshotFactory({ options: {
+        ...limits,
+        spectrum: null,
+        spectrumCollection: { entries: hostileEntries, maximumCaptureBytes: 4096 },
+      } });
+      let hostileHost;
+      try {
+        const boot = createMisoAudioWorkletHost(hostileFactory);
+        await hostileGate.started;
+        hostileEntry.targetId = "mutated-after-capture";
+        hostileEntries[0] = { target: "output", targetId: "replacement", channels: "right" };
+        hostileGate.release();
+        hostileHost = await boot;
+        const constructorEntries = FakeNode.latest.options.processorOptions.options
+          .spectrumCollection.entries;
+        assert.equal(hostileMapCalls, 0, "snapshot.nested.hostile-map-never-called");
+        assert.notEqual(
+          constructorEntries,
+          hostileEntries,
+          "snapshot.nested.hostile-map-private-array-identity",
+        );
+        assert.equal(
+          constructorEntries[0].targetId,
+          "hostile-captured",
+          "snapshot.nested.hostile-map-captured-entry-value",
+        );
+        assert.equal(
+          constructorEntries[0].channels,
+          "both",
+          "snapshot.nested.hostile-map-captured-entry-channel",
+        );
+      } finally {
+        hostileGate.release();
+        if (addModuleGate === hostileGate) addModuleGate = null;
+        if (hostileHost !== undefined) await hostileHost.dispose().catch(() => undefined);
+      }
     };
 
     const runSnapshotSingleRead = async () => {
@@ -1417,6 +1493,56 @@ async function testMainRealm() {
       } finally {
         await hostValue.dispose();
       }
+
+      let throwingSpectrumReads = 0;
+      const throwingSpectrumOptions = {
+        ...limits, sourceRingFrames: -1, spectrumCollection: null,
+      };
+      Object.defineProperty(throwingSpectrumOptions, "spectrum", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throwingSpectrumReads += 1;
+          throw new Error("later spectrum getter must remain unread");
+        },
+      });
+      await snapshotLocalRefusal(
+        "snapshot.short-circuit.invalid-source-before-throwing-spectrum",
+        snapshotFactory({ options: throwingSpectrumOptions }),
+      );
+      assert.equal(
+        throwingSpectrumReads,
+        0,
+        "snapshot.short-circuit.throwing-spectrum-zero-reads",
+      );
+
+      let mutatingSpectrumReads = 0;
+      const mutatingSpectrumOptions = {
+        ...limits, sourceRingFrames: -1, spectrumCollection: null,
+      };
+      Object.defineProperty(mutatingSpectrumOptions, "spectrum", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          mutatingSpectrumReads += 1;
+          mutatingSpectrumOptions.sourceRingFrames = 256;
+          return null;
+        },
+      });
+      await snapshotLocalRefusal(
+        "snapshot.short-circuit.invalid-source-before-mutating-spectrum",
+        snapshotFactory({ options: mutatingSpectrumOptions }),
+      );
+      assert.equal(
+        mutatingSpectrumReads,
+        0,
+        "snapshot.short-circuit.mutating-spectrum-zero-reads",
+      );
+      assert.equal(
+        mutatingSpectrumOptions.sourceRingFrames,
+        -1,
+        "snapshot.short-circuit.invalid-source-not-mutated",
+      );
     };
 
     const runSnapshotAccepted = async (label, factory, check = () => undefined) => {
