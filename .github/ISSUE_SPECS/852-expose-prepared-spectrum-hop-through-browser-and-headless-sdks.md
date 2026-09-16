@@ -94,3 +94,18 @@ SDK, Worker, artifact, or deployment surface changed. Tests cover ordinary H256,
 protected H256, and omitted default. Root reran the complete host-web library suite (195 passed,
 2 existing ignored), strict host-web library Clippy, wasm32 compilation, formatting, and diff
 checks: PASS. The additive FFI/capability boundary remains a fresh bounded task.
+
+**B1a2 additive Wasm boundary — complete in two Luna MAX rounds.** Round 1 added three explicit
+exports: capability value 1, ordinary spectrum-hop boot, and protected observation spectrum-hop
+boot. Raw values are accepted only through `SpectrumHop::new`; 0 and every unsupported value
+refuse before capture preparation, publish no host, return handle 0, carry a bounded invalid-argument
+diagnostic, and permit a restaged valid retry. Existing boot exports remain default wrappers and no
+packed structure changed. Root review found that the borrow-conflict branch of the invalid-hop
+helper could return `RESULT_INTERNAL` as a fake nonzero handle, and that parameter-metadata's
+authoritative export inventory remained stale. Luna round 2 fixed the return path, added a focused
+borrow-conflict/no-publication test, and updated the canonical inventory from 131 to 134 exports.
+Root reran all 201 host-web library tests (2 existing ignored), parameter-metadata's 18 ABI-layout
+and 5 round-trip tests, strict host-web library Clippy, wasm32 compilation, the 27-mutation ABI
+self-test, formatting, and diff checks: PASS. The agent additionally reports exact 134/134 Wasm
+export inspection and render-callgraph PASS. The artifact digest is expected to change and remains
+deferred to B4. Worker-side explicit-metadata validation is the remaining B1 subtask.

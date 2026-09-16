@@ -152,13 +152,15 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 131] = [
+pub const EXPORTS: [&str; 134] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_boot_with_observation_demand",
+    "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop",
+    "miso_engine_web_v1_boot_with_spectrum_hop",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
@@ -253,6 +255,7 @@ pub const EXPORTS: [&str; 131] = [
     "miso_engine_web_v1_spectrum_collection_request_ptr",
     "miso_engine_web_v1_spectrum_collection_target_ids_capacity",
     "miso_engine_web_v1_spectrum_collection_target_ids_ptr",
+    "miso_engine_web_v1_spectrum_hop_capability",
     "miso_engine_web_v1_spectrum_read",
     "miso_engine_web_v1_spectrum_request_bytes",
     "miso_engine_web_v1_spectrum_request_ptr",

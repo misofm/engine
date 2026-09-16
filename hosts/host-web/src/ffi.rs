@@ -71,8 +71,8 @@ use host_core::{
     ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
     SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence, SpectrumCaptureCollectionEntry,
     SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
-    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumSmoothingConfig, SpectrumTarget,
-    SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
+    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop, SpectrumSmoothingConfig,
+    SpectrumTarget, SpectrumWindow, prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -5034,7 +5034,7 @@ fn prewarm_observation_staging() -> Result<(), BootFailure> {
     })
 }
 
-fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
+fn boot_staged(len: u32, mode: StagedBootMode, spectrum_hop: Option<SpectrumHop>) -> u32 {
     let already_live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
     if already_live {
         BOOT_STAGING.with(|staging| {
@@ -5075,10 +5075,11 @@ fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
                     Ok(request)
                 });
                 spectrum_request.and_then(|request| {
-                    AudioWorkletEngineHost::boot_with_spectrum(
+                    AudioWorkletEngineHost::boot_with_spectrum_config(
                         &staging.document,
                         *staging.options,
                         request,
+                        spectrum_hop,
                     )
                 })
             }
@@ -5167,10 +5168,11 @@ fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
                         maximum_retained_bytes: ingress.maximum_retained_bytes,
                     },
                 };
-                AudioWorkletEngineHost::boot_with_observation_demand(
+                AudioWorkletEngineHost::boot_with_observation_demand_config(
                     &staging.document,
                     *staging.options,
                     &preparation,
+                    spectrum_hop,
                 )
             }),
         };
@@ -5257,7 +5259,32 @@ fn boot_staged(len: u32, mode: StagedBootMode) -> u32 {
 /// Private protected staged boot used by the checkpoint-A fixtures.
 #[allow(dead_code)]
 pub(crate) fn boot_staged_observation_demand(len: u32) -> u32 {
-    boot_staged(len, StagedBootMode::ProtectedObservation)
+    boot_staged(len, StagedBootMode::ProtectedObservation, None)
+}
+
+fn reject_explicit_spectrum_hop() -> u32 {
+    BOOT_STAGING.with(|staging| {
+        if let Ok(mut staging) = staging.try_borrow_mut() {
+            staging.record_failure(BootFailure::fixed(
+                RESULT_INVALID_ARGUMENT,
+                "web.spectrum.hop",
+            ));
+        }
+    });
+    0
+}
+
+fn boot_staged_with_spectrum_hop(len: u32, mode: StagedBootMode, hop_frames: u32) -> u32 {
+    let Ok(spectrum_hop) = SpectrumHop::new(hop_frames) else {
+        return reject_explicit_spectrum_hop();
+    };
+    boot_staged(len, mode, Some(spectrum_hop))
+}
+
+/// Return the capability value for explicit prepared spectrum-hop boot.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_hop_capability() -> u32 {
+    1
 }
 
 /// Boot the exact staged document with the protected observation preparation.
@@ -5266,10 +5293,26 @@ pub extern "C" fn miso_engine_web_v1_boot_with_observation_demand(len: u32) -> u
     boot_staged_observation_demand(len)
 }
 
+/// Boot the exact staged document with protected observation preparation and an explicit spectrum
+/// capture hop in frames.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop(
+    len: u32,
+    hop_frames: u32,
+) -> u32 {
+    boot_staged_with_spectrum_hop(len, StagedBootMode::ProtectedObservation, hop_frames)
+}
+
 /// Boot the exact staged document and atomically publish the sole running handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
-    boot_staged(len, StagedBootMode::Legacy)
+    boot_staged(len, StagedBootMode::Legacy, None)
+}
+
+/// Boot the exact staged document with an explicit ordinary spectrum capture hop in frames.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_with_spectrum_hop(len: u32, hop_frames: u32) -> u32 {
+    boot_staged_with_spectrum_hop(len, StagedBootMode::Legacy, hop_frames)
 }
 
 /// Return the frozen result code of the last boot attempt.
@@ -7286,6 +7329,9 @@ pub(crate) mod live_response_ffi_tests {
 #[cfg(test)]
 mod spectrum_ffi_tests {
     use super::*;
+    use crate::ffi::observation_checkpoint_a_tests::{
+        no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
+    };
 
     #[test]
     fn cold_spectrum_capture_configuration_is_idempotent() {
@@ -7340,6 +7386,175 @@ mod spectrum_ffi_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn spectrum_hop_capability_is_the_pinned_value() {
+        assert_eq!(miso_engine_web_v1_spectrum_hop_capability(), 1);
+    }
+
+    #[test]
+    fn invalid_explicit_hop_borrow_conflict_returns_zero_without_publication() {
+        no_live_host();
+        let document = stage_ordinary_output_boot();
+        BOOT_STAGING.with(|slot| {
+            let _borrow = slot.borrow_mut();
+            assert_eq!(
+                miso_engine_web_v1_boot_with_spectrum_hop(document.len() as u32, 0),
+                0,
+                "an invalid hop must never become a fake handle on a staging borrow conflict",
+            );
+        });
+        no_live_host();
+    }
+
+    fn stage_ordinary_output_boot() -> &'static [u8] {
+        let document = include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        stage_left_output_request();
+        BOOT_STAGING.with(|slot| {
+            slot.borrow_mut().options = Box::new(WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            });
+        });
+        test_stage_document(document);
+        document
+    }
+
+    fn stream_hop_metadata() -> WebSpectrumStreamMetadata {
+        SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata)
+    }
+
+    #[test]
+    fn explicit_ordinary_boot_publishes_h256_and_h1024_stream_metadata() {
+        for hop in [256_u32, 1024] {
+            no_live_host();
+            let document = stage_ordinary_output_boot();
+            let handle = miso_engine_web_v1_boot_with_spectrum_hop(document.len() as u32, hop);
+            assert_ne!(handle, 0, "ordinary H{hop} boot must publish a handle");
+            assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+                RESULT_OK,
+                "ordinary H{hop} stream start",
+            );
+            let metadata = stream_hop_metadata();
+            assert_eq!(metadata.sample_rate_hz, 48_000);
+            assert_eq!(metadata.quantum_frames, 128);
+            assert_eq!(metadata.hop_frames, hop);
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        }
+    }
+
+    #[test]
+    fn explicit_protected_boot_publishes_h1024_stream_metadata() {
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop(
+            document.len() as u32,
+            1024,
+        );
+        assert_ne!(handle, 0, "protected H1024 boot must publish a handle");
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        let metadata = stream_hop_metadata();
+        assert_eq!(metadata.sample_rate_hz, 48_000);
+        assert_eq!(metadata.quantum_frames, 128);
+        assert_eq!(metadata.hop_frames, 1024);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    #[test]
+    fn invalid_explicit_hops_refuse_before_publication_and_valid_retries_work() {
+        const INVALID_HOPS: [u32; 11] =
+            [0, 1, 255, 257, 511, 513, 1023, 1025, 2047, 2049, u32::MAX];
+        let protected_document = protected_document();
+
+        for hop in INVALID_HOPS {
+            no_live_host();
+            let document = stage_ordinary_output_boot();
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+            assert_eq!(
+                miso_engine_web_v1_boot_with_spectrum_hop(document.len() as u32, hop),
+                0,
+                "ordinary invalid H{hop} must refuse",
+            );
+            assert_eq!(miso_engine_web_v1_boot_result(), RESULT_INVALID_ARGUMENT);
+            assert!(miso_engine_web_v1_boot_diagnostic_bytes() > 0);
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                0,
+                "ordinary invalid H{hop} entered spectrum preparation",
+            );
+            no_live_host();
+
+            let document = stage_ordinary_output_boot();
+            let retry = miso_engine_web_v1_boot_with_spectrum_hop(document.len() as u32, 256);
+            assert_ne!(retry, 0, "ordinary retry after invalid H{hop}");
+            assert_eq!(miso_engine_web_v1_dispose(retry), RESULT_OK);
+
+            no_live_host();
+            stage_protected_boot(protected_document, protected_preparation_record());
+            SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
+            assert_eq!(
+                miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop(
+                    protected_document.len() as u32,
+                    hop,
+                ),
+                0,
+                "protected invalid H{hop} must refuse",
+            );
+            assert_eq!(miso_engine_web_v1_boot_result(), RESULT_INVALID_ARGUMENT);
+            assert!(miso_engine_web_v1_boot_diagnostic_bytes() > 0);
+            assert_eq!(
+                SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get()),
+                0,
+                "protected invalid H{hop} entered spectrum preparation",
+            );
+            no_live_host();
+
+            stage_protected_boot(protected_document, protected_preparation_record());
+            let retry = miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop(
+                protected_document.len() as u32,
+                1024,
+            );
+            assert_ne!(retry, 0, "protected retry after invalid H{hop}");
+            assert_eq!(miso_engine_web_v1_dispose(retry), RESULT_OK);
+        }
+    }
+
+    #[test]
+    fn legacy_boot_wrappers_keep_the_derived_default_hop() {
+        no_live_host();
+        let document = stage_ordinary_output_boot();
+        let handle = miso_engine_web_v1_boot(document.len() as u32);
+        assert_ne!(handle, 0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        let expected = SpectrumCadence::new(48_000, 128)
+            .expect("launch default cadence")
+            .hop_frames();
+        assert_eq!(stream_hop_metadata().hop_frames, expected);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+        no_live_host();
+        let document = protected_document();
+        stage_protected_boot(document, protected_preparation_record());
+        let handle = miso_engine_web_v1_boot_with_observation_demand(document.len() as u32);
+        assert_ne!(handle, 0);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(stream_hop_metadata().hop_frames, expected);
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
     #[test]
