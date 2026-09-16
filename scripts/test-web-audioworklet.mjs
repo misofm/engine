@@ -1,11 +1,66 @@
-import "./test-prepared-control.mjs";
-import { readFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { MessageChannel } from "node:worker_threads";
 const root = new URL("../", import.meta.url);
-const preparedAbiLayout = JSON.parse(await readFile(
-  new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
-));
+const commandArguments = process.argv.slice(2);
+const realWasmReceiverRequested = commandArguments.includes("--real-wasm-receiver");
+const qualificationModuleIndex = commandArguments.indexOf("--qualification-module");
+if (qualificationModuleIndex !== -1 && typeof commandArguments[qualificationModuleIndex + 1] !== "string") {
+  throw new TypeError("--qualification-module requires a file path");
+}
+
+function parseRealWasmReceiverArguments() {
+  if (!realWasmReceiverRequested) return null;
+  const fakeMutationOverrides = [
+    "MISO_ENGINE_WEB_HOST_TEST_MODULE",
+    "MISO_ENGINE_WEB_WORKLET_TEST_MODULE",
+    "MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST",
+  ];
+  const activeOverride = fakeMutationOverrides.find((name) => (
+    Object.prototype.hasOwnProperty.call(process.env, name)
+  ));
+  if (activeOverride !== undefined) {
+    throw new TypeError(`--real-wasm-receiver rejects fake mutation override ${activeOverride}`);
+  }
+  if (qualificationModuleIndex !== -1) {
+    throw new TypeError("--real-wasm-receiver rejects --qualification-module");
+  }
+  const artifactsIndex = commandArguments.indexOf("--artifacts");
+  if (artifactsIndex === -1 || typeof commandArguments[artifactsIndex + 1] !== "string") {
+    throw new TypeError("--real-wasm-receiver requires --artifacts DIR");
+  }
+  const consumed = new Set([0, artifactsIndex, artifactsIndex + 1]);
+  const realIndex = commandArguments.indexOf("--real-wasm-receiver");
+  consumed.add(realIndex);
+  if (consumed.size !== commandArguments.length
+      || commandArguments.filter((argument) => argument === "--real-wasm-receiver").length !== 1
+      || commandArguments.filter((argument) => argument === "--artifacts").length !== 1
+      || realIndex === artifactsIndex + 1) {
+    throw new TypeError("usage: --real-wasm-receiver --artifacts DIR");
+  }
+  return Object.freeze({ artifactDirectory: resolve(commandArguments[artifactsIndex + 1]) });
+}
+
+const realWasmReceiverArguments = parseRealWasmReceiverArguments();
+if (realWasmReceiverArguments === null) {
+  await import("./test-prepared-control.mjs");
+}
+const preparedAbiLayout = realWasmReceiverArguments === null
+  ? JSON.parse(await readFile(
+    new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
+  ))
+  : undefined;
 const unsupportedPreparationModuleBytes = Uint8Array.from([
   0, 97, 115, 109, 1, 0, 0, 0,
   1, 5, 1, 96, 0, 1, 127,
@@ -24,13 +79,9 @@ const hostUrl = process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE === undefined
 const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
   ? new URL("hosts/host-web/web/miso-engine-v1-audio-worklet.js", root)
   : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
-const qualificationModuleIndex = process.argv.indexOf("--qualification-module");
-if (qualificationModuleIndex !== -1 && typeof process.argv[qualificationModuleIndex + 1] !== "string") {
-  throw new TypeError("--qualification-module requires a file path");
-}
 const qualificationUrl = qualificationModuleIndex === -1
   ? new URL("hosts/host-web/qualification/qualification.js", root)
-  : pathToFileURL(process.argv[qualificationModuleIndex + 1]);
+  : pathToFileURL(commandArguments[qualificationModuleIndex + 1]);
 
 const limits = Object.freeze({
   sourceRingFrames: 256,
@@ -89,6 +140,761 @@ async function localErrorResult(promise, result) {
   const error = await errorResult(promise, result);
   assert.equal(error.requestId, 0, "local refusal carries no allocated ID");
   return error;
+}
+
+const REAL_STAGE_TIMEOUT_MS = 5000;
+const REAL_PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
+const REAL_WASM_SHA256 = "18b9dbfa61ae1188fcb00f18317702e37feb37c4843ac2b885194a4c77322cab";
+const REAL_WASM_FILE = "miso-engine-v1-audio-worklet.simd128.wasm";
+const REAL_ARTIFACT_NAMES = Object.freeze([
+  "miso-engine-v1-abi-layout.json",
+  "miso-engine-v1-audio-worklet-host.d.ts",
+  "miso-engine-v1-audio-worklet-host.js",
+  "miso-engine-v1-audio-worklet.js",
+  REAL_WASM_FILE,
+  "miso-engine-v1-parameter-metadata.json",
+  "prepared-control.js",
+]);
+const REAL_ARTIFACT_AUTHORITIES = new Map([
+  ["miso-engine-v1-abi-layout.json", new URL("sdk/assets/miso-engine-v1-abi-layout.json", root)],
+  ["miso-engine-v1-audio-worklet-host.d.ts", new URL(
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts", root,
+  )],
+  ["miso-engine-v1-audio-worklet-host.js", new URL(
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-host.js", root,
+  )],
+  ["miso-engine-v1-audio-worklet.js", new URL(
+    "hosts/host-web/web/miso-engine-v1-audio-worklet.js", root,
+  )],
+  ["miso-engine-v1-parameter-metadata.json", new URL(
+    "sdk/assets/miso-engine-v1-parameter-metadata.json", root,
+  )],
+  ["prepared-control.js", new URL("hosts/host-web/web/prepared-control.js", root)],
+]);
+const REAL_WASM_PIN_URL = new URL(
+  "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256", root,
+);
+const REAL_GLOBAL_NAMES = Object.freeze([
+  "fetch", "AudioWorkletNode", "AudioWorkletProcessor", "registerProcessor", "sampleRate",
+  "renderQuantumSize",
+]);
+const NATIVE_RELEASE_ASSERTION = "ordinary native disposal releases saved native handle";
+
+function realDeadline(label, operation) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      rejectPromise(new Error(`${label} timed out after ${REAL_STAGE_TIMEOUT_MS}ms`));
+    }, REAL_STAGE_TIMEOUT_MS);
+    Promise.resolve().then(operation).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolvePromise(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        rejectPromise(error);
+      },
+    );
+  });
+}
+
+function realArtifactPath(directory, name) {
+  return join(directory, name);
+}
+
+function realPathUrl(directory, name) {
+  return pathToFileURL(realArtifactPath(directory, name)).href;
+}
+
+async function preflightRealArtifact(directory) {
+  const artifactDirectory = resolve(directory);
+  const entries = await readdir(artifactDirectory, { withFileTypes: true });
+  const names = entries.map((entry) => entry.name).sort();
+  const expectedNames = [...REAL_ARTIFACT_NAMES].sort();
+  if (names.length !== expectedNames.length
+      || names.some((name, index) => name !== expectedNames[index])) {
+    throw new Error(
+      `real-Wasm artifact preflight: exact seven-file membership mismatch: ${names.join(",")}`,
+    );
+  }
+  if (entries.some((entry) => !entry.isFile())) {
+    throw new Error("real-Wasm artifact preflight: every artifact entry must be a regular file");
+  }
+  const fileEntries = await Promise.all(REAL_ARTIFACT_NAMES.map(async (name) => [
+    name,
+    await readFile(realArtifactPath(artifactDirectory, name)),
+  ]));
+  const files = new Map(fileEntries);
+  const pin = (await readFile(REAL_WASM_PIN_URL, "utf8")).trim();
+  if (pin !== REAL_WASM_SHA256) {
+    throw new Error("real-Wasm artifact preflight: repository Wasm SHA-256 pin changed");
+  }
+  const wasmSha256 = createHash("sha256").update(files.get(REAL_WASM_FILE)).digest("hex");
+  if (wasmSha256 !== REAL_WASM_SHA256) {
+    throw new Error(`real-Wasm artifact preflight: Wasm SHA-256 mismatch: ${wasmSha256}`);
+  }
+  for (const [name, authorityUrl] of REAL_ARTIFACT_AUTHORITIES) {
+    const authority = await readFile(authorityUrl);
+    if (Buffer.compare(files.get(name), authority) !== 0) {
+      throw new Error(`real-Wasm artifact preflight: ${name} differs from source authority`);
+    }
+  }
+  return Object.freeze({
+    directory: artifactDirectory,
+    files,
+    wasmPath: realArtifactPath(artifactDirectory, REAL_WASM_FILE),
+    wasmUrl: realPathUrl(artifactDirectory, REAL_WASM_FILE),
+    abiPath: realArtifactPath(artifactDirectory, "miso-engine-v1-abi-layout.json"),
+    abiUrl: realPathUrl(artifactDirectory, "miso-engine-v1-abi-layout.json"),
+    hostUrl: realPathUrl(artifactDirectory, "miso-engine-v1-audio-worklet-host.js"),
+    workletUrl: realPathUrl(artifactDirectory, "miso-engine-v1-audio-worklet.js"),
+    workletSource: files.get("miso-engine-v1-audio-worklet.js").toString("utf8"),
+    wasmSha256,
+  });
+}
+
+function realArrayBuffer(bytes) {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function defineRealGlobal(name, value) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value,
+  });
+}
+
+function createRealWebAudioFacade(artifact, allowedWorkletUrl) {
+  let active = true;
+  let currentProcessorPort = null;
+  let registeredProcessor = null;
+  let registeredProcessorName = null;
+  let constructionCount = 0;
+  const allNodes = new Set();
+  const pendingModuleLoads = new Set();
+  const fetches = [];
+  const fetchTargets = new Map([
+    [artifact.wasmUrl, artifact.wasmPath],
+    [artifact.abiUrl, artifact.abiPath],
+  ]);
+
+  function registerProcessor(name, processor) {
+    if (!active) throw new Error("real Web Audio facade is torn down");
+    if (name !== REAL_PROCESSOR_NAME || typeof processor !== "function") {
+      throw new Error(`unexpected AudioWorklet registration: ${name}`);
+    }
+    if (registeredProcessor !== null) {
+      throw new Error("AudioWorklet processor registered more than once");
+    }
+    registeredProcessorName = name;
+    registeredProcessor = processor;
+  }
+
+  async function fetchVerifiedFile(input) {
+    if (!active) throw new Error("real Web Audio facade is torn down");
+    const url = input instanceof URL ? input.href : input;
+    if (typeof url !== "string" || !fetchTargets.has(url)) {
+      throw new Error(`unverified real-Wasm fetch refused: ${String(url)}`);
+    }
+    fetches.push(url);
+    const bytes = await readFile(fetchTargets.get(url));
+    if (!active) throw new Error("real Web Audio facade was torn down during fetch");
+    return {
+      ok: true,
+      arrayBuffer: async () => {
+        if (url !== artifact.wasmUrl) throw new Error("non-Wasm arrayBuffer fetch refused");
+        return realArrayBuffer(bytes);
+      },
+      json: async () => {
+        if (url !== artifact.abiUrl) throw new Error("non-ABI JSON fetch refused");
+        return JSON.parse(bytes.toString("utf8"));
+      },
+    };
+  }
+
+  async function addModule(moduleUrl) {
+    if (!active || moduleUrl !== allowedWorkletUrl) {
+      throw new Error(`unverified worklet URL refused: ${String(moduleUrl)}`);
+    }
+    registeredProcessor = null;
+    registeredProcessorName = null;
+    const loading = (async () => {
+      await import(moduleUrl);
+      if (!active) throw new Error("real Web Audio facade was torn down during addModule");
+      if (registeredProcessorName !== REAL_PROCESSOR_NAME || registeredProcessor === null) {
+        throw new Error("registered worklet processor did not attest to the shipped name");
+      }
+    })();
+    pendingModuleLoads.add(loading);
+    try {
+      await loading;
+    } finally {
+      pendingModuleLoads.delete(loading);
+    }
+  }
+
+  class RealAudioWorkletProcessor {
+    constructor() {
+      if (currentProcessorPort === null) {
+        throw new Error("AudioWorkletProcessor was constructed without a native port");
+      }
+      this.port = currentProcessorPort;
+    }
+  }
+
+  class RealAudioWorkletNode {
+    constructor(context, name, options) {
+      if (!active) throw new Error("real Web Audio facade is torn down");
+      if (name !== REAL_PROCESSOR_NAME || registeredProcessorName !== REAL_PROCESSOR_NAME
+          || registeredProcessor === null) {
+        throw new Error(`unattested AudioWorklet processor: ${name}`);
+      }
+      const processorOptions = options?.processorOptions;
+      if (!(processorOptions?.document instanceof Uint8Array)) {
+        throw new Error("AudioWorklet construction options omitted the document");
+      }
+      const channel = new MessageChannel();
+      this.port = channel.port1;
+      this.processorPort = channel.port2;
+      const originalHostPostMessageDescriptor = Object.getOwnPropertyDescriptor(this.port, "postMessage");
+      const originalHostPostMessage = this.port.postMessage;
+      const node = this;
+      const instrumentedHostPostMessage = function (...args) {
+        node.hostPostMessageAttempts += 1;
+        return Reflect.apply(originalHostPostMessage, this, args);
+      };
+      Object.defineProperty(this.port, "postMessage", {
+        configurable: true,
+        enumerable: originalHostPostMessageDescriptor?.enumerable ?? true,
+        writable: true,
+        value: instrumentedHostPostMessage,
+      });
+      let hostPostMessageInstrumentationRestored = false;
+      this.restoreHostPostMessageInstrumentation = () => {
+        if (hostPostMessageInstrumentationRestored) return;
+        if (this.port.postMessage !== instrumentedHostPostMessage) {
+          throw new Error("host MessagePort postMessage instrumentation was replaced");
+        }
+        if (originalHostPostMessageDescriptor === undefined) {
+          if (!Reflect.deleteProperty(this.port, "postMessage")) {
+            throw new Error("host MessagePort postMessage instrumentation could not be removed");
+          }
+        } else {
+          Object.defineProperty(this.port, "postMessage", originalHostPostMessageDescriptor);
+        }
+        hostPostMessageInstrumentationRestored = true;
+      };
+      this.responses = [];
+      this.requests = [];
+      this.messageErrors = [];
+      this.hostPostMessageAttempts = 0;
+      this.processor = null;
+      this.constructionError = null;
+      this.constructionTimer = null;
+      this.tornDown = false;
+      this.closedHostPort = false;
+      this.closedProcessorPort = false;
+      this.disconnectCount = 0;
+      this.onprocessorerror = null;
+      this.constructionSnapshot = Object.freeze({
+        context,
+        name,
+        numberOfInputs: options.numberOfInputs,
+        numberOfOutputs: options.numberOfOutputs,
+        outputChannelCount: Object.freeze([...options.outputChannelCount]),
+        processorOptions: Object.freeze({
+          module: processorOptions.module,
+          document: new Uint8Array(processorOptions.document),
+          options: Object.freeze({ ...processorOptions.options }),
+        }),
+      });
+      this.port.on("message", (message) => this.responses.push(message));
+      this.processorPort.on("message", (message) => this.requests.push(message));
+      this.port.on("messageerror", (error) => this.messageErrors.push(error));
+      this.processorPort.on("messageerror", (error) => this.messageErrors.push(error));
+      this.port.start();
+      this.processorPort.start();
+      constructionCount += 1;
+      allNodes.add(this);
+      this.constructionTimer = setTimeout(() => {
+        this.constructionTimer = null;
+        if (this.tornDown || !active) return;
+        const Processor = registeredProcessor;
+        if (Processor === null) {
+          this.constructionError = new Error("registered processor disappeared before construction");
+          this.onprocessorerror?.(this.constructionError);
+          return;
+        }
+        currentProcessorPort = this.processorPort;
+        try {
+          this.processor = new Processor(options);
+        } catch (error) {
+          this.constructionError = error;
+          this.onprocessorerror?.(error);
+        } finally {
+          currentProcessorPort = null;
+        }
+      }, 0);
+    }
+
+    disconnect() {
+      this.disconnectCount += 1;
+      this.teardown();
+    }
+
+    teardown() {
+      if (this.tornDown) return;
+      this.tornDown = true;
+      if (this.constructionTimer !== null) {
+        clearTimeout(this.constructionTimer);
+        this.constructionTimer = null;
+      }
+      const errors = [];
+      this.port.onmessage = null;
+      this.port.onmessageerror = null;
+      this.processorPort.onmessage = null;
+      try {
+        this.port.close();
+        this.closedHostPort = true;
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        this.processorPort.close();
+        this.closedProcessorPort = true;
+      } catch (error) {
+        errors.push(error);
+      }
+      this.port.removeAllListeners();
+      this.processorPort.removeAllListeners();
+      if (errors.length > 0) throw new AggregateError(errors, "native MessagePort cleanup failed");
+    }
+  }
+
+  const facade = {
+    audioWorklet: Object.freeze({ addModule }),
+    fetches,
+    install() {
+      defineRealGlobal("fetch", fetchVerifiedFile);
+      defineRealGlobal("AudioWorkletNode", RealAudioWorkletNode);
+      defineRealGlobal("AudioWorkletProcessor", RealAudioWorkletProcessor);
+      defineRealGlobal("registerProcessor", registerProcessor);
+      defineRealGlobal("sampleRate", 48000);
+      defineRealGlobal("renderQuantumSize", 128);
+    },
+    async teardown() {
+      active = false;
+      const errors = [];
+      for (const node of allNodes) {
+        try {
+          node.teardown();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          node.restoreHostPostMessageInstrumentation();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      const moduleResults = await Promise.allSettled([...pendingModuleLoads]);
+      for (const result of moduleResults) {
+        if (result.status === "rejected") errors.push(result.reason);
+      }
+      if (errors.length > 0) throw new AggregateError(errors, "real Web Audio facade cleanup failed");
+    },
+    get constructionCount() {
+      return constructionCount;
+    },
+    get registeredProcessor() {
+      return registeredProcessor;
+    },
+    get nodes() {
+      return [...allNodes];
+    },
+  };
+  return facade;
+}
+
+function restoreRealGlobals(descriptors) {
+  for (const name of REAL_GLOBAL_NAMES) {
+    const descriptor = descriptors.get(name);
+    if (descriptor === undefined) delete globalThis[name];
+    else Object.defineProperty(globalThis, name, descriptor);
+  }
+}
+
+async function withRealWebAudioFacade(artifact, workletUrl, label, callback) {
+  const descriptors = new Map(
+    REAL_GLOBAL_NAMES.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
+  );
+  const facade = createRealWebAudioFacade(artifact, workletUrl);
+  let value;
+  let operationError = null;
+  try {
+    facade.install();
+    value = await callback(facade);
+  } catch (error) {
+    operationError = error;
+  }
+  let cleanupError = null;
+  try {
+    await realDeadline(`${label} cleanup`, () => facade.teardown());
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    restoreRealGlobals(descriptors);
+    for (const name of REAL_GLOBAL_NAMES) {
+      assert.deepEqual(
+        Object.getOwnPropertyDescriptor(globalThis, name),
+        descriptors.get(name),
+        `${label}: global descriptor for ${name} was not restored`,
+      );
+    }
+  } catch (error) {
+    cleanupError = cleanupError === null ? error : new AggregateError(
+      [cleanupError, error],
+      `${label}: global restoration failed after cleanup failure`,
+    );
+  }
+  if (operationError !== null && cleanupError !== null) {
+    throw new AggregateError(
+      [operationError, cleanupError],
+      `${label} failed and cleanup also failed`,
+    );
+  }
+  if (operationError !== null) throw operationError;
+  if (cleanupError !== null) throw cleanupError;
+  return value;
+}
+
+function realBootOptions() {
+  return Object.freeze({
+    sourceRingFrames: 0,
+    maximumMemoryBytes: 67108864n,
+    consoleCommandQueueRecords: 0n,
+    consoleMeterBlocks: 0n,
+    consoleObservationTaps: 0n,
+    consoleMasterTrackPlusOne: 0n,
+  });
+}
+
+function realLifecycleState() {
+  return {
+    host: null,
+    node: null,
+    native: null,
+    hostDisposeAcknowledged: false,
+  };
+}
+
+async function ordinaryRealLifecycle(artifact, workletUrl, facade, label, state) {
+  const document = new Uint8Array(await realDeadline(
+    `${label} session document`,
+    () => readFile(new URL("hosts/host-web/tests/browser-v1/session.json", root)),
+  ));
+  const options = realBootOptions();
+  const context = {
+    state: "suspended",
+    sampleRate: 48000,
+    renderQuantumSize: 128,
+    audioWorklet: facade.audioWorklet,
+  };
+  const { createMisoAudioWorkletHost } = await realDeadline(
+    `${label} host import`,
+    () => import(artifact.hostUrl),
+  );
+  const host = await realDeadline(`${label} boot`, () => createMisoAudioWorkletHost({
+    context,
+    document,
+    options,
+    simd128ModuleUrl: artifact.wasmUrl,
+    workletModuleUrl: workletUrl,
+  }));
+  state.host = host;
+  state.node = host.node;
+  assert.equal(host.backend, "simd128", `${label}: host backend`);
+  assert.equal(facade.constructionCount, 1, `${label}: exactly one native node construction`);
+  assert.equal(state.node.constructionError, null, `${label}: no construction error`);
+  assert.equal(state.node.processor !== null, true, `${label}: registered processor constructed`);
+  assert.equal(
+    state.node.processor.constructor,
+    facade.registeredProcessor,
+    `${label}: node uses the registered processor`,
+  );
+  const snapshot = state.node.constructionSnapshot;
+  assert.equal(snapshot.name, REAL_PROCESSOR_NAME, `${label}: processor name`);
+  assert.equal(snapshot.numberOfInputs, 0, `${label}: input count`);
+  assert.equal(snapshot.numberOfOutputs, 1, `${label}: output count`);
+  assert.deepEqual(snapshot.outputChannelCount, [2], `${label}: output channels`);
+  assert.equal(
+    snapshot.processorOptions.module instanceof WebAssembly.Module,
+    true,
+    `${label}: native WebAssembly.Module construction identity`,
+  );
+  assert.deepEqual([...snapshot.processorOptions.document], [...document], `${label}: document snapshot`);
+  assert.deepEqual(snapshot.processorOptions.options, {
+    ...options,
+    spectrum: null,
+    spectrumCollection: null,
+  }, `${label}: boot option snapshot`);
+  const processor = state.node.processor;
+  assert.equal(
+    processor.instance instanceof WebAssembly.Instance,
+    true,
+    `${label}: native WebAssembly.Instance construction identity`,
+  );
+  assert.equal(
+    processor.exports,
+    processor.instance.exports,
+    `${label}: processor exports preserve native instance identity`,
+  );
+  const ready = state.node.responses.find((message) => message?.tag === "miso.ready.v1");
+  assert.notEqual(ready, undefined, `${label}: actual ready reply`);
+  assert.equal(ready.requestId, 0, `${label}: boot correlation`);
+  assert.equal(ready.result, 0, `${label}: boot result`);
+  assert.equal(ready.backend, "simd128", `${label}: boot backend`);
+  assert(Number.isSafeInteger(ready.memoryBytes) && ready.memoryBytes > 0, `${label}: boot memory`);
+  assert.deepEqual(facade.fetches, [artifact.wasmUrl, artifact.abiUrl], `${label}: verified fetches`);
+
+  const status = await realDeadline(`${label} status`, () => host.status());
+  assert.deepEqual(Object.keys(status).sort(), [
+    "backend", "lastResult", "memoryBytes", "nextAbsoluteSample", "quantumFrames", "renderedQuanta",
+    "requestId", "result", "sampleRateHz", "state", "tag",
+  ], `${label}: status shape`);
+  assert.equal(status.tag, "miso.status.v1", `${label}: status tag`);
+  assert.equal(status.requestId, 1, `${label}: status correlation`);
+  assert.equal(status.result, 0, `${label}: status result`);
+  assert.equal(status.lastResult, 0, `${label}: status lastResult`);
+  assert.equal(status.state, 2, `${label}: status state`);
+  assert.equal(status.backend, 1, `${label}: status backend`);
+  assert.equal(status.sampleRateHz, 48000, `${label}: status sample rate`);
+  assert.equal(status.quantumFrames, 128, `${label}: status quantum`);
+  assert.equal(status.nextAbsoluteSample, 0n, `${label}: status next sample`);
+  assert.equal(status.renderedQuanta, 0n, `${label}: status rendered quanta`);
+  assert.equal(status.memoryBytes, host.memoryBytes, `${label}: status memory`);
+  const statusRequests = state.node.requests.filter((message) => message?.tag === "miso.status.v1");
+  assert.deepEqual(statusRequests.map((message) => message.requestId), [1], `${label}: status request`);
+  assert(
+    state.node.responses.some((message) => message?.tag === "miso.status.v1" && message.requestId === 1),
+    `${label}: correlated status reply`,
+  );
+
+  const native = Object.freeze({
+    instance: processor.instance,
+    exports: processor.exports,
+    handle: processor.handle,
+  });
+  state.native = native;
+  assert(Number.isSafeInteger(native.handle) && native.handle > 0, `${label}: native handle is live`);
+  const beforePointer = native.exports.miso_engine_web_v1_status_ptr(native.handle);
+  assert(Number.isInteger(beforePointer) && beforePointer > 0, `${label}: status pointer before disposal`);
+
+  const hostPostMessageAttemptsBeforeDispose = state.node.hostPostMessageAttempts;
+  await realDeadline(`${label} dispose`, () => host.dispose());
+  state.hostDisposeAcknowledged = true;
+  const disposeRequests = state.node.requests.filter((message) => message?.tag === "miso.dispose.v1");
+  assert.deepEqual(disposeRequests.map((message) => message.requestId), [2], `${label}: dispose request`);
+  const disposeReplies = state.node.responses.filter(
+    (message) => message?.tag === "miso.ack.v1" && message.requestId === 2,
+  );
+  assert.equal(disposeReplies.length, 1, `${label}: one correlated disposal acknowledgement`);
+  assert.equal(disposeReplies[0].result, 0, `${label}: disposal acknowledgement result`);
+  assert.equal(
+    native.exports.miso_engine_web_v1_status_ptr(native.handle),
+    0,
+    NATIVE_RELEASE_ASSERTION,
+  );
+  assert.equal(processor.handle, 0, `${label}: processor clears its disposed handle`);
+  assert.equal(native.instance.exports, native.exports, `${label}: saved instance remains native`);
+  assert.equal(
+    state.node.hostPostMessageAttempts,
+    hostPostMessageAttemptsBeforeDispose + 1,
+    `${label}: first disposal sends one host postMessage attempt`,
+  );
+
+  const hostPostMessageAttemptsAfterDispose = state.node.hostPostMessageAttempts;
+  await realDeadline(`${label} repeated dispose`, () => host.dispose());
+  assert.equal(
+    state.node.hostPostMessageAttempts,
+    hostPostMessageAttemptsAfterDispose,
+    `${label}: repeated disposal sends no additional host postMessage attempt`,
+  );
+  assert.equal(state.node.closedHostPort, true, `${label}: host port closed`);
+  assert.equal(state.node.closedProcessorPort, true, `${label}: processor port closed`);
+  assert.equal(state.node.disconnectCount, 1, `${label}: node disconnected once`);
+}
+
+function isNativeReleaseAssertion(error) {
+  return error?.code === "ERR_ASSERTION"
+    && typeof error.message === "string"
+    && error.message.startsWith(NATIVE_RELEASE_ASSERTION);
+}
+
+function cleanupSavedNativeHandle(state, label, requireLive) {
+  if (state.native === null) {
+    if (requireLive) throw new Error(`${label}: no independently saved native handle`);
+    return;
+  }
+  const { exports, handle } = state.native;
+  const pointerBeforeCleanup = exports.miso_engine_web_v1_status_ptr(handle);
+  if (requireLive) {
+    assert(Number.isInteger(pointerBeforeCleanup) && pointerBeforeCleanup > 0,
+      `${label}: saved handle was not live before fallback cleanup`);
+  }
+  if (pointerBeforeCleanup === 0) return;
+  const result = exports.miso_engine_web_v1_dispose(handle);
+  assert.equal(result, 0, `${label}: retained native disposal result`);
+  assert.equal(
+    exports.miso_engine_web_v1_status_ptr(handle),
+    0,
+    `${label}: retained native status pointer after fallback cleanup`,
+  );
+}
+
+async function runPositiveRealLifecycle(artifact) {
+  await withRealWebAudioFacade(artifact, artifact.workletUrl, "ordinary lifecycle", async (facade) => {
+    const state = realLifecycleState();
+    let operationError = null;
+    try {
+      await ordinaryRealLifecycle(artifact, artifact.workletUrl, facade, "ordinary", state);
+    } catch (error) {
+      operationError = error;
+    }
+    let cleanupError = null;
+    try {
+      await realDeadline("ordinary native failure cleanup", () => (
+        cleanupSavedNativeHandle(state, "ordinary native failure cleanup", false)
+      ));
+    } catch (error) {
+      cleanupError = error;
+    }
+    if (operationError !== null && cleanupError !== null) {
+      throw new AggregateError([operationError, cleanupError], "ordinary lifecycle and cleanup failed");
+    }
+    if (operationError !== null) throw operationError;
+    if (cleanupError !== null) throw cleanupError;
+  });
+  console.log("real-Wasm ordinary lifecycle: boot/status/dispose/repeated-dispose passed; cleanup passed");
+}
+
+async function runCorruptedWasmRedControl(artifact) {
+  const privateDirectory = await realDeadline(
+    "corrupted Wasm private copy",
+    () => mkdtemp(join(tmpdir(), "miso-837-corrupt-")),
+  );
+  try {
+    await realDeadline("corrupted Wasm private copy", async () => {
+      await Promise.all(REAL_ARTIFACT_NAMES.map((name) => copyFile(
+        realArtifactPath(artifact.directory, name),
+        realArtifactPath(privateDirectory, name),
+      )));
+      const corrupted = Uint8Array.from(await readFile(
+        realArtifactPath(privateDirectory, REAL_WASM_FILE),
+      ));
+      corrupted[corrupted.length - 1] ^= 1;
+      await writeFile(realArtifactPath(privateDirectory, REAL_WASM_FILE), corrupted);
+    });
+    let refusal = null;
+    try {
+      await realDeadline(
+        "corrupted Wasm identity preflight",
+        () => preflightRealArtifact(privateDirectory),
+      );
+    } catch (error) {
+      refusal = error;
+    }
+    assert.notEqual(refusal, null, "corrupted Wasm red control must refuse");
+    assert.match(refusal.message, /Wasm SHA-256 mismatch/);
+    console.log("red control: corrupted private Wasm refused before module/node construction");
+  } finally {
+    await realDeadline(
+      "corrupted Wasm private-copy cleanup",
+      () => rm(privateDirectory, { recursive: true, force: true }),
+    );
+  }
+}
+
+async function runDisposalMutantRedControl(artifact) {
+  const statement = "const result = this.exports.miso_engine_web_v1_dispose(this.handle);";
+  const occurrenceCount = artifact.workletSource.split(statement).length - 1;
+  if (occurrenceCount !== 1) {
+    throw new Error(
+      `disposal mutant refused: expected one ordinary disposal statement, found ${occurrenceCount}`,
+    );
+  }
+  const statementIndex = artifact.workletSource.indexOf(statement);
+  const ordinaryBranchIndex = artifact.workletSource.indexOf(
+    'if (message.tag === "miso.dispose.v1" && exactFields(message, ["tag", "requestId"]))',
+  );
+  if (ordinaryBranchIndex < 0 || statementIndex < ordinaryBranchIndex
+      || statementIndex > ordinaryBranchIndex + 500) {
+    throw new Error("disposal mutant refused: native statement is not in the ordinary branch");
+  }
+  const replacement = "const result = RESULT_OK;";
+  const mutantSource = artifact.workletSource.replace(statement, replacement);
+  if (mutantSource === artifact.workletSource
+      || mutantSource.split(replacement).length - 1 < 1) {
+    throw new Error("disposal mutant refused: source replacement was not unique");
+  }
+  const mutantWorkletUrl = `data:text/javascript;base64,${Buffer.from(mutantSource, "utf8").toString("base64")}`;
+  await withRealWebAudioFacade(artifact, mutantWorkletUrl, "disposal mutant", async (facade) => {
+    const state = realLifecycleState();
+    let lifecycleError = null;
+    try {
+      await ordinaryRealLifecycle(artifact, mutantWorkletUrl, facade, "disposal mutant", state);
+    } catch (error) {
+      lifecycleError = error;
+    }
+    const expectedFailure = isNativeReleaseAssertion(lifecycleError);
+    let cleanupError = null;
+    try {
+      await realDeadline("disposal mutant fallback native cleanup", () => (
+        cleanupSavedNativeHandle(state, "disposal mutant fallback native cleanup", expectedFailure)
+      ));
+    } catch (error) {
+      cleanupError = error;
+    }
+    if (!expectedFailure) {
+      const primary = lifecycleError ?? new Error("disposal mutant did not fail the named release assertion");
+      if (cleanupError !== null) {
+        throw new AggregateError([primary, cleanupError], "disposal mutant red control and cleanup failed");
+      }
+      throw primary;
+    }
+    assert.equal(state.hostDisposeAcknowledged, true, "disposal mutant failure followed an acknowledged disposal");
+    assert.equal(state.node.processor.handle, 0, "disposal mutant processor acknowledged and cleared its handle");
+    assert.equal(state.node.closedHostPort, true, "disposal mutant host port closed");
+    assert.equal(state.node.closedProcessorPort, true, "disposal mutant processor port closed");
+    if (cleanupError !== null) throw cleanupError;
+    console.log(
+      "red control: ordinary disposal mutant failed the named saved-handle release assertion; "
+      + "independent native fallback disposal/status-zero cleanup passed",
+    );
+  });
+}
+
+async function testRealWasmReceiver(artifactDirectory) {
+  const artifact = await realDeadline(
+    "real-Wasm artifact preflight",
+    () => preflightRealArtifact(artifactDirectory),
+  );
+  console.log(`real-Wasm artifact preflight: exact seven files, SHA-256 ${artifact.wasmSha256}`);
+  await runPositiveRealLifecycle(artifact);
+  await runCorruptedWasmRedControl(artifact);
+  await runDisposalMutantRedControl(artifact);
+  console.log("real-Wasm receiver lifecycle qualification passed");
 }
 
 async function testMainRealm() {
@@ -2027,6 +2833,10 @@ async function testProcessor() {
   }
 }
 
-await testMainRealm();
-await testProcessor();
-console.log("web AudioWorklet hermetic tests passed");
+if (realWasmReceiverArguments !== null) {
+  await testRealWasmReceiver(realWasmReceiverArguments.artifactDirectory);
+} else {
+  await testMainRealm();
+  await testProcessor();
+  console.log("web AudioWorklet hermetic tests passed");
+}
