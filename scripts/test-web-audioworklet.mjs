@@ -1057,8 +1057,16 @@ async function testMainRealm() {
       this.options = options;
       this.constructionContext = context;
       this.constructionModule = options.processorOptions.module;
+      const constructorDocument = options.processorOptions.document;
+      this.constructionDocumentShape = {
+        byteOffset: constructorDocument.byteOffset,
+        byteLength: constructorDocument.byteLength,
+        buffer: constructorDocument.buffer,
+      };
       // FakeNode retains the real constructor input by reference above. This separate, immediate
-      // copy is the test oracle: later caller mutation cannot rewrite the evidence being checked.
+      // byte copy is the content oracle: later caller mutation cannot rewrite the evidence being
+      // checked. Shape and backing identity are recorded from the actual constructor argument
+      // above, not inferred from this copy.
       this.constructionSnapshot = {
         name: _name,
         numberOfInputs: options.numberOfInputs,
@@ -1215,7 +1223,13 @@ async function testMainRealm() {
       const document = new Uint8Array(backing, 3, 5);
       document.set([11, 22, 33, 44, 55]);
       const originalVisible = [...document];
-      const factory = snapshotFactory({ document, includePreparedModule: false });
+      const originalWorkletUrl = "captured-document-processor.js";
+      const factory = snapshotFactory({
+        document,
+        includePreparedModule: false,
+        workletModuleUrl: originalWorkletUrl,
+      });
+      const eventsBefore = events.length;
       const nodesBefore = FakeNode.count;
       let hostValue;
       try {
@@ -1223,20 +1237,41 @@ async function testMainRealm() {
         await gate.started;
         document[1] = 99;
         factory.document = new Uint8Array([201, 202, 203]);
+        factory.workletModuleUrl = "mutated-during-compile.js";
         gate.release();
         hostValue = await boot;
         assert.equal(FakeNode.count, nodesBefore + 1, "snapshot.document.constructed");
         const node = FakeNode.latest;
         const captured = node.constructionSnapshot.processorOptions.document;
         assert.deepEqual([...captured], originalVisible, "snapshot.document.before-construction");
-        assert.equal(captured.byteOffset, 0, "snapshot.document.visible-range-offset");
-        assert.equal(captured.byteLength, originalVisible.length, "snapshot.document.visible-range-length");
-        assert.notEqual(captured.buffer, backing, "snapshot.document.private-storage");
+        assert.equal(
+          node.constructionDocumentShape.byteOffset,
+          0,
+          "snapshot.document.actual-constructor-visible-range-offset",
+        );
+        assert.equal(
+          node.constructionDocumentShape.byteLength,
+          originalVisible.length,
+          "snapshot.document.actual-constructor-visible-range-length",
+        );
+        assert.notEqual(
+          node.constructionDocumentShape.buffer,
+          backing,
+          "snapshot.document.actual-constructor-private-storage",
+        );
         assert.equal(backing.byteLength, 16, "snapshot.document.caller-buffer-attached");
         assert.equal(
           Object.isFrozen(node.options.processorOptions.document),
           false,
           "snapshot.document.nonempty-not-frozen",
+        );
+        const addModuleEvents = events.slice(eventsBefore)
+          .filter(([kind]) => kind === "addModule");
+        assert.equal(addModuleEvents.length, 1, "snapshot.document.add-module-once");
+        assert.equal(
+          addModuleEvents[0][1],
+          originalWorkletUrl,
+          "snapshot.document.worklet-url-captured-before-compile",
         );
       } finally {
         gate.release();
@@ -1302,6 +1337,61 @@ async function testMainRealm() {
         false,
         "snapshot.nested.sparse-hole",
       );
+
+      let reads = 0;
+      const firstEntries = [{ target: "output", targetId: "getter-first", channels: "both" }];
+      const laterEntries = [{ target: "output", targetId: "getter-later", channels: "right" }];
+      const getterCollection = { maximumCaptureBytes: 4096 };
+      Object.defineProperty(getterCollection, "entries", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          reads += 1;
+          return reads === 1 ? firstEntries : laterEntries;
+        },
+      });
+      const getterOptions = {
+        ...limits,
+        spectrum: null,
+        spectrumCollection: getterCollection,
+      };
+      const getterGate = snapshotGate();
+      addModuleGate = getterGate;
+      const getterFactory = snapshotFactory({ options: getterOptions });
+      let getterHost;
+      try {
+        const boot = createMisoAudioWorkletHost(getterFactory);
+        await getterGate.started;
+        assert.equal(reads, 1, "snapshot.nested-getter.single-synchronous-read");
+        Object.defineProperty(getterCollection, "entries", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            reads += 1;
+            return laterEntries;
+          },
+        });
+        firstEntries[0].targetId = "caller-mutated-after-capture";
+        getterGate.release();
+        getterHost = await boot;
+        const actualCollection = FakeNode.latest.options.processorOptions.options
+          .spectrumCollection;
+        assert.equal(reads, 1, "snapshot.nested-getter.no-later-read");
+        assert.equal(
+          actualCollection.entries[0].targetId,
+          "getter-first",
+          "snapshot.nested-getter.first-value-reaches-construction",
+        );
+        assert.equal(
+          actualCollection.entries[0].channels,
+          "both",
+          "snapshot.nested-getter.first-entry-reaches-construction",
+        );
+      } finally {
+        getterGate.release();
+        if (addModuleGate === getterGate) addModuleGate = null;
+        if (getterHost !== undefined) await getterHost.dispose().catch(() => undefined);
+      }
     };
 
     const runSnapshotSingleRead = async () => {
@@ -1487,6 +1577,56 @@ async function testMainRealm() {
         nonEnumerablePrepared,
       );
 
+      const nonEnumerableCollectionEntries = { maximumCaptureBytes: 1 };
+      Object.defineProperty(nonEnumerableCollectionEntries, "entries", {
+        configurable: true,
+        enumerable: false,
+        value: [collectionEntry],
+        writable: true,
+      });
+      await snapshotLocalRefusal(
+        "snapshot.shape.non-enumerable-collection-entries",
+        snapshotFactory({ options: {
+          ...limits, spectrum: null, spectrumCollection: nonEnumerableCollectionEntries,
+        } }),
+      );
+
+      const nonEnumerableSpectrumOptions = { ...limits };
+      Object.defineProperty(nonEnumerableSpectrumOptions, "spectrum", {
+        configurable: true,
+        enumerable: false,
+        value: singleSpectrum,
+        writable: true,
+      });
+      await snapshotLocalRefusal(
+        "snapshot.shape.six-enumerable-non-enumerable-spectrum",
+        snapshotFactory({ options: nonEnumerableSpectrumOptions }),
+      );
+
+      const nonEnumerableCollectionOptions = { ...limits };
+      const nonEnumerableCollection = {
+        entries: [collectionEntry],
+        maximumCaptureBytes: 4096,
+      };
+      Object.defineProperty(nonEnumerableCollectionOptions, "spectrumCollection", {
+        configurable: true,
+        enumerable: false,
+        value: nonEnumerableCollection,
+        writable: true,
+      });
+      await runSnapshotAccepted(
+        "snapshot.shape.six-enumerable-non-enumerable-collection",
+        snapshotFactory({ options: nonEnumerableCollectionOptions }),
+      );
+      const actualNonEnumerableCollection = FakeNode.latest.options.processorOptions.options
+        .spectrumCollection;
+      assert.ok(actualNonEnumerableCollection !== null, "snapshot.shape.non-enumerable-collection.actual");
+      assert.deepEqual(
+        actualNonEnumerableCollection.entries,
+        [collectionEntry],
+        "snapshot.shape.non-enumerable-collection.actual-values",
+      );
+
       await snapshotLocalRefusal(
         "snapshot.shape.seven-field-spectrum",
         snapshotFactory({ options: { ...limits, spectrum: singleSpectrum } }),
@@ -1659,11 +1799,22 @@ async function testMainRealm() {
       try {
         const boot = createMisoAudioWorkletHost(readyFactory);
         await readyGateValue.started;
+        readyContext.sampleRate = 44100;
+        readyContext.renderQuantumSize = 32;
         readyFactory.context = snapshotContext({ sampleRate: 44100, quantum: 32, state: "running" });
         readyFactory.options = { ...limits, sourceRingFrames: 1 };
         readyGateValue.release();
         readyHost = await boot;
         assert.equal(readyHost.backend, "simd128", "snapshot.ready.uses-captured-resources");
+        assert.equal(readyHost.resources.sampleRateHz, 48000,
+          "snapshot.ready.resources-captured-sample-rate");
+        assert.equal(readyHost.resources.quantumFrames, 64,
+          "snapshot.ready.resources-captured-quantum");
+        const readyStatus = await readyHost.status();
+        assert.equal(readyStatus.sampleRateHz, 48000,
+          "snapshot.ready.returned-host-captured-sample-rate");
+        assert.equal(readyStatus.quantumFrames, 64,
+          "snapshot.ready.returned-host-captured-quantum");
       } finally {
         readyGateValue.release();
         if (readyGate === readyGateValue) readyGate = null;
