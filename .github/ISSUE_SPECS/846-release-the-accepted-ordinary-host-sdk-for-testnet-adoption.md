@@ -59,3 +59,29 @@ finding. It re-ran the publisher/trust/generated/type/package gates, seven-file 
 both packed-host selectors, 257 headless tests and real-Wasm lifecycle checks. This establishes
 source/package readiness only; required PR/main qualification and immutable npm
 qualify/publish/registry verification remain.
+
+## Published and independently verified delivery
+
+PR #847 passed required qualification and merged as
+`89288333961713b3adaea0ad3050fcbb5e35d748`. Exact-main qualification run
+35082958084 passed. Immutable npm qualification run 35083633472 produced the same reviewed
+98-file archive, SHA256 `5ca46401c29b8206cea348be811ad30623c43807dbe1b33935d57534185e2744`
+and npm integrity
+`sha512-UZVdQrqJWUZVd07F0OkW3kCFeUrjMDc4ZM2/eEq83NHG2EMwvfxrjyRIWpyDNRWGSW9kPsQMAp2xHzbnLssymw==`.
+The qualified archive again byte-matched the accepted host, ABI and Wasm closure and passed both
+#844 packed-host ownership selectors.
+
+Publication run 35084001863 submitted that exact archive once through OIDC. npm accepted it, but
+the workflow's bounded registry-convergence step expired before public propagation. No second
+publish was attempted. Once the version became public, verify-only recovery run 35084369532 passed
+against qualification 35083633472 and the unchanged main SHA.
+
+Root independently downloaded the registry archive and proved byte equality with the qualified
+archive. Fresh public runtime imports, CLI `0.4.0`, TypeScript imports and npm 11.19.0 signature
+audit pass. Exactly one SLSA v1 subject binds
+`pkg:npm/%40misofm/engine@0.4.0` and archive SHA512
+`51955d42ba89594655774ec5d0e916de4085794ae330373864cdbf784abcdcd1c6d84330bdfc6b8f24485a9c83351586496f643ec40c029db11f36e72ecb329b`
+to source `89288333961713b3adaea0ad3050fcbb5e35d748`, this repository's
+`.github/workflows/npm-publish.yml`, and `refs/heads/main`. The registry-packaged host passes both
+#844 ownership selectors. SDK 0.4.0 is therefore ready for the separately tracked exact-dependency
+adapter release; no combined protected/ordinary observation or protected-EQ claim is made.
