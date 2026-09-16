@@ -442,12 +442,13 @@ function snapshotSpectrumCollectionBoot(input) {
   // Setting the length first keeps every absent index sparse in the ordinary private Array.
   const capturedEntries = [];
   capturedEntries.length = entriesLength;
-  for (let index = 0; index < entriesLength; index += 1) {
-    if (!(index in entries)) continue;
-    const snapshot = snapshotSpectrumCollectionEntry(entries[index]);
-    if (!snapshot.valid) return { value: null, valid: false };
+  // Preserve caller-shadowed `every` validation, but never use its return value as storage.
+  if (!entries.every((entry, index) => {
+    const snapshot = snapshotSpectrumCollectionEntry(entry);
+    if (!snapshot.valid) return false;
     capturedEntries[index] = snapshot.value;
-  }
+    return true;
+  })) return { value: null, valid: false };
   const maximumCaptureBytes = input.maximumCaptureBytes;
   if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes <= 0) {
     return { value: null, valid: false };
@@ -1436,32 +1437,31 @@ class MisoAudioWorkletHost {
 }
 
 export async function createMisoAudioWorkletHost(options) {
+  // Keep baseline's first-read/short-circuit order, caching each consumed semantic value.
+  const context = options?.context;
+  const quantumFrames = context?.renderQuantumSize ?? 128;
   const preparedModule = options?.preparedModule;
   const factoryFields = preparedModule === undefined
     ? OPTION_FIELDS
     : [...OPTION_FIELDS, "preparedModule"];
   if (!hasExactFields(options, factoryFields)) throw webError(RESULT_INVALID_ARGUMENT);
 
-  const context = options.context;
-  const document = options.document;
-  const bootSnapshot = snapshotBootOptions(options.options);
-  const simd128ModuleUrl = options.simd128ModuleUrl;
-  const workletModuleUrl = options.workletModuleUrl;
-  const contextState = context?.state;
-  const sampleRateHz = context?.sampleRate;
-  const quantumFrames = context?.renderQuantumSize ?? 128;
-  const audioWorklet = context?.audioWorklet;
-  const documentSnapshot = snapshotDocument(document);
-  if ((preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module))
-      || contextState !== "suspended"
-      || !validU32(quantumFrames) || quantumFrames === 0
-      || !validU32(sampleRateHz) || sampleRateHz === 0
-      || documentSnapshot === undefined
-      || !bootSnapshot.valid
-      || typeof simd128ModuleUrl !== "string"
-      || typeof workletModuleUrl !== "string") {
-    throw webError(1);
+  if (preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module)) {
+    throw webError(RESULT_INVALID_ARGUMENT);
   }
+  const contextState = context?.state;
+  if (contextState !== "suspended") throw webError(RESULT_INVALID_ARGUMENT);
+  if (!validU32(quantumFrames) || quantumFrames === 0) throw webError(RESULT_INVALID_ARGUMENT);
+  const sampleRateHz = context?.sampleRate;
+  if (!validU32(sampleRateHz) || sampleRateHz === 0) throw webError(RESULT_INVALID_ARGUMENT);
+  const documentSnapshot = snapshotDocument(options.document);
+  if (documentSnapshot === undefined) throw webError(RESULT_INVALID_ARGUMENT);
+  const bootSnapshot = snapshotBootOptions(options.options);
+  if (!bootSnapshot.valid) throw webError(RESULT_INVALID_ARGUMENT);
+  const simd128ModuleUrl = options.simd128ModuleUrl;
+  if (typeof simd128ModuleUrl !== "string") throw webError(RESULT_INVALID_ARGUMENT);
+  const workletModuleUrl = options.workletModuleUrl;
+  if (typeof workletModuleUrl !== "string") throw webError(RESULT_INVALID_ARGUMENT);
   const bootOptions = bootSnapshot.value;
   bootOptions.spectrum = bootOptions.spectrum ?? null;
   bootOptions.spectrumCollection = bootOptions.spectrumCollection ?? null;
@@ -1470,6 +1470,8 @@ export async function createMisoAudioWorkletHost(options) {
   if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");
   let node;
   try {
+    // Capture before a possible module-fetch await; getter failures retain initialization folding.
+    const audioWorklet = context.audioWorklet;
     const selected = {
       backend: SHIPPING_BACKEND,
       module: preparedModule ?? await fetchModule(simd128ModuleUrl),

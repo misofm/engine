@@ -1192,6 +1192,19 @@ async function testMainRealm() {
       return error;
     };
 
+    const snapshotPreloadingFailure = async (label, factory, check) => {
+      const eventsBefore = events.length;
+      const fetchesBefore = fetches.length;
+      const nodesBefore = FakeNode.count;
+      await assert.rejects(async () => {
+        const hostValue = await createMisoAudioWorkletHost(factory);
+        await hostValue.dispose();
+      }, check, label);
+      assert.equal(events.length, eventsBefore, `${label}: no loading or addModule`);
+      assert.equal(fetches.length, fetchesBefore, `${label}: no fetch`);
+      assert.equal(FakeNode.count, nodesBefore, `${label}: no node construction`);
+    };
+
     const snapshotLocalHostRefusal = async (label, promise, result = 1) => {
       const outcome = await promise.then(
         (hostValue) => ({ hostValue }),
@@ -1229,6 +1242,16 @@ async function testMainRealm() {
         includePreparedModule: false,
         workletModuleUrl: originalWorkletUrl,
       });
+      const originalAudioWorklet = factory.context.audioWorklet;
+      let audioWorkletReads = 0;
+      let replacementAddModuleCalls = 0;
+      const replacementAudioWorklet = {
+        async addModule(url) { replacementAddModuleCalls += 1; await originalAudioWorklet.addModule(url); },
+      };
+      Object.defineProperty(factory.context, "audioWorklet", {
+        configurable: true,
+        get() { audioWorkletReads += 1; return originalAudioWorklet; },
+      });
       const eventsBefore = events.length;
       const nodesBefore = FakeNode.count;
       let hostValue;
@@ -1238,6 +1261,9 @@ async function testMainRealm() {
         document[1] = 99;
         factory.document = new Uint8Array([201, 202, 203]);
         factory.workletModuleUrl = "mutated-during-compile.js";
+        Object.defineProperty(factory.context, "audioWorklet", {
+          get() { audioWorkletReads += 1; return replacementAudioWorklet; },
+        });
         gate.release();
         hostValue = await boot;
         assert.equal(FakeNode.count, nodesBefore + 1, "snapshot.document.constructed");
@@ -1273,6 +1299,8 @@ async function testMainRealm() {
           originalWorkletUrl,
           "snapshot.document.worklet-url-captured-before-compile",
         );
+        assert.equal(audioWorkletReads, 1, "snapshot.document.audio-worklet-captured-before-compile");
+        assert.equal(replacementAddModuleCalls, 0, "snapshot.document.replacement-audio-worklet-unused");
       } finally {
         gate.release();
         if (compileGate === gate) compileGate = null;
@@ -1468,6 +1496,86 @@ async function testMainRealm() {
         if (addModuleGate === hostileGate) addModuleGate = null;
         if (hostileHost !== undefined) await hostileHost.dispose().catch(() => undefined);
       }
+
+      for (const shadow of ["false", "undefined"]) {
+        const label = `snapshot.nested.every-${shadow}`;
+        const reads = { every: 0, calls: 0, entry: 0, maximum: 0 };
+        const entry = { targetId: "unread", channels: "both" };
+        Object.defineProperty(entry, "target", {
+          enumerable: true,
+          get() { reads.entry += 1; return "output"; },
+        });
+        const entries = [entry];
+        Object.defineProperty(entries, "every", {
+          get() {
+            reads.every += 1;
+            return shadow === "undefined" ? undefined : function () {
+              assert.equal(this, entries, `${label}.receiver`);
+              reads.calls += 1;
+              return false;
+            };
+          },
+        });
+        const spectrumCollection = { entries };
+        Object.defineProperty(spectrumCollection, "maximumCaptureBytes", {
+          enumerable: true,
+          get() { reads.maximum += 1; throw new Error("late collection maximum read"); },
+        });
+        const factory = snapshotFactory({ options: { ...limits, spectrum: null, spectrumCollection } });
+        if (shadow === "false") await snapshotLocalRefusal(label, factory);
+        else await snapshotPreloadingFailure(label, factory, (error) => (
+          error instanceof TypeError && error.tag === undefined && /every.*not a function/.test(error.message)
+        ));
+        assert.deepEqual(reads, {
+          every: 1, calls: shadow === "false" ? 1 : 0, entry: 0, maximum: 0,
+        }, `${label}.short-circuit`);
+      }
+
+      for (const throwingField of ["constructor", "species"]) {
+        const label = `snapshot.nested.throwing-${throwingField}`;
+        const reads = { constructor: 0, species: 0, every: 0, target: 0, targetId: 0, channels: 0 };
+        const values = { target: "output", targetId: "entry-first", channels: "both" };
+        const entry = {};
+        for (const [field, value] of Object.entries(values)) {
+          Object.defineProperty(entry, field, {
+            enumerable: true,
+            get() { reads[field] += 1; return reads[field] === 1 ? value : "reread"; },
+          });
+        }
+        const entries = [entry, ,];
+        const constructor = {
+          get [Symbol.species]() { reads.species += 1; throw new Error("array species consulted"); },
+        };
+        Object.defineProperty(entries, "constructor", {
+          get() {
+            reads.constructor += 1;
+            if (throwingField === "constructor") throw new Error("array constructor consulted");
+            return constructor;
+          },
+        });
+        Object.defineProperty(entries, "every", {
+          value(callback) {
+            reads.every += 1;
+            assert.equal(this, entries, `${label}.every-receiver`);
+            assert.equal(Array.prototype.every.call(this, callback), true, `${label}.valid-entries`);
+            return this; // Truthy validation outcome must never become constructor storage.
+          },
+        });
+        await runSnapshotAccepted(label, snapshotFactory({ options: {
+          ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
+        } }), () => {
+          const captured = FakeNode.latest.options.processorOptions.options.spectrumCollection.entries;
+          assert.notEqual(captured, entries, `${label}.private-array`);
+          assert.equal(Object.getPrototypeOf(captured), Array.prototype, `${label}.ordinary-array`);
+          assert.equal(captured.length, 2, `${label}.length`);
+          assert.equal(Object.hasOwn(captured, 1), false, `${label}.hole`);
+          assert.notEqual(captured[0], entry, `${label}.private-entry`);
+          assert.deepEqual(captured[0], values, `${label}.captured-fields`);
+          assert.deepEqual(reads, {
+            constructor: 0, species: 0, every: 1, target: 1, targetId: 1, channels: 1,
+          }, `${label}.single-reads`);
+        });
+      }
     };
 
     const runSnapshotSingleRead = async () => {
@@ -1553,6 +1661,126 @@ async function testMainRealm() {
         await hostValue.dispose();
       }
       assert.ok(label, "snapshot accepted case has a label");
+    };
+
+    const runSnapshotFactoryOrderCases = async () => {
+      // Adjacent baseline stages must refuse before even reading the later accessor.
+      for (const [name, setup] of [
+        ["running-context-spectrum-repair", (f) => {
+          f.context.state = "running";
+          return [f.options, "spectrum", () => { f.context.state = "suspended"; return null; }];
+        }],
+        ["invalid-module-before-options", (f) => {
+          f.preparedModule = null; return [f, "options"];
+        }],
+        ["invalid-context-before-document", (f) => {
+          f.context.state = "running"; return [f, "document"];
+        }],
+        ["invalid-quantum-before-rate", (f) => {
+          f.context.renderQuantumSize = 0; return [f.context, "sampleRate"];
+        }],
+        ["invalid-rate-before-document", (f) => {
+          f.context.sampleRate = 0; return [f, "document"];
+        }],
+        ["invalid-document-before-spectrum", (f) => {
+          f.document = null; return [f.options, "spectrum"];
+        }],
+        ["invalid-boot-before-simd-url", (f) => {
+          f.options.sourceRingFrames = -1; return [f, "simd128ModuleUrl"];
+        }],
+        ["invalid-simd-url-before-worklet-url", (f) => {
+          f.simd128ModuleUrl = 0; return [f, "workletModuleUrl"];
+        }],
+      ]) {
+        const label = `snapshot.factory-order.${name}`;
+        const factory = snapshotFactory({ options: { ...limits, spectrum: null, spectrumCollection: null } });
+        const [object, field, repair] = setup(factory);
+        let reads = 0;
+        Object.defineProperty(object, field, {
+          enumerable: true,
+          get() {
+            reads += 1;
+            if (repair !== undefined) return repair();
+            throw new Error(`${label}: later getter`);
+          },
+        });
+        await snapshotLocalRefusal(label, factory);
+        assert.equal(reads, 0, `${label}.later-reads`);
+      }
+
+      // The opening quantum read precedes both preparedModule and the exact-shape decision.
+      const repairFactory = snapshotFactory({ preparedModule: null });
+      let repairedModule = null;
+      let quantumReads = 0;
+      let moduleReads = 0;
+      Object.defineProperty(repairFactory.context, "renderQuantumSize", {
+        get() { quantumReads += 1; repairedModule = unsupportedPreparationModule; return 64; },
+      });
+      Object.defineProperty(repairFactory, "preparedModule", {
+        get() { moduleReads += 1; return repairedModule; },
+      });
+      const eventsBefore = events.length;
+      const fetchesBefore = fetches.length;
+      const nodesBefore = FakeNode.count;
+      const repairBoot = createMisoAudioWorkletHost(repairFactory);
+      let repairHost;
+      try {
+        assert.equal(quantumReads, 1, "snapshot.factory-order.repair.initial-quantum-read");
+        assert.equal(moduleReads, 1, "snapshot.factory-order.repair.initial-module-read");
+        repairHost = await repairBoot;
+        assert.equal(moduleReads, 1, "snapshot.factory-order.repair.cached-module");
+        // One initial read, one preconstruction recheck, and FakeNode's own context observation.
+        assert.equal(quantumReads, 3, "snapshot.factory-order.repair.quantum-recheck");
+        assert.equal(FakeNode.count, nodesBefore + 1, "snapshot.factory-order.repair.constructed");
+        assert.equal(FakeNode.latest.constructionModule, unsupportedPreparationModule,
+          "snapshot.factory-order.repair.module-identity");
+        assert.deepEqual(events.slice(eventsBefore), [["addModule", "processor.js"]],
+          "snapshot.factory-order.repair.no-compile");
+        assert.equal(fetches.length, fetchesBefore + 1, "snapshot.factory-order.repair.only-abi-fetch");
+        assert.match(fetches[fetchesBefore], /miso-engine-v1-abi-layout\.json$/);
+      } finally {
+        if (repairHost !== undefined) await repairHost.dispose();
+      }
+
+      for (const throws of [false, true]) {
+        const label = `snapshot.factory-order.invalid-shape-quantum-${throws ? "throws" : "reads"}`;
+        const factory = snapshotFactory();
+        factory.extra = true;
+        const sentinel = new Error(label);
+        const reads = { quantum: 0, module: 0 };
+        Object.defineProperty(factory.context, "renderQuantumSize", {
+          get() { reads.quantum += 1; if (throws) throw sentinel; return 64; },
+        });
+        Object.defineProperty(factory, "preparedModule", {
+          get() { reads.module += 1; return unsupportedPreparationModule; },
+        });
+        if (throws) await snapshotPreloadingFailure(label, factory, (error) => error === sentinel);
+        else await snapshotLocalRefusal(label, factory);
+        assert.deepEqual(reads, { quantum: 1, module: throws ? 0 : 1 }, `${label}.reads`);
+      }
+
+      const validate = WebAssembly.validate;
+      try {
+        for (const supported of [false, true]) {
+          const label = `snapshot.factory-order.audio-worklet-simd-${supported}`;
+          const factory = snapshotFactory({ includePreparedModule: false });
+          const reads = { simd: 0, audioWorklet: 0 };
+          WebAssembly.validate = () => { reads.simd += 1; return supported; };
+          Object.defineProperty(factory.context, "audioWorklet", {
+            get() { reads.audioWorklet += 1; throw new Error("audioWorklet getter sentinel"); },
+          });
+          if (supported) await snapshotLocalRefusal(label, factory, 255);
+          else await snapshotPreloadingFailure(label, factory, (error) => {
+            assert.deepEqual(error, {
+              tag: "miso.unsupported.v1", requestId: 0, result: 7, capability: "simd128",
+            }, label);
+            return true;
+          });
+          assert.deepEqual(reads, { simd: 1, audioWorklet: supported ? 1 : 0 }, `${label}.reads`);
+        }
+      } finally {
+        WebAssembly.validate = validate;
+      }
     };
 
     const runSnapshotStorageCases = async () => {
@@ -2232,6 +2460,7 @@ async function testMainRealm() {
         },
       );
       await runSnapshotStorageCases();
+      await runSnapshotFactoryOrderCases();
       await runSnapshotShapeAndDomainCases();
       await runSnapshotReferencesAndLimits();
       await runSnapshotContextDriftCases();
