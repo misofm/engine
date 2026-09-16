@@ -9436,11 +9436,15 @@ mod observation_checkpoint_c1_tests {
 
     #[test]
     fn each_unsupported_alias_does_not_spend_its_classified_attempt() {
-        let ordinary_calls: [fn(u32) -> u32; 6] = [
-            |handle| miso_engine_web_v1_spectrum_arm(handle),
-            |handle| miso_engine_web_v1_spectrum_read(handle, u32::MAX),
-            |handle| miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
-            |handle| {
+        let calls: [(&str, fn(u32) -> u32); 8] = [
+            ("arm", |handle| miso_engine_web_v1_spectrum_arm(handle)),
+            ("read", |handle| {
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX)
+            }),
+            ("select", |handle| {
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX)
+            }),
+            ("stream select", |handle| {
                 miso_engine_web_v1_spectrum_stream_select(
                     handle,
                     u32::MAX,
@@ -9448,9 +9452,19 @@ mod observation_checkpoint_c1_tests {
                     u32::MAX,
                     f64::NAN,
                 )
-            },
-            |handle| miso_engine_web_v1_observation_read(handle, u32::MAX),
-            |handle| miso_engine_web_v1_meter_lease(handle, 1),
+            }),
+            ("resident read", |handle| {
+                miso_engine_web_v1_observation_read(handle, u32::MAX)
+            }),
+            ("meter acquire", |handle| {
+                miso_engine_web_v1_meter_lease(handle, 1)
+            }),
+            ("cancel", |handle| {
+                miso_engine_web_v1_spectrum_cancel(handle)
+            }),
+            ("meter release", |handle| {
+                miso_engine_web_v1_meter_lease(handle, 0)
+            }),
         ];
         for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
             ("free", (1, false, false, false)),
@@ -9463,44 +9477,30 @@ mod observation_checkpoint_c1_tests {
             let spectrum_markers = stage_spectrum_markers();
             let resident_markers = stage_resident_markers();
             let before = protected_ffi_state(handle);
-            for &call in &ordinary_calls {
-                assert_eq!(call(handle), RESULT_UNSUPPORTED, "{label} ordinary alias");
-                assert_eq!(
-                    protected_ffi_state(handle),
-                    before,
-                    "{label} ordinary unsupported alias changed protected state"
-                );
-                assert_eq!(
-                    call(handle),
-                    RESULT_UNSUPPORTED,
-                    "{label} repeated ordinary alias"
-                );
-                assert_eq!(
-                    protected_ffi_state(handle),
-                    before,
-                    "{label} repeated ordinary unsupported alias changed protected state"
-                );
+            assert_eq!(
+                before.status.profile,
+                crate::OBSERVATION_PROFILE_EQ_SPECTRUM
+            );
+            assert_ne!(before.status.owner, 0);
+            for &(alias, call) in &calls {
+                for repeat in 0..2 {
+                    let (result, allocations, frees) =
+                        crate::ffi::live_response_ffi_tests::measured(|| call(handle));
+                    assert_eq!(result, RESULT_UNSUPPORTED, "{label} {alias} call {repeat}");
+                    assert_eq!(allocations, 0, "{label} {alias} call {repeat} allocated");
+                    assert_eq!(frees, 0, "{label} {alias} call {repeat} freed");
+                    let after = protected_ffi_state(handle);
+                    assert_eq!(after.status.owner, before.status.owner);
+                    assert_eq!(
+                        after.status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL,
+                        0
+                    );
+                    assert_eq!(
+                        after, before,
+                        "{label} {alias} call {repeat} changed protected state"
+                    );
+                }
             }
-            assert_eq!(
-                miso_engine_web_v1_spectrum_cancel(handle),
-                RESULT_UNSUPPORTED,
-                "{label} removal alias"
-            );
-            assert_eq!(
-                protected_ffi_state(handle),
-                before,
-                "{label} removal unsupported alias changed protected state"
-            );
-            assert_eq!(
-                miso_engine_web_v1_meter_lease(handle, 0),
-                RESULT_UNSUPPORTED,
-                "{label} meter release alias"
-            );
-            assert_eq!(
-                protected_ffi_state(handle),
-                before,
-                "{label} repeated removal-class alias changed protected state"
-            );
             assert_spectrum_markers(spectrum_markers);
             assert_resident_markers(&resident_markers);
             dispose(handle);

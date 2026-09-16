@@ -9889,10 +9889,9 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     assert_eq!(terminal[0].state, OBSERVATION_RECEIPT_STATE_CLOSED);
     assert_eq!(terminal[0].result, RESULT_WRONG_STATE);
 
-    // Three authoritative rows leave exactly the reserved removal row. The live controller has
-    // one real outstanding ordinary publication, so its removal queue may accept the stop into
-    // row four. Once all four rows are occupied, a new publication cannot advance the native
-    // revision or overwrite any row, while repeated stop still returns its original receipt.
+    // One real Pending start and two synthetic occupancy rows leave the fourth row for removal.
+    // The synthetic rows prove only occupancy; the live controller has exactly one real
+    // outstanding ordinary publication and no removal publication.
     let mut capacity = AudioWorkletEngineHost::boot_with_observation_demand(
         document.as_bytes(),
         boot_options(128),
@@ -9938,36 +9937,176 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
         0,
         "removal credit is available before the fourth publication"
     );
+    {
+        let ready = capacity.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.owner(), accepted_start.owner);
+        assert_eq!(storage.controller.work().active_spectrum_captures, 1);
+        assert_eq!(
+            storage.controller.spectrum_state().accepted_generation,
+            accepted_start.revision
+        );
+        assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+        assert_eq!(storage.controller.try_applied(), None);
+    }
+    assert_eq!(capacity.status().rendered_quanta, 0);
     let three_rows = capacity.side_records.receipts;
-    let revision_before_stop = capacity.observation_status().accepted_generation;
     assert_eq!(capacity.stop_spectrum_stream(), RESULT_OK);
     let stop_receipt = capacity.observation_admission().receipt;
     assert_eq!(stop_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(stop_receipt.owner, accepted_start.owner.get());
     assert_eq!(capacity.side_records.pending_count, 4);
     assert_eq!(capacity.side_records.reserved_mask, 0);
     assert_eq!(capacity.side_records.pending_stop_slot, Some(3));
     assert_eq!(capacity.side_records.receipts[..3], three_rows[..3]);
     assert_eq!(capacity.side_records.receipts[3], stop_receipt);
     assert_eq!(stop_receipt.sequence, accepted_start.revision + 1);
-    assert_eq!(revision_before_stop, accepted_start.revision);
-    assert_eq!(capacity.observation_status().accepted_generation, 0);
-
     let four_rows = capacity.side_records.receipts;
-    let revision_at_capacity = capacity.observation_status().accepted_generation;
-    assert_eq!(
-        capacity.start_spectrum_stream(),
-        Err(RESULT_BACKPRESSURE),
-        "four occupied rows refuse a new publication"
-    );
-    assert_eq!(capacity.side_records.receipts, four_rows);
-    assert_eq!(
-        capacity.observation_status().accepted_generation,
-        revision_at_capacity
-    );
     assert_eq!(capacity.stop_spectrum_stream(), RESULT_OK);
     assert_eq!(capacity.observation_admission().receipt, stop_receipt);
     assert_eq!(capacity.side_records.receipts, four_rows);
     assert_eq!(capacity.side_records.pending_stop_slot, Some(3));
+    assert_eq!(capacity.side_records.reserved_mask, 0);
+    assert_eq!(capacity.side_records.pending_count, 4);
+
+    // Isolate capacity from native publication backpressure: apply/reconcile a real start but
+    // retain its completed row, then fill the other three rows with synthetic occupancy only.
+    // There is no outstanding native Ordinary or Removal work, and the live spectrum needs a
+    // real removal. Taking the one completed row will leave exactly enough space for that stop.
+    let mut full = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("full-row protected boot");
+    full.start_spectrum_stream().expect("real capacity start");
+    let real_start = full.observation_admission().receipt;
+    assert_eq!(real_start.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(full.render_next(), RESULT_OK);
+    full.reconcile_observation_applications();
+    assert_eq!(full.side_records.pending_count, 0);
+    assert_eq!(full.side_records.completed_count, 1);
+    let completed_start = WebObservationReceipt {
+        state: OBSERVATION_RECEIPT_STATE_APPLIED,
+        application_sample: 0,
+        ..real_start
+    };
+    assert_eq!(full.side_records.receipts[0], completed_start);
+    let (owner, spectrum, work) = {
+        let ready = full.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.try_applied(), None);
+        (
+            storage.controller.owner(),
+            storage.controller.spectrum_state(),
+            storage.controller.work(),
+        )
+    };
+    assert_eq!(owner.get(), real_start.owner);
+    assert_eq!(spectrum.accepted_generation, real_start.sequence);
+    assert_eq!(spectrum.applied_generation, real_start.sequence);
+    assert_eq!(work.active_spectrum_captures, 1);
+    for sequence in [
+        real_start.sequence + 10,
+        real_start.sequence + 11,
+        real_start.sequence + 12,
+    ] {
+        let slot = full
+            .reserve_receipt(ObservationClass::Removal)
+            .expect("synthetic occupancy row");
+        full.commit_receipt(
+            slot,
+            host_core::ObservationAccepted {
+                owner,
+                revision: sequence,
+                work,
+            },
+            OBSERVATION_OPERATION_START_SPECTRUM,
+        );
+    }
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 1);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, None);
+    assert_ne!(
+        full.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0
+    );
+    let full_rows = full.side_records.receipts;
+    let applications = full.side_records.applications;
+    let application_len = full.side_records.application_len;
+    // The native revision counter is private. The next genuine receipt must follow this real
+    // publication's sequence, independently of the synthetic rows and spectrum generation.
+    let expected_stop_sequence = real_start.sequence + 1;
+    assert_eq!(full.stop_spectrum_stream(), RESULT_BACKPRESSURE);
+    let refusal = full.observation_admission();
+    assert_eq!(refusal.operation, OBSERVATION_OPERATION_STOP_SPECTRUM);
+    assert_eq!(refusal.result, RESULT_BACKPRESSURE);
+    assert_eq!(refusal.reason, OBSERVATION_REFUSAL_REASON_BACKPRESSURE);
+    assert_eq!(
+        refusal.flags,
+        OBSERVATION_ADMISSION_REQUESTED | OBSERVATION_ADMISSION_MAXIMUM
+    );
+    assert_eq!(
+        &refusal.limit[..refusal.limit_bytes as usize],
+        b"observation.application_capacity"
+    );
+    assert_eq!((refusal.requested, refusal.maximum), (5, 4));
+    assert_eq!(refusal.receipt, WebObservationReceipt::default());
+    assert_eq!(full.side_records.receipts, full_rows);
+    assert_eq!(full.side_records.applications, applications);
+    assert_eq!(full.side_records.application_len, application_len);
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 1);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, None);
+    {
+        let ready = full.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.owner(), owner);
+        assert_eq!(storage.controller.spectrum_state(), spectrum);
+        assert_eq!(storage.controller.work(), work);
+        assert_eq!(storage.controller.try_applied(), None);
+    }
+
+    assert_eq!(full.take_observation_applications(), &[completed_start]);
+    assert_eq!(
+        full.side_records.receipts[0],
+        WebObservationReceipt::default()
+    );
+    assert_eq!(full.side_records.receipts[1..], full_rows[1..]);
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 0);
+    // The capacity refusal legitimately spent Removal ingress credit. Render replenishes it;
+    // no new native publication should be waiting to apply at this boundary.
+    assert_eq!(full.render_next(), RESULT_OK);
+    full.reconcile_observation_applications();
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 0);
+    assert_ne!(
+        full.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0
+    );
+    assert_eq!(full.stop_spectrum_stream(), RESULT_OK);
+    let recovered_stop = full.observation_admission().receipt;
+    assert_eq!(recovered_stop.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(recovered_stop.owner, owner.get());
+    assert_eq!(recovered_stop.sequence, expected_stop_sequence);
+    assert_eq!(full.side_records.receipts[0], recovered_stop);
+    assert_eq!(full.side_records.receipts[1..], full_rows[1..]);
+    assert_eq!(full.side_records.pending_count, 4);
+    assert_eq!(full.side_records.completed_count, 0);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, Some(0));
 }
 
 #[test]
