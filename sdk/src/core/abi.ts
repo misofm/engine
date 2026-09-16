@@ -112,6 +112,8 @@ export interface BootOptions {
   readonly sourceRingFrames?: number;
   /** Total boot memory budget. Absent selects the engine's default ceiling. */
   readonly maximumMemoryBytes?: bigint;
+  /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
+  readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /** The four console words. Absent attaches no console at all. */
   readonly console?: {
     readonly commandQueueRecords?: number;

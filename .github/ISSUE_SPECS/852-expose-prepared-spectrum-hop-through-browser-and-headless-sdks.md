@@ -122,3 +122,18 @@ root's independent audit caught one rustfmt discrepancy; round 2 corrected forma
 semantic change. Root reran the focused tests, strict host-web library Clippy, wasm32 compilation,
 formatting, and diff checks: PASS. This closes the Rust/ABI B1 slice; SDK capability enforcement
 and transport remain B2.
+
+**B2a shared/headless boot contract — complete in two Luna MAX rounds.** `BootOptions` now accepts
+the literal preparation value `spectrumHopFrames` for H256, H512, H1024, or H2048. The SDK copies
+and validates it synchronously before instantiation, leaves it outside the packed boot-options
+record, and selects the additive boot export only after the existing ABI-version guard and an
+exact capability value of 1. Omission still uses the legacy export without probing the optional
+capability; an old, wrong-capability, or incomplete explicit asset raises a typed asset refusal
+and never falls back. Reboot preflights capability before disposing the live session. Round 1
+implemented the seam and focused fake/proxy asset coverage. Root review found that its initial
+capability probe preceded the documented ABI-version step; round 2 restored ABI-first ordering
+and added a regression proving the ABI diagnostic wins without probing capability. Root reran all
+eight focused cases, the SDK type/mirror gate, Node syntax checks, and diff checks: PASS. The full
+boot eval also passed against the prior qualified artifact in the agent run. Generated ABI and
+actual new-artifact qualification remain deferred to B4; Worker preservation is the next bounded
+B2 slice.
