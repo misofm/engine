@@ -925,6 +925,8 @@ async function testMainRealm() {
   let commandMutation = null;
   let compileGate = null;
   let addModuleGate = null;
+  let readyGate = null;
+  let abiJsonGate = null;
 
   const snapshotGate = () => {
     let release;
@@ -1014,10 +1016,10 @@ async function testMainRealm() {
       this.onprocessorerror = null;
       this.options = options;
       this.constructionQuantumFrames = context.renderQuantumSize ?? 128;
+      this.constructionContext = context;
+      this.constructionModule = options.processorOptions.module;
       if (bootDataTestMode !== null) {
         const constructorDocument = options.processorOptions.document;
-        this.constructionContext = context;
-        this.constructionModule = options.processorOptions.module;
         this.constructionDocumentShape = {
           byteOffset: constructorDocument.byteOffset,
           byteLength: constructorDocument.byteLength,
@@ -1032,13 +1034,19 @@ async function testMainRealm() {
       this.disposeMessages = 0;
       this.disconnectCount = 0;
       FakeNode.latest = this;
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: "simd128",
           resources: resourceReport(1, this.constructionQuantumFrames),
           memoryBytes: 65536,
         };
+        if (readyGate !== null) {
+          const gate = readyGate;
+          readyGate = null;
+          gate.start();
+          await gate.promise;
+        }
         if (readyMutation !== null) data = readyMutation(data);
         this.port.onmessage?.({ data });
       });
@@ -1056,7 +1064,15 @@ async function testMainRealm() {
     return {
       ok: true,
       arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-      json: async () => preparedAbiLayout,
+      json: async () => {
+        if (abiJsonGate !== null) {
+          const gate = abiJsonGate;
+          abiJsonGate = null;
+          gate.start();
+          await gate.promise;
+        }
+        return preparedAbiLayout;
+      },
     };
   };
   const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
@@ -1744,8 +1760,9 @@ async function testMainRealm() {
       }
 
       {
-        const gate = snapshotGate();
-        addModuleGate = gate;
+        const addGate = snapshotGate();
+        const readyPause = snapshotGate();
+        const abiPause = snapshotGate();
         const spectrum = {
           target: "trackPostMatrix", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
         };
@@ -1761,17 +1778,64 @@ async function testMainRealm() {
         };
         const expectedOptions = { ...options, spectrum: { ...spectrum } };
         const factory = makeFactory({ options, workletModuleUrl: "single-spectrum.js" });
+        const originalFactory = {
+          context: factory.context,
+          options: factory.options,
+          simd128ModuleUrl: factory.simd128ModuleUrl,
+          workletModuleUrl: factory.workletModuleUrl,
+          hasPreparedModule: Object.hasOwn(factory, "preparedModule"),
+          preparedModule: factory.preparedModule,
+        };
+        const originalContext = {
+          state: context.state,
+          sampleRate: context.sampleRate,
+          renderQuantumSize: context.renderQuantumSize,
+        };
+        const replacementModule = await original.compile(unsupportedPreparationModuleBytes);
+        const replacementContext = {
+          state: "suspended", sampleRate: 44100, renderQuantumSize: 128,
+          audioWorklet: { addModule: async () => undefined },
+        };
         let hostValue;
+        let boot;
         const previousMixedSuccess = mixedSuccess;
         try {
-          const boot = createMisoAudioWorkletHost(factory);
-          await gate.started;
-          spectrum.targetId = "mutated-spectrum";
+          addModuleGate = addGate;
+          readyGate = readyPause;
+          abiJsonGate = abiPause;
+          boot = createMisoAudioWorkletHost(factory);
+          await addGate.started;
+          spectrum.targetId = "mutated-spectrum-before-construction";
+          options.sourceRingFrames = 128;
+          options.consoleCommandQueueRecords = 8n;
           options.consoleMeterBlocks = 99n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.context = replacementContext;
+          factory.preparedModule = replacementModule;
           factory.simd128ModuleUrl = "mutated-simd.wasm";
-          factory.workletModuleUrl = "mutated-processor.js";
-          gate.release();
+          factory.workletModuleUrl = "mutated-processor-before-construction.js";
+          addGate.release();
+          await readyPause.started;
+          context.state = "running";
+          context.sampleRate = 44100;
+          context.renderQuantumSize = 128;
+          spectrum.targetId = "mutated-spectrum-while-ready";
+          options.sourceRingFrames = 256;
+          options.consoleCommandQueueRecords = 4n;
+          options.consoleMeterBlocks = 101n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
+          readyPause.release();
+          await abiPause.started;
+          spectrum.targetId = "mutated-spectrum-while-abi";
+          options.sourceRingFrames = 64;
+          options.consoleCommandQueueRecords = 2n;
+          options.consoleMeterBlocks = 103n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.context = { ...replacementContext, sampleRate: 96000 };
+          factory.preparedModule = replacementModule;
+          factory.simd128ModuleUrl = "mutated-simd-while-abi.wasm";
+          factory.workletModuleUrl = "mutated-processor-while-abi.js";
+          abiPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
           const captured = node.options.processorOptions.options;
@@ -1786,6 +1850,14 @@ async function testMainRealm() {
             [["compile", "simd.wasm"], ["addModule", "single-spectrum.js"]],
             "single spectrum loading inputs are captured",
           );
+          const status = await hostValue.status();
+          assert.equal(status.sampleRateHz, 48000, "status keeps captured sample rate");
+          assert.equal(status.quantumFrames, 64, "status keeps captured quantum");
+          assert.equal(node.constructionContext, context, "construction keeps context identity");
+          assert.equal(node.constructionModule, unsupportedPreparationModule,
+            "construction keeps compiled module identity");
+          assert.equal(node.constructionQuantumFrames, 64,
+            "construction keeps captured quantum after context mutation");
 
           mixedSuccess = true;
           holdAll = true;
@@ -1837,12 +1909,97 @@ async function testMainRealm() {
           const nextCommand = await hostValue.command({ commands: [localCommand] });
           assert.equal(nextCommand.requestId, commandAck.requestId + 1,
             "command capacity refusal did not burn an ID");
+          const observeAck = await hostValue.observe({
+            subscriptions: [{
+              trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+            }],
+          });
+          assert.equal(observeAck.result, 0, "captured observation default command accepted");
+          assert.equal(observeAck.bindings[0].windowBlocks, 7,
+            "windowBlocks: 0 uses captured consoleMeterBlocks");
+        } finally {
+          addGate.release();
+          readyPause.release();
+          abiPause.release();
+          if (addModuleGate === addGate) addModuleGate = null;
+          if (readyGate === readyPause) readyGate = null;
+          if (abiJsonGate === abiPause) abiJsonGate = null;
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          mixedSuccess = previousMixedSuccess;
+          context.state = originalContext.state;
+          context.sampleRate = originalContext.sampleRate;
+          context.renderQuantumSize = originalContext.renderQuantumSize;
+          factory.context = originalFactory.context;
+          factory.options = originalFactory.options;
+          factory.simd128ModuleUrl = originalFactory.simd128ModuleUrl;
+          factory.workletModuleUrl = originalFactory.workletModuleUrl;
+          if (originalFactory.hasPreparedModule) factory.preparedModule = originalFactory.preparedModule;
+          else delete factory.preparedModule;
+          if (boot !== undefined && hostValue === undefined) await boot.catch(() => undefined);
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
+
+      {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const options = { ...limits, sourceRingFrames: 128 };
+        const factory = makeFactory({ options, workletModuleUrl: "explicit-depth.js" });
+        let boot;
+        let hostValue;
+        const previousMixedSuccess = mixedSuccess;
+        try {
+          boot = createMisoAudioWorkletHost(factory);
+          await gate.started;
+          options.sourceRingFrames = 256;
+          factory.options = { ...options };
+          gate.release();
+          hostValue = await boot;
+          mixedSuccess = true;
+          holdAll = true;
+          const heldSources = Array.from({ length: 2 }, (_value, index) => {
+            const buffer = new ArrayBuffer(4);
+            const request = hostValue.submitSource({
+              sourceId: "explicit-source", generation: 1n, startFrame: BigInt(index),
+              sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 1,
+              endOfRegion: false,
+            });
+            assert.equal(buffer.byteLength, 0, `explicit source ${index} transferred`);
+            return request;
+          });
+          const beforeOverflow = events.length;
+          const overflowBuffer = new ArrayBuffer(4);
+          await localErrorResult(hostValue.submitSource({
+            sourceId: "explicit-source", generation: 1n, startFrame: 2n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
+            endOfRegion: false,
+          }), 6);
+          assert.equal(events.length, beforeOverflow,
+            "explicit source capacity refusal posted no event");
+          assert.equal(overflowBuffer.byteLength, 4,
+            "explicit source refusal retained caller storage");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const sourceAcks = await Promise.all(heldSources);
+          assert.equal(sourceAcks.length, 2, "explicit source depth accepts exactly two held submissions");
+          assert(sourceAcks.every((ack) => ack.result === 0),
+            "explicit source depth held submissions accepted");
+          const nextBuffer = new ArrayBuffer(4);
+          const nextAck = await hostValue.submitSource({
+            sourceId: "explicit-source", generation: 1n, startFrame: 3n,
+            sampleRateHz: 48000, planes: [new Float32Array(nextBuffer)], frames: 1,
+            endOfRegion: false,
+          });
+          assert.equal(nextAck.requestId, sourceAcks.at(-1).requestId + 1,
+            "explicit source refusal did not burn an ID");
         } finally {
           gate.release();
           if (addModuleGate === gate) addModuleGate = null;
           holdAll = false;
           for (const respond of heldAll.splice(0)) respond();
           mixedSuccess = previousMixedSuccess;
+          if (boot !== undefined && hostValue === undefined) await boot.catch(() => undefined);
           if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
         }
       }
