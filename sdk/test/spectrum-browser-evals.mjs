@@ -42,6 +42,7 @@ function spectrumResult(query) {
 class SpectrumWorker {
   #listeners = new Map();
   messages = [];
+  replies = [];
   silent;
   failStream;
   terminated = false;
@@ -78,13 +79,15 @@ class SpectrumWorker {
         return;
       }
       const bytes = encodedSpectrumResult(message.buffer);
-      queueMicrotask(() => this.#emit({
+      const reply = {
         type: "spectrum-stream-result",
         requestId: message.requestId,
         resultByteLength: bytes,
         buffer: message.buffer,
         metadata: message.metadata,
-      }));
+      };
+      this.replies.push(reply);
+      queueMicrotask(() => this.#emit(reply));
     }
   }
 
@@ -101,7 +104,8 @@ class SpectrumWorker {
   }
 }
 
-function streamMetadata(status, sequence = 0n) {
+function streamMetadata(status, sequence = 0n, hopFrames = 2_048, sampleRateHz = 48_000) {
+  const hop = BigInt(hopFrames);
   return {
     structSize: ABI_LAYOUT.constants.spectrumStreamMetadataBytes,
     abiVersion: ABI_LAYOUT.abiVersion,
@@ -109,16 +113,16 @@ function streamMetadata(status, sequence = 0n) {
     status,
     target: 3,
     channels: 3,
-    sampleRateHz: 48_000,
+    sampleRateHz,
     quantumFrames: 128,
-    hopFrames: 2_048,
+    hopFrames,
     sourceUnderrun: 0,
     captureEpoch: 1n,
     sequence,
     droppedCaptures: 0n,
     windows: sequence,
-    capturedSample: sequence * 2_048n,
-    endSample: (sequence + 1n) * 2_048n,
+    capturedSample: sequence * hop,
+    endSample: sequence * hop + 2_048n,
     analysisEpoch: 1n,
     historyStartSample: 0n,
     smoothingMs: 100,
@@ -178,6 +182,59 @@ async function browserEngine(host, worker, extra = {}) {
     ...extra,
   });
 }
+
+async function assertNativeHopTransport(hopFrames, sampleRateHz = 48_000) {
+  const worker = new SpectrumWorker();
+  let sequence = 0n;
+  const host = hostWithCapture({
+    async startSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(1, 0n, hopFrames, sampleRateHz) };
+    },
+    async readSpectrumStream(buffer) {
+      sequence += 1n;
+      return {
+        result: 0,
+        byteLength: 8_256,
+        buffer,
+        metadata: streamMetadata(6, sequence, hopFrames, sampleRateHz),
+      };
+    },
+    async stopSpectrumStream() {
+      return { result: 0, metadata: streamMetadata(5, sequence, hopFrames, sampleRateHz) };
+    },
+  });
+  const engine = await browserEngine(host, worker);
+  try {
+    const subscription = await engine.subscribeSpectrum({ ...PREPARED, cadenceMs: 1 });
+    const notification = await subscription.pump();
+    assert.ok(notification);
+    const request = worker.messages.find((message) => message.type === "spectrum-stream-query");
+    const reply = worker.replies.find((message) => message.type === "spectrum-stream-result");
+    assert.ok(request);
+    assert.ok(reply);
+    assert.equal(request.metadata.hopFrames, hopFrames);
+    assert.equal(reply.metadata.hopFrames, hopFrames);
+    assert.equal(notification.metadata.hopFrames, hopFrames);
+    assert.equal(notification.metadata.sampleRateHz, sampleRateHz);
+    assert.equal(subscription.bounds.hopFrames, hopFrames);
+    assert.ok(subscription.readLatest());
+    await subscription.close();
+  } finally {
+    await engine.close();
+  }
+}
+
+test("browser spectrum preserves native H256 through Worker and publication", async () => {
+  await assertNativeHopTransport(256);
+});
+
+test("browser spectrum preserves native H1024 through Worker and publication", async () => {
+  await assertNativeHopTransport(1_024);
+});
+
+test("browser spectrum preserves a high-rate derived H3200 through Worker and publication", async () => {
+  await assertNativeHopTransport(3_200, 96_000);
+});
 
 test("browser managed spectrum returns and reuses one transfer buffer", async () => {
   const worker = new SpectrumWorker();

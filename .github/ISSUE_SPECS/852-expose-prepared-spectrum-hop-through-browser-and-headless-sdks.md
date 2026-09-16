@@ -141,3 +141,13 @@ eight focused cases, the SDK type/mirror gate, Node syntax checks, and diff chec
 boot eval also passed against the prior qualified artifact in the agent run. Generated ABI and
 actual new-artifact qualification remain deferred to B4; Worker preservation is the next bounded
 B2 slice.
+
+**B2b response Worker transport — complete in fresh Luna MAX round 1.** Audit confirmed that the
+existing main-realm client forwards native stream metadata unchanged, the response Worker stages
+that same `hopFrames` value into the native analyzer and returns native result metadata, and the
+shared spectrum decoder never derives or substitutes a TypeScript cadence. No source change was
+needed. A focused test-only checkpoint proves H256, H1024, and the valid 96 kHz legacy default
+H3200 across request, reply, subscription bounds, and frozen publication. Root reran all 13
+spectrum-browser evals, including existing transfer ownership, delayed cleanup, failure recovery,
+and lifecycle cases, plus SDK type/mirror and syntax checks: PASS. Actual-module Worker evidence
+remains part of B4's single-candidate qualification.
