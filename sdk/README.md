@@ -7,8 +7,8 @@ owns source delivery, playback UI, storage, and output encoding.
 
 Sessions are strict, versioned canonical JSON. Tracks have independent left/right processing,
 three effect racks, explicit routing and integer-sample delay compensation. The native effect
-library includes EQ, compressor, gate/expander, de-esser, limiter, dynamic EQ, multiband compressor,
-saturator/clipper, transient shaper, and delay. The generated catalog describes their parameters,
+library includes EQ, compressor, gate/expander, limiter, multiband compressor, saturator/clipper,
+transient shaper, and delay. The generated catalog describes their parameters,
 units, domains, and observation capabilities.
 
 ## Install and choose an entry point
