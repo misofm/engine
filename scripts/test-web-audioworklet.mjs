@@ -1184,7 +1184,7 @@ async function testMainRealm() {
       return error;
     };
 
-    const snapshotLocalHostRefusal = async (label, promise) => {
+    const snapshotLocalHostRefusal = async (label, promise, result = 1) => {
       const outcome = await promise.then(
         (hostValue) => ({ hostValue }),
         (error) => ({ error }),
@@ -1197,7 +1197,7 @@ async function testMainRealm() {
       assert(error !== undefined, label);
       assert.equal(error.tag, "miso.error.v1", label);
       assert.equal(error.requestId, 0, label);
-      assert.equal(error.result, 1, label);
+      assert.equal(error.result, result, label);
       return error;
     };
 
@@ -1710,6 +1710,7 @@ async function testMainRealm() {
             sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 2,
             endOfRegion: false,
           }),
+          6,
         );
         assert.equal(events.length, sourceEventsBefore + 4,
           "snapshot.limits.explicit-source-overflow-no-post");
@@ -1739,6 +1740,7 @@ async function testMainRealm() {
         await snapshotLocalHostRefusal(
           "snapshot.limits.explicit-command-overflow",
           explicitHost.command({ commands: [snapshotCommand()] }),
+          6,
         );
         assert.equal(events.length, commandEventsBefore + 2,
           "snapshot.limits.explicit-command-overflow-no-post");
@@ -1789,6 +1791,7 @@ async function testMainRealm() {
         await snapshotLocalHostRefusal(
           "snapshot.limits.zero-command-overflow",
           zeroHost.command({ commands: [snapshotCommand()] }),
+          6,
         );
         assert.equal(events.length, commandEventsBefore,
           "snapshot.limits.zero-command-overflow-no-post");
@@ -1874,6 +1877,7 @@ async function testMainRealm() {
             sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 2,
             endOfRegion: false,
           }),
+          6,
         );
         assert.equal(events.length, eventsBefore,
           "snapshot.limits.default-depth-overflow-no-post");
