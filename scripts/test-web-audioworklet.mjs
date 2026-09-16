@@ -15,6 +15,12 @@ import { MessageChannel } from "node:worker_threads";
 const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const realWasmReceiverRequested = commandArguments.includes("--real-wasm-receiver");
+const bootDataModeFlags = [
+  ["--boot-data-document", "document"],
+  ["--boot-data-nested", "nested"],
+].filter(([flag]) => commandArguments.includes(flag));
+if (bootDataModeFlags.length > 1) throw new TypeError("only one boot-data test mode is allowed");
+const bootDataTestMode = bootDataModeFlags[0]?.[1] ?? null;
 const qualificationModuleIndex = commandArguments.indexOf("--qualification-module");
 if (qualificationModuleIndex !== -1 && typeof commandArguments[qualificationModuleIndex + 1] !== "string") {
   throw new TypeError("--qualification-module requires a file path");
@@ -905,6 +911,7 @@ async function testMainRealm() {
     compile: WebAssembly.compile,
   };
   const events = [];
+  let fetchCount = 0;
   let holdSource = false;
   let holdAll = false;
   const heldAll = [];
@@ -916,6 +923,18 @@ async function testMainRealm() {
   let commandResult = 0;
   let mixedSuccess = false;
   let commandMutation = null;
+  let compileGate = null;
+  let addModuleGate = null;
+  let readyGate = null;
+  let abiJsonGate = null;
+
+  const snapshotGate = () => {
+    let release;
+    let markStarted;
+    const promise = new Promise((resolve) => { release = resolve; });
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    return { promise, started, start: markStarted, release };
+  };
 
   class FakePort {
     onmessage = null;
@@ -989,21 +1008,45 @@ async function testMainRealm() {
 
   class FakeNode {
     static latest;
+    static count = 0;
 
-    constructor(_context, _name, options) {
+    constructor(context, _name, options) {
+      FakeNode.count += 1;
       this.port = new FakePort();
       this.onprocessorerror = null;
       this.options = options;
+      this.constructionQuantumFrames = context.renderQuantumSize ?? 128;
+      this.constructionContext = context;
+      this.constructionModule = options.processorOptions.module;
+      if (bootDataTestMode !== null) {
+        const constructorDocument = options.processorOptions.document;
+        this.constructionDocumentShape = {
+          byteOffset: constructorDocument.byteOffset,
+          byteLength: constructorDocument.byteLength,
+          buffer: constructorDocument.buffer,
+        };
+        this.constructionSnapshot = {
+          document: new Uint8Array(constructorDocument),
+          module: options.processorOptions.module,
+          options: structuredClone(options.processorOptions.options),
+        };
+      }
       this.disposeMessages = 0;
       this.disconnectCount = 0;
       FakeNode.latest = this;
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: "simd128",
-          resources: resourceReport(1, 64),
+          resources: resourceReport(1, this.constructionQuantumFrames),
           memoryBytes: 65536,
         };
+        if (readyGate !== null) {
+          const gate = readyGate;
+          readyGate = null;
+          gate.start();
+          await gate.promise;
+        }
         if (readyMutation !== null) data = readyMutation(data);
         this.port.onmessage?.({ data });
       });
@@ -1016,25 +1059,952 @@ async function testMainRealm() {
 
   globalThis.AudioWorkletNode = FakeNode;
   WebAssembly.validate = () => true;
-  globalThis.fetch = async (url) => ({
-    ok: true,
-    arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-    json: async () => preparedAbiLayout,
-  });
+  globalThis.fetch = async (url) => {
+    fetchCount += 1;
+    return {
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
+      json: async () => {
+        if (abiJsonGate !== null) {
+          const gate = abiJsonGate;
+          abiJsonGate = null;
+          gate.start();
+          await gate.promise;
+        }
+        return preparedAbiLayout;
+      },
+    };
+  };
   const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
     events.push(["compile", url]);
+    if (compileGate !== null) {
+      const gate = compileGate;
+      compileGate = null;
+      gate.start();
+      await gate.promise;
+    }
     return unsupportedPreparationModule;
   };
   const context = {
     state: "suspended",
     sampleRate: 48000,
     renderQuantumSize: 64,
-    audioWorklet: { addModule: async (url) => events.push(["addModule", url]) },
+    audioWorklet: {
+      addModule: async (url) => {
+        events.push(["addModule", url]);
+        if (addModuleGate !== null) {
+          const gate = addModuleGate;
+          addModuleGate = null;
+          gate.start();
+          await gate.promise;
+        }
+      },
+    },
   };
   try {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
+
+    const bootDataFactory = ({
+      document = new Uint8Array([0x7b, 0x22, 0x73, 0x22, 0x7d]),
+      options = limits,
+      includePreparedModule = false,
+      workletModuleUrl = "processor.js",
+    } = {}) => {
+      const factory = {
+        context,
+        document,
+        options,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl,
+      };
+      if (includePreparedModule) factory.preparedModule = unsupportedPreparationModule;
+      return factory;
+    };
+
+    const runBootDataDocument = async () => {
+      const gate = snapshotGate();
+      compileGate = gate;
+      const backing = new ArrayBuffer(16);
+      const document = new Uint8Array(backing, 3, 5);
+      document.set([11, 22, 33, 44, 55]);
+      const originalVisible = [...document];
+      const originalWorkletUrl = "boot-data-document-processor.js";
+      const factory = bootDataFactory({ document, workletModuleUrl: originalWorkletUrl });
+      const eventsBefore = events.length;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        document[1] = 99;
+        factory.workletModuleUrl = "mutated-during-compile.js";
+        gate.release();
+        hostValue = await boot;
+        const node = FakeNode.latest;
+        assert.deepEqual(
+          [...node.constructionSnapshot.document],
+          originalVisible,
+          "boot-data.document.before-construction",
+        );
+        assert.equal(node.constructionDocumentShape.byteOffset, 0, "boot-data.document.offset-zero");
+        assert.equal(
+          node.constructionDocumentShape.byteLength,
+          originalVisible.length,
+          "boot-data.document.visible-length",
+        );
+        assert.notEqual(
+          node.constructionDocumentShape.buffer,
+          backing,
+          "boot-data.document.private-storage",
+        );
+        assert.equal(node.constructionContext, context, "boot-data.document.context-identity");
+        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.document.module");
+        assert.deepEqual(
+          events.slice(eventsBefore),
+          [["compile", "simd.wasm"], ["addModule", originalWorkletUrl]],
+          "boot-data.document.captured-loading-inputs",
+        );
+      } finally {
+        gate.release();
+        if (compileGate === gate) compileGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    const runBootDataNested = async () => {
+      const gate = snapshotGate();
+      addModuleGate = gate;
+      const firstEntry = { target: "output", targetId: "first", channels: "both" };
+      const thirdEntry = { target: "trackPostMatrix", targetId: "third", channels: "left" };
+      const entries = [firstEntry, , thirdEntry];
+      const collection = { entries, maximumCaptureBytes: 4096 };
+      const factory = bootDataFactory({
+        document: new Uint8Array(),
+        includePreparedModule: true,
+        workletModuleUrl: "boot-data-nested-processor.js",
+        options: { ...limits, spectrum: null, spectrumCollection: collection },
+      });
+      const expected = {
+        ...limits,
+        spectrum: null,
+        spectrumCollection: {
+          entries: [
+            { target: "output", targetId: "first", channels: "both" },
+            ,
+            { target: "trackPostMatrix", targetId: "third", channels: "left" },
+          ],
+          maximumCaptureBytes: 4096,
+        },
+      };
+      const eventsBefore = events.length;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        firstEntry.targetId = "mutated-first";
+        thirdEntry.channels = "right";
+        entries[0] = { target: "output", targetId: "replaced-entry", channels: "right" };
+        factory.options.spectrumCollection = {
+          entries: [{ target: "output", targetId: "replaced-collection", channels: "both" }],
+          maximumCaptureBytes: 8192,
+        };
+        gate.release();
+        hostValue = await boot;
+        const node = FakeNode.latest;
+        assert.deepEqual(
+          node.constructionSnapshot.options,
+          expected,
+          "boot-data.nested.before-construction",
+        );
+        const capturedCollection = node.constructionSnapshot.options.spectrumCollection;
+        assert.equal(
+          Object.hasOwn(capturedCollection.entries, 1),
+          false,
+          "boot-data.nested.sparse-hole",
+        );
+        assert.notEqual(
+          node.options.processorOptions.options.spectrumCollection,
+          collection,
+          "boot-data.nested.private-collection",
+        );
+        assert.notEqual(
+          node.options.processorOptions.options.spectrumCollection.entries,
+          entries,
+          "boot-data.nested.private-entries",
+        );
+        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.nested.module");
+        assert.deepEqual(
+          events.slice(eventsBefore),
+          [["addModule", "boot-data-nested-processor.js"]],
+          "boot-data.nested.supplied-module-loading",
+        );
+      } finally {
+        gate.release();
+        if (addModuleGate === gate) addModuleGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    if (bootDataTestMode === "document") {
+      await runBootDataDocument();
+      return;
+    }
+    if (bootDataTestMode === "nested") {
+      await runBootDataNested();
+      return;
+    }
+
+    const runPlainDataMatrix = async () => {
+      const makeFactory = (overrides = {}) => ({
+        context, document: new Uint8Array(), options: limits,
+        simd128ModuleUrl: "simd.wasm", workletModuleUrl: "processor.js", ...overrides,
+      });
+      const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
+      const makeSpectrum = () => ({
+        target: "trackPostMatrix", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
+      });
+      const makeCollectionOptions = (entries) => ({
+        ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
+      });
+      const addWitness = (object, key, setterOnly = false, enumerable = true) => {
+        let calls = 0;
+        const descriptor = setterOnly
+          ? { configurable: true, enumerable, set() { calls += 1; } }
+          : { configurable: true, enumerable, get() {
+            calls += 1; throw new Error(`unexpected ${String(key)} read`);
+          } };
+        Object.defineProperty(object, key, descriptor);
+        return () => calls;
+      };
+      const assertRefusal = async (label, factory, witness = () => 0) => {
+        const before = [events.length, fetchCount, FakeNode.count];
+        await localErrorResult(createMisoAudioWorkletHost(factory), 1);
+        assert.equal(witness(), 0, `${label}: witness or callback invoked`);
+        assert.equal(fetchCount, before[1], `${label}: fetch occurred`);
+        assert.equal(events.length, before[0], `${label}: compile/addModule occurred`);
+        assert.equal(FakeNode.count, before[2], `${label}: node constructed`);
+      };
+      const assertAccepted = async (label, factory, check = () => {}) => {
+        let host;
+        let node;
+        try {
+          host = await createMisoAudioWorkletHost(factory);
+          node = FakeNode.latest;
+          check(host, node.options.processorOptions.options);
+        } finally {
+          if (host !== undefined) {
+            await host.dispose();
+            assert.equal(node.disconnectCount, 1, `${label}: host was disposed`);
+          }
+        }
+      };
+
+      const descriptorCases = [
+        ["factory", () => { const f = makeFactory(); return [f, f, "context"]; }],
+        ["boot", () => { const o = { ...limits }; return [makeFactory({ options: o }), o, "sourceRingFrames"]; }],
+        ["spectrum", () => {
+          const s = makeSpectrum(); const o = { ...limits, spectrum: s, spectrumCollection: null };
+          return [makeFactory({ options: o }), s, "target"];
+        }],
+        ["collection", () => {
+          const e = [makeEntry()]; const o = makeCollectionOptions(e);
+          return [makeFactory({ options: o }), o.spectrumCollection, "entries"];
+        }],
+        ["array-index", () => {
+          const e = [makeEntry()]; const o = makeCollectionOptions(e);
+          return [makeFactory({ options: o }), e, "0"];
+        }],
+        ["entry", () => {
+          const e = makeEntry(); const o = makeCollectionOptions([e]);
+          return [makeFactory({ options: o }), e, "targetId"];
+        }],
+      ];
+      for (const setterOnly of [false, true]) {
+        for (const [label, makeCase] of descriptorCases) {
+          const [factory, object, key] = makeCase();
+          await assertRefusal(`${setterOnly ? "setter-only" : "accessor"} ${label}`, factory,
+            addWitness(object, key, setterOnly));
+        }
+      }
+      for (const setterOnly of [false, true]) {
+        const factory = makeFactory();
+        await assertRefusal(`hidden ${setterOnly ? "setter-only" : "accessor"}`, factory,
+          addWitness(factory, "context", setterOnly, false));
+      }
+
+      const decoratedEntries = [
+        ["every=false", "every", false],
+        ["every=undefined", "every", undefined, false],
+        ["every callback", "every", "callback"],
+        ["map", "map", "callback"],
+        ["constructor", "constructor", "callback"],
+        ["Symbol.iterator", Symbol.iterator, "callback"],
+        ["Symbol.species", Symbol.species, "callback"],
+      ];
+      for (const [label, key, value, enumerable = true] of decoratedEntries) {
+        let calls = 0;
+        let retained = null;
+        const entries = [makeEntry()];
+        const decoration = value === "callback" ? (...args) => {
+          calls += 1;
+          retained = args[0] ?? null;
+          return true;
+        } : value;
+        Object.defineProperty(entries, key, {
+          configurable: true, enumerable, value: decoration, writable: true,
+        });
+        await assertRefusal(`decorated entries ${label}`, makeFactory({
+          options: makeCollectionOptions(entries),
+        }), () => calls);
+        assert.equal(retained, null, `decorated entries ${label}: callback escaped`);
+      }
+
+      const refusalCases = [
+        ["unknown enumerable", () => Object.assign(makeFactory(), { unknown: undefined })],
+        ["unknown hidden", () => {
+          const factory = makeFactory();
+          Object.defineProperty(factory, "unknown", { value: undefined });
+          return factory;
+        }],
+        ["unknown symbol", () => {
+          const factory = makeFactory();
+          Object.defineProperty(factory, Symbol("unknown"), { value: undefined });
+          return factory;
+        }],
+        ["custom-prototype entries", () => {
+          const entries = [makeEntry()]; Object.setPrototypeOf(entries, { custom: true });
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+        ["subclass entries", () => {
+          class EntriesSubclass extends Array {}
+          const entries = new EntriesSubclass(makeEntry());
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+        ["noncanonical array index", () => {
+          const entries = [makeEntry()]; Object.defineProperty(entries, "01", { value: makeEntry() });
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+      ];
+      for (const [label, makeCase] of refusalCases) {
+        await assertRefusal(label, makeCase());
+      }
+
+      const literalOptions = { ...limits };
+      await assertAccepted("same-realm literal records", makeFactory({ options: literalOptions }));
+      {
+        const options = Object.assign(Object.create(null), limits);
+        const factory = Object.assign(Object.create(null), makeFactory({ options }));
+        await assertAccepted("null-prototype records", factory);
+      }
+      {
+        const spectrum = Object.assign(Object.create(null), makeSpectrum());
+        const spectrumOptions = Object.assign(Object.create(null), limits, {
+          spectrum, spectrumCollection: null,
+        });
+        await assertAccepted(
+          "null-prototype spectrum record",
+          makeFactory({ options: spectrumOptions }),
+        );
+        const entry = Object.assign(Object.create(null), makeEntry());
+        const collection = Object.assign(Object.create(null), {
+          entries: [entry], maximumCaptureBytes: 4096,
+        });
+        const collectionOptions = Object.assign(Object.create(null), limits, {
+          spectrum: null, spectrumCollection: collection,
+        });
+        await assertAccepted(
+          "null-prototype collection and entry records",
+          makeFactory({ options: collectionOptions }),
+        );
+      }
+      {
+        const options = Object.freeze({ ...limits });
+        await assertAccepted("frozen records", Object.freeze(makeFactory({ options })));
+      }
+      await assertAccepted(
+        "legacy six-field shape",
+        makeFactory({ options: { ...limits } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "legacy spectrum normalizes to null");
+          assert.equal(options.spectrumCollection, null,
+            "legacy spectrum collection normalizes to null");
+        },
+      );
+      await assertAccepted(
+        "extended eight-field shape and null normalization",
+        makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: null } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "explicit spectrum null is preserved");
+          assert.equal(options.spectrumCollection, null, "explicit collection null is preserved");
+        },
+      );
+      await assertAccepted(
+        "extended undefined spectrum normalizes to null",
+        makeFactory({ options: { ...limits, spectrum: undefined, spectrumCollection: null } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "enumerable undefined spectrum normalizes to null");
+          assert.equal(options.spectrumCollection, null, "enumerable null collection is preserved");
+        },
+      );
+      await assertAccepted(
+        "extended undefined spectrum keeps collection",
+        makeFactory({
+          options: {
+            ...limits,
+            spectrum: undefined,
+            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          },
+        }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "undefined spectrum normalizes to null");
+          assert.equal(options.spectrumCollection.entries.length, 1,
+            "nonnull collection remains effective");
+          assert.equal(options.spectrumCollection.entries[0].target, "output",
+            "nonnull collection entry remains effective");
+        },
+      );
+      {
+        const first = Object.freeze(makeEntry());
+        const second = Object.freeze(makeEntry());
+        const entries = new Array(3);
+        Object.defineProperty(entries, "0", {
+          value: first, writable: false, enumerable: false, configurable: false,
+        });
+        entries[2] = second;
+        Object.freeze(entries);
+        const collection = Object.freeze({ entries, maximumCaptureBytes: 4096 });
+        const options = Object.freeze({
+          ...limits, spectrum: null, spectrumCollection: collection,
+        });
+        await assertAccepted(
+          "frozen sparse exact entries",
+          Object.freeze(makeFactory({ options })),
+          (_host, captured) => {
+            const copiedCollection = captured.spectrumCollection;
+            const copiedEntries = copiedCollection.entries;
+            assert.equal(copiedEntries.length, 3, "sparse entries length captured");
+            assert.equal(Object.hasOwn(copiedEntries, 0), true, "sparse index is present");
+            assert.equal(Object.hasOwn(copiedEntries, 1), false, "sparse hole is retained");
+            assert.equal(
+              Object.getOwnPropertyDescriptor(copiedEntries, "0").enumerable,
+              false,
+              "hidden index enumerability is retained",
+            );
+            assert.equal(
+              Object.getOwnPropertyDescriptor(copiedEntries, "2").enumerable,
+              true,
+              "visible index enumerability is retained",
+            );
+            assert.notEqual(copiedCollection, collection, "collection snapshot is fresh");
+            assert.notEqual(copiedEntries, entries, "entries snapshot is fresh");
+            assert.notEqual(copiedEntries[0], first, "nested entry snapshot is fresh");
+            assert.notEqual(copiedEntries[2], second, "second nested snapshot is fresh");
+          },
+        );
+      }
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrumCollection", {
+          value: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          enumerable: false,
+        });
+        await assertAccepted(
+          "hidden collection remains effective",
+          makeFactory({ options }),
+          (_host, captured) => {
+            assert.equal(captured.spectrumCollection.entries.length, 1);
+            assert.equal(captured.spectrumCollection.entries[0].target, "output");
+          },
+        );
+      }
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrum", { value: null, enumerable: false });
+        await assertAccepted(
+          "hidden null spectrum normalizes to null",
+          makeFactory({ options }),
+          (_host, captured) => assert.equal(captured.spectrum, null),
+        );
+      }
+
+      await assertRefusal(
+        "exact seven-field shape",
+        makeFactory({ options: { ...limits, spectrum: null } }),
+      );
+      await assertRefusal(
+        "enumerable undefined spectrum shape",
+        makeFactory({ options: { ...limits, spectrum: undefined } }),
+      );
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrum", {
+          value: makeSpectrum(), enumerable: false,
+        });
+        await assertRefusal("hidden nonnull spectrum", makeFactory({ options }));
+      }
+      {
+        const enumerableUndefined = makeFactory();
+        enumerableUndefined.preparedModule = undefined;
+        await assertRefusal("enumerable undefined prepared module", enumerableUndefined);
+        const enumerableNull = makeFactory();
+        enumerableNull.preparedModule = null;
+        await assertRefusal("enumerable null prepared module", enumerableNull);
+        const hiddenUndefined = makeFactory();
+        Object.defineProperty(hiddenUndefined, "preparedModule", { value: undefined });
+        await assertAccepted("hidden undefined prepared module", hiddenUndefined);
+        const hiddenDefined = makeFactory();
+        Object.defineProperty(hiddenDefined, "preparedModule", {
+          value: unsupportedPreparationModule,
+        });
+        await assertRefusal("hidden defined prepared module", hiddenDefined);
+      }
+      {
+        const collection = { maximumCaptureBytes: 4096 };
+        Object.defineProperty(collection, "entries", {
+          value: [makeEntry()], enumerable: false,
+        });
+        await assertRefusal(
+          "hidden required collection entries",
+          makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: collection } }),
+        );
+      }
+      await assertRefusal(
+        "mutually exclusive spectrum settings",
+        makeFactory({
+          options: {
+            ...limits,
+            spectrum: makeSpectrum(),
+            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          },
+        }),
+      );
+
+      const plainOptions = (overrides = {}) => ({ ...limits, ...overrides });
+      const singleSpectrumOptions = (overrides = {}) => ({
+        ...limits, spectrum: { ...makeSpectrum(), ...overrides }, spectrumCollection: null,
+      });
+      const collectionDomainOptions = (overrides = {}) => ({
+        ...limits,
+        spectrum: null,
+        spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096, ...overrides },
+      });
+      const domainRefusals = [
+        ["u32 type", plainOptions({ sourceRingFrames: "256" })],
+        ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
+        ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
+        ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
+        ["command queue bound", plainOptions({ consoleCommandQueueRecords: 257n })],
+        ["observation taps bound", plainOptions({ consoleObservationTaps: 17n })],
+        ["observation taps dependency", plainOptions({
+          consoleCommandQueueRecords: 0n, consoleObservationTaps: 1n,
+        })],
+        ["master dependency", plainOptions({ consoleObservationTaps: 0n })],
+        ["invalid spectrum target", singleSpectrumOptions({ target: "unknown" })],
+        ["invalid spectrum channel", singleSpectrumOptions({ channels: "center" })],
+        ["empty spectrum ID", singleSpectrumOptions({ targetId: "" })],
+        ["oversize UTF-8 spectrum ID", singleSpectrumOptions({ targetId: "é".repeat(64) })],
+        ["single capture zero", singleSpectrumOptions({ maximumCaptureBytes: 0 })],
+        ["single capture bound", singleSpectrumOptions({ maximumCaptureBytes: 1_048_577 })],
+        ["collection capture zero", collectionDomainOptions({ maximumCaptureBytes: 0 })],
+      ];
+      for (const [label, options] of domainRefusals) {
+        await assertRefusal(label, makeFactory({ options }));
+      }
+      await assertAccepted(
+        "collection capture above single limit",
+        makeFactory({ options: collectionDomainOptions({ maximumCaptureBytes: 1_048_577 }) }),
+      );
+      {
+        const savedQuantum = context.renderQuantumSize;
+        try {
+          delete context.renderQuantumSize;
+          await assertAccepted(
+            "default context quantum",
+            makeFactory(),
+            (host) => {
+              assert.equal(host.resources.quantumFrames, 128, "default quantum is captured");
+              assert.equal(FakeNode.latest.constructionQuantumFrames, 128,
+                "construction uses captured default quantum");
+            },
+          );
+        } finally {
+          context.renderQuantumSize = savedQuantum;
+        }
+      }
+
+      await assertRefusal("SharedArrayBuffer document", makeFactory({
+        document: new Uint8Array(new SharedArrayBuffer(4)),
+      }));
+      {
+        const backing = new ArrayBuffer(4);
+        const document = new Uint8Array(backing);
+        structuredClone(backing, { transfer: [backing] });
+        await assertRefusal("detached document", makeFactory({ document }));
+      }
+      {
+        let iteratorCalls = 0;
+        const forged = Object.create(Uint8Array.prototype);
+        Object.defineProperty(forged, Symbol.iterator, {
+          configurable: true,
+          get() {
+            iteratorCalls += 1;
+            throw new Error("forged document iterator invoked");
+          },
+        });
+        await assertRefusal("forged document", makeFactory({ document: forged }), () => iteratorCalls);
+      }
+      {
+        const backing = new ArrayBuffer(8);
+        const document = new Uint8Array(backing, 2, 3);
+        document.set([11, 22, 33]);
+        const originalVisible = [document[0], document[1], document[2]];
+        let decorationCalls = 0;
+        const decoration = {
+          configurable: true,
+          get() {
+            decorationCalls += 1;
+            throw new Error("document decoration invoked");
+          },
+        };
+        Object.defineProperty(document, "buffer", decoration);
+        Object.defineProperty(document, "constructor", decoration);
+        Object.defineProperty(document, Symbol.toStringTag, decoration);
+        Object.defineProperty(document, Symbol.iterator, decoration);
+        Object.defineProperty(backing, "slice", decoration);
+        const gate = snapshotGate();
+        compileGate = gate;
+        let hostValue;
+        try {
+          const boot = createMisoAudioWorkletHost(makeFactory({ document }));
+          await gate.started;
+          document[1] = 99;
+          gate.release();
+          hostValue = await boot;
+          const copied = FakeNode.latest.options.processorOptions.document;
+          assert.deepEqual([...copied], originalVisible, "decorated document copied before mutation");
+          assert.equal(copied.byteOffset, 0, "decorated document offset-zero copy");
+          assert.equal(copied.byteLength, originalVisible.length, "decorated document length");
+          assert.notEqual(copied.buffer, backing, "decorated document private copy");
+          assert.equal(decorationCalls, 0, "decorated document hooks were not invoked");
+        } finally {
+          gate.release();
+          if (compileGate === gate) compileGate = null;
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
+      {
+        const emptyHost = await createMisoAudioWorkletHost(makeFactory({ document: new Uint8Array() }));
+        await emptyHost.dispose();
+      }
+
+      {
+        let audioWorkletReads = 0;
+        const unsupportedContext = Object.create(context);
+        Object.defineProperty(unsupportedContext, "audioWorklet", {
+          configurable: true,
+          get() {
+            audioWorkletReads += 1;
+            throw new Error("audioWorklet accessed before SIMD refusal");
+          },
+        });
+        const beforeEvents = events.length;
+        const beforeFetches = fetchCount;
+        const beforeNodes = FakeNode.count;
+        const validate = WebAssembly.validate;
+        try {
+          WebAssembly.validate = () => false;
+          const refusal = await createMisoAudioWorkletHost(makeFactory({
+            context: unsupportedContext,
+          })).then(() => assert.fail("expected unsupported SIMD refusal"), (error) => error);
+          assert.deepEqual(Object.keys(refusal).sort(), ["capability", "requestId", "result", "tag"]);
+          assert.equal(refusal.tag, "miso.unsupported.v1");
+          assert.equal(refusal.capability, "simd128");
+          assert.equal(refusal.result, 7);
+          assert.equal(refusal.requestId, 0);
+          assert.equal(audioWorkletReads, 0, "unsupported SIMD touched audioWorklet");
+          assert.equal(fetchCount, beforeFetches, "unsupported SIMD fetched a module");
+          assert.equal(events.length, beforeEvents, "unsupported SIMD compiled or loaded a module");
+          assert.equal(FakeNode.count, beforeNodes, "unsupported SIMD constructed a node");
+        } finally {
+          WebAssembly.validate = validate;
+        }
+      }
+      for (const [label, mutate, restore] of [
+        ["state", () => { context.state = "running"; }, () => { context.state = "suspended"; }],
+        ["sample rate", () => { context.sampleRate = 44100; }, () => { context.sampleRate = 48000; }],
+        ["quantum", () => { context.renderQuantumSize = 128; }, () => { context.renderQuantumSize = 64; }],
+      ]) {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const beforeEvents = events.length;
+        const beforeNodes = FakeNode.count;
+        let boot;
+        try {
+          boot = createMisoAudioWorkletHost(makeFactory());
+          await gate.started;
+          mutate();
+          gate.release();
+          await localErrorResult(boot, 1);
+          assert.equal(FakeNode.count, beforeNodes, `${label} drift constructed a node`);
+          assert.deepEqual(
+            events.slice(beforeEvents),
+            [["compile", "simd.wasm"], ["addModule", "processor.js"]],
+            `${label} drift was checked after loading and before construction`,
+          );
+        } finally {
+          restore();
+          gate.release();
+          if (addModuleGate === gate) addModuleGate = null;
+        }
+      }
+
+      {
+        const addGate = snapshotGate();
+        const readyPause = snapshotGate();
+        const abiPause = snapshotGate();
+        const spectrum = {
+          target: "trackPostMatrix", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
+        };
+        const options = {
+          sourceRingFrames: 0,
+          maximumMemoryBytes: 0n,
+          consoleCommandQueueRecords: 0n,
+          consoleMeterBlocks: 7n,
+          consoleObservationTaps: 0n,
+          consoleMasterTrackPlusOne: 0n,
+          spectrum,
+          spectrumCollection: null,
+        };
+        const expectedOptions = { ...options, spectrum: { ...spectrum } };
+        const factory = makeFactory({ options, workletModuleUrl: "single-spectrum.js" });
+        const originalFactory = {
+          context: factory.context,
+          options: factory.options,
+          simd128ModuleUrl: factory.simd128ModuleUrl,
+          workletModuleUrl: factory.workletModuleUrl,
+          hasPreparedModule: Object.hasOwn(factory, "preparedModule"),
+          preparedModule: factory.preparedModule,
+        };
+        const originalContext = {
+          state: context.state,
+          sampleRate: context.sampleRate,
+          renderQuantumSize: context.renderQuantumSize,
+        };
+        const replacementModule = await original.compile(unsupportedPreparationModuleBytes);
+        const replacementContext = {
+          state: "suspended", sampleRate: 44100, renderQuantumSize: 128,
+          audioWorklet: { addModule: async () => undefined },
+        };
+        let hostValue;
+        let boot;
+        const previousMixedSuccess = mixedSuccess;
+        try {
+          addModuleGate = addGate;
+          readyGate = readyPause;
+          abiJsonGate = abiPause;
+          boot = createMisoAudioWorkletHost(factory);
+          await addGate.started;
+          spectrum.targetId = "mutated-spectrum-before-construction";
+          options.sourceRingFrames = 128;
+          options.consoleCommandQueueRecords = 8n;
+          options.consoleMeterBlocks = 99n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.context = replacementContext;
+          factory.preparedModule = replacementModule;
+          factory.simd128ModuleUrl = "mutated-simd.wasm";
+          factory.workletModuleUrl = "mutated-processor-before-construction.js";
+          addGate.release();
+          await readyPause.started;
+          context.state = "running";
+          context.sampleRate = 44100;
+          context.renderQuantumSize = 128;
+          spectrum.targetId = "mutated-spectrum-while-ready";
+          options.sourceRingFrames = 256;
+          options.consoleCommandQueueRecords = 4n;
+          options.consoleMeterBlocks = 101n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
+          readyPause.release();
+          await abiPause.started;
+          spectrum.targetId = "mutated-spectrum-while-abi";
+          options.sourceRingFrames = 64;
+          options.consoleCommandQueueRecords = 2n;
+          options.consoleMeterBlocks = 103n;
+          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.context = { ...replacementContext, sampleRate: 96000 };
+          factory.preparedModule = replacementModule;
+          factory.simd128ModuleUrl = "mutated-simd-while-abi.wasm";
+          factory.workletModuleUrl = "mutated-processor-while-abi.js";
+          abiPause.release();
+          hostValue = await boot;
+          const node = FakeNode.latest;
+          const captured = node.options.processorOptions.options;
+          assert.equal(hostValue.resources.sampleRateHz, 48000);
+          assert.equal(hostValue.resources.quantumFrames, 64);
+          assert.deepEqual(captured, expectedOptions, "single spectrum boot values are captured");
+          assert.equal(captured.spectrumCollection, null);
+          assert.notEqual(captured, options, "single spectrum boot snapshot is fresh");
+          assert.notEqual(captured.spectrum, spectrum, "single spectrum snapshot is fresh");
+          assert.deepEqual(
+            events.slice(-2),
+            [["compile", "simd.wasm"], ["addModule", "single-spectrum.js"]],
+            "single spectrum loading inputs are captured",
+          );
+          const status = await hostValue.status();
+          assert.equal(status.sampleRateHz, 48000, "status keeps captured sample rate");
+          assert.equal(status.quantumFrames, 64, "status keeps captured quantum");
+          assert.equal(node.constructionContext, context, "construction keeps context identity");
+          assert.equal(node.constructionModule, unsupportedPreparationModule,
+            "construction keeps compiled module identity");
+          assert.equal(node.constructionQuantumFrames, 64,
+            "construction keeps captured quantum after context mutation");
+
+          mixedSuccess = true;
+          holdAll = true;
+          const heldSources = Array.from({ length: 77 }, (_value, index) => {
+            const buffer = new ArrayBuffer(4);
+            const request = hostValue.submitSource({
+              sourceId: "single-source", generation: 1n, startFrame: BigInt(index),
+              sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 1,
+              endOfRegion: false,
+            });
+            assert.equal(buffer.byteLength, 0, `single source ${index} transferred`);
+            return request;
+          });
+          const beforeSourceOverflow = events.length;
+          const overflowBuffer = new ArrayBuffer(4);
+          await localErrorResult(hostValue.submitSource({
+            sourceId: "single-source", generation: 1n, startFrame: 77n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
+            endOfRegion: false,
+          }), 6);
+          assert.equal(events.length, beforeSourceOverflow, "source capacity refusal posted no event");
+          assert.equal(overflowBuffer.byteLength, 4, "source refusal retained caller storage");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const sourceAcks = await Promise.all(heldSources);
+          assert(sourceAcks.every((ack) => ack.result === 0), "all default-depth sources accepted");
+          const nextSourceBuffer = new ArrayBuffer(4);
+          const nextSource = hostValue.submitSource({
+            sourceId: "single-source", generation: 1n, startFrame: 78n,
+            sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 1,
+            endOfRegion: false,
+          });
+          const nextSourceAck = await nextSource;
+          assert.equal(nextSourceAck.requestId, sourceAcks.at(-1).requestId + 1,
+            "source capacity refusal did not burn an ID");
+
+          const localCommand = {
+            kind: 1, rack: 255, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 0,
+            smoothingSamples: 64, values: [0, 0, 0, 0],
+          };
+          holdAll = true;
+          const heldCommand = hostValue.command({ commands: [localCommand] });
+          const beforeCommandOverflow = events.length;
+          await localErrorResult(hostValue.command({ commands: [localCommand] }), 6);
+          assert.equal(events.length, beforeCommandOverflow, "command capacity refusal posted no event");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const commandAck = await heldCommand;
+          const nextCommand = await hostValue.command({ commands: [localCommand] });
+          assert.equal(nextCommand.requestId, commandAck.requestId + 1,
+            "command capacity refusal did not burn an ID");
+          const observeAck = await hostValue.observe({
+            subscriptions: [{
+              trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+            }],
+          });
+          assert.equal(observeAck.result, 0, "captured observation default command accepted");
+          assert.equal(observeAck.bindings[0].windowBlocks, 7,
+            "windowBlocks: 0 uses captured consoleMeterBlocks");
+        } finally {
+          addGate.release();
+          readyPause.release();
+          abiPause.release();
+          if (addModuleGate === addGate) addModuleGate = null;
+          if (readyGate === readyPause) readyGate = null;
+          if (abiJsonGate === abiPause) abiJsonGate = null;
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          mixedSuccess = previousMixedSuccess;
+          context.state = originalContext.state;
+          context.sampleRate = originalContext.sampleRate;
+          context.renderQuantumSize = originalContext.renderQuantumSize;
+          factory.context = originalFactory.context;
+          factory.options = originalFactory.options;
+          factory.simd128ModuleUrl = originalFactory.simd128ModuleUrl;
+          factory.workletModuleUrl = originalFactory.workletModuleUrl;
+          if (originalFactory.hasPreparedModule) factory.preparedModule = originalFactory.preparedModule;
+          else delete factory.preparedModule;
+          if (boot !== undefined && hostValue === undefined) await boot.catch(() => undefined);
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
+
+      {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const options = { ...limits, sourceRingFrames: 128 };
+        const factory = makeFactory({ options, workletModuleUrl: "explicit-depth.js" });
+        let boot;
+        let hostValue;
+        const previousMixedSuccess = mixedSuccess;
+        try {
+          boot = createMisoAudioWorkletHost(factory);
+          await gate.started;
+          options.sourceRingFrames = 256;
+          factory.options = { ...options };
+          gate.release();
+          hostValue = await boot;
+          mixedSuccess = true;
+          holdAll = true;
+          const heldSources = Array.from({ length: 2 }, (_value, index) => {
+            const buffer = new ArrayBuffer(4);
+            const request = hostValue.submitSource({
+              sourceId: "explicit-source", generation: 1n, startFrame: BigInt(index),
+              sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 1,
+              endOfRegion: false,
+            });
+            assert.equal(buffer.byteLength, 0, `explicit source ${index} transferred`);
+            return request;
+          });
+          const beforeOverflow = events.length;
+          const overflowBuffer = new ArrayBuffer(4);
+          await localErrorResult(hostValue.submitSource({
+            sourceId: "explicit-source", generation: 1n, startFrame: 2n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
+            endOfRegion: false,
+          }), 6);
+          assert.equal(events.length, beforeOverflow,
+            "explicit source capacity refusal posted no event");
+          assert.equal(overflowBuffer.byteLength, 4,
+            "explicit source refusal retained caller storage");
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          const sourceAcks = await Promise.all(heldSources);
+          assert.equal(sourceAcks.length, 2, "explicit source depth accepts exactly two held submissions");
+          assert(sourceAcks.every((ack) => ack.result === 0),
+            "explicit source depth held submissions accepted");
+          const nextBuffer = new ArrayBuffer(4);
+          const nextAck = await hostValue.submitSource({
+            sourceId: "explicit-source", generation: 1n, startFrame: 3n,
+            sampleRateHz: 48000, planes: [new Float32Array(nextBuffer)], frames: 1,
+            endOfRegion: false,
+          });
+          assert.equal(nextAck.requestId, sourceAcks.at(-1).requestId + 1,
+            "explicit source refusal did not burn an ID");
+        } finally {
+          gate.release();
+          if (addModuleGate === gate) addModuleGate = null;
+          holdAll = false;
+          for (const respond of heldAll.splice(0)) respond();
+          mixedSuccess = previousMixedSuccess;
+          if (boot !== undefined && hostValue === undefined) await boot.catch(() => undefined);
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
+    };
+
     const host = await createMisoAudioWorkletHost({
       context,
       document: new TextEncoder().encode("{\"schema_version\":0}"),
@@ -1799,6 +2769,7 @@ async function testMainRealm() {
     assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
+    await runPlainDataMatrix();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;

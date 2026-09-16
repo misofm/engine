@@ -21,6 +21,43 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
+const HOST_ARRAY = Array;
+const HOST_ARRAY_PROTOTYPE = Array.prototype;
+const HOST_ARRAY_IS_ARRAY = Array.isArray;
+const HOST_OBJECT_PROTOTYPE = Object.prototype;
+const HOST_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const HOST_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const HOST_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const HOST_HAS_OWN = Object.prototype.hasOwnProperty;
+const HOST_UINT8_ARRAY = Uint8Array;
+const HOST_UINT8_ARRAY_SET = Uint8Array.prototype.set;
+const HOST_TYPED_ARRAY_PROTOTYPE = HOST_OBJECT_GET_PROTOTYPE_OF(HOST_UINT8_ARRAY.prototype);
+const HOST_TYPED_ARRAY_TAG_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  HOST_TYPED_ARRAY_PROTOTYPE,
+  Symbol.toStringTag,
+).get;
+const HOST_TYPED_ARRAY_BUFFER_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  HOST_TYPED_ARRAY_PROTOTYPE,
+  "buffer",
+).get;
+const HOST_TYPED_ARRAY_BYTE_OFFSET_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  HOST_TYPED_ARRAY_PROTOTYPE,
+  "byteOffset",
+).get;
+const HOST_TYPED_ARRAY_BYTE_LENGTH_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  HOST_TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+).get;
+const HOST_TYPED_ARRAY_LENGTH_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  HOST_TYPED_ARRAY_PROTOTYPE,
+  "length",
+).get;
+const HOST_ARRAY_BUFFER_BYTE_LENGTH_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+  ArrayBuffer.prototype,
+  "byteLength",
+).get;
+
 // The one frozen shipping backend (issue 024 `BACKEND_SIMD128`). It is still sent explicitly so
 // the processor can cross-check it against the backend row the Rust artifact reports: a module
 // built without `+simd128` reports `0` and is rejected transactionally rather than rendered with.
@@ -256,6 +293,198 @@ function hasExactFields(value, fields) {
   const keys = Object.keys(value).sort();
   const expected = [...fields].sort();
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function capturePlainRecord(value, fields) {
+  if (value === null || typeof value !== "object" || HOST_ARRAY_IS_ARRAY(value)) return null;
+  const prototype = HOST_OBJECT_GET_PROTOTYPE_OF(value);
+  if (prototype !== HOST_OBJECT_PROTOTYPE && prototype !== null) return null;
+  const known = new Set(fields);
+  const descriptors = new Map();
+  let enumerableCount = 0;
+  const keys = HOST_REFLECT_OWN_KEYS(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (typeof key !== "string" || !known.has(key)) return null;
+    const descriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
+    if (descriptor === undefined
+        || !HOST_HAS_OWN.call(descriptor, "value")
+        || !HOST_HAS_OWN.call(descriptor, "enumerable")) return null;
+    descriptors.set(key, { value: descriptor.value, enumerable: descriptor.enumerable });
+    if (descriptor.enumerable) enumerableCount += 1;
+  }
+  return { descriptors, enumerableCount };
+}
+
+function hasEnumerableShape(captured, fields) {
+  if (captured.enumerableCount !== fields.length) return false;
+  return hasRequiredEnumerableFields(captured, fields);
+}
+
+function hasRequiredEnumerableFields(captured, fields) {
+  for (let index = 0; index < fields.length; index += 1) {
+    const descriptor = captured.descriptors.get(fields[index]);
+    if (descriptor === undefined || !descriptor.enumerable) return false;
+  }
+  return true;
+}
+
+function snapshotDocument(value) {
+  if (value === null || typeof value !== "object") return undefined;
+  try {
+    if (HOST_TYPED_ARRAY_TAG_GETTER.call(value) !== "Uint8Array") return undefined;
+    const backing = HOST_TYPED_ARRAY_BUFFER_GETTER.call(value);
+    const backingByteLength = HOST_ARRAY_BUFFER_BYTE_LENGTH_GETTER.call(backing);
+    const byteOffset = HOST_TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value);
+    const byteLength = HOST_TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value);
+    const length = HOST_TYPED_ARRAY_LENGTH_GETTER.call(value);
+    if (byteOffset > backingByteLength || byteLength > backingByteLength - byteOffset
+        || byteLength !== length) return undefined;
+    const copy = new HOST_UINT8_ARRAY(length);
+    HOST_UINT8_ARRAY_SET.call(copy, value);
+    return copy;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function canonicalArrayIndex(key, length) {
+  if (key === "") return -1;
+  const index = Number(key);
+  return Number.isInteger(index) && index >= 0 && index <= 0xfffffffe
+      && index < length && String(index) === key
+    ? index
+    : -1;
+}
+
+function snapshotSpectrumEntry(value) {
+  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_ENTRY_FIELDS);
+  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_ENTRY_FIELDS)) return undefined;
+  return {
+    target: captured.descriptors.get("target").value,
+    targetId: captured.descriptors.get("targetId").value,
+    channels: captured.descriptors.get("channels").value,
+  };
+}
+
+function snapshotSpectrumEntries(value) {
+  if (!HOST_ARRAY_IS_ARRAY(value)
+      || HOST_OBJECT_GET_PROTOTYPE_OF(value) !== HOST_ARRAY_PROTOTYPE) return undefined;
+  const lengthDescriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, "length");
+  if (lengthDescriptor === undefined
+      || !HOST_HAS_OWN.call(lengthDescriptor, "value")
+      || !HOST_HAS_OWN.call(lengthDescriptor, "enumerable")) return undefined;
+  const length = lengthDescriptor.value;
+  if (!Number.isSafeInteger(length) || length < 0 || length > 0xffffffff) return undefined;
+  const keys = HOST_REFLECT_OWN_KEYS(value);
+  const indices = [];
+  let sawLength = false;
+  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+    const key = keys[keyIndex];
+    if (key === "length") {
+      sawLength = true;
+      continue;
+    }
+    const index = typeof key === "string" ? canonicalArrayIndex(key, length) : -1;
+    if (index < 0) return undefined;
+    const descriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
+    if (descriptor === undefined
+        || !HOST_HAS_OWN.call(descriptor, "value")
+        || !HOST_HAS_OWN.call(descriptor, "enumerable")) return undefined;
+    indices.push({ index, value: descriptor.value, enumerable: descriptor.enumerable });
+  }
+  if (!sawLength) return undefined;
+  let copy;
+  try {
+    copy = new HOST_ARRAY(length);
+    for (let index = 0; index < indices.length; index += 1) {
+      const source = indices[index];
+      const entry = snapshotSpectrumEntry(source.value);
+      if (entry === undefined) return undefined;
+      HOST_OBJECT_DEFINE_PROPERTY(copy, source.index, {
+        value: entry,
+        writable: true,
+        enumerable: source.enumerable,
+        configurable: true,
+      });
+    }
+  } catch (_) {
+    return undefined;
+  }
+  return copy;
+}
+
+function snapshotSpectrumBoot(value) {
+  if (value === null) return null;
+  const captured = capturePlainRecord(value, SPECTRUM_BOOT_FIELDS);
+  if (!captured || !hasEnumerableShape(captured, SPECTRUM_BOOT_FIELDS)) return undefined;
+  const snapshot = {
+    target: captured.descriptors.get("target").value,
+    targetId: captured.descriptors.get("targetId").value,
+    channels: captured.descriptors.get("channels").value,
+    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
+  };
+  return validSpectrumBoot(snapshot) ? snapshot : undefined;
+}
+
+function snapshotSpectrumCollection(value) {
+  if (value === null) return null;
+  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_FIELDS);
+  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_FIELDS)) return undefined;
+  const entries = snapshotSpectrumEntries(captured.descriptors.get("entries").value);
+  if (entries === undefined) return undefined;
+  const snapshot = {
+    entries,
+    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
+  };
+  return validSpectrumCollectionBoot(snapshot) ? snapshot : undefined;
+}
+
+function snapshotBootOptions(value) {
+  const captured = capturePlainRecord(value, BOOT_OPTION_FIELDS);
+  if (!captured || !hasRequiredEnumerableFields(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
+  const spectrumDescriptor = captured.descriptors.get("spectrum");
+  const collectionDescriptor = captured.descriptors.get("spectrumCollection");
+  const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
+  const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
+  if (spectrumIsEnumerable || collectionIsEnumerable) {
+    if (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
+  } else {
+    if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
+    if (spectrumDescriptor !== undefined
+        && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
+  }
+  const spectrumValue = spectrumDescriptor === undefined ? undefined : spectrumDescriptor.value;
+  const spectrum = snapshotSpectrumBoot(spectrumValue ?? null);
+  const spectrumCollection = snapshotSpectrumCollection(
+    (collectionDescriptor === undefined ? undefined : collectionDescriptor.value) ?? null,
+  );
+  if (spectrum === undefined || spectrumCollection === undefined) return undefined;
+  const snapshot = {
+    sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
+    maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
+    consoleCommandQueueRecords: captured.descriptors.get("consoleCommandQueueRecords").value,
+    consoleMeterBlocks: captured.descriptors.get("consoleMeterBlocks").value,
+    consoleObservationTaps: captured.descriptors.get("consoleObservationTaps").value,
+    consoleMasterTrackPlusOne: captured.descriptors.get("consoleMasterTrackPlusOne").value,
+    spectrum,
+    spectrumCollection,
+  };
+  return validBootOptions(snapshot) ? snapshot : undefined;
+}
+
+function snapshotFactory(value) {
+  const captured = capturePlainRecord(value, [...OPTION_FIELDS, "preparedModule"]);
+  if (!captured || !hasRequiredEnumerableFields(captured, OPTION_FIELDS)) return undefined;
+  const preparedDescriptor = captured.descriptors.get("preparedModule");
+  const preparedModule = preparedDescriptor === undefined ? undefined : preparedDescriptor.value;
+  if (preparedModule === undefined) {
+    if (captured.enumerableCount !== OPTION_FIELDS.length) return undefined;
+  } else if (!preparedDescriptor.enumerable
+      || captured.enumerableCount !== OPTION_FIELDS.length + 1) {
+    return undefined;
+  }
+  return { descriptors: captured.descriptors, preparedModule };
 }
 
 function webError(result, requestId = 0, planes) {
@@ -1328,40 +1557,65 @@ class MisoAudioWorkletHost {
 }
 
 export async function createMisoAudioWorkletHost(options) {
-  const quantumFrames = options?.context?.renderQuantumSize ?? 128;
-  if (!hasExactFields(options, options?.preparedModule === undefined ? OPTION_FIELDS : [...OPTION_FIELDS, "preparedModule"])
-      || (options.preparedModule !== undefined && !(options.preparedModule instanceof WebAssembly.Module))
-      || options.context?.state !== "suspended"
-      || !validU32(quantumFrames) || quantumFrames === 0
-      || !validU32(options.context?.sampleRate) || options.context.sampleRate === 0
-      || !(options.document instanceof Uint8Array)
-      || !validBootOptions(options.options)
-      || typeof options.simd128ModuleUrl !== "string"
-      || typeof options.workletModuleUrl !== "string") {
-    throw webError(1);
+  let factorySnapshot;
+  let documentSnapshot;
+  let bootOptions;
+  let context;
+  let contextState;
+  let sampleRateHz;
+  let quantumFrames;
+  let preparedModule;
+  let simd128ModuleUrl;
+  let workletModuleUrl;
+  try {
+    factorySnapshot = snapshotFactory(options);
+    if (factorySnapshot === undefined) throw new Error("invalid factory");
+    const descriptors = factorySnapshot.descriptors;
+    context = descriptors.get("context").value;
+    contextState = context?.state;
+    quantumFrames = context?.renderQuantumSize ?? 128;
+    sampleRateHz = context?.sampleRate;
+    preparedModule = factorySnapshot.preparedModule;
+    simd128ModuleUrl = descriptors.get("simd128ModuleUrl").value;
+    workletModuleUrl = descriptors.get("workletModuleUrl").value;
+    documentSnapshot = snapshotDocument(descriptors.get("document").value);
+    bootOptions = snapshotBootOptions(descriptors.get("options").value);
+    if ((preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module))
+        || contextState !== "suspended"
+        || !validU32(quantumFrames) || quantumFrames === 0
+        || !validU32(sampleRateHz) || sampleRateHz === 0
+        || documentSnapshot === undefined
+        || bootOptions === undefined
+        || typeof simd128ModuleUrl !== "string"
+        || typeof workletModuleUrl !== "string") throw new Error("invalid factory data");
+  } catch (_) {
+    throw webError(RESULT_INVALID_ARGUMENT);
   }
   // W4-D1: attest before allocating anything. Thrown outside the `try` below so it reaches the
   // caller as itself rather than being folded into the generic 255 rejection.
   if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");
   let node;
   try {
+    // Capture this capability only after SIMD attestation, so unsupported browsers do not touch it.
+    const audioWorklet = context.audioWorklet;
     const selected = {
       backend: SHIPPING_BACKEND,
-      module: options.preparedModule ?? await fetchModule(options.simd128ModuleUrl),
+      module: preparedModule ?? await fetchModule(simd128ModuleUrl),
     };
-    await options.context.audioWorklet.addModule(options.workletModuleUrl);
-    node = new AudioWorkletNode(options.context, PROCESSOR_NAME, {
+    await audioWorklet.addModule(workletModuleUrl);
+    if (context.state !== "suspended"
+        || context.sampleRate !== sampleRateHz
+        || (context.renderQuantumSize ?? 128) !== quantumFrames) {
+      throw webError(RESULT_INVALID_ARGUMENT);
+    }
+    node = new AudioWorkletNode(context, PROCESSOR_NAME, {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       processorOptions: {
         module: selected.module,
-        document: new Uint8Array(options.document),
-        options: {
-          ...options.options,
-          spectrum: options.options.spectrum ?? null,
-          spectrumCollection: options.options.spectrumCollection ?? null,
-        },
+        document: documentSnapshot,
+        options: bootOptions,
       },
     });
     const ready = await new Promise((resolve, reject) => {
@@ -1386,7 +1640,7 @@ export async function createMisoAudioWorkletHost(options) {
             && validResources(
               message.resources,
               selected.backend,
-              options.context.sampleRate,
+              sampleRateHz,
               quantumFrames,
             )) {
           finish(resolve, {
@@ -1413,19 +1667,19 @@ export async function createMisoAudioWorkletHost(options) {
     return new MisoAudioWorkletHost(
       node,
       selected.backend,
-      options.context.sampleRate,
+      sampleRateHz,
       quantumFrames,
       ready.resources,
       ready.memoryBytes,
       // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
       // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
-      (options.options.sourceRingFrames === 0
-        ? Math.ceil(options.context.sampleRate / 10 / quantumFrames) + 2
-        : options.options.sourceRingFrames / quantumFrames),
-      Number(options.options.consoleCommandQueueRecords) || 1,
+      (bootOptions.sourceRingFrames === 0
+        ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
+        : bootOptions.sourceRingFrames / quantumFrames),
+      Number(bootOptions.consoleCommandQueueRecords) || 1,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(options.options.consoleMeterBlocks),
+      Number(bootOptions.consoleMeterBlocks),
       selected.module,
       preparedAbiLayout,
     );
