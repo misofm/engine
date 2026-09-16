@@ -8,6 +8,8 @@ For the supported plain-data grammar, `createMisoAudioWorkletHost(input)` owns a
 
 This is a deliberately narrower successor to exhausted #843, not a fifth correction. #843 required broad getter and shadowed-method compatibility; all four candidates failed, finally because caller-controlled `entries.every` could retain a callback that wrote into private storage. This issue removes that obligation by refusing accessors and decorated arrays before invocation. Preserve #843's complete failed ledger and never describe its broader contract as passed.
 
+Execution admitted at **2026-09-16 07:17:43 UTC** from clean synchronized main `299c828570f57cfbb4e1c82ced817be2ca5050b6` after fresh Astra XHIGH scope, separate fresh Astra XHIGH adversarial GO, and the required fresh Sol HIGH stateless brief. Local spec, GitHub title/body/number and OPEN state are exact at checkpoint `d7bff077`. This starts the 120-active-minute ceiling.
+
 ## Frozen product contract
 
 Assume standard, unmodified host-realm intrinsics and non-Proxy inputs. Inspect only the fixed factory, boot, spectrum, collection, entries-array, and entry schemas.
