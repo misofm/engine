@@ -855,6 +855,10 @@ export interface MisoAudioWorkletHost {
   dispose(): Promise<void>;
 }
 
+/// Boot preparation accepts same-realm plain-data records and undecorated arrays with standard
+/// non-Proxy intrinsics. `context` and `preparedModule` are capability exceptions; `document` is
+/// privately copied from a genuine `Uint8Array`. Invalid shapes reject the returned Promise before
+/// loading.
 export interface CreateMisoAudioWorkletHostOptions {
   context: BaseAudioContext;
   document: Uint8Array;

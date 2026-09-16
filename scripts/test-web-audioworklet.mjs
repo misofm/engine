@@ -15,6 +15,12 @@ import { MessageChannel } from "node:worker_threads";
 const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const realWasmReceiverRequested = commandArguments.includes("--real-wasm-receiver");
+const bootDataModeFlags = [
+  ["--boot-data-document", "document"],
+  ["--boot-data-nested", "nested"],
+].filter(([flag]) => commandArguments.includes(flag));
+if (bootDataModeFlags.length > 1) throw new TypeError("only one boot-data test mode is allowed");
+const bootDataTestMode = bootDataModeFlags[0]?.[1] ?? null;
 const qualificationModuleIndex = commandArguments.indexOf("--qualification-module");
 if (qualificationModuleIndex !== -1 && typeof commandArguments[qualificationModuleIndex + 1] !== "string") {
   throw new TypeError("--qualification-module requires a file path");
@@ -916,6 +922,16 @@ async function testMainRealm() {
   let commandResult = 0;
   let mixedSuccess = false;
   let commandMutation = null;
+  let compileGate = null;
+  let addModuleGate = null;
+
+  const snapshotGate = () => {
+    let release;
+    let markStarted;
+    const promise = new Promise((resolve) => { release = resolve; });
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    return { promise, started, start: markStarted, release };
+  };
 
   class FakePort {
     onmessage = null;
@@ -989,11 +1005,28 @@ async function testMainRealm() {
 
   class FakeNode {
     static latest;
+    static count = 0;
 
-    constructor(_context, _name, options) {
+    constructor(context, _name, options) {
+      FakeNode.count += 1;
       this.port = new FakePort();
       this.onprocessorerror = null;
       this.options = options;
+      if (bootDataTestMode !== null) {
+        const constructorDocument = options.processorOptions.document;
+        this.constructionContext = context;
+        this.constructionModule = options.processorOptions.module;
+        this.constructionDocumentShape = {
+          byteOffset: constructorDocument.byteOffset,
+          byteLength: constructorDocument.byteLength,
+          buffer: constructorDocument.buffer,
+        };
+        this.constructionSnapshot = {
+          document: new Uint8Array(constructorDocument),
+          module: options.processorOptions.module,
+          options: structuredClone(options.processorOptions.options),
+        };
+      }
       this.disposeMessages = 0;
       this.disconnectCount = 0;
       FakeNode.latest = this;
@@ -1025,16 +1058,182 @@ async function testMainRealm() {
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
     events.push(["compile", url]);
+    if (compileGate !== null) {
+      const gate = compileGate;
+      compileGate = null;
+      gate.start();
+      await gate.promise;
+    }
     return unsupportedPreparationModule;
   };
   const context = {
     state: "suspended",
     sampleRate: 48000,
     renderQuantumSize: 64,
-    audioWorklet: { addModule: async (url) => events.push(["addModule", url]) },
+    audioWorklet: {
+      addModule: async (url) => {
+        events.push(["addModule", url]);
+        if (addModuleGate !== null) {
+          const gate = addModuleGate;
+          addModuleGate = null;
+          gate.start();
+          await gate.promise;
+        }
+      },
+    },
   };
   try {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
+
+    const bootDataFactory = ({
+      document = new Uint8Array([0x7b, 0x22, 0x73, 0x22, 0x7d]),
+      options = limits,
+      includePreparedModule = false,
+      workletModuleUrl = "processor.js",
+    } = {}) => {
+      const factory = {
+        context,
+        document,
+        options,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl,
+      };
+      if (includePreparedModule) factory.preparedModule = unsupportedPreparationModule;
+      return factory;
+    };
+
+    const runBootDataDocument = async () => {
+      const gate = snapshotGate();
+      compileGate = gate;
+      const backing = new ArrayBuffer(16);
+      const document = new Uint8Array(backing, 3, 5);
+      document.set([11, 22, 33, 44, 55]);
+      const originalVisible = [...document];
+      const originalWorkletUrl = "boot-data-document-processor.js";
+      const factory = bootDataFactory({ document, workletModuleUrl: originalWorkletUrl });
+      const eventsBefore = events.length;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        document[1] = 99;
+        factory.workletModuleUrl = "mutated-during-compile.js";
+        gate.release();
+        hostValue = await boot;
+        const node = FakeNode.latest;
+        assert.deepEqual(
+          [...node.constructionSnapshot.document],
+          originalVisible,
+          "boot-data.document.before-construction",
+        );
+        assert.equal(node.constructionDocumentShape.byteOffset, 0, "boot-data.document.offset-zero");
+        assert.equal(
+          node.constructionDocumentShape.byteLength,
+          originalVisible.length,
+          "boot-data.document.visible-length",
+        );
+        assert.notEqual(
+          node.constructionDocumentShape.buffer,
+          backing,
+          "boot-data.document.private-storage",
+        );
+        assert.equal(node.constructionContext, context, "boot-data.document.context-identity");
+        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.document.module");
+        assert.deepEqual(
+          events.slice(eventsBefore),
+          [["compile", "simd.wasm"], ["addModule", originalWorkletUrl]],
+          "boot-data.document.captured-loading-inputs",
+        );
+      } finally {
+        gate.release();
+        if (compileGate === gate) compileGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    const runBootDataNested = async () => {
+      const gate = snapshotGate();
+      addModuleGate = gate;
+      const firstEntry = { target: "output", targetId: "first", channels: "both" };
+      const thirdEntry = { target: "trackPostMatrix", targetId: "third", channels: "left" };
+      const entries = [firstEntry, , thirdEntry];
+      const collection = { entries, maximumCaptureBytes: 4096 };
+      const factory = bootDataFactory({
+        document: new Uint8Array(),
+        includePreparedModule: true,
+        workletModuleUrl: "boot-data-nested-processor.js",
+        options: { ...limits, spectrum: null, spectrumCollection: collection },
+      });
+      const expected = {
+        ...limits,
+        spectrum: null,
+        spectrumCollection: {
+          entries: [
+            { target: "output", targetId: "first", channels: "both" },
+            ,
+            { target: "trackPostMatrix", targetId: "third", channels: "left" },
+          ],
+          maximumCaptureBytes: 4096,
+        },
+      };
+      const eventsBefore = events.length;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        firstEntry.targetId = "mutated-first";
+        thirdEntry.channels = "right";
+        entries[0] = { target: "output", targetId: "replaced-entry", channels: "right" };
+        factory.options.spectrumCollection = {
+          entries: [{ target: "output", targetId: "replaced-collection", channels: "both" }],
+          maximumCaptureBytes: 8192,
+        };
+        gate.release();
+        hostValue = await boot;
+        const node = FakeNode.latest;
+        assert.deepEqual(
+          node.constructionSnapshot.options,
+          expected,
+          "boot-data.nested.before-construction",
+        );
+        const capturedCollection = node.constructionSnapshot.options.spectrumCollection;
+        assert.equal(
+          Object.hasOwn(capturedCollection.entries, 1),
+          false,
+          "boot-data.nested.sparse-hole",
+        );
+        assert.notEqual(
+          node.options.processorOptions.options.spectrumCollection,
+          collection,
+          "boot-data.nested.private-collection",
+        );
+        assert.notEqual(
+          node.options.processorOptions.options.spectrumCollection.entries,
+          entries,
+          "boot-data.nested.private-entries",
+        );
+        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.nested.module");
+        assert.deepEqual(
+          events.slice(eventsBefore),
+          [["addModule", "boot-data-nested-processor.js"]],
+          "boot-data.nested.supplied-module-loading",
+        );
+      } finally {
+        gate.release();
+        if (addModuleGate === gate) addModuleGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    if (bootDataTestMode === "document") {
+      await runBootDataDocument();
+      return;
+    }
+    if (bootDataTestMode === "nested") {
+      await runBootDataNested();
+      return;
+    }
+
     const host = await createMisoAudioWorkletHost({
       context,
       document: new TextEncoder().encode("{\"schema_version\":0}"),
