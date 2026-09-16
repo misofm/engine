@@ -28,4 +28,18 @@ Remove stale or overly long historical explanations that obstruct onboarding. Pr
 
 ## Evidence
 
-Work has not started. Baseline is synchronized Engine main `704b8a3dddd3c91c6cbcb98c869ba67c4c0ae39e`.
+Baseline was synchronized Engine main `704b8a3dddd3c91c6cbcb98c869ba67c4c0ae39e`.
+
+- A fresh Astra XHIGH author replaced the 626-line release-history guide with a 263-line,
+  task-oriented guide using only the four public package entry points.
+- `npm run check:generated`, `npm run check:assets`, `bash scripts/check-sdk-types.sh`, and
+  `git diff --check` passed.
+- All three TypeScript examples compiled strictly against the emitted package declarations and
+  actual `@misofm/engine` export mappings.
+- Every repository-file link resolves.
+- A fresh Astra MEDIUM adversarial review found one stale shipped-effect claim. Commit `30404121`
+  removed the two undelivered effects; the same reviewer then returned PASS and confirmed the
+  eight-effect list matches the generated catalog.
+
+Decision: PASS. The README describes the current 0.4.0 product and its material boundaries without
+changing code, package metadata, generated files, or artifacts.
