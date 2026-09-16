@@ -366,9 +366,38 @@ function createRealWebAudioFacade(artifact, allowedWorkletUrl) {
       const channel = new MessageChannel();
       this.port = channel.port1;
       this.processorPort = channel.port2;
+      const originalHostPostMessageDescriptor = Object.getOwnPropertyDescriptor(this.port, "postMessage");
+      const originalHostPostMessage = this.port.postMessage;
+      const node = this;
+      const instrumentedHostPostMessage = function (...args) {
+        node.hostPostMessageAttempts += 1;
+        return Reflect.apply(originalHostPostMessage, this, args);
+      };
+      Object.defineProperty(this.port, "postMessage", {
+        configurable: true,
+        enumerable: originalHostPostMessageDescriptor?.enumerable ?? true,
+        writable: true,
+        value: instrumentedHostPostMessage,
+      });
+      let hostPostMessageInstrumentationRestored = false;
+      this.restoreHostPostMessageInstrumentation = () => {
+        if (hostPostMessageInstrumentationRestored) return;
+        if (this.port.postMessage !== instrumentedHostPostMessage) {
+          throw new Error("host MessagePort postMessage instrumentation was replaced");
+        }
+        if (originalHostPostMessageDescriptor === undefined) {
+          if (!Reflect.deleteProperty(this.port, "postMessage")) {
+            throw new Error("host MessagePort postMessage instrumentation could not be removed");
+          }
+        } else {
+          Object.defineProperty(this.port, "postMessage", originalHostPostMessageDescriptor);
+        }
+        hostPostMessageInstrumentationRestored = true;
+      };
       this.responses = [];
       this.requests = [];
       this.messageErrors = [];
+      this.hostPostMessageAttempts = 0;
       this.processor = null;
       this.constructionError = null;
       this.constructionTimer = null;
@@ -469,6 +498,11 @@ function createRealWebAudioFacade(artifact, allowedWorkletUrl) {
       for (const node of allNodes) {
         try {
           node.teardown();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          node.restoreHostPostMessageInstrumentation();
         } catch (error) {
           errors.push(error);
         }
@@ -667,6 +701,7 @@ async function ordinaryRealLifecycle(artifact, workletUrl, facade, label, state)
   const beforePointer = native.exports.miso_engine_web_v1_status_ptr(native.handle);
   assert(Number.isInteger(beforePointer) && beforePointer > 0, `${label}: status pointer before disposal`);
 
+  const hostPostMessageAttemptsBeforeDispose = state.node.hostPostMessageAttempts;
   await realDeadline(`${label} dispose`, () => host.dispose());
   state.hostDisposeAcknowledged = true;
   const disposeRequests = state.node.requests.filter((message) => message?.tag === "miso.dispose.v1");
@@ -683,13 +718,18 @@ async function ordinaryRealLifecycle(artifact, workletUrl, facade, label, state)
   );
   assert.equal(processor.handle, 0, `${label}: processor clears its disposed handle`);
   assert.equal(native.instance.exports, native.exports, `${label}: saved instance remains native`);
+  assert.equal(
+    state.node.hostPostMessageAttempts,
+    hostPostMessageAttemptsBeforeDispose + 1,
+    `${label}: first disposal sends one host postMessage attempt`,
+  );
 
-  const requestCountAfterDispose = state.node.requests.length;
+  const hostPostMessageAttemptsAfterDispose = state.node.hostPostMessageAttempts;
   await realDeadline(`${label} repeated dispose`, () => host.dispose());
   assert.equal(
-    state.node.requests.length,
-    requestCountAfterDispose,
-    `${label}: repeated disposal sends no additional request`,
+    state.node.hostPostMessageAttempts,
+    hostPostMessageAttemptsAfterDispose,
+    `${label}: repeated disposal sends no additional host postMessage attempt`,
   );
   assert.equal(state.node.closedHostPort, true, `${label}: host port closed`);
   assert.equal(state.node.closedProcessorPort, true, `${label}: processor port closed`);
