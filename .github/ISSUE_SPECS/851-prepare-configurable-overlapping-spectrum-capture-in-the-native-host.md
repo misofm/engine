@@ -144,3 +144,15 @@ accepts that exact bound and transactionally refuses 12,543 with the public copy
 Root reran the complete host-core all-feature suite and doctests, strict all-feature/all-target
 Clippy, the realtime policy gate, formatting, and the wasm32 no-default host-core check: PASS. A
 fresh Astra medium rereview of this exact checkpoint remains required before native delivery.
+
+**Fresh Astra medium integrated native verdict at `e6a60c02`: PASS.** The reviewer found no
+remaining blockers. It independently verified that
+`C*Q + ceil(Q/H)*(C*N + 4*N)` conservatively covers every selected-plane history/reconstruction,
+dual-plane owned-record, and queue-transfer copy, including repeated completions and rejected
+full-queue attempts. The Q128/H256 stereo probe measures 12,544 operations and exact/one-below
+admission accepts 12,544 and transactionally refuses 12,543. Cadence, exact windows, immutable
+ownership, bounded Gap recovery, validity/failure fencing, smoothing, preparation/lifecycle,
+retained resources, PCM identity, realtime rules, additive compatibility, host-core default and
+no-default suites, wasm32 scalar/SIMD checks, and host-web compilation all passed. The only notes
+were two existing nightly-only ignored budget tests and an existing no-default internal-helper
+warning; neither affects delivery.
