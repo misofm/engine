@@ -151,3 +151,13 @@ H3200 across request, reply, subscription bounds, and frozen publication. Root r
 spectrum-browser evals, including existing transfer ownership, delayed cleanup, failure recovery,
 and lifecycle cases, plus SDK type/mirror and syntax checks: PASS. Actual-module Worker evidence
 remains part of B4's single-candidate qualification.
+
+**B3a browser policy and host-request shape — complete in fresh Luna MAX round 1.** Browser policy
+now carries the same optional literal H256/H512/H1024/H2048 into scratch and worklet preparation.
+`createEngine` validates and snapshots it before calling any asynchronous scratch/context/host
+dependency, so invalid values have no side effects and caller mutation cannot change either boot.
+The SDK-to-host adapter maps omission to the flat host record's zero default sentinel and forwards
+explicit values unchanged. The authoritative host declaration and SDK mirror add the same required
+numeric field and remain byte-identical. Root reran seven focused forwarding/refusal/mutation
+tests, the SDK type and declaration-mirror gate, syntax checks, and diff checks: PASS. Runtime host
+snapshotting, capability refusal, and AudioWorklet boot dispatch remain the isolated B3b slice.

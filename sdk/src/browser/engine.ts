@@ -9,6 +9,7 @@ import {
   assertQuantumMatch,
   assertWebDeliverableSources,
   scratchBootOptions,
+  validateBrowserSpectrumHopFrames,
   workletBootOptions,
 } from "./policy.ts";
 import type { BrowserBootPolicy } from "./policy.ts";
@@ -479,6 +480,7 @@ export function createEngine(
 ): Promise<BrowserEngine<DefaultAudioContext>>;
 export function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>>;
 export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>> {
+  const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.policy?.spectrumHopFrames);
   const preparedSpectrum = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
   const preparedSpectrumCollection = options.spectrumCollection === undefined
     ? undefined : cloneSpectrumCollection(options.spectrumCollection);
@@ -486,7 +488,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const document = documentBytes(options.document);
-  const policy = { ...options.policy, ...(typeof options.policy?.console === "object" ? { console: { ...options.policy.console } } : {}) };
+  const policy = {
+    ...options.policy,
+    ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
+    ...(typeof options.policy?.console === "object" ? { console: { ...options.policy.console } } : {}),
+  };
   const preparedModule = options.preparedModule;
   const simd128ModuleUrl = options.simd128ModuleUrl ?? BUNDLED_ENGINE_ASSETS.wasm.href;
   const workletModuleUrl = options.workletModuleUrl ?? BUNDLED_ENGINE_ASSETS.workletModule.href;

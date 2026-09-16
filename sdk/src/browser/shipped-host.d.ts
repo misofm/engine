@@ -690,6 +690,8 @@ export interface MisoWebBootOptions {
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   maximumMemoryBytes: bigint;
+  /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
+  spectrumHopFrames: number;
   /// Per-track control-queue depth in records, or `0n` to attach no control channel (issue 137).
   consoleCommandQueueRecords: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
