@@ -164,3 +164,21 @@ contracts. No new codec/backend/framework is required. #763 remains OPEN for its
 previously specified simultaneous jobs/multi-target batches, remaining discovery,
 identity/join fields and transport/qualification scope. Closing these small
 children does not silently close or reduce that parent commitment.
+
+## Configurable overlapping spectrum children
+
+Fresh Astra xhigh adversarial review rejected a hop-only configuration change because the
+existing capture, work ledger, read-loss behavior and Worker validation all encode the
+non-overlapping default. The corrected design is split into two stateless children:
+
+- #851 owns native protected preparation, exact overlapping 2048-frame windows for explicit
+  256/512/1024/2048-frame hops, immutable one-slot publication, validity propagation, bounded
+  loss recovery and checked work/resource accounting.
+- #852 depends on delivered #851 and owns additive host-web ABI/capability wiring, headless and
+  browser SDK preparation, AudioWorklet/Worker propagation, actual artifacts, browser evidence
+  and public documentation.
+
+Configuration remains host observation policy outside canonical session JSON. Deployment and app
+adoption remain separate outcomes. These children improve the delivered single active spectrum
+job; they do not discharge this parent's independent simultaneous-job, transport, join or final
+qualification requirements.
