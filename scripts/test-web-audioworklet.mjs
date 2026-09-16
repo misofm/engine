@@ -15,6 +15,14 @@ import { MessageChannel } from "node:worker_threads";
 const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const realWasmReceiverRequested = commandArguments.includes("--real-wasm-receiver");
+const snapshotModeFlags = [
+  ["--snapshot-document", "document"],
+  ["--snapshot-nested", "nested"],
+  ["--snapshot-single-read", "single-read"],
+  ["--snapshot-existing", "existing"],
+].filter(([flag]) => commandArguments.includes(flag));
+if (snapshotModeFlags.length > 1) throw new TypeError("only one snapshot test mode is allowed");
+const snapshotTestMode = snapshotModeFlags[0]?.[1] ?? "all";
 const qualificationModuleIndex = commandArguments.indexOf("--qualification-module");
 if (qualificationModuleIndex !== -1 && typeof commandArguments[qualificationModuleIndex + 1] !== "string") {
   throw new TypeError("--qualification-module requires a file path");
@@ -905,6 +913,7 @@ async function testMainRealm() {
     compile: WebAssembly.compile,
   };
   const events = [];
+  const fetches = [];
   let holdSource = false;
   let holdAll = false;
   const heldAll = [];
@@ -916,11 +925,58 @@ async function testMainRealm() {
   let commandResult = 0;
   let mixedSuccess = false;
   let commandMutation = null;
+  let compileGate = null;
+  let addModuleGate = null;
+  let readyGate = null;
+  let abiGate = null;
+
+  const snapshotGate = () => {
+    let release;
+    let markStarted;
+    const promise = new Promise((resolve) => { release = resolve; });
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    return {
+      promise,
+      started,
+      start: markStarted,
+      release,
+    };
+  };
+
+  const snapshotContext = ({
+    state = "suspended",
+    sampleRate = 48000,
+    quantum = 64,
+    omitQuantum = false,
+  } = {}) => {
+    const value = {
+      state,
+      sampleRate,
+      audioWorklet: {
+        addModule: async (url) => {
+          events.push(["addModule", url]);
+          if (addModuleGate !== null) {
+            const gate = addModuleGate;
+            addModuleGate = null;
+            gate.start();
+            await gate.promise;
+          }
+        },
+      },
+    };
+    if (!omitQuantum) value.renderQuantumSize = quantum;
+    return value;
+  };
 
   class FakePort {
     onmessage = null;
     onmessageerror = null;
     closeCount = 0;
+
+    constructor(sampleRateHz, quantumFrames) {
+      this.sampleRateHz = sampleRateHz;
+      this.quantumFrames = quantumFrames;
+    }
 
     close() {
       this.closeCount += 1;
@@ -943,7 +999,8 @@ async function testMainRealm() {
         } else if (received.tag === "miso.status.v1") {
           response = {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
-            lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
+            lastResult: 0, backend: 1, sampleRateHz: this.sampleRateHz,
+            quantumFrames: this.quantumFrames,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
           };
           if (statusMutation !== null) response = statusMutation(response);
@@ -989,19 +1046,44 @@ async function testMainRealm() {
 
   class FakeNode {
     static latest;
+    static count = 0;
 
-    constructor(_context, _name, options) {
-      this.port = new FakePort();
+    constructor(context, _name, options) {
+      FakeNode.count += 1;
+      const sampleRateHz = context.sampleRate;
+      const quantumFrames = context.renderQuantumSize ?? 128;
+      this.port = new FakePort(sampleRateHz, quantumFrames);
       this.onprocessorerror = null;
       this.options = options;
+      this.constructionContext = context;
+      this.constructionModule = options.processorOptions.module;
+      // FakeNode retains the real constructor input by reference above. This separate, immediate
+      // copy is the test oracle: later caller mutation cannot rewrite the evidence being checked.
+      this.constructionSnapshot = {
+        name: _name,
+        numberOfInputs: options.numberOfInputs,
+        numberOfOutputs: options.numberOfOutputs,
+        outputChannelCount: [...options.outputChannelCount],
+        processorOptions: {
+          module: options.processorOptions.module,
+          document: new Uint8Array(options.processorOptions.document),
+          options: structuredClone(options.processorOptions.options),
+        },
+      };
       this.disposeMessages = 0;
       this.disconnectCount = 0;
       FakeNode.latest = this;
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
+        if (readyGate !== null) {
+          const gate = readyGate;
+          readyGate = null;
+          gate.start();
+          await gate.promise;
+        }
         let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: "simd128",
-          resources: resourceReport(1, 64),
+          resources: resourceReport(1, quantumFrames),
           memoryBytes: 65536,
         };
         if (readyMutation !== null) data = readyMutation(data);
@@ -1016,25 +1098,882 @@ async function testMainRealm() {
 
   globalThis.AudioWorkletNode = FakeNode;
   WebAssembly.validate = () => true;
-  globalThis.fetch = async (url) => ({
-    ok: true,
-    arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-    json: async () => preparedAbiLayout,
-  });
   const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
     events.push(["compile", url]);
+    if (compileGate !== null) {
+      const gate = compileGate;
+      compileGate = null;
+      gate.start();
+      await gate.promise;
+    }
     return unsupportedPreparationModule;
   };
-  const context = {
-    state: "suspended",
-    sampleRate: 48000,
-    renderQuantumSize: 64,
-    audioWorklet: { addModule: async (url) => events.push(["addModule", url]) },
+  globalThis.fetch = async (url) => {
+    fetches.push(String(url));
+    if (abiGate !== null && String(url).includes("miso-engine-v1-abi-layout.json")) {
+      const gate = abiGate;
+      abiGate = null;
+      gate.start();
+      await gate.promise;
+    }
+    return {
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
+      json: async () => preparedAbiLayout,
+    };
   };
+  const context = snapshotContext();
   try {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
+
+    const snapshotFactory = ({
+      context: factoryContext = snapshotContext(),
+      document = new Uint8Array([0x7b, 0x22, 0x73, 0x22, 0x7d]),
+      options: factoryOptions = { ...limits },
+      simd128ModuleUrl = "simd.wasm",
+      workletModuleUrl = "processor.js",
+      includePreparedModule = true,
+      preparedModule = unsupportedPreparationModule,
+    } = {}) => {
+      const factory = {
+        context: factoryContext,
+        document,
+        options: factoryOptions,
+        simd128ModuleUrl,
+        workletModuleUrl,
+      };
+      if (includePreparedModule) factory.preparedModule = preparedModule;
+      return factory;
+    };
+
+    const expectedProcessorOptions = (options) => {
+      const copy = structuredClone(options);
+      copy.spectrum = copy.spectrum ?? null;
+      copy.spectrumCollection = copy.spectrumCollection ?? null;
+      return copy;
+    };
+
+    const snapshotLocalRefusal = async (label, factory, result = 1) => {
+      const eventsBefore = events.length;
+      const fetchesBefore = fetches.length;
+      const nodesBefore = FakeNode.count;
+      const outcome = await createMisoAudioWorkletHost(factory).then(
+        (hostValue) => ({ hostValue }),
+        (error) => ({ error }),
+      );
+      if (outcome.hostValue !== undefined) {
+        await outcome.hostValue.dispose().catch(() => undefined);
+        assert.fail(label);
+      }
+      const error = outcome.error;
+      assert(error !== undefined, label);
+      assert.deepEqual(Object.keys(error).sort(), ["requestId", "result", "tag"], label);
+      assert.equal(error.tag, "miso.error.v1", label);
+      assert.equal(error.requestId, 0, label);
+      assert.equal(error.result, result, label);
+      assert.equal(events.length, eventsBefore, `${label}: no loading or addModule`);
+      assert.equal(fetches.length, fetchesBefore, `${label}: no fetch`);
+      assert.equal(FakeNode.count, nodesBefore, `${label}: no node construction`);
+      return error;
+    };
+
+    const snapshotLocalHostRefusal = async (label, promise) => {
+      const outcome = await promise.then(
+        (hostValue) => ({ hostValue }),
+        (error) => ({ error }),
+      );
+      if (outcome.hostValue !== undefined) {
+        await outcome.hostValue.dispose().catch(() => undefined);
+        assert.fail(label);
+      }
+      const error = outcome.error;
+      assert(error !== undefined, label);
+      assert.equal(error.tag, "miso.error.v1", label);
+      assert.equal(error.requestId, 0, label);
+      assert.equal(error.result, 1, label);
+      return error;
+    };
+
+    const snapshotCommand = () => ({
+      kind: 1, rack: 255, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 0,
+      smoothingSamples: 1, values: [0, 0, 0, 0],
+    });
+
+    const runSnapshotDocumentControl = async () => {
+      // Red control 1: baseline 299c8285 reads the caller document after this pause. Keep this
+      // case first so a later snapshot assertion cannot mask the required named failure.
+      const gate = snapshotGate();
+      compileGate = gate;
+      const backing = new ArrayBuffer(16);
+      const document = new Uint8Array(backing, 3, 5);
+      document.set([11, 22, 33, 44, 55]);
+      const originalVisible = [...document];
+      const factory = snapshotFactory({ document, includePreparedModule: false });
+      const nodesBefore = FakeNode.count;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        document[1] = 99;
+        factory.document = new Uint8Array([201, 202, 203]);
+        gate.release();
+        hostValue = await boot;
+        assert.equal(FakeNode.count, nodesBefore + 1, "snapshot.document.constructed");
+        const node = FakeNode.latest;
+        const captured = node.constructionSnapshot.processorOptions.document;
+        assert.deepEqual([...captured], originalVisible, "snapshot.document.before-construction");
+        assert.equal(captured.byteOffset, 0, "snapshot.document.visible-range-offset");
+        assert.equal(captured.byteLength, originalVisible.length, "snapshot.document.visible-range-length");
+        assert.notEqual(captured.buffer, backing, "snapshot.document.private-storage");
+        assert.equal(backing.byteLength, 16, "snapshot.document.caller-buffer-attached");
+        assert.equal(
+          Object.isFrozen(node.options.processorOptions.document),
+          false,
+          "snapshot.document.nonempty-not-frozen",
+        );
+      } finally {
+        gate.release();
+        if (compileGate === gate) compileGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    const runSnapshotNestedCase = async (label, options, mutate) => {
+      const gate = snapshotGate();
+      addModuleGate = gate;
+      const factory = snapshotFactory({ options });
+      const expected = expectedProcessorOptions(options);
+      const nodesBefore = FakeNode.count;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        mutate(factory);
+        gate.release();
+        hostValue = await boot;
+        assert.equal(FakeNode.count, nodesBefore + 1, `snapshot.${label}.constructed`);
+        assert.deepEqual(
+          FakeNode.latest.constructionSnapshot.processorOptions.options,
+          expected,
+          `snapshot.${label}.before-construction`,
+        );
+      } finally {
+        gate.release();
+        if (addModuleGate === gate) addModuleGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+    };
+
+    const runSnapshotNestedControl = async () => {
+      // Red control 2: after the corrected factory exists, replacing this collection and mutating
+      // its entries must fail a shallow-copy mutant at the uniquely named assertion below.
+      const firstEntry = { target: "output", targetId: "first", channels: "both" };
+      const thirdEntry = { target: "trackPostMatrix", targetId: "third", channels: "left" };
+      const collection = {
+        entries: [firstEntry, , thirdEntry],
+        maximumCaptureBytes: 4096,
+      };
+      await runSnapshotNestedCase(
+        "nested",
+        {
+          ...limits,
+          spectrum: null,
+          spectrumCollection: collection,
+        },
+        (factory) => {
+          firstEntry.targetId = "mutated-first";
+          thirdEntry.channels = "right";
+          factory.options.spectrumCollection = {
+            entries: [{ target: "output", targetId: "replacement", channels: "both" }],
+            maximumCaptureBytes: 8192,
+          };
+        },
+      );
+      assert.equal(
+        Object.hasOwn(FakeNode.latest.constructionSnapshot.processorOptions.options
+          .spectrumCollection.entries, 1),
+        false,
+        "snapshot.nested.sparse-hole",
+      );
+    };
+
+    const runSnapshotSingleRead = async () => {
+      let reads = 0;
+      const options = { ...limits };
+      Object.defineProperty(options, "sourceRingFrames", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          reads += 1;
+          return reads === 1 ? 256 : 512;
+        },
+      });
+      const factory = snapshotFactory({ options });
+      const hostValue = await createMisoAudioWorkletHost(factory);
+      try {
+        assert.equal(reads, 1, "snapshot.single-read");
+        assert.equal(
+          FakeNode.latest.constructionSnapshot.processorOptions.options.sourceRingFrames,
+          256,
+          "snapshot.single-read.constructor-value",
+        );
+      } finally {
+        await hostValue.dispose();
+      }
+    };
+
+    const runSnapshotAccepted = async (label, factory, check = () => undefined) => {
+      const hostValue = await createMisoAudioWorkletHost(factory);
+      try {
+        check(FakeNode.latest.constructionSnapshot, hostValue);
+      } finally {
+        await hostValue.dispose();
+      }
+      assert.ok(label, "snapshot accepted case has a label");
+    };
+
+    const runSnapshotStorageCases = async () => {
+      const sharedBacking = new SharedArrayBuffer(8);
+      const sharedDocument = new Uint8Array(sharedBacking);
+      sharedDocument.set([1, 2, 3, 4]);
+      await snapshotLocalRefusal(
+        "snapshot.storage.shared-before-loading",
+        snapshotFactory({ document: sharedDocument }),
+      );
+
+      const detachedBacking = new ArrayBuffer(8);
+      const detachedDocument = new Uint8Array(detachedBacking);
+      structuredClone(detachedBacking, { transfer: [detachedBacking] });
+      await snapshotLocalRefusal(
+        "snapshot.storage.detached-before-loading",
+        snapshotFactory({ document: detachedDocument }),
+      );
+
+      const gate = snapshotGate();
+      addModuleGate = gate;
+      const backing = new ArrayBuffer(12);
+      const document = new Uint8Array(backing, 2, 6);
+      document.set([31, 41, 51, 61, 71, 81]);
+      const expected = [...document];
+      const factory = snapshotFactory({ document });
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        structuredClone(backing, { transfer: [backing] });
+        gate.release();
+        hostValue = await boot;
+        assert.equal(backing.byteLength, 0, "snapshot.storage.detached-after-capture.caller-detached");
+        assert.deepEqual(
+          [...FakeNode.latest.constructionSnapshot.processorOptions.document],
+          expected,
+          "snapshot.storage.detached-after-capture",
+        );
+      } finally {
+        gate.release();
+        if (addModuleGate === gate) addModuleGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+
+      const emptyHost = await createMisoAudioWorkletHost(snapshotFactory({ document: new Uint8Array() }));
+      try {
+        assert.equal(
+          FakeNode.latest.constructionSnapshot.processorOptions.document.byteLength,
+          0,
+          "snapshot.storage.attached-empty-admissible",
+        );
+      } finally {
+        await emptyHost.dispose();
+      }
+    };
+
+    const runSnapshotShapeAndDomainCases = async () => {
+      const singleSpectrum = {
+        target: "trackPostInputBuiltins",
+        targetId: `${"é".repeat(63)}a`,
+        channels: "both",
+        maximumCaptureBytes: 1_048_576,
+      };
+      const collectionEntry = {
+        target: "trackPostMatrix", targetId: "collection-entry", channels: "left",
+      };
+      const sparseCollection = {
+        entries: [collectionEntry, , { target: "output", targetId: "tail", channels: "right" }],
+        maximumCaptureBytes: Number.MAX_SAFE_INTEGER,
+      };
+
+      await runSnapshotAccepted(
+        "snapshot.shape.legacy-six",
+        snapshotFactory({ options: { ...limits } }),
+        (snapshot) => {
+          assert.equal(snapshot.processorOptions.options.spectrum, null,
+            "snapshot.shape.legacy-six.spectrum-normalized");
+          assert.equal(snapshot.processorOptions.options.spectrumCollection, null,
+            "snapshot.shape.legacy-six.collection-normalized");
+        },
+      );
+      await runSnapshotAccepted(
+        "snapshot.shape.explicit-undefined-normalization",
+        snapshotFactory({ options: { ...limits, spectrum: undefined, spectrumCollection: undefined } }),
+        (snapshot) => {
+          assert.equal(snapshot.processorOptions.options.spectrum, null,
+            "snapshot.shape.undefined-spectrum-normalized");
+          assert.equal(snapshot.processorOptions.options.spectrumCollection, null,
+            "snapshot.shape.undefined-collection-normalized");
+        },
+      );
+      await runSnapshotAccepted(
+        "snapshot.shape.single-eight",
+        snapshotFactory({
+          options: { ...limits, spectrum: singleSpectrum, spectrumCollection: null },
+        }),
+        (snapshot) => {
+          assert.deepEqual(snapshot.processorOptions.options.spectrum, singleSpectrum,
+            "snapshot.shape.single-spectrum-values");
+        },
+      );
+      await runSnapshotAccepted(
+        "snapshot.shape.collection-eight",
+        snapshotFactory({
+          options: { ...limits, spectrum: null, spectrumCollection: sparseCollection },
+        }),
+        (snapshot) => {
+          assert.equal(
+            Object.hasOwn(snapshot.processorOptions.options.spectrumCollection.entries, 1),
+            false,
+            "snapshot.shape.collection-sparse-hole",
+          );
+          assert.equal(
+            snapshot.processorOptions.options.spectrumCollection.maximumCaptureBytes,
+            Number.MAX_SAFE_INTEGER,
+            "snapshot.shape.collection-positive-safe-integer-domain",
+          );
+        },
+      );
+      await runSnapshotAccepted(
+        "snapshot.domain.inclusive-boundaries",
+        snapshotFactory({
+          options: {
+            sourceRingFrames: 0xffffffff,
+            maximumMemoryBytes: 0xffffffffffffffffn,
+            consoleCommandQueueRecords: 256n,
+            consoleMeterBlocks: 0xffffffffn,
+            consoleObservationTaps: 16n,
+            consoleMasterTrackPlusOne: 0xffffffffn,
+            spectrum: null,
+            spectrumCollection: null,
+          },
+        }),
+        (snapshot) => {
+          assert.equal(snapshot.processorOptions.options.sourceRingFrames, 0xffffffff);
+          assert.equal(snapshot.processorOptions.options.consoleCommandQueueRecords, 256n);
+          assert.equal(snapshot.processorOptions.options.consoleObservationTaps, 16n);
+        },
+      );
+
+      const nonEnumerablePrepared = snapshotFactory({ includePreparedModule: false });
+      Object.defineProperty(nonEnumerablePrepared, "preparedModule", {
+        configurable: true, enumerable: false, value: undefined, writable: true,
+      });
+      await runSnapshotAccepted(
+        "snapshot.shape.non-enumerable-prepared-undefined",
+        nonEnumerablePrepared,
+      );
+
+      await snapshotLocalRefusal(
+        "snapshot.shape.seven-field-spectrum",
+        snapshotFactory({ options: { ...limits, spectrum: singleSpectrum } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.seven-field-collection",
+        snapshotFactory({ options: { ...limits, spectrumCollection: sparseCollection } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.both-spectrum-forms",
+        snapshotFactory({ options: {
+          ...limits, spectrum: singleSpectrum, spectrumCollection: sparseCollection,
+        } }),
+      );
+      const unknownFactory = snapshotFactory();
+      unknownFactory.protectedOptions = {};
+      await snapshotLocalRefusal("snapshot.shape.unknown-factory", unknownFactory);
+      await snapshotLocalRefusal(
+        "snapshot.shape.unknown-boot",
+        snapshotFactory({ options: { ...limits, inventedProtectedOption: true } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.unknown-spectrum",
+        snapshotFactory({ options: {
+          ...limits, spectrum: { ...singleSpectrum, invented: true }, spectrumCollection: null,
+        } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.unknown-collection",
+        snapshotFactory({ options: {
+          ...limits, spectrum: null, spectrumCollection: { ...sparseCollection, invented: true },
+        } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.unknown-entry",
+        snapshotFactory({ options: {
+          ...limits,
+          spectrum: null,
+          spectrumCollection: {
+            entries: [{ ...collectionEntry, invented: true }], maximumCaptureBytes: 1,
+          },
+        } }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.enumerable-prepared-undefined",
+        snapshotFactory({ includePreparedModule: true, preparedModule: undefined }),
+      );
+      await snapshotLocalRefusal(
+        "snapshot.shape.enumerable-prepared-null",
+        snapshotFactory({ includePreparedModule: true, preparedModule: null }),
+      );
+
+      for (const [label, options] of [
+        ["source-negative", { ...limits, sourceRingFrames: -1 }],
+        ["source-fractional", { ...limits, sourceRingFrames: 1.5 }],
+        ["source-too-large", { ...limits, sourceRingFrames: 0x1_0000_0000 }],
+        ["memory-number", { ...limits, maximumMemoryBytes: 1 }],
+        ["command-too-large", { ...limits, consoleCommandQueueRecords: 257n }],
+        ["meter-too-large", { ...limits, consoleMeterBlocks: 0x1_0000_0000n }],
+        ["observation-too-large", { ...limits, consoleObservationTaps: 17n }],
+        ["master-too-large", { ...limits, consoleMasterTrackPlusOne: 0x1_0000_0000n }],
+        ["observation-without-queue", {
+          ...limits, consoleCommandQueueRecords: 0n, consoleObservationTaps: 1n,
+        }],
+        ["master-without-observation", {
+          ...limits, consoleObservationTaps: 0n, consoleMasterTrackPlusOne: 1n,
+        }],
+        ["single-capture-too-large", {
+          ...limits,
+          spectrum: { ...singleSpectrum, maximumCaptureBytes: 1_048_577 },
+          spectrumCollection: null,
+        }],
+        ["single-target-invalid", {
+          ...limits,
+          spectrum: { ...singleSpectrum, target: "not-a-target" },
+          spectrumCollection: null,
+        }],
+        ["single-channel-invalid", {
+          ...limits,
+          spectrum: { ...singleSpectrum, channels: "stereo" },
+          spectrumCollection: null,
+        }],
+        ["single-id-empty", {
+          ...limits,
+          spectrum: { ...singleSpectrum, targetId: "" },
+          spectrumCollection: null,
+        }],
+        ["single-id-too-long", {
+          ...limits,
+          spectrum: { ...singleSpectrum, targetId: "a".repeat(128) },
+          spectrumCollection: null,
+        }],
+        ["single-capture-zero", {
+          ...limits,
+          spectrum: { ...singleSpectrum, maximumCaptureBytes: 0 },
+          spectrumCollection: null,
+        }],
+        ["collection-entry-invalid", {
+          ...limits,
+          spectrum: null,
+          spectrumCollection: {
+            entries: [{ ...collectionEntry, channels: "stereo" }], maximumCaptureBytes: 1,
+          },
+        }],
+        ["empty-collection", {
+          ...limits,
+          spectrum: null,
+          spectrumCollection: { entries: [], maximumCaptureBytes: 1 },
+        }],
+      ]) {
+        await snapshotLocalRefusal(`snapshot.domain.${label}`, snapshotFactory({ options }));
+      }
+    };
+
+    const runSnapshotReferencesAndLimits = async () => {
+      const moduleA = unsupportedPreparationModule;
+      const moduleB = await original.compile(unsupportedPreparationModuleBytes);
+      const capturedContext = snapshotContext();
+      const replacementContext = snapshotContext({ sampleRate: 44100, quantum: 32 });
+      const gate = snapshotGate();
+      addModuleGate = gate;
+      const factory = snapshotFactory({
+        context: capturedContext,
+        preparedModule: moduleA,
+        simd128ModuleUrl: "captured-simd.wasm",
+        workletModuleUrl: "captured-processor.js",
+      });
+      const compileCountBefore = events.filter((event) => event[0] === "compile").length;
+      const fetchCountBefore = fetches.length;
+      let hostValue;
+      try {
+        const boot = createMisoAudioWorkletHost(factory);
+        await gate.started;
+        factory.context = replacementContext;
+        factory.preparedModule = moduleB;
+        factory.simd128ModuleUrl = "mutated-simd.wasm";
+        factory.workletModuleUrl = "mutated-processor.js";
+        gate.release();
+        hostValue = await boot;
+        assert.equal(FakeNode.latest.constructionContext, capturedContext,
+          "snapshot.references.context");
+        assert.equal(FakeNode.latest.constructionModule, moduleA,
+          "snapshot.references.supplied-module");
+        assert.equal(
+          events.filter((event) => event[0] === "compile").length,
+          compileCountBefore,
+          "snapshot.references.supplied-module-no-fetch-compile",
+        );
+        assert.equal(
+          fetches.slice(fetchCountBefore).some((url) => url.includes("captured-simd.wasm")),
+          false,
+          "snapshot.references.supplied-module-no-wasm-fetch",
+        );
+        assert.equal(
+          events.findLast((event) => event[0] === "addModule")[1],
+          "captured-processor.js",
+          "snapshot.references.worklet-url",
+        );
+      } finally {
+        gate.release();
+        if (addModuleGate === gate) addModuleGate = null;
+        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+      }
+
+      const readyGateValue = snapshotGate();
+      readyGate = readyGateValue;
+      const readyContext = snapshotContext();
+      const readyFactory = snapshotFactory({ context: readyContext });
+      let readyHost;
+      try {
+        const boot = createMisoAudioWorkletHost(readyFactory);
+        await readyGateValue.started;
+        readyFactory.context = snapshotContext({ sampleRate: 44100, quantum: 32, state: "running" });
+        readyFactory.options = { ...limits, sourceRingFrames: 1 };
+        readyGateValue.release();
+        readyHost = await boot;
+        assert.equal(readyHost.backend, "simd128", "snapshot.ready.uses-captured-resources");
+      } finally {
+        readyGateValue.release();
+        if (readyGate === readyGateValue) readyGate = null;
+        if (readyHost !== undefined) await readyHost.dispose().catch(() => undefined);
+      }
+
+      const explicitOptions = {
+        ...limits,
+        sourceRingFrames: 256,
+        consoleCommandQueueRecords: 2n,
+        consoleMeterBlocks: 7n,
+        consoleObservationTaps: 1n,
+        consoleMasterTrackPlusOne: 1n,
+      };
+      const explicitGate = snapshotGate();
+      abiGate = explicitGate;
+      const explicitFactory = snapshotFactory({ options: explicitOptions });
+      let explicitHost;
+      try {
+        const boot = createMisoAudioWorkletHost(explicitFactory);
+        await explicitGate.started;
+        explicitOptions.sourceRingFrames = 64;
+        explicitOptions.consoleCommandQueueRecords = 1n;
+        explicitOptions.consoleMeterBlocks = 9n;
+        explicitGate.release();
+        explicitHost = await boot;
+        holdAll = true;
+        const sourceEventsBefore = events.length;
+        const sourceRequests = [];
+        for (let index = 0; index < 4; index += 1) {
+          const buffer = new ArrayBuffer(8);
+          const request = explicitHost.submitSource({
+            sourceId: "snapshot-explicit", generation: BigInt(index + 1), startFrame: 0n,
+            sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 2, endOfRegion: false,
+          });
+          assert.equal(buffer.byteLength, 0, "snapshot.limits.explicit-source-capacity");
+          sourceRequests.push(request);
+        }
+        const overflowBuffer = new ArrayBuffer(8);
+        await snapshotLocalHostRefusal(
+          "snapshot.limits.explicit-source-overflow",
+          explicitHost.submitSource({
+            sourceId: "snapshot-explicit", generation: 5n, startFrame: 0n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 2,
+            endOfRegion: false,
+          }),
+        );
+        assert.equal(events.length, sourceEventsBefore + 4,
+          "snapshot.limits.explicit-source-overflow-no-post");
+        assert.equal(overflowBuffer.byteLength, 8,
+          "snapshot.limits.explicit-source-overflow-retains-storage");
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        const sourceAcks = await Promise.all(sourceRequests);
+        const nextSourceBuffer = new ArrayBuffer(8);
+        const nextSource = explicitHost.submitSource({
+          sourceId: "snapshot-explicit", generation: 6n, startFrame: 0n,
+          sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 2,
+          endOfRegion: false,
+        });
+        assert.equal(nextSourceBuffer.byteLength, 0);
+        assert.equal((await nextSource).requestId, Math.max(...sourceAcks.map((ack) => ack.requestId)) + 1,
+          "snapshot.limits.explicit-source-no-id-burn");
+
+        holdAll = true;
+        const commandEventsBefore = events.length;
+        const commandRequests = [
+          explicitHost.command({ commands: [snapshotCommand()] }),
+          explicitHost.command({ commands: [snapshotCommand()] }),
+        ];
+        assert.equal(events.length, commandEventsBefore + 2,
+          "snapshot.limits.explicit-command-capacity");
+        await snapshotLocalHostRefusal(
+          "snapshot.limits.explicit-command-overflow",
+          explicitHost.command({ commands: [snapshotCommand()] }),
+        );
+        assert.equal(events.length, commandEventsBefore + 2,
+          "snapshot.limits.explicit-command-overflow-no-post");
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        const commandAcks = await Promise.all(commandRequests);
+        const commandAfter = await explicitHost.command({ commands: [snapshotCommand()] });
+        assert.equal(commandAfter.requestId, Math.max(...commandAcks.map((ack) => ack.requestId)) + 1,
+          "snapshot.limits.explicit-command-no-id-burn");
+
+        const observation = await explicitHost.observe({
+          subscriptions: [{
+            trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+          }],
+        });
+        assert.equal(observation.bindings[0].windowBlocks, 7,
+          "snapshot.limits.observe-default-window");
+      } finally {
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        explicitGate.release();
+        if (abiGate === explicitGate) abiGate = null;
+        if (explicitHost !== undefined) await explicitHost.dispose().catch(() => undefined);
+      }
+
+      const zeroOptions = {
+        ...limits,
+        sourceRingFrames: 64,
+        consoleCommandQueueRecords: 0n,
+        consoleMeterBlocks: 0n,
+        consoleObservationTaps: 0n,
+        consoleMasterTrackPlusOne: 0n,
+      };
+      const zeroGate = snapshotGate();
+      abiGate = zeroGate;
+      const zeroFactory = snapshotFactory({ options: zeroOptions });
+      let zeroHost;
+      try {
+        const boot = createMisoAudioWorkletHost(zeroFactory);
+        await zeroGate.started;
+        zeroOptions.consoleCommandQueueRecords = 4n;
+        zeroOptions.consoleMeterBlocks = 9n;
+        zeroGate.release();
+        zeroHost = await boot;
+        holdAll = true;
+        const first = zeroHost.command({ commands: [snapshotCommand()] });
+        const commandEventsBefore = events.length;
+        await snapshotLocalHostRefusal(
+          "snapshot.limits.zero-command-overflow",
+          zeroHost.command({ commands: [snapshotCommand()] }),
+        );
+        assert.equal(events.length, commandEventsBefore,
+          "snapshot.limits.zero-command-overflow-no-post");
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        const firstAck = await first;
+        const next = await zeroHost.command({ commands: [snapshotCommand()] });
+        assert.equal(next.requestId, firstAck.requestId + 1,
+          "snapshot.limits.zero-command-no-id-burn");
+      } finally {
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        zeroGate.release();
+        if (abiGate === zeroGate) abiGate = null;
+        if (zeroHost !== undefined) await zeroHost.dispose().catch(() => undefined);
+      }
+
+      const defaultContext = snapshotContext({ omitQuantum: true });
+      const defaultFactory = snapshotFactory({
+        context: defaultContext,
+        options: {
+          ...limits,
+          sourceRingFrames: 0,
+          consoleCommandQueueRecords: 0n,
+          consoleMeterBlocks: 0n,
+          consoleObservationTaps: 0n,
+          consoleMasterTrackPlusOne: 0n,
+        },
+      });
+      const defaultHost = await createMisoAudioWorkletHost(defaultFactory);
+      try {
+        const defaultStatus = await defaultHost.status();
+        assert.equal(defaultStatus.sampleRateHz, 48000, "snapshot.limits.default-sample-rate");
+        assert.equal(defaultStatus.quantumFrames, 128, "snapshot.limits.default-quantum");
+      } finally {
+        await defaultHost.dispose();
+      }
+
+      const defaultDepthContext = snapshotContext();
+      const defaultDepthOptions = {
+        ...limits,
+        sourceRingFrames: 0,
+        consoleCommandQueueRecords: 0n,
+        consoleMeterBlocks: 0n,
+        consoleObservationTaps: 0n,
+        consoleMasterTrackPlusOne: 0n,
+      };
+      const defaultDepthGate = snapshotGate();
+      abiGate = defaultDepthGate;
+      const defaultDepthFactory = snapshotFactory({
+        context: defaultDepthContext, options: defaultDepthOptions,
+      });
+      let defaultDepthHost;
+      try {
+        const boot = createMisoAudioWorkletHost(defaultDepthFactory);
+        await defaultDepthGate.started;
+        defaultDepthContext.sampleRate = 96000;
+        defaultDepthContext.renderQuantumSize = 128;
+        defaultDepthGate.release();
+        defaultDepthHost = await boot;
+        const status = await defaultDepthHost.status();
+        assert.equal(status.sampleRateHz, 48000, "snapshot.limits.default-depth-status-rate");
+        assert.equal(status.quantumFrames, 64, "snapshot.limits.default-depth-status-quantum");
+        const expectedBlocks = Math.ceil(48000 / 10 / 64) + 2;
+        holdAll = true;
+        const requests = [];
+        for (let index = 0; index < expectedBlocks; index += 1) {
+          const buffer = new ArrayBuffer(8);
+          const request = defaultDepthHost.submitSource({
+            sourceId: "snapshot-default", generation: BigInt(index + 1), startFrame: 0n,
+            sampleRateHz: 48000, planes: [new Float32Array(buffer)], frames: 2,
+            endOfRegion: false,
+          });
+          assert.equal(buffer.byteLength, 0, "snapshot.limits.default-depth-capacity");
+          requests.push(request);
+        }
+        const overflowBuffer = new ArrayBuffer(8);
+        const eventsBefore = events.length;
+        await snapshotLocalHostRefusal(
+          "snapshot.limits.default-depth-overflow",
+          defaultDepthHost.submitSource({
+            sourceId: "snapshot-default", generation: BigInt(expectedBlocks + 1), startFrame: 0n,
+            sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 2,
+            endOfRegion: false,
+          }),
+        );
+        assert.equal(events.length, eventsBefore,
+          "snapshot.limits.default-depth-overflow-no-post");
+        assert.equal(overflowBuffer.byteLength, 8,
+          "snapshot.limits.default-depth-overflow-retains-storage");
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        const acknowledgements = await Promise.all(requests);
+        const nextBuffer = new ArrayBuffer(8);
+        const next = defaultDepthHost.submitSource({
+          sourceId: "snapshot-default", generation: BigInt(expectedBlocks + 2), startFrame: 0n,
+          sampleRateHz: 48000, planes: [new Float32Array(nextBuffer)], frames: 2,
+          endOfRegion: false,
+        });
+        assert.equal(nextBuffer.byteLength, 0);
+        assert.equal((await next).requestId, Math.max(...acknowledgements.map((ack) => ack.requestId)) + 1,
+          "snapshot.limits.default-depth-no-id-burn");
+      } finally {
+        holdAll = false;
+        for (const respond of heldAll.splice(0)) respond();
+        defaultDepthGate.release();
+        if (abiGate === defaultDepthGate) abiGate = null;
+        if (defaultDepthHost !== undefined) await defaultDepthHost.dispose().catch(() => undefined);
+      }
+    };
+
+    const runSnapshotContextDriftCases = async () => {
+      for (const [label, mutate] of [
+        ["state", (value) => { value.state = "running"; }],
+        ["sample-rate", (value) => { value.sampleRate = 44100; }],
+        ["quantum", (value) => { value.renderQuantumSize = 32; }],
+      ]) {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const value = snapshotContext();
+        const beforeNodes = FakeNode.count;
+        let boot;
+        try {
+          boot = createMisoAudioWorkletHost(snapshotFactory({ context: value }));
+          await gate.started;
+          mutate(value);
+          gate.release();
+          await snapshotLocalHostRefusal(`snapshot.context-drift.${label}`, boot);
+          assert.equal(FakeNode.count, beforeNodes, `snapshot.context-drift.${label}.no-node`);
+        } finally {
+          gate.release();
+          if (addModuleGate === gate) addModuleGate = null;
+        }
+      }
+    };
+
+    const runSnapshotMatrix = async () => {
+      const ordinaryOptions = { ...limits };
+      await runSnapshotNestedCase(
+        "nested-ordinary",
+        ordinaryOptions,
+        (factory) => { factory.options.sourceRingFrames = 128; },
+      );
+      const singleOptions = {
+        ...limits,
+        spectrum: {
+          target: "output", targetId: "nested-single", channels: "left", maximumCaptureBytes: 2048,
+        },
+        spectrumCollection: null,
+      };
+      await runSnapshotNestedCase(
+        "nested-single",
+        singleOptions,
+        (factory) => {
+          factory.options.spectrum.targetId = "mutated-single";
+          factory.options.spectrum = {
+            target: "output", targetId: "replacement-single", channels: "right",
+            maximumCaptureBytes: 4096,
+          };
+        },
+      );
+      await runSnapshotStorageCases();
+      await runSnapshotShapeAndDomainCases();
+      await runSnapshotReferencesAndLimits();
+      await runSnapshotContextDriftCases();
+    };
+
+    if (snapshotTestMode === "document") {
+      await runSnapshotDocumentControl();
+      return;
+    }
+    if (snapshotTestMode === "nested") {
+      await runSnapshotNestedControl();
+      return;
+    }
+    if (snapshotTestMode === "single-read") {
+      await runSnapshotSingleRead();
+      return;
+    }
+    if (snapshotTestMode !== "existing") {
+      await runSnapshotDocumentControl();
+      await runSnapshotNestedControl();
+      await runSnapshotSingleRead();
+      await runSnapshotMatrix();
+    }
+    // The legacy receiver assertions intentionally inspect the complete event stream (including
+    // the MAX_SAFE_INTEGER control), so keep the new boot matrix's hermetic traffic out of it.
+    events.length = 0;
+    fetches.length = 0;
+
     const host = await createMisoAudioWorkletHost({
       context,
       document: new TextEncoder().encode("{\"schema_version\":0}"),
