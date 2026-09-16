@@ -210,3 +210,17 @@ qualification passed all 19 red mutations; hermetic Worklet, SDK type, syntax, a
 passed. The tracked standalone real-Wasm receiver helper still carries the prior candidate digest;
 a temporary digest substitution passed and was restored, so permanent candidate lineage, the full
 supported-browser run, and documentation remain B4b2b.
+
+**B4b2b candidate lineage and supported-browser record — complete after the bounded escalation
+sequence.** Luna round 1 updated the standalone receiver digest and passed Chromium, but Firefox
+could not resume the new live H1024 context without a trusted gesture. Luna round 2 replaced that
+probe with a 3072-frame offline render; Chromium then proved the native one-in-flight backpressure
+contract by retaining only one publication until read, so that approach could not prove two
+overlapping windows. The single Sol HIGH round restored the live probe and extended the existing
+qualification click orchestration with a separate H1024 resume control. Chromium
+151.0.7922.34, Firefox 153.0, and WebKit 26.5 then passed the full qualification and all mutation
+self-tests against candidate commit `5fe0035476f72edaa3bbe9beadb5b43a0c08e1c8` and exact Wasm
+`e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`; the generated results and
+deployment matrix carry that lineage. The permanently updated standalone real-Wasm receiver,
+SDK types, syntax, candidate membership/digest, and diff checks also pass. SDK documentation and
+aggregate repository gates remain B4b2c.

@@ -369,7 +369,11 @@ async function createContinuousSpectrumBrowser(
       const context = live
         ? new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" })
         : new OfflineAudioContext(2, frames, 48_000);
-      if (!live) Object.defineProperty(context, "close", { value: async () => {} });
+      // Firefox can create a later context already running after this page's first trusted
+      // resume. Keep a suspension pending across addModule so the shipped host observes its
+      // required suspended preparation state, matching the collection qualification below.
+      if (live) void (context as AudioContext).suspend();
+      else Object.defineProperty(context, "close", { value: async () => {} });
       return context;
     },
     createHost: (request) => createDefaultHost({
@@ -628,7 +632,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   }
 }
 
-/** A short live-context probe keeps two H1024 windows readable through the real Worklet queue. */
+/** A short live probe drains two overlapping H1024 windows through the real Worklet queue. */
 async function runConfiguredSpectrumHopQualification(): Promise<Record<string, unknown>> {
   const query = {
     target: { kind: "output" as const, outputId: "main-out" },
@@ -675,7 +679,27 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
       onUpdate: remember,
     })).handle;
     await submitSpectrumSource(browser, frames);
-    if (browser.context.state === "suspended") await browser.context.resume();
+    const context = browser.context as AudioContext;
+    const resumeButton = document.createElement("button");
+    resumeButton.id = "spectrum-hop-resume";
+    resumeButton.textContent = "Start configured spectrum qualification audio";
+    document.body.append(resumeButton);
+    let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+    let resumeGesture = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        resumeTimer = setTimeout(() => reject(new Error(
+          `configured spectrum audio resume timed out (gesture=${resumeGesture}, state=${context.state})`,
+        )), 10_000);
+        resumeButton.addEventListener("click", () => {
+          resumeGesture = true;
+          void context.resume().then(resolve, reject);
+        }, { once: true });
+      });
+    } finally {
+      if (resumeTimer !== undefined) clearTimeout(resumeTimer);
+      resumeButton.remove();
+    }
     const deadline = performance.now() + 10_000;
     for (let attempt = 0; attempt < 512 && publications.length < 2; attempt += 1) {
       await subscription.pump();

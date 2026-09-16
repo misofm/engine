@@ -748,8 +748,19 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       }
     }, sdkEnabled);
     if (sdkEnabled) {
-      // Resume the real collection AudioContext with a trusted gesture across browsers.
-      await Promise.race([execution, page.locator("#spectrum-collection-resume").click()]);
+      // Resume each real AudioContext with a trusted gesture across browsers. The SDK
+      // qualification creates these controls in execution order; racing completion keeps
+      // a preceding failure from turning into a locator timeout that hides its diagnostic.
+      const completion = execution.then((value) => ({ kind: "complete", value }));
+      for (const selector of ["#spectrum-collection-resume", "#spectrum-hop-resume"]) {
+        const click = page.locator(selector).click().then(
+          () => ({ kind: "clicked" }),
+          (error) => ({ kind: "click-error", error }),
+        );
+        const outcome = await Promise.race([completion, click]);
+        if (outcome.kind === "complete") break;
+        if (outcome.kind === "click-error") throw outcome.error;
+      }
     }
     const result = await execution;
     gate(browserName, "browser-execution", result.qualificationError === undefined,
