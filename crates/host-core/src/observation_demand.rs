@@ -22,7 +22,7 @@ use graph::{
 use crate::spectrum::{
     ControlledSpectrumCaptureCollection, ControlledSpectrumDescriptor, SPECTRUM_WINDOW_FRAMES,
     SpectrumCadence, SpectrumCapturedRecord, SpectrumChannels, SpectrumContinuousWindow,
-    SpectrumTarget,
+    SpectrumHop, SpectrumTarget,
 };
 
 /// The process-local identity of one prepared observation owner.
@@ -158,6 +158,38 @@ pub struct HostObservationPreparation<'a> {
     pub activation: GraphObservationActivationConfig,
 }
 
+/// Additive protected-preparation wrapper for one optional validated spectrum hop.
+///
+/// [`HostObservationPreparation`] intentionally keeps its existing field layout so ordinary
+/// native and browser callers remain source-compatible. The wrapper is consumed only by the
+/// additive preparation entry points and applies one effective cadence to every prepared spectrum
+/// target in its demand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostObservationPreparationConfig<'a> {
+    /// The existing complete observation demand.
+    pub demand: HostObservationPreparation<'a>,
+    /// Optional validated sample-clock spacing shared by all protected spectrum targets.
+    pub spectrum_hop: Option<SpectrumHop>,
+}
+
+impl<'a> HostObservationPreparationConfig<'a> {
+    /// Construct a protected demand wrapper with the existing default cadence policy.
+    #[must_use]
+    pub const fn new(demand: HostObservationPreparation<'a>) -> Self {
+        Self {
+            demand,
+            spectrum_hop: None,
+        }
+    }
+
+    /// Select one validated sample-clock hop for every protected spectrum target.
+    #[must_use]
+    pub const fn with_spectrum_hop(mut self, spectrum_hop: SpectrumHop) -> Self {
+        self.spectrum_hop = Some(spectrum_hop);
+        self
+    }
+}
+
 /// One selected meter's private generation identity in a complete-set selection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MeterSelectionEntry {
@@ -184,6 +216,12 @@ struct MeterSelection {
     len: usize,
     spectrum: Option<SpectrumSelectionEntry>,
 }
+
+// Three complete selections (accepted, applied and candidate) plus the ordinary and reserved
+// pending publications. These values are layout authorities shared by the owner and its
+// retained-resource projection.
+const PENDING_APPLICATION_COUNT: usize = 2;
+const METER_SELECTION_SET_COUNT: usize = 3 + PENDING_APPLICATION_COUNT;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationKind {
@@ -287,7 +325,7 @@ pub struct HostObservationController {
     accepted: MeterSelection,
     applied: MeterSelection,
     candidate: MeterSelection,
-    pending: [PendingApplication; 2],
+    pending: [PendingApplication; PENDING_APPLICATION_COUNT],
     candidate_handles: Box<[u64]>,
     terminal_closed: bool,
     /// Number of queued snapshots discarded because their observation generation is no longer
@@ -1015,6 +1053,14 @@ impl HostObservationController {
                 .map_or(0, |selection| selection.generation),
             selection_epoch: self.spectrum_selection_epoch,
         }
+    }
+
+    /// Return the immutable effective cadence prepared for this owner, when a spectrum catalog
+    /// was retained. Every protected spectrum selection, replacement and restart uses this same
+    /// cadence; an owner without a spectrum catalog returns `None`.
+    #[must_use]
+    pub const fn spectrum_cadence(&self) -> Option<SpectrumCadence> {
+        self.spectrum_cadence
     }
 
     /// Whether the graph endpoint has reached terminal closure.
@@ -1756,7 +1802,7 @@ pub(crate) fn observation_metadata_resources(
     for length in track_id_lengths {
         add(layout_bytes::<u8>(length)?)?;
     }
-    for _ in 0..5 {
+    for _ in 0..METER_SELECTION_SET_COUNT {
         add(layout_bytes::<MeterSelectionEntry>(meter_capacity)?)?;
     }
     add(layout_bytes::<u64>(handle_capacity)?)?;

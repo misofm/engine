@@ -36,17 +36,18 @@ use source::{
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::observation_demand::{
-    HostObservationController, HostObservationPreparation, HostObservationResources,
-    ObservationBudget, ObservationRefusal, ObservationRefusalReason, ObservationWorkCost,
-    allocate_owner_id, observation_graph_model_addition, observation_resources,
-    project_spectrum_work,
+    HostObservationController, HostObservationPreparation, HostObservationPreparationConfig,
+    HostObservationResources, ObservationBudget, ObservationRefusal, ObservationRefusalReason,
+    ObservationWorkCost, allocate_owner_id, observation_graph_model_addition,
+    observation_resources, project_spectrum_work,
 };
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
-    SpectrumCadence, SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
-    SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
-    controlled_spectrum_capture_collection_resources, prepare_capture_collection,
-    prepare_controlled_capture_collection, spectrum_capture_collection_resources,
+    CONTROLLED_SLOTS_PER_ENTRY, SpectrumCadence, SpectrumCapture, SpectrumCaptureCollection,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumCaptureResources,
+    SpectrumHop, SpectrumPrepareError, controlled_spectrum_capture_collection_resources,
+    prepare_capture_collection, prepare_controlled_capture_collection,
+    spectrum_capture_collection_resources,
 };
 
 #[derive(Clone, Copy)]
@@ -661,16 +662,41 @@ pub fn prepare_host_runtime_with_observation_demand(
     console: &HostConsoleRequest,
     observations: &HostObservationPreparation<'_>,
 ) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
-    let (prepared, handles, _, owner) = prepare_host_runtime_with_console_policy_and_spectrum(
-        compiled,
-        caps,
-        console,
-        Some(observations.meters),
-        Some(observations),
-        false,
-        Backend::current(),
-        None,
-    )?;
+    let (prepared, handles, _, owner) =
+        prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+            compiled,
+            caps,
+            console,
+            Some(observations.meters),
+            Some(observations),
+            false,
+            Backend::current(),
+            None,
+            None,
+        )?;
+    let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
+    Ok((prepared, handles, owner))
+}
+
+/// Prepare a protected observation owner from an additive cadence configuration wrapper.
+pub fn prepare_host_runtime_with_observation_demand_config(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    preparation: &HostObservationPreparationConfig<'_>,
+) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
+    let (prepared, handles, _, owner) =
+        prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+            compiled,
+            caps,
+            console,
+            Some(preparation.demand.meters),
+            Some(&preparation.demand),
+            false,
+            Backend::current(),
+            preparation.spectrum_hop,
+            None,
+        )?;
     let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
     Ok((prepared, handles, owner))
 }
@@ -682,16 +708,41 @@ pub fn prepare_host_runtime_with_observation_demand_between_render_calls(
     console: &HostConsoleRequest,
     observations: &HostObservationPreparation<'_>,
 ) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
-    let (prepared, handles, _, owner) = prepare_host_runtime_with_console_policy_and_spectrum(
-        compiled,
-        caps,
-        console,
-        Some(observations.meters),
-        Some(observations),
-        true,
-        Backend::current(),
-        None,
-    )?;
+    let (prepared, handles, _, owner) =
+        prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+            compiled,
+            caps,
+            console,
+            Some(observations.meters),
+            Some(observations),
+            true,
+            Backend::current(),
+            None,
+            None,
+        )?;
+    let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
+    Ok((prepared, handles, owner))
+}
+
+/// Prepare a serialized protected observation owner from an additive cadence configuration wrapper.
+pub fn prepare_host_runtime_with_observation_demand_between_render_calls_config(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    preparation: &HostObservationPreparationConfig<'_>,
+) -> Result<(PreparedHost, HostConsoleHandles, HostObservationController), PrepareDiagnostics> {
+    let (prepared, handles, _, owner) =
+        prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+            compiled,
+            caps,
+            console,
+            Some(preparation.demand.meters),
+            Some(&preparation.demand),
+            true,
+            Backend::current(),
+            preparation.spectrum_hop,
+            None,
+        )?;
     let owner = owner.ok_or_else(|| resource("host.observation.owner"))?;
     Ok((prepared, handles, owner))
 }
@@ -779,6 +830,39 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+        compiled,
+        caps,
+        console,
+        selected_meters,
+        observation_demand,
+        between_render_calls,
+        backend,
+        None,
+        spectrum_request,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn prepare_host_runtime_with_console_policy_and_spectrum_with_hop(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    selected_meters: Option<&[HostMeterRequest]>,
+    observation_demand: Option<&HostObservationPreparation<'_>>,
+    between_render_calls: bool,
+    backend: Backend,
+    spectrum_hop: Option<SpectrumHop>,
+    spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+) -> Result<
+    (
+        PreparedHost,
+        HostConsoleHandles,
+        Option<PreparedSpectrumCapture>,
+        Option<HostObservationController>,
+    ),
+    PrepareDiagnostics,
+> {
     // The controlled owner admits selected meters and the fixed prepared spectrum catalog. Empty
     // spectrum is deliberately inert. Resident taps remain outside this owner and are refused
     // before any observer, source or effect storage is prepared.
@@ -811,8 +895,15 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                 .is_some_and(|spectrum| !spectrum.entries.is_empty())
         })
         .map(|_| {
-            SpectrumCadence::new(compiled.sample_rate().0, compiled.quantum().0)
-                .map_err(|_| shape("host.observation.spectrum_cadence"))
+            match spectrum_hop {
+                Some(hop) => SpectrumCadence::with_hop(
+                    compiled.sample_rate().0,
+                    compiled.quantum().0,
+                    hop.get(),
+                ),
+                None => SpectrumCadence::new(compiled.sample_rate().0, compiled.quantum().0),
+            }
+            .map_err(|_| shape("host.observation.spectrum_cadence"))
         })
         .transpose()?;
     if let (Some(cadence), Some(observations)) = (controlled_spectrum_cadence, observation_demand)
@@ -1642,7 +1733,7 @@ fn preflight_spectrum_handles(
     spectrum_entry_count: usize,
 ) -> Result<(), PrepareDiagnostics> {
     let slot_count = spectrum_entry_count
-        .checked_mul(2)
+        .checked_mul(CONTROLLED_SLOTS_PER_ENTRY)
         .ok_or_else(|| resource("host.spectrum.collection"))?;
     if slot_count == 0 {
         return Ok(());

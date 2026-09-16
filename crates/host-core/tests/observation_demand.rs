@@ -8,14 +8,17 @@ use core::{
 use graph::{GraphObservationActivationConfig, GraphObservationController};
 use host_core::{
     HostConsoleRequest, HostMeterId, HostMeterRequest, HostObservationController,
-    HostObservationPreparation, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationRefusalReason,
-    ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter, SPECTRUM_WINDOW_FRAMES,
-    SourceSubmission, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
-    SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget, StartedRenderSession,
-    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_observation_demand,
+    HostObservationPreparation, HostObservationPreparationConfig, HostPrepareCaps,
+    HostPrepareReport, HostShapePolicy, HostSpectrumDemand, HostSpectrumMode,
+    HostSpectrumReadError, ObservationRefusalReason, ObservationWorkCost, ObservationWorkLimits,
+    PreparedHostMeter, SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumCaptureCollectionEntry,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels, SpectrumHop,
+    SpectrumTarget, StartedRenderSession, compile_host_session, prepare_host_runtime,
+    prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
-    prepare_host_runtime_with_spectrum, spectrum_capture_resources_for,
+    prepare_host_runtime_with_observation_demand_between_render_calls_config,
+    prepare_host_runtime_with_observation_demand_config, prepare_host_runtime_with_spectrum,
+    spectrum_capture_resources_for,
 };
 #[cfg(feature = "test-support")]
 use host_core::{
@@ -423,6 +426,70 @@ fn controlled_spectrum_resource_cap_is_inclusive_and_prepares_exact_targets() {
             .err()
             .expect("one below paired capture budget");
     assert!(String::from_utf8_lossy(refusal.as_bytes()).contains("host.spectrum.capture_budget"));
+
+    let explicit_hop = SpectrumHop::new(256).expect("supported explicit hop");
+    demand.spectrum = Some(&exact_spectrum);
+    let serialized_preparation =
+        HostObservationPreparationConfig::new(demand).with_spectrum_hop(explicit_hop);
+    let (serialized_host, _, serialized_owner) =
+        prepare_host_runtime_with_observation_demand_between_render_calls_config(
+            &compiled,
+            &caps(),
+            &console(),
+            &serialized_preparation,
+        )
+        .expect("serialized explicit cadence keeps paired storage accounting");
+    assert_eq!(
+        serialized_owner
+            .spectrum_cadence()
+            .expect("serialized explicit cadence")
+            .hop_frames(),
+        explicit_hop.get()
+    );
+    drop(serialized_host);
+    let explicit_preparation =
+        HostObservationPreparationConfig::new(demand).with_spectrum_hop(explicit_hop);
+    let (explicit_host, _, explicit_owner) = prepare_host_runtime_with_observation_demand_config(
+        &compiled,
+        &caps(),
+        &console(),
+        &explicit_preparation,
+    )
+    .expect("explicit cadence keeps paired storage accounting");
+    assert_eq!(
+        explicit_host.report.spectrum_capture_retained_bytes,
+        retained
+    );
+    assert_eq!(
+        explicit_owner
+            .spectrum_cadence()
+            .expect("explicit cadence")
+            .hop_frames(),
+        explicit_hop.get()
+    );
+    assert!(
+        prepare_host_runtime_with_observation_demand_config(
+            &compiled,
+            &caps(),
+            &console(),
+            &explicit_preparation,
+        )
+        .is_ok(),
+        "explicit cadence does not alter retained storage"
+    );
+    demand.spectrum = Some(&below_spectrum);
+    let below_preparation =
+        HostObservationPreparationConfig::new(demand).with_spectrum_hop(explicit_hop);
+    assert!(
+        prepare_host_runtime_with_observation_demand_config(
+            &compiled,
+            &caps(),
+            &console(),
+            &below_preparation,
+        )
+        .is_err(),
+        "one below paired storage budget refuses with explicit cadence"
+    );
 }
 
 #[test]
@@ -1013,6 +1080,351 @@ fn controlled_spectrum_request(
         entries,
         maximum_capture_bytes: u64::MAX,
     }
+}
+
+#[test]
+fn protected_explicit_hops_share_one_cadence_and_fence_replacement_epochs() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![
+        SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+        },
+        SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::Output("main-out".into()),
+            channels: SpectrumChannels::Stereo,
+        },
+    ]);
+
+    for hop in SpectrumHop::SUPPORTED {
+        let mut observation = demand(&[]);
+        observation.spectrum = Some(&request);
+        let preparation = HostObservationPreparationConfig::new(observation).with_spectrum_hop(hop);
+        let (host, _, mut owner) = prepare_host_runtime_with_observation_demand_config(
+            &compiled,
+            &caps(),
+            &console(),
+            &preparation,
+        )
+        .expect("explicit protected cadence prepares");
+        assert_eq!(
+            owner.spectrum_cadence().map(|cadence| cadence.hop_frames()),
+            Some(hop.get())
+        );
+
+        let target_a = HostSpectrumDemand {
+            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            channels: SpectrumChannels::Stereo,
+            mode: HostSpectrumMode::Continuous,
+        };
+        let target_b = HostSpectrumDemand {
+            target: SpectrumTarget::Output("main-out".into()),
+            channels: SpectrumChannels::Stereo,
+            mode: HostSpectrumMode::Continuous,
+        };
+        let first = owner
+            .replace_spectrum(&target_a)
+            .expect("first explicit spectrum admission");
+        let (mut render, mut sources, _) = host.start_render_session().unwrap();
+        let initial_blocks =
+            (SPECTRUM_WINDOW_FRAMES as u64 + 2 * u64::from(hop.get())).div_ceil(128) as usize;
+        let mut first_windows = Vec::new();
+        let mut first_applied = false;
+        for block in 0..initial_blocks {
+            render_source_block(&mut render, &mut sources, block);
+            if !first_applied && let Some(receipt) = owner.try_applied() {
+                assert_eq!(receipt.revision, first.revision);
+                first_applied = true;
+            }
+            match owner.try_read_continuous_spectrum() {
+                Ok(window) => first_windows.push(window),
+                Err(HostSpectrumReadError::Pending | HostSpectrumReadError::Warming) => {}
+                Err(error) => panic!("unexpected initial explicit read: {error:?}"),
+            }
+        }
+        assert!(first_applied);
+        assert!(first_windows.len() >= 3);
+        for (sequence, observed) in first_windows.iter().take(3).enumerate() {
+            let first_sample = sequence as u64 * u64::from(hop.get());
+            assert_eq!(observed.observation_generation, first.revision);
+            assert_eq!(observed.selection_epoch, 1);
+            assert_eq!(observed.window.stream_epoch, 1);
+            assert_eq!(observed.window.sequence, sequence as u64);
+            assert_eq!(observed.window.first_sample, first_sample);
+            assert_eq!(
+                observed.window.end_sample(),
+                Some(first_sample + SPECTRUM_WINDOW_FRAMES as u64)
+            );
+        }
+
+        let replacement = owner
+            .replace_spectrum(&target_b)
+            .expect("explicit target replacement admission");
+        assert_eq!(replacement.revision, first.revision + 1);
+        assert_eq!(replacement.work, first.work);
+        assert_eq!(owner.spectrum_cadence().unwrap().hop_frames(), hop.get());
+        assert_eq!(owner.spectrum_state().selection_epoch, 2);
+        assert_eq!(
+            owner.try_read_continuous_spectrum().err(),
+            Some(HostSpectrumReadError::PendingApplication)
+        );
+
+        let replacement_start_block = initial_blocks;
+        let mut replacement_first_sample = None;
+        let mut replacement_window = None;
+        let mut replacement_applied = false;
+        for block in replacement_start_block..replacement_start_block + 16 {
+            render_source_block(&mut render, &mut sources, block);
+            if !replacement_applied && let Some(receipt) = owner.try_applied() {
+                assert_eq!(receipt.revision, replacement.revision);
+                replacement_first_sample = Some(receipt.first_sample);
+                replacement_applied = true;
+            }
+            match owner.try_read_continuous_spectrum() {
+                Ok(window) => replacement_window = Some(window),
+                Err(HostSpectrumReadError::Pending | HostSpectrumReadError::Warming) => {}
+                Err(error) => panic!("unexpected replacement read: {error:?}"),
+            }
+        }
+        let replacement_window = replacement_window.expect("replacement window");
+        assert!(replacement_applied);
+        assert_eq!(
+            replacement_window.observation_generation,
+            replacement.revision
+        );
+        assert_eq!(replacement_window.selection_epoch, 2);
+        assert_eq!(replacement_window.window.stream_epoch, 1);
+        assert_eq!(replacement_window.window.sequence, 0);
+        assert_eq!(
+            replacement_window.window.first_sample,
+            replacement_first_sample.expect("replacement application sample")
+        );
+        assert_eq!(
+            replacement_window.window.end_sample(),
+            Some(replacement_window.window.first_sample + SPECTRUM_WINDOW_FRAMES as u64)
+        );
+
+        let restart = owner
+            .restart_spectrum()
+            .expect("explicit restart admission");
+        assert_eq!(restart.revision, replacement.revision + 1);
+        assert_eq!(restart.work, replacement.work);
+        assert_eq!(owner.spectrum_cadence().unwrap().hop_frames(), hop.get());
+        assert_eq!(owner.spectrum_state().selection_epoch, 2);
+        let restart_start_block = replacement_start_block + 16;
+        let mut restart_first_sample = None;
+        let mut restart_window = None;
+        let mut restart_applied = false;
+        for block in restart_start_block..restart_start_block + 16 {
+            render_source_block(&mut render, &mut sources, block);
+            if !restart_applied && let Some(receipt) = owner.try_applied() {
+                assert_eq!(receipt.revision, restart.revision);
+                restart_first_sample = Some(receipt.first_sample);
+                restart_applied = true;
+            }
+            match owner.try_read_continuous_spectrum() {
+                Ok(window) => restart_window = Some(window),
+                Err(HostSpectrumReadError::Pending | HostSpectrumReadError::Warming) => {}
+                Err(error) => panic!("unexpected restart read: {error:?}"),
+            }
+        }
+        let restart_window = restart_window.expect("restart window");
+        assert!(restart_applied);
+        assert_eq!(restart_window.observation_generation, restart.revision);
+        assert_eq!(restart_window.selection_epoch, 2);
+        assert_eq!(restart_window.window.stream_epoch, 1);
+        assert_eq!(restart_window.window.sequence, 0);
+        assert_eq!(
+            restart_window.window.first_sample,
+            restart_first_sample.expect("restart application sample")
+        );
+    }
+}
+
+#[test]
+fn protected_explicit_work_limits_are_inclusive_and_transactional() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+    }]);
+    let hop = SpectrumHop::new(256).expect("supported explicit hop");
+    let mut observation = demand(&[]);
+    observation.spectrum = Some(&request);
+    let preparation = HostObservationPreparationConfig::new(observation).with_spectrum_hop(hop);
+
+    let (host, _, mut owner) = prepare_host_runtime_with_observation_demand_config(
+        &compiled,
+        &caps(),
+        &console(),
+        &preparation,
+    )
+    .expect("explicit protected owner");
+    let spectrum_demand = HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let expected = owner
+        .replace_spectrum(&spectrum_demand)
+        .expect("unlimited explicit admission")
+        .work;
+    assert_eq!(owner.spectrum_cadence().unwrap().hop_frames(), hop.get());
+    drop(host);
+
+    for field in 0..5 {
+        let mut exact = preparation;
+        exact.demand = observation;
+        match field {
+            0 => {
+                exact.demand.work_limits.maximum_active_spectrum_captures =
+                    expected.active_spectrum_captures
+            }
+            1 => {
+                exact
+                    .demand
+                    .work_limits
+                    .maximum_capture_input_samples_per_block =
+                    expected.capture_input_samples_per_block
+            }
+            2 => {
+                exact
+                    .demand
+                    .work_limits
+                    .maximum_capture_copy_samples_per_block =
+                    expected.capture_copy_samples_per_block
+            }
+            3 => {
+                exact
+                    .demand
+                    .work_limits
+                    .maximum_capture_publications_per_block =
+                    expected.capture_publications_per_block
+            }
+            4 => {
+                exact.demand.work_limits.maximum_capture_bytes_per_second =
+                    expected.capture_bytes_per_second
+            }
+            _ => unreachable!(),
+        }
+        let (_exact_host, _, mut exact_owner) =
+            prepare_host_runtime_with_observation_demand_config(
+                &compiled,
+                &caps(),
+                &console(),
+                &exact,
+            )
+            .expect("exact spectrum work limit prepares");
+        let accepted = exact_owner
+            .replace_spectrum(&spectrum_demand)
+            .expect("exact spectrum work limit is inclusive");
+        assert_eq!(accepted.work, expected);
+
+        let mut below = exact;
+        match field {
+            0 => below.demand.work_limits.maximum_active_spectrum_captures -= 1,
+            1 => {
+                below
+                    .demand
+                    .work_limits
+                    .maximum_capture_input_samples_per_block -= 1
+            }
+            2 => {
+                below
+                    .demand
+                    .work_limits
+                    .maximum_capture_copy_samples_per_block -= 1
+            }
+            3 => {
+                below
+                    .demand
+                    .work_limits
+                    .maximum_capture_publications_per_block -= 1
+            }
+            4 => below.demand.work_limits.maximum_capture_bytes_per_second -= 1,
+            _ => unreachable!(),
+        }
+        let (_refused_host, _, mut refused_owner) =
+            prepare_host_runtime_with_observation_demand_config(
+                &compiled,
+                &caps(),
+                &console(),
+                &below,
+            )
+            .expect("admission-only spectrum limit prepares");
+        let before_work = refused_owner.work();
+        let before_state = refused_owner.spectrum_state();
+        let refusal = refused_owner
+            .replace_spectrum(&spectrum_demand)
+            .expect_err("one below spectrum work limit refuses");
+        assert_eq!(refusal.reason, ObservationRefusalReason::WorkBudget);
+        assert_eq!(refused_owner.work(), before_work);
+        assert_eq!(refused_owner.spectrum_state(), before_state);
+        assert_eq!(
+            refused_owner.spectrum_cadence().unwrap().hop_frames(),
+            hop.get()
+        );
+    }
+}
+
+#[test]
+fn protected_explicit_spectrum_is_pcm_bit_exact() {
+    let compiled = compile_host_session(SESSION, &caps()).unwrap();
+    let target = SpectrumTarget::TrackPostMatrix("eq1".into());
+    let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
+        target: target.clone(),
+        channels: SpectrumChannels::Stereo,
+    }]);
+    let mut observation = demand(&[]);
+    observation.spectrum = Some(&request);
+    let hop = SpectrumHop::new(256).expect("supported explicit hop");
+    let preparation = HostObservationPreparationConfig::new(observation).with_spectrum_hop(hop);
+    let baseline_host = prepare_host_runtime(&compiled, &caps()).expect("baseline host");
+    let (selected_host, _, mut owner) = prepare_host_runtime_with_observation_demand_config(
+        &compiled,
+        &caps(),
+        &console(),
+        &preparation,
+    )
+    .expect("explicit protected host");
+    let selected = HostSpectrumDemand {
+        target,
+        channels: SpectrumChannels::Stereo,
+        mode: HostSpectrumMode::Continuous,
+    };
+    let accepted = owner
+        .replace_spectrum(&selected)
+        .expect("explicit spectrum admission");
+    let (mut baseline, mut baseline_sources, _) = baseline_host.start_render_session().unwrap();
+    let (mut render, mut sources, _) = selected_host.start_render_session().unwrap();
+    for block in 0..16 {
+        let baseline_output = render_source_block(&mut baseline, &mut baseline_sources, block);
+        let selected_output = render_source_block(&mut render, &mut sources, block);
+        for (baseline_sample, selected_sample) in baseline_output.iter().zip(selected_output.iter())
+        {
+            assert_eq!(
+                baseline_sample.to_bits(),
+                selected_sample.to_bits(),
+                "explicit protected spectrum changed PCM at block {block}"
+            );
+        }
+        if block == 0 {
+            assert_eq!(
+                owner.try_applied().expect("spectrum application").revision,
+                accepted.revision
+            );
+        }
+    }
+    let window = owner
+        .try_read_continuous_spectrum()
+        .expect("explicit first spectrum window");
+    assert_eq!(window.observation_generation, accepted.revision);
+    assert_eq!(window.selection_epoch, 1);
+    assert_eq!(window.window.first_sample, 0);
+    assert_eq!(
+        window.window.end_sample(),
+        Some(SPECTRUM_WINDOW_FRAMES as u64)
+    );
 }
 
 #[test]

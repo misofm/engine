@@ -321,7 +321,7 @@ pub(crate) fn controlled_spectrum_capture_collection_resources(
             .checked_add(
                 resources
                     .retained_bytes
-                    .checked_mul(2)
+                    .checked_mul(CONTROLLED_SLOTS_PER_ENTRY as u64)
                     .ok_or(SpectrumPrepareError::CollectionCapacity)?,
             )
             .ok_or(SpectrumPrepareError::CollectionCapacity)?;
@@ -1521,7 +1521,7 @@ pub(crate) fn prepare_capture_collection(
 }
 
 #[allow(dead_code)] // Paired slots are consumed by the controlled host path in C3/C4.
-const CONTROLLED_SLOTS_PER_ENTRY: usize = 2;
+pub(crate) const CONTROLLED_SLOTS_PER_ENTRY: usize = 2;
 
 /// One private paired slot for a host-controlled capture entry.
 #[allow(dead_code)]

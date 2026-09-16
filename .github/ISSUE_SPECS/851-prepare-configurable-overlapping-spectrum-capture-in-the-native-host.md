@@ -106,3 +106,18 @@ tests retain zero-smoothing equivalence and reset-on-loss/epoch/invalid/configur
 Root reran both new focused tests, strict all-target Clippy, formatting and diff checks: PASS.
 Implementer reports spectrum unit 45, spectrum integration 9, protected-owner 23 and the complete
 host-core all-feature suite PASS. N4 remains unstarted.
+
+**N4 protected native preparation — candidate complete.** Fresh Luna MAX added one additive
+`HostObservationPreparationConfig` wrapper whose sole optional setting is a validated `SpectrumHop`;
+the two existing execution modes each have one config entry point, while all old constructors keep
+the derived default. One immutable effective cadence is stored by the protected owner and reused by
+start, replacement and restart; its checked H drives admission work. Resource accounting continues
+to derive actual capture/owner layouts, with shared constants replacing the prior paired-slot and
+five-selection magic numbers. Integration gates exercise every hop through prepare→admit→apply→
+render→read, exact spans and identities, target replacement/restart, exact and one-below work and
+paired-storage budgets with unchanged refused state, and PCM bit identity. Root review rejected
+duplicate convenience spellings after round 1; Luna round 2 reduced the API to one wrapper builder,
+two required execution-mode functions, one cadence accessor and the `SpectrumHop` re-export.
+Focused explicit-hop tests and strict Clippy pass under root. Implementer reports locked complete
+host-core all-feature/no-default suites, doctests, wasm32 host-core check, host-web all-feature check,
+formatting and diff checks PASS. Fresh Astra medium native review remains required before delivery.
