@@ -164,3 +164,13 @@ produced `082e04b609278e016bfa194358952600321552e3322e6a549ef51cf974062034` twic
 ordinary refusing path and once through the explicit print-only repin path. The checked-in digest
 now names those exact source bytes; no ABI record, JavaScript asset, package, or deployment state
 changed. Qualification must rerun and pass before merge.
+
+**Qualification lineage correction.** The repinned artifact itself and every native, Wasm, SDK,
+workspace, policy, and realtime job passed in PR #853 run `35122195213`. All three browser jobs
+stopped before browser launch at the shared lineage preflight because retained `results.json` still
+named the previous artifact; the final verdict correctly failed. Fresh Luna MAX round 1 changed
+only `candidateCommit` to the clean pre-pin candidate head `34632327`, `wasmSha256` to `082e04b6…`,
+and the corresponding generated matrix sentence. Parsed browser rows, versions, gates, resources,
+and every other result field remain identical. Matrix generation/check, session-identity validation,
+and diff hygiene pass. A new qualification run must execute the browser matrix successfully before
+merge; no failed browser workload was retried because the first run never passed lineage preflight.
