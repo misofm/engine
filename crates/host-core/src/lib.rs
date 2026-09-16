@@ -127,12 +127,12 @@ pub use engine::realtime::{
 };
 pub use graph::GraphObservationActivationConfig;
 pub use observation_demand::{
-    HostMeterId, HostObservationController, HostObservationPreparation, HostObservationResources,
-    HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, HostSpectrumState,
-    ObservationAccepted, ObservationApplied, ObservationOwnerId, ObservationReadError,
-    ObservationRefusal, ObservationRefusalReason, ObservationStop, ObservationWorkCost,
-    ObservationWorkLimits, ObservedContinuousSpectrumWindow, ObservedMeterSnapshot,
-    PreparedHostMeter,
+    HostMeterId, HostObservationController, HostObservationPreparation,
+    HostObservationPreparationConfig, HostObservationResources, HostSpectrumDemand,
+    HostSpectrumMode, HostSpectrumReadError, HostSpectrumState, ObservationAccepted,
+    ObservationApplied, ObservationOwnerId, ObservationReadError, ObservationRefusal,
+    ObservationRefusalReason, ObservationStop, ObservationWorkCost, ObservationWorkLimits,
+    ObservedContinuousSpectrumWindow, ObservedMeterSnapshot, PreparedHostMeter,
 };
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
@@ -143,6 +143,8 @@ pub use prepare::{
     prepare_host_runtime_with_console_and_spectrum_collection,
     prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
+    prepare_host_runtime_with_observation_demand_between_render_calls_config,
+    prepare_host_runtime_with_observation_demand_config,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_console,
@@ -169,9 +171,9 @@ pub use spectrum::{
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest,
     SpectrumCaptureResources, SpectrumChannels, SpectrumContinuousCaptureError,
-    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumOutput, SpectrumPrepareError,
-    SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
-    spectrum_analysis_history_resources, spectrum_capture_collection_resources,
+    SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop, SpectrumOutput,
+    SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget,
+    SpectrumWindow, spectrum_analysis_history_resources, spectrum_capture_collection_resources,
     spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
