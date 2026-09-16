@@ -445,10 +445,16 @@ function snapshotBootOptions(value) {
   if (!captured || !hasRequiredEnumerableFields(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
   const spectrumDescriptor = captured.descriptors.get("spectrum");
   const collectionDescriptor = captured.descriptors.get("spectrumCollection");
+  const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
+  const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
+  if (spectrumIsEnumerable || collectionIsEnumerable) {
+    if (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
+  } else {
+    if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
+    if (spectrumDescriptor !== undefined
+        && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
+  }
   const spectrumValue = spectrumDescriptor === undefined ? undefined : spectrumDescriptor.value;
-  if (spectrumValue === undefined
-      ? !hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)
-      : !hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
   const spectrum = snapshotSpectrumBoot(spectrumValue ?? null);
   const spectrumCollection = snapshotSpectrumCollection(
     (collectionDescriptor === undefined ? undefined : collectionDescriptor.value) ?? null,

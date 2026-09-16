@@ -1423,6 +1423,31 @@ async function testMainRealm() {
           assert.equal(options.spectrumCollection, null, "explicit collection null is preserved");
         },
       );
+      await assertAccepted(
+        "extended undefined spectrum normalizes to null",
+        makeFactory({ options: { ...limits, spectrum: undefined, spectrumCollection: null } }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "enumerable undefined spectrum normalizes to null");
+          assert.equal(options.spectrumCollection, null, "enumerable null collection is preserved");
+        },
+      );
+      await assertAccepted(
+        "extended undefined spectrum keeps collection",
+        makeFactory({
+          options: {
+            ...limits,
+            spectrum: undefined,
+            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
+          },
+        }),
+        (_host, options) => {
+          assert.equal(options.spectrum, null, "undefined spectrum normalizes to null");
+          assert.equal(options.spectrumCollection.entries.length, 1,
+            "nonnull collection remains effective");
+          assert.equal(options.spectrumCollection.entries[0].target, "output",
+            "nonnull collection entry remains effective");
+        },
+      );
       {
         const first = Object.freeze(makeEntry());
         const second = Object.freeze(makeEntry());
@@ -1475,6 +1500,15 @@ async function testMainRealm() {
             assert.equal(captured.spectrumCollection.entries.length, 1);
             assert.equal(captured.spectrumCollection.entries[0].target, "output");
           },
+        );
+      }
+      {
+        const options = { ...limits };
+        Object.defineProperty(options, "spectrum", { value: null, enumerable: false });
+        await assertAccepted(
+          "hidden null spectrum normalizes to null",
+          makeFactory({ options }),
+          (_host, captured) => assert.equal(captured.spectrum, null),
         );
       }
 
