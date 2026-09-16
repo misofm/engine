@@ -15,6 +15,15 @@ the byte length and SHA-256 of every artifact. A Node or Bun headless consumer n
 toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
 so the host and Wasm cannot silently come from different releases.
 
+### Release 0.4.0 compatibility
+
+`@misofm/engine@0.4.0` carries the accepted ordinary-host AudioWorklet boot-input ownership
+contract from #844 and the qualified observation ABI/native closure. It uses the matching
+AudioWorklet Wasm artifact (`b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61`),
+so metadata, host, and runtime bytes must be taken from this package together. Combined
+protected/ordinary observation preparation and a protected-EQ coexistence claim remain outside
+this release; #835 is the policy boundary and #824 remains separate.
+
 ### Release 0.3.0 compatibility
 
 `@misofm/engine@0.3.0` carries the accepted live EQ cuts and builtin HPF/LPF controls. It uses

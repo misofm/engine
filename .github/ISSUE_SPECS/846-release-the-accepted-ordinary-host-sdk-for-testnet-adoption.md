@@ -25,3 +25,21 @@ Astra XHIGH scope and fresh adversarial plan review approved the corrected three
 ## Evidence
 
 Starting source is clean synchronized main `85bb5997ba813d9b87007e801893d4a655138197`. Exact-main qualification run 35075507202 passed. Its retained seven-file AudioWorklet artifact contains Wasm SHA256 `b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61` and host SHA256 `48a772b822b4e6b00ba9bad8d667490365361e9c5d59b7da24446eae10c54615`; the host is byte-identical to current source and contains #844 ownership preparation. Public SDK 0.3.0 is source `51e03cfdde61802fc8456872a6637a265fae5979`, uses the earlier Wasm, and its packaged host lacks #844. Live registry lookup returns parsed E404 for SDK 0.4.0. No implementation or publication has occurred.
+
+Implementation preparation (Luna round 1): froze the SDK package and lockfile at 0.4.0; updated
+the npm workflow's five release identity/subject guards and expected AudioWorklet digest to
+`b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61`; updated only matching
+release fixtures and the SDK compatibility note. The workflow's historical normalized baseline,
+mode matrix, exact archive ownership, OIDC-only publication, immutable-version refusal, and
+provenance checks remain unchanged.
+
+Luna round 1 gates (2026-09-16, uncommitted preparation worktree): `npm ci --ignore-scripts` in
+`sdk/` PASS (5 packages added, 6 audited, 0 vulnerabilities); `python3 -B
+scripts/test-npm-publish-modes.py` PASS (`npm publish mode reachability and trust gates: ok`);
+`node scripts/test-parse-npm-trust-list.mjs` PASS (`npm trust list parser fixtures and mutations:
+ok`); `bash scripts/check-sdk-generated.sh` PASS (assets, generated modules, and generated surface
+are current); `python3 -B scripts/check-sdk-deletions.py` PASS (74 files carry none of the retired
+spellings); `bash scripts/check-sdk-types.sh` PASS (including the shipped-host mirror pin); and
+`git diff --check` PASS. Headless/package/AudioWorklet artifact gates were not started because the
+retained Worklet artifact is outside this bounded preparation tranche; no source or generated
+artifact was changed.
