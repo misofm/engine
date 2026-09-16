@@ -42,8 +42,11 @@ const CONTINUOUS_MODE: u8 = 1;
 
 const PROBE_VALIDATION_SAMPLES: usize = 0;
 const PROBE_STORAGE_WRITES: usize = 1;
-const PROBE_PAYLOAD_CONSTRUCTIONS: usize = 2;
-const PROBE_PUBLICATION_ATTEMPTS: usize = 3;
+const PROBE_RECONSTRUCTION_WRITES: usize = 2;
+const PROBE_OWNED_RECORD_SAMPLE_COPIES: usize = 3;
+const PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES: usize = 4;
+const PROBE_PAYLOAD_CONSTRUCTIONS: usize = 5;
+const PROBE_PUBLICATION_ATTEMPTS: usize = 6;
 
 /// Source-operation counts used by the focused spectrum render tests.
 #[cfg(any(test, feature = "test-support"))]
@@ -53,6 +56,12 @@ pub struct SpectrumOperationCounts {
     pub validation_samples: u64,
     /// Selected samples written to the prepared capture arrays.
     pub selected_storage_writes: u64,
+    /// Selected history samples written into chronological persistent capture buffers.
+    pub chronological_reconstruction_writes: u64,
+    /// Samples copied from persistent capture buffers into owned records.
+    pub owned_record_sample_copies: u64,
+    /// Sample-equivalent payload work passed to the queue, including rejected attempts.
+    pub queue_payload_transfer_samples: u64,
     /// Complete record payloads constructed for publication.
     pub payload_constructions: u64,
     /// Publication attempts, including attempts rejected by a full queue.
@@ -65,6 +74,9 @@ std::thread_local! {
         Cell::new(SpectrumOperationCounts {
             validation_samples: 0,
             selected_storage_writes: 0,
+            chronological_reconstruction_writes: 0,
+            owned_record_sample_copies: 0,
+            queue_payload_transfer_samples: 0,
             payload_constructions: 0,
             publication_attempts: 0,
         })
@@ -84,6 +96,19 @@ fn probe_add(which: usize, amount: usize) {
             PROBE_STORAGE_WRITES => {
                 counts.selected_storage_writes =
                     counts.selected_storage_writes.saturating_add(amount)
+            }
+            PROBE_RECONSTRUCTION_WRITES => {
+                counts.chronological_reconstruction_writes = counts
+                    .chronological_reconstruction_writes
+                    .saturating_add(amount)
+            }
+            PROBE_OWNED_RECORD_SAMPLE_COPIES => {
+                counts.owned_record_sample_copies =
+                    counts.owned_record_sample_copies.saturating_add(amount)
+            }
+            PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES => {
+                counts.queue_payload_transfer_samples =
+                    counts.queue_payload_transfer_samples.saturating_add(amount)
             }
             PROBE_PAYLOAD_CONSTRUCTIONS => {
                 counts.payload_constructions = counts.payload_constructions.saturating_add(amount)
@@ -2236,6 +2261,7 @@ fn one_shot_finish(
         .unwrap_or(first_sample);
     if state.filled == SPECTRUM_WINDOW_FRAMES {
         probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
+        probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
         let window = SpectrumWindow {
             left: *buffers.left,
             right: *buffers.right,
@@ -2251,6 +2277,10 @@ fn one_shot_finish(
             dropped_captures: 0,
         };
         probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
+        probe_add(
+            PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
+            2 * SPECTRUM_WINDOW_FRAMES,
+        );
         if buffers.producer.try_push(record).is_ok() {
             state.completed_sample = Some(first_sample);
             state.state.store(COMPLETE, Ordering::Release);
@@ -2559,13 +2589,16 @@ fn continuous_publish(
         };
         if buffers.channels.includes_left() {
             buffers.left[frame] = state.history_left[index];
+            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
         }
         if buffers.channels.includes_right() {
             buffers.right[frame] = state.history_right[index];
+            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
         }
         source_underrun |= state.history_validity[index] != 0;
     }
     probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
+    probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
     let record = SpectrumCapturedRecord {
         window: SpectrumWindow {
             left: *buffers.left,
@@ -2580,6 +2613,10 @@ fn continuous_publish(
         dropped_captures: state.shared.drops.load(Ordering::Acquire),
     };
     probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
+    probe_add(
+        PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
+        2 * SPECTRUM_WINDOW_FRAMES,
+    );
     if buffers.producer.try_push(record).is_err() {
         if state
             .shared
@@ -4138,6 +4175,9 @@ mod tests {
             super::SpectrumOperationCounts {
                 validation_samples: (2 * SPECTRUM_WINDOW_FRAMES) as u64,
                 selected_storage_writes: (2 * SPECTRUM_WINDOW_FRAMES) as u64,
+                chronological_reconstruction_writes: 0,
+                owned_record_sample_copies: (2 * SPECTRUM_WINDOW_FRAMES) as u64,
+                queue_payload_transfer_samples: (2 * SPECTRUM_WINDOW_FRAMES) as u64,
                 payload_constructions: 1,
                 publication_attempts: 1,
             }
@@ -4477,6 +4517,18 @@ mod tests {
             let counts = super::test_only_spectrum_operation_counts();
             assert_eq!(counts.validation_samples, (2 * quantum) as u64);
             assert_eq!(counts.selected_storage_writes, (2 * quantum) as u64);
+            assert_eq!(
+                counts.chronological_reconstruction_writes,
+                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
+            assert_eq!(
+                counts.owned_record_sample_copies,
+                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
+            assert_eq!(
+                counts.queue_payload_transfer_samples,
+                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
             assert_eq!(counts.payload_constructions, expected_attempts);
             assert_eq!(counts.publication_attempts, expected_attempts);
             assert_eq!(
@@ -4494,6 +4546,67 @@ mod tests {
             assert_eq!(queued.first_sample, 256);
             assert_eq!(queued.sequence, 1);
         }
+    }
+
+    #[test]
+    fn continuous_q128_h256_probes_the_complete_copy_pipeline() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+        let cadence = SpectrumCadence::with_hop(48_000, 128, 256).expect("overlap cadence");
+        capture
+            .begin_continuous(cadence, false)
+            .expect("continuous test activation");
+
+        let (warm_left, warm_right) = ramp_block(0, SPECTRUM_WINDOW_FRAMES);
+        observer.capture(
+            &warm_left,
+            &warm_right,
+            0,
+            super::GraphObservationValidity::CLEAR,
+        );
+        capture
+            .try_read_continuous()
+            .expect("warm window is available");
+        let (before_left, before_right) = ramp_block(SPECTRUM_WINDOW_FRAMES, 128);
+        observer.capture(
+            &before_left,
+            &before_right,
+            SPECTRUM_WINDOW_FRAMES as u64,
+            super::GraphObservationValidity::CLEAR,
+        );
+
+        super::test_only_reset_spectrum_operation_counts();
+        let completion_start = SPECTRUM_WINDOW_FRAMES + 128;
+        let (left, right) = ramp_block(completion_start, 128);
+        observer.capture(
+            &left,
+            &right,
+            completion_start as u64,
+            super::GraphObservationValidity::CLEAR,
+        );
+        let counts = super::test_only_spectrum_operation_counts();
+        assert_eq!(counts.validation_samples, 2 * 128);
+        assert_eq!(counts.selected_storage_writes, 2 * 128);
+        assert_eq!(
+            counts.chronological_reconstruction_writes,
+            (2 * SPECTRUM_WINDOW_FRAMES) as u64
+        );
+        assert_eq!(
+            counts.owned_record_sample_copies,
+            (2 * SPECTRUM_WINDOW_FRAMES) as u64
+        );
+        assert_eq!(
+            counts.queue_payload_transfer_samples,
+            (2 * SPECTRUM_WINDOW_FRAMES) as u64
+        );
+        assert_eq!(counts.payload_constructions, 1);
+        assert_eq!(counts.publication_attempts, 1);
+        assert_eq!(
+            counts.selected_storage_writes
+                + counts.chronological_reconstruction_writes
+                + counts.owned_record_sample_copies
+                + counts.queue_payload_transfer_samples,
+            12_544
+        );
     }
 
     #[test]

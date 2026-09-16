@@ -1269,6 +1269,10 @@ fn protected_explicit_work_limits_are_inclusive_and_transactional() {
         .replace_spectrum(&spectrum_demand)
         .expect("unlimited explicit admission")
         .work;
+    assert_eq!(
+        expected.capture_copy_samples_per_block,
+        2 * 128 + (2 + 4) * SPECTRUM_WINDOW_FRAMES as u64
+    );
     assert_eq!(owner.spectrum_cadence().unwrap().hop_frames(), hop.get());
     drop(host);
 
@@ -1358,6 +1362,14 @@ fn protected_explicit_work_limits_are_inclusive_and_transactional() {
             .replace_spectrum(&spectrum_demand)
             .expect_err("one below spectrum work limit refuses");
         assert_eq!(refusal.reason, ObservationRefusalReason::WorkBudget);
+        if field == 2 {
+            assert_eq!(
+                refusal.limit,
+                Some("maximum_capture_copy_samples_per_block")
+            );
+            assert_eq!(refusal.requested, Some(12_544));
+            assert_eq!(refusal.maximum, Some(12_543));
+        }
         assert_eq!(refused_owner.work(), before_work);
         assert_eq!(refused_owner.spectrum_state(), before_state);
         assert_eq!(
@@ -2032,6 +2044,18 @@ fn protected_track_spectrum_preserves_pcm_and_counts_resident_final_partial_and_
             assert_eq!(
                 counts.selected_storage_writes,
                 (2 * blocks * quantum) as u64
+            );
+            assert_eq!(
+                counts.chronological_reconstruction_writes,
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
+            assert_eq!(
+                counts.owned_record_sample_copies,
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
+            );
+            assert_eq!(
+                counts.queue_payload_transfer_samples,
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
             );
             assert_eq!(counts.payload_constructions, 1);
             assert_eq!(counts.publication_attempts, 1);

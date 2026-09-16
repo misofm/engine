@@ -133,3 +133,14 @@ N1 and N2 exhausted their two Luna rounds, so the bounded correction escalates p
 to one Sol high round: charge the actual conservative term (or eliminate a proved copy), add an
 independent reconstruction/queue discriminator, and update exact/one-below admission gates. A
 fresh Astra medium rereview is required afterward; browser issue #852 remains unstarted.
+
+**Sol high copy-accounting correction — candidate complete.** The checked projection now charges
+`C*Q + ceil(Q/H)*(C*N + 4*N)`: circular-history writes, selected-plane chronological
+reconstruction, construction of the dual-plane owned record, and transfer of that record into the
+one-slot queue, including a rejected full-queue attempt. Runtime-only probes independently count
+the three completion copy stages rather than deriving them from the projection. The stereo
+Q128/H256 discriminator observes exactly 12,544 sample-copy operations; protected admission
+accepts that exact bound and transactionally refuses 12,543 with the public copy-work limit name.
+Root reran the complete host-core all-feature suite and doctests, strict all-feature/all-target
+Clippy, the realtime policy gate, formatting, and the wasm32 no-default host-core check: PASS. A
+fresh Astra medium rereview of this exact checkpoint remains required before native delivery.

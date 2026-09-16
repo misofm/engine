@@ -727,10 +727,11 @@ fn project_meter_work(
 /// length `N`, the checked projection charges:
 ///
 /// * `C * Q` selected finite-input validations per block;
-/// * `C * Q + ceil(Q / H) * 4 * N` copy-sample operations per block. The first term is the
-///   circular-history write cost for the whole observed block. Each completion constructs a
-///   chronological dual-plane owned record and copies both planes into the one-slot queue, so
-///   the two full payload copies account for `4 * N`, even when the queue is full;
+/// * `C * Q + ceil(Q / H) * (C * N + 4 * N)` copy-sample operations per block. The first term is
+///   the circular-history write cost for the whole observed block. Each completion reconstructs
+///   `C` chronological planes in persistent buffers, constructs a dual-plane owned record, and
+///   transfers both owned planes into the one-slot queue. The latter two full-payload operations
+///   account for `4 * N`, including attempts made while the queue is full;
 /// * `ceil(Q / H)` completion/publication attempts per block; and
 /// * `(ceil(R / H) + 1) * sizeof(SpectrumCapturedRecord)` bytes per second. The ceiling uses the
 ///   effective sample-clock hop, and the extra bounded slot preserves the existing restart/
@@ -762,11 +763,17 @@ pub(crate) fn project_spectrum_work(
     let history_writes = channel_count
         .checked_mul(quantum)
         .ok_or_else(arithmetic_overflow)?;
+    let reconstruction_writes = publication_attempts
+        .checked_mul(channel_count)
+        .and_then(|copies| copies.checked_mul(window))
+        .ok_or_else(arithmetic_overflow)?;
     let owned_record_and_queue_copies = publication_attempts
         .checked_mul(window)
         .and_then(|copies| copies.checked_mul(4))
         .ok_or_else(arithmetic_overflow)?;
     let capture_copy_samples_per_block = history_writes
+        .checked_add(reconstruction_writes)
+        .ok_or_else(arithmetic_overflow)?
         .checked_add(owned_record_and_queue_copies)
         .ok_or_else(arithmetic_overflow)?;
     let publications_per_second = sample_rate
@@ -2162,7 +2169,10 @@ mod tests {
         let record_bytes = u64::try_from(size_of::<SpectrumCapturedRecord>()).expect("record size");
         assert_eq!(projected.active_spectrum_captures, 1);
         assert_eq!(projected.capture_input_samples_per_block, 2 * 128);
-        assert_eq!(projected.capture_copy_samples_per_block, 2 * 128 + 4 * 2048);
+        assert_eq!(
+            projected.capture_copy_samples_per_block,
+            2 * 128 + (2 + 4) * 2048
+        );
         assert_eq!(projected.capture_publications_per_block, 1);
         assert_eq!(projected.capture_bytes_per_second, (24 + 1) * record_bytes);
     }
@@ -2191,7 +2201,7 @@ mod tests {
                 assert_eq!(projected.capture_input_samples_per_block, 2 * quantum);
                 assert_eq!(
                     projected.capture_copy_samples_per_block,
-                    2 * quantum + attempts * 4 * window
+                    2 * quantum + attempts * (2 + 4) * window
                 );
                 assert_eq!(projected.capture_publications_per_block, attempts);
                 assert_eq!(
@@ -2217,7 +2227,7 @@ mod tests {
             assert_eq!(projected.capture_publications_per_block, attempts);
             assert_eq!(
                 projected.capture_copy_samples_per_block,
-                2 * 4_096 + attempts * 4 * SPECTRUM_WINDOW_FRAMES as u64
+                2 * 4_096 + attempts * (2 + 4) * SPECTRUM_WINDOW_FRAMES as u64
             );
             assert_eq!(
                 projected.capture_bytes_per_second,
@@ -2380,6 +2390,10 @@ mod tests {
         let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
         let expected =
             project_spectrum_work(cadence, SpectrumChannels::Stereo).expect("spectrum projection");
+        assert_eq!(
+            expected.capture_copy_samples_per_block,
+            2 * 128 + (2 + 4) * SPECTRUM_WINDOW_FRAMES as u64
+        );
         let fields = [
             (
                 "maximum_active_spectrum_captures",
