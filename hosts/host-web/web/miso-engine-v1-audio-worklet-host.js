@@ -415,6 +415,41 @@ async function fetchModule(url) {
   return WebAssembly.compile(await response.arrayBuffer());
 }
 
+function snapshotDocument(document) {
+  if (!(document instanceof Uint8Array)) return undefined;
+  const backing = document.buffer;
+  if (typeof SharedArrayBuffer !== "undefined" && backing instanceof SharedArrayBuffer) {
+    return undefined;
+  }
+  try {
+    // ArrayBuffer.prototype.slice throws for a detached backing store, while an attached empty
+    // ArrayBuffer remains admissible through the existing typed-array validation boundary.
+    ArrayBuffer.prototype.slice.call(backing, 0, 0);
+    return new Uint8Array(document);
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function snapshotBootOptions(input) {
+  if (input === null || typeof input !== "object") return input;
+  const options = { ...input };
+  if (options.spectrum !== null && typeof options.spectrum === "object") {
+    options.spectrum = { ...options.spectrum };
+  }
+  if (options.spectrumCollection !== null
+      && typeof options.spectrumCollection === "object"
+      && Array.isArray(options.spectrumCollection.entries)) {
+    options.spectrumCollection = {
+      ...options.spectrumCollection,
+      entries: options.spectrumCollection.entries.map((entry) => (
+        entry === undefined ? undefined : { ...entry }
+      )),
+    };
+  }
+  return options;
+}
+
 /// The typed refusal for a browser that cannot run the shipped artifact.
 ///
 /// Deliberately not a `miso.error.v1`: a caller must be able to tell "this browser is out of
@@ -1328,18 +1363,34 @@ class MisoAudioWorkletHost {
 }
 
 export async function createMisoAudioWorkletHost(options) {
-  const quantumFrames = options?.context?.renderQuantumSize ?? 128;
-  if (!hasExactFields(options, options?.preparedModule === undefined ? OPTION_FIELDS : [...OPTION_FIELDS, "preparedModule"])
-      || (options.preparedModule !== undefined && !(options.preparedModule instanceof WebAssembly.Module))
-      || options.context?.state !== "suspended"
+  const preparedModule = options?.preparedModule;
+  const factoryFields = preparedModule === undefined
+    ? OPTION_FIELDS
+    : [...OPTION_FIELDS, "preparedModule"];
+  if (!hasExactFields(options, factoryFields)) throw webError(RESULT_INVALID_ARGUMENT);
+
+  const context = options.context;
+  const document = options.document;
+  const bootOptions = snapshotBootOptions(options.options);
+  const simd128ModuleUrl = options.simd128ModuleUrl;
+  const workletModuleUrl = options.workletModuleUrl;
+  const contextState = context?.state;
+  const sampleRateHz = context?.sampleRate;
+  const quantumFrames = context?.renderQuantumSize ?? 128;
+  const audioWorklet = context?.audioWorklet;
+  const documentSnapshot = snapshotDocument(document);
+  if ((preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module))
+      || contextState !== "suspended"
       || !validU32(quantumFrames) || quantumFrames === 0
-      || !validU32(options.context?.sampleRate) || options.context.sampleRate === 0
-      || !(options.document instanceof Uint8Array)
-      || !validBootOptions(options.options)
-      || typeof options.simd128ModuleUrl !== "string"
-      || typeof options.workletModuleUrl !== "string") {
+      || !validU32(sampleRateHz) || sampleRateHz === 0
+      || documentSnapshot === undefined
+      || !validBootOptions(bootOptions)
+      || typeof simd128ModuleUrl !== "string"
+      || typeof workletModuleUrl !== "string") {
     throw webError(1);
   }
+  bootOptions.spectrum = bootOptions.spectrum ?? null;
+  bootOptions.spectrumCollection = bootOptions.spectrumCollection ?? null;
   // W4-D1: attest before allocating anything. Thrown outside the `try` below so it reaches the
   // caller as itself rather than being folded into the generic 255 rejection.
   if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");
@@ -1347,21 +1398,22 @@ export async function createMisoAudioWorkletHost(options) {
   try {
     const selected = {
       backend: SHIPPING_BACKEND,
-      module: options.preparedModule ?? await fetchModule(options.simd128ModuleUrl),
+      module: preparedModule ?? await fetchModule(simd128ModuleUrl),
     };
-    await options.context.audioWorklet.addModule(options.workletModuleUrl);
-    node = new AudioWorkletNode(options.context, PROCESSOR_NAME, {
+    await audioWorklet.addModule(workletModuleUrl);
+    if (context.state !== "suspended"
+        || context.sampleRate !== sampleRateHz
+        || (context.renderQuantumSize ?? 128) !== quantumFrames) {
+      throw webError(RESULT_INVALID_ARGUMENT);
+    }
+    node = new AudioWorkletNode(context, PROCESSOR_NAME, {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       processorOptions: {
         module: selected.module,
-        document: new Uint8Array(options.document),
-        options: {
-          ...options.options,
-          spectrum: options.options.spectrum ?? null,
-          spectrumCollection: options.options.spectrumCollection ?? null,
-        },
+        document: documentSnapshot,
+        options: bootOptions,
       },
     });
     const ready = await new Promise((resolve, reject) => {
@@ -1386,7 +1438,7 @@ export async function createMisoAudioWorkletHost(options) {
             && validResources(
               message.resources,
               selected.backend,
-              options.context.sampleRate,
+              sampleRateHz,
               quantumFrames,
             )) {
           finish(resolve, {
@@ -1413,19 +1465,19 @@ export async function createMisoAudioWorkletHost(options) {
     return new MisoAudioWorkletHost(
       node,
       selected.backend,
-      options.context.sampleRate,
+      sampleRateHz,
       quantumFrames,
       ready.resources,
       ready.memoryBytes,
       // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
       // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
-      (options.options.sourceRingFrames === 0
-        ? Math.ceil(options.context.sampleRate / 10 / quantumFrames) + 2
-        : options.options.sourceRingFrames / quantumFrames),
-      Number(options.options.consoleCommandQueueRecords) || 1,
+      (bootOptions.sourceRingFrames === 0
+        ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
+        : bootOptions.sourceRingFrames / quantumFrames),
+      Number(bootOptions.consoleCommandQueueRecords) || 1,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(options.options.consoleMeterBlocks),
+      Number(bootOptions.consoleMeterBlocks),
       selected.module,
       preparedAbiLayout,
     );
