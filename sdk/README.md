@@ -172,6 +172,24 @@ decimal/lattice edits for agent-facing controls.
 Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery
 are bounded; notifications can arrive later than the samples they describe.
 
+Set the prepared continuous-spectrum hop with `BootOptions.spectrumHopFrames` when calling
+`createOfflineEngine`, or with `BrowserBootPolicy.spectrumHopFrames` under `policy` for
+`createEngine`. The allowed values are `256`, `512`, `1024`, and `2048` frames. This is a
+preparation-time structural setting passed as a validated boot number: it is outside canonical
+session JSON and is not a Wasm environment variable. Omit it to retain the rate/quantum-derived
+default (`48 kHz` with a `128`-frame quantum derives `2048`). Headless and browser preparation
+have the same semantics. For an explicit browser hop, the asset must expose
+`miso_engine_web_v1_spectrum_hop_capability` returning exactly `1` and the additive
+`miso_engine_web_v1_boot_with_spectrum_hop`; an old or incompatible asset is refused without
+falling back to the default path.
+
+Every spectrum result uses a fixed `2,048`-frame analysis window. The prepared hop controls the
+window start spacing, so hops below `2048` overlap successive windows. Runtime `cadenceMs` controls
+subscription delivery and `smoothingMs` controls power smoothing; neither changes the prepared
+native hop. Halving the hop approximately doubles analysis and publication frequency and their CPU work.
+Native capture storage and the SDK's bounded buffers and retained result storage keep memory bounded
+instead of growing with stem duration.
+
 | Observation | API and meaning of its time |
 | --- | --- |
 | Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. |

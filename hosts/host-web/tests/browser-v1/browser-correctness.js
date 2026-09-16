@@ -18,6 +18,8 @@ function bootOptions() {
     // is what this fixture's digests were pinned against.
     consoleObservationTaps: 0n,
     consoleMasterTrackPlusOne: 0n,
+    // Zero selects the rate/quantum-derived spectrum hop default.
+    spectrumHopFrames: 0,
     spectrum: undefined,
     spectrumCollection: undefined,
   };

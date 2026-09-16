@@ -224,3 +224,16 @@ self-tests against candidate commit `5fe0035476f72edaa3bbe9beadb5b43a0c08e1c8` a
 deployment matrix carry that lineage. The permanently updated standalone real-Wasm receiver,
 SDK types, syntax, candidate membership/digest, and diff checks also pass. SDK documentation and
 aggregate repository gates remain B4b2c.
+
+**B4b2c SDK documentation and aggregate gates — complete after the bounded escalation sequence.**
+The SDK README now documents the prepared `spectrumHopFrames` values, the fixed 2048-frame window,
+derived default, browser capability/refusal rule, separation from session JSON/environment/runtime
+delivery cadence, and the CPU/memory tradeoff. Luna round 1 found the browser-correctness fixture's
+authoritative boot record missing the new zero/default field. Luna round 2 added that field and the
+resource oracle measured only `bridgeMetadataBytes` and `bridgeRetainedBytes` increasing by eight
+bytes each. The single Sol HIGH round verified and recorded those two generated accounting deltas;
+all three PCM digests and every other oracle field are unchanged. The exact-candidate headless gate
+passed 278/278 tests, the AudioWorklet static/object/realtime/callgraph gates passed, the publishable
+SDK package and 11/11 CLI tests passed, and generated/type, 26 resource-mutation, boot-budget,
+matrix-freshness, candidate membership/digest, and diff gates passed. B4 implementation and local
+qualification are complete; the requested fresh Astra medium adversarial review remains.
