@@ -685,16 +685,28 @@ fn project_meter_work(
 
 /// Derive the checked work charged by one active fixed-spectrum capture.
 ///
-/// The prepared cadence fixes the launch rate and block quantum. The projection deliberately
-/// counts one active producer and one publication attempt per block; paired dormant slots are
-/// storage only and never multiply these fields.
+/// For channel count `C`, render quantum `Q`, effective hop `H`, sample rate `R`, and window
+/// length `N`, the checked projection charges:
+///
+/// * `C * Q` selected finite-input validations per block;
+/// * `C * Q + ceil(Q / H) * 4 * N` copy-sample operations per block. The first term is the
+///   circular-history write cost for the whole observed block. Each completion constructs a
+///   chronological dual-plane owned record and copies both planes into the one-slot queue, so
+///   the two full payload copies account for `4 * N`, even when the queue is full;
+/// * `ceil(Q / H)` completion/publication attempts per block; and
+/// * `(ceil(R / H) + 1) * sizeof(SpectrumCapturedRecord)` bytes per second. The ceiling uses the
+///   effective sample-clock hop, and the extra bounded slot preserves the existing restart/
+///   boundary-alignment allowance.
+///
+/// Paired dormant slots are storage only and never multiply these fields.
 pub(crate) fn project_spectrum_work(
     cadence: SpectrumCadence,
     channels: SpectrumChannels,
 ) -> Result<ObservationWorkCost, ObservationRefusal> {
     let quantum = u64::from(cadence.quantum_frames());
     let sample_rate = u64::from(cadence.sample_rate_hz());
-    if quantum == 0 {
+    let hop = u64::from(cadence.hop_frames());
+    if quantum == 0 || hop == 0 {
         return Err(arithmetic_overflow());
     }
     let window = u64::try_from(SPECTRUM_WINDOW_FRAMES).map_err(|_| arithmetic_overflow())?;
@@ -705,21 +717,24 @@ pub(crate) fn project_spectrum_work(
     let capture_input_samples_per_block = channel_count
         .checked_mul(quantum)
         .ok_or_else(arithmetic_overflow)?;
-    let capture_copy_samples_per_block = channel_count
-        .checked_mul(quantum.min(window))
-        .and_then(|samples| samples.checked_add(window.checked_mul(4)?))
-        .ok_or_else(arithmetic_overflow)?;
-    let quanta = window
-        .checked_add(quantum - 1)
+    let publication_attempts = quantum
+        .checked_add(hop - 1)
         .ok_or_else(arithmetic_overflow)?
-        / quantum;
-    let full_hop = quanta
+        / hop;
+    let history_writes = channel_count
         .checked_mul(quantum)
         .ok_or_else(arithmetic_overflow)?;
+    let owned_record_and_queue_copies = publication_attempts
+        .checked_mul(window)
+        .and_then(|copies| copies.checked_mul(4))
+        .ok_or_else(arithmetic_overflow)?;
+    let capture_copy_samples_per_block = history_writes
+        .checked_add(owned_record_and_queue_copies)
+        .ok_or_else(arithmetic_overflow)?;
     let publications_per_second = sample_rate
-        .checked_add(full_hop - 1)
+        .checked_add(hop - 1)
         .ok_or_else(arithmetic_overflow)?
-        / full_hop;
+        / hop;
     let record_bytes =
         u64::try_from(size_of::<SpectrumCapturedRecord>()).map_err(|_| arithmetic_overflow())?;
     let capture_bytes_per_second = publications_per_second
@@ -730,7 +745,7 @@ pub(crate) fn project_spectrum_work(
         active_spectrum_captures: 1,
         capture_input_samples_per_block,
         capture_copy_samples_per_block,
-        capture_publications_per_block: 1,
+        capture_publications_per_block: publication_attempts,
         capture_bytes_per_second,
         ..ObservationWorkCost::ZERO
     })
@@ -2104,6 +2119,87 @@ mod tests {
         assert_eq!(projected.capture_copy_samples_per_block, 2 * 128 + 4 * 2048);
         assert_eq!(projected.capture_publications_per_block, 1);
         assert_eq!(projected.capture_bytes_per_second, (24 + 1) * record_bytes);
+    }
+
+    #[test]
+    fn spectrum_work_uses_each_explicit_hop_at_all_launch_rates() {
+        let rates = [44_100_u64, 48_000, 88_200, 96_000];
+        let hops = [256_u64, 512, 1_024, 2_048];
+        let quantum = 192_u64;
+        let window = SPECTRUM_WINDOW_FRAMES as u64;
+        let record_bytes =
+            u64::try_from(size_of::<SpectrumCapturedRecord>()).expect("record size fits");
+
+        for sample_rate_hz in rates {
+            for hop_frames in hops {
+                let cadence = SpectrumCadence::with_hop(
+                    u32::try_from(sample_rate_hz).expect("rate fits"),
+                    u32::try_from(quantum).expect("quantum fits"),
+                    u32::try_from(hop_frames).expect("hop fits"),
+                )
+                .expect("explicit cadence");
+                let projected = project_spectrum_work(cadence, SpectrumChannels::Stereo)
+                    .expect("explicit projection");
+                let attempts = quantum.div_ceil(hop_frames);
+                assert_eq!(projected.active_spectrum_captures, 1);
+                assert_eq!(projected.capture_input_samples_per_block, 2 * quantum);
+                assert_eq!(
+                    projected.capture_copy_samples_per_block,
+                    2 * quantum + attempts * 4 * window
+                );
+                assert_eq!(projected.capture_publications_per_block, attempts);
+                assert_eq!(
+                    projected.capture_bytes_per_second,
+                    (sample_rate_hz.div_ceil(hop_frames) + 1) * record_bytes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spectrum_work_handles_nondividing_quantum_and_grows_as_hop_falls() {
+        let record_bytes =
+            u64::try_from(size_of::<SpectrumCapturedRecord>()).expect("record size fits");
+        let mut previous: Option<(u64, u64, u64)> = None;
+        for hop_frames in [2_048_u32, 1_024, 512, 256] {
+            let cadence =
+                SpectrumCadence::with_hop(48_000, 4_096, hop_frames).expect("explicit cadence");
+            let projected = project_spectrum_work(cadence, SpectrumChannels::Stereo)
+                .expect("explicit projection");
+            let attempts = 4_096_u64.div_ceil(u64::from(hop_frames));
+            assert_eq!(projected.capture_input_samples_per_block, 2 * 4_096);
+            assert_eq!(projected.capture_publications_per_block, attempts);
+            assert_eq!(
+                projected.capture_copy_samples_per_block,
+                2 * 4_096 + attempts * 4 * SPECTRUM_WINDOW_FRAMES as u64
+            );
+            assert_eq!(
+                projected.capture_bytes_per_second,
+                (48_000_u64.div_ceil(u64::from(hop_frames)) + 1) * record_bytes
+            );
+            if let Some(previous) = previous {
+                assert!(projected.capture_publications_per_block > previous.0);
+                assert!(projected.capture_copy_samples_per_block > previous.1);
+                assert!(projected.capture_bytes_per_second > previous.2);
+            }
+            previous = Some((
+                projected.capture_publications_per_block,
+                projected.capture_copy_samples_per_block,
+                projected.capture_bytes_per_second,
+            ));
+        }
+
+        // H is a sample-clock spacing: neither nondividing Q=192 nor a multiple-boundary Q=768
+        // rounds or rejects an explicit hop.
+        for quantum in [128_u32, 192, 768, 4_096] {
+            let cadence = SpectrumCadence::with_hop(48_000, quantum, 512)
+                .expect("explicit hop does not require Q divisibility");
+            assert_eq!(cadence.hop_frames(), 512);
+            let projected = project_spectrum_work(cadence, SpectrumChannels::Stereo)
+                .expect("every supported quantum projects without alignment");
+            let attempts = u64::from(quantum).div_ceil(512);
+            assert_eq!(projected.capture_publications_per_block, attempts);
+        }
     }
 
     #[test]

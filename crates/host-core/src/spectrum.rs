@@ -1109,7 +1109,34 @@ pub enum SpectrumCaptureError {
     Busy,
 }
 
-/// The checked, block-aligned profile for a continuous spectrum capture.
+/// A validated explicit hop for a continuous spectrum capture.
+///
+/// The native overlap profile permits only the four fixed frame spacings. Keeping the value in
+/// this representation means a prepared cadence cannot carry an arbitrary hop accidentally.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SpectrumHop(u32);
+
+impl SpectrumHop {
+    /// The supported explicit hops, in ascending order.
+    pub const SUPPORTED: [Self; 4] = [Self(256), Self(512), Self(1024), Self(2048)];
+
+    /// Validate one explicit hop in frames.
+    pub fn new(hop_frames: u32) -> Result<Self, SpectrumCadenceError> {
+        match hop_frames {
+            256 | 512 | 1024 | 2048 => Ok(Self(hop_frames)),
+            _ => Err(SpectrumCadenceError::UnsupportedHop),
+        }
+    }
+
+    /// Return the validated hop in frames.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// The checked profile for a continuous spectrum capture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpectrumCadence {
     sample_rate_hz: u32,
@@ -1120,12 +1147,7 @@ pub struct SpectrumCadence {
 impl SpectrumCadence {
     /// Derive the launch-supported hop from one prepared render shape.
     pub fn new(sample_rate_hz: u32, quantum_frames: u32) -> Result<Self, SpectrumCadenceError> {
-        if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
-            return Err(SpectrumCadenceError::UnsupportedRate);
-        }
-        if quantum_frames == 0 {
-            return Err(SpectrumCadenceError::ZeroQuantum);
-        }
+        Self::validate_shape(sample_rate_hz, quantum_frames)?;
         let minimum_hop = (u64::from(sample_rate_hz) / 30).max(SPECTRUM_WINDOW_FRAMES as u64);
         let quantum = u64::from(quantum_frames);
         let quanta = minimum_hop
@@ -1142,6 +1164,37 @@ impl SpectrumCadence {
         })
     }
 
+    /// Construct a cadence with one of the supported explicit hops.
+    ///
+    /// The hop is a sample-clock spacing and is intentionally independent of the render quantum;
+    /// an explicit value does not need to divide `quantum_frames` and is never rounded.
+    pub fn with_hop(
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+        hop_frames: u32,
+    ) -> Result<Self, SpectrumCadenceError> {
+        Self::validate_shape(sample_rate_hz, quantum_frames)?;
+        let hop = SpectrumHop::new(hop_frames)?;
+        Ok(Self {
+            sample_rate_hz,
+            quantum_frames,
+            hop_frames: hop.get(),
+        })
+    }
+
+    fn validate_shape(
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+    ) -> Result<(), SpectrumCadenceError> {
+        if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+            return Err(SpectrumCadenceError::UnsupportedRate);
+        }
+        if quantum_frames == 0 {
+            return Err(SpectrumCadenceError::ZeroQuantum);
+        }
+        Ok(())
+    }
+
     /// Sample rate fixed at preparation.
     #[must_use]
     pub const fn sample_rate_hz(self) -> u32 {
@@ -1154,7 +1207,7 @@ impl SpectrumCadence {
         self.quantum_frames
     }
 
-    /// Non-overlapping hop between scheduled window starts.
+    /// Sample-clock hop between scheduled window starts.
     #[must_use]
     pub const fn hop_frames(self) -> u32 {
         self.hop_frames
@@ -1168,6 +1221,8 @@ pub enum SpectrumCadenceError {
     UnsupportedRate,
     /// A zero quantum cannot align capture starts.
     ZeroQuantum,
+    /// An explicit hop is outside the four supported overlap spacings.
+    UnsupportedHop,
     /// Checked hop arithmetic overflowed or did not fit the profile.
     HopOverflow,
 }
@@ -3197,9 +3252,9 @@ mod tests {
     use super::{
         ARMED, CAPTURING, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB,
         SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError, SpectrumAnalysisHistory, SpectrumAnalyzer,
-        SpectrumCadence, SpectrumCapture, SpectrumCaptureCollectionEntry,
+        SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureCollectionEntry,
         SpectrumCaptureCollectionRequest, SpectrumCaptureObserver, SpectrumCaptureReadError,
-        SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow,
+        SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
         SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
     use crate::observation_demand::HostSpectrumMode;
@@ -4042,6 +4097,71 @@ mod tests {
         );
         assert!(SpectrumCadence::new(192_000, 128).is_err());
         assert!(SpectrumCadence::new(48_000, 0).is_err());
+    }
+
+    #[test]
+    fn explicit_hops_are_validated_without_quantum_alignment() {
+        let rates = [44_100, 48_000, 88_200, 96_000];
+        let hops = [256, 512, 1_024, 2_048];
+        for sample_rate_hz in rates {
+            for hop_frames in hops {
+                let cadence = SpectrumCadence::with_hop(sample_rate_hz, 192, hop_frames)
+                    .expect("supported explicit hop");
+                assert_eq!(cadence.sample_rate_hz(), sample_rate_hz);
+                assert_eq!(cadence.quantum_frames(), 192);
+                assert_eq!(cadence.hop_frames(), hop_frames);
+                assert_eq!(
+                    SpectrumHop::new(hop_frames)
+                        .expect("supported hop representation")
+                        .get(),
+                    hop_frames
+                );
+            }
+        }
+        assert_eq!(SpectrumHop::SUPPORTED.map(SpectrumHop::get), hops);
+
+        for hop_frames in [0, 1, 255, 257, 2_049, u32::MAX] {
+            assert_eq!(
+                SpectrumHop::new(hop_frames),
+                Err(SpectrumCadenceError::UnsupportedHop)
+            );
+            assert_eq!(
+                SpectrumCadence::with_hop(48_000, 192, hop_frames),
+                Err(SpectrumCadenceError::UnsupportedHop)
+            );
+        }
+        assert_eq!(
+            SpectrumCadence::with_hop(192_000, 192, 256),
+            Err(SpectrumCadenceError::UnsupportedRate)
+        );
+        assert_eq!(
+            SpectrumCadence::with_hop(48_000, 0, 256),
+            Err(SpectrumCadenceError::ZeroQuantum)
+        );
+    }
+
+    #[test]
+    fn default_cadence_keeps_nondividing_quantum_profiles() {
+        let expected = [
+            (44_100, 2_112),
+            (48_000, 2_112),
+            (88_200, 3_072),
+            (96_000, 3_264),
+        ];
+        for (sample_rate_hz, hop_frames) in expected {
+            assert_eq!(
+                SpectrumCadence::new(sample_rate_hz, 192)
+                    .expect("launch cadence")
+                    .hop_frames(),
+                hop_frames
+            );
+        }
+        assert_eq!(
+            SpectrumCadence::new(48_000, u32::MAX)
+                .expect("maximum representable quantum")
+                .hop_frames(),
+            u32::MAX
+        );
     }
 
     #[test]

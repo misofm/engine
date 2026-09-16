@@ -3932,6 +3932,7 @@ impl AudioWorkletEngineHost {
                 SpectrumContinuousCaptureError::Cadence(error) => match error {
                     host_core::SpectrumCadenceError::UnsupportedRate => RESULT_UNSUPPORTED,
                     host_core::SpectrumCadenceError::ZeroQuantum => RESULT_INVALID_ARGUMENT,
+                    host_core::SpectrumCadenceError::UnsupportedHop => RESULT_INVALID_ARGUMENT,
                     host_core::SpectrumCadenceError::HopOverflow => RESULT_REFUSED_BUDGET,
                 },
                 SpectrumContinuousCaptureError::EpochOverflow => RESULT_REFUSED_BUDGET,

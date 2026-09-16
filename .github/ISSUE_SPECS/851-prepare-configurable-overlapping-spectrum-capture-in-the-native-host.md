@@ -64,3 +64,17 @@ Gates cover protected prepare/admit/apply/render/read spans and metadata, replac
 Assign N1-N4 sequentially to one fresh Luna MAX agent each. An agent gets only this contract, its task, exact prior checkpoint, and focused commands. Root audits and commits/pushes each coherent checkpoint before the next task starts. Each Luna task has at most two implementation/revision rounds; if still unsatisfactory, escalate to Sol high for one round, then Astra xhigh for one round, then stop and rescope. Record one verdict per round and never weaken gates.
 
 After N4, a fresh Astra medium agent adversarially verifies the exact integrated native candidate. Push PASS evidence, synchronize this body, close the issue, and verify remote closure before browser/SDK implementation begins. Keep #763 open.
+
+## Checkpoint evidence
+
+**N1 cadence and work projection — complete.** Fresh Luna MAX added the validated four-hop
+vocabulary and one explicit cadence constructor while preserving the default profile, including
+high-rate/default hops above 2048 and nondividing quantums. The work projection now uses effective
+H for checked `ceil(Q/H)` completion attempts and `ceil(Fs/H)+1` payload traffic, and charges
+selected history writes plus conservative owned-record/publication copies. No active overlap path
+is exposed. Root's first strict all-target Clippy run found five `manual_div_ceil` violations in the
+new tests; Luna corrected them in its second and final round and removed duplicate constructor/
+accessor spellings. Root reran the five focused projection tests, explicit-hop validation, and
+strict host-core all-feature/all-target Clippy successfully. Implementer also reports the complete
+host-core all-feature suite/doctests, host-web all-feature check, formatting and diff checks PASS.
+Checkpoint source follows the pushed planning baseline `2313a93d`; N2 remains unstarted.
