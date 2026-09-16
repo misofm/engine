@@ -8342,6 +8342,8 @@ fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
     )
 }
 
+type InputFilterShadow = ([u32; 4], [u32; 4], [bool; 4], u64);
+
 #[derive(Debug, PartialEq)]
 struct ProtectedNativeState {
     status: WebObservationStatus,
@@ -8358,7 +8360,7 @@ struct ProtectedNativeState {
     in_flight: Vec<u32>,
     command_decoded: Vec<(u32, u32)>,
     control_queues: Vec<(u64, usize, u64, usize, u64, usize)>,
-    input_filter_shadows: Vec<([u32; 4], [u32; 4], [bool; 4], u64)>,
+    input_filter_shadows: Vec<InputFilterShadow>,
     has_in_flight_commands: bool,
     command_staging: Option<Vec<u8>>,
     companion_staging: Option<Vec<u8>>,

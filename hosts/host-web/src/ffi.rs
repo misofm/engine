@@ -9436,7 +9436,9 @@ mod observation_checkpoint_c1_tests {
 
     #[test]
     fn each_unsupported_alias_does_not_spend_its_classified_attempt() {
-        let calls: [(&str, fn(u32) -> u32); 8] = [
+        type UnsupportedCall = (&'static str, fn(u32) -> u32);
+
+        let calls: [UnsupportedCall; 8] = [
             ("arm", |handle| miso_engine_web_v1_spectrum_arm(handle)),
             ("read", |handle| {
                 miso_engine_web_v1_spectrum_read(handle, u32::MAX)
@@ -11636,10 +11638,7 @@ mod observation_checkpoint_c2a_tests {
             let host = &live.as_ref().expect("protected live host").host;
             assert_eq!(host.side_records.pending_count, 1);
             assert!(
-                host.side_records
-                    .receipts
-                    .iter()
-                    .any(|receipt| *receipt == first_receipt),
+                host.side_records.receipts.contains(&first_receipt),
                 "the authoritative Pending receipt survives the intervening refusal"
             );
         });
