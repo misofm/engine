@@ -10,6 +10,8 @@ This is a deliberately narrower successor to exhausted #843, not a fifth correct
 
 Execution admitted at **2026-09-16 07:17:43 UTC** from clean synchronized main `299c828570f57cfbb4e1c82ced817be2ca5050b6` after fresh Astra XHIGH scope, separate fresh Astra XHIGH adversarial GO, and the required fresh Sol HIGH stateless brief. Local spec, GitHub title/body/number and OPEN state are exact at checkpoint `d7bff077`. This starts the 120-active-minute ceiling.
 
+The first Luna MAX test handoff was stopped after six minutes of inspection with no worktree edits, then the second and final Luna round for this bounded task delivered checkpoint **`d8cc66db`**. Only the receiver test and two mirrored declaration comments changed: 203 test insertions and four comment lines per declaration, with no type/signature or production edit. The two focused selectors reach construction and exit1 only at `boot-data.document.before-construction` and `boot-data.nested.before-construction` against both current main and a byte-exact private `299c8285` host; the nested case retains its sparse-hole assertion after the named value assertion. Root independently confirmed test syntax, declaration parity, diff hygiene and the unchanged default fake suite at exit0. Logs are `/tmp/miso-844-root-{default,document-red,nested-red,baseline-document-red,baseline-nested-red}.log`; Luna report `/tmp/miso-844-luna1b-minimal.md`. This is the required intentional-red checkpoint, not a submitted complete candidate.
+
 ## Frozen product contract
 
 Assume standard, unmodified host-realm intrinsics and non-Proxy inputs. Inspect only the fixed factory, boot, spectrum, collection, entries-array, and entry schemas.
