@@ -1128,15 +1128,16 @@ async function testMainRealm() {
   try {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
 
-    const snapshotFactory = ({
-      context: factoryContext = snapshotContext(),
-      document = new Uint8Array([0x7b, 0x22, 0x73, 0x22, 0x7d]),
-      options: factoryOptions = { ...limits },
-      simd128ModuleUrl = "simd.wasm",
-      workletModuleUrl = "processor.js",
-      includePreparedModule = true,
-      preparedModule = unsupportedPreparationModule,
-    } = {}) => {
+    const snapshotFactory = (factoryInput = {}) => {
+      const {
+        context: factoryContext = snapshotContext(),
+        document = new Uint8Array([0x7b, 0x22, 0x73, 0x22, 0x7d]),
+        options: factoryOptions = { ...limits },
+        simd128ModuleUrl = "simd.wasm",
+        workletModuleUrl = "processor.js",
+        includePreparedModule = true,
+        preparedModule,
+      } = factoryInput;
       const factory = {
         context: factoryContext,
         document,
@@ -1144,7 +1145,11 @@ async function testMainRealm() {
         simd128ModuleUrl,
         workletModuleUrl,
       };
-      if (includePreparedModule) factory.preparedModule = preparedModule;
+      if (includePreparedModule) {
+        factory.preparedModule = Object.hasOwn(factoryInput, "preparedModule")
+          ? preparedModule
+          : unsupportedPreparationModule;
+      }
       return factory;
     };
 
