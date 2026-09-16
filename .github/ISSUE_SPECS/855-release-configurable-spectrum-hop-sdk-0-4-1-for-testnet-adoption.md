@@ -57,3 +57,59 @@ Record the release commit, PR, exact-main qualification run, npm qualification/p
 - Registry latest before work: 0.4.0.
 - Registry 0.4.1 before work: parsed E404 / unused.
 - No release-preparation implementation or publication has occurred under this issue.
+
+## Implementation attempt 1 evidence
+
+On 2026-09-16, the bounded release-preparation tranche was applied in worktree
+`/tmp/miso-engine-0-4-1` on branch `codex/release-engine-0-4-1`, from brief commit
+`dc42960ac2cd0951e82c59a79d204f6f006dc7d6` whose parent is the accepted runtime base
+`9fe7157e3485f016cd62963cb84189fddac9c2b3`. Only the five allowed metadata paths changed in
+the implementation tranche. The package and lockfile identities are both `0.4.1`; the workflow
+contains exactly five `0.4.1` release literals and exactly one accepted Worklet pin
+`e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`; no `0.4.0` remains in the
+workflow. The release fixture uses `0.4.1` for package, CLI, smoke, PURL, mutation, and
+diagnostic identities while retaining the historical `0.2.4` normalization and fixed workflow
+and qualify-step hashes. The README install and release-record links now identify 0.4.1/#855.
+
+The focused gates all pass:
+
+- `npm ci --ignore-scripts` in `sdk/`: PASS (5 packages added, 6 audited, 0 vulnerabilities).
+- `python3 -B scripts/test-npm-publish-modes.py`: PASS (`npm publish mode reachability and
+  trust gates: ok`).
+- `node scripts/test-parse-npm-trust-list.mjs`: PASS (`npm trust list parser fixtures and
+  mutations: ok`).
+- `bash scripts/test-sdk-artifact-builder-output-contract.sh`: PASS.
+- `bash scripts/check-sdk-generated.sh`: PASS for assets, generated modules, and generated
+  surface.
+- `python3 -B scripts/check-sdk-deletions.py`: PASS (74 files carry none of the retired
+  spellings).
+- `bash scripts/check-sdk-types.sh`: PASS, including the shipped-host declaration mirror pin.
+- `bash scripts/build-web-audioworklet.sh <fresh-empty-directory>`: PASS; the exact seven-file
+  closure was built and its Wasm SHA-256 is
+  `e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`.
+- `bash scripts/check-sdk-headless.sh <that-closure>`: PASS (278 tests, 31 suites).
+- `bash scripts/sdk-package.sh check <that-closure>`: PASS (artifact-builder contract, 11/11
+  `enginectl` checks, and the 98-file publishable tarball gate).
+- `bash scripts/check-web-audioworklet.sh <that-closure>`: PASS for static/object, callgraph,
+  metadata, ABI, vocabulary, session-map, and boot-budget checks.
+- `node scripts/test-web-audioworklet.mjs --real-wasm-receiver --artifacts <that-closure>`:
+  PASS for exact seven-file membership/digest, ordinary lifecycle, corrupted-Wasm refusal, and
+  disposal mutation controls.
+- `bash scripts/test-web-audioworklet.sh`: PASS for the full hermetic Worklet suite, safe-integer
+  boundary, opcode policy, qualification mutations, browser response, policy, metadata,
+  vocabulary, and session-map controls.
+- A retained fresh archive smoke passed against a fresh extraction, and all seven packaged
+  closure files are byte-identical to the fresh closure. The archive is
+  `/tmp/issue855-sdk-candidate.N0hX1r/misofm-engine-0.4.1.tgz`, 1,331,109 bytes and 98 files,
+  with SHA-256
+  `251ba94b46cfc648ff867a1191e3d28e1cf18b910fc651c0c87de3d18111a7bc`, SHA-512
+  `85345d6f548ec919e06e7b5edb54306923223d9d58f741605e47a14831b61e4dfb841650daab602192f41f6b3536da6067ef2977802c9a174b9de0638fa2203b`, npm shasum
+  `dedf9cf506205b628e1966b0fa08b8cd7c387523`, and npm integrity
+  `sha512-hTRdb1SOyRngbnte21QwaSMiPZ1Y90FgXkehSDG2Hk37hBZQ2qtgIZL0H2s1NtpgZ+8pd4AsmhdLneBjj6IgOw==`.
+- `git diff --check`: PASS. The exact implementation diff path set is exactly
+  `.github/workflows/npm-publish.yml`, `scripts/test-npm-publish-modes.py`, `sdk/README.md`,
+  `sdk/package-lock.json`, and `sdk/package.json`; no runtime, generated, ABI, or historical
+  normalization fixture was changed.
+
+The candidate is locally qualified for fresh review. No commit, push, pull request, workflow
+dispatch, npm publication, or registry mutation occurred in this attempt.
