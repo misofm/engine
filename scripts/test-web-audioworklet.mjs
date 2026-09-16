@@ -911,6 +911,7 @@ async function testMainRealm() {
     compile: WebAssembly.compile,
   };
   const events = [];
+  let fetchCount = 0;
   let holdSource = false;
   let holdAll = false;
   const heldAll = [];
@@ -1049,11 +1050,14 @@ async function testMainRealm() {
 
   globalThis.AudioWorkletNode = FakeNode;
   WebAssembly.validate = () => true;
-  globalThis.fetch = async (url) => ({
-    ok: true,
-    arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-    json: async () => preparedAbiLayout,
-  });
+  globalThis.fetch = async (url) => {
+    fetchCount += 1;
+    return {
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
+      json: async () => preparedAbiLayout,
+    };
+  };
   const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
@@ -1233,6 +1237,254 @@ async function testMainRealm() {
       await runBootDataNested();
       return;
     }
+
+    const runPlainDataMatrix = async () => {
+      const makeFactory = (overrides = {}) => ({
+        context, document: new Uint8Array(), options: limits,
+        simd128ModuleUrl: "simd.wasm", workletModuleUrl: "processor.js", ...overrides,
+      });
+      const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
+      const makeSpectrum = () => ({
+        target: "trackPostMatrix", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
+      });
+      const makeCollectionOptions = (entries) => ({
+        ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
+      });
+      const addWitness = (object, key, setterOnly = false, enumerable = true) => {
+        let calls = 0;
+        const descriptor = setterOnly
+          ? { configurable: true, enumerable, set() { calls += 1; } }
+          : { configurable: true, enumerable, get() {
+            calls += 1; throw new Error(`unexpected ${String(key)} read`);
+          } };
+        Object.defineProperty(object, key, descriptor);
+        return () => calls;
+      };
+      const assertRefusal = async (label, factory, witness = () => 0) => {
+        const before = [events.length, fetchCount, FakeNode.count];
+        await localErrorResult(createMisoAudioWorkletHost(factory), 1);
+        assert.equal(witness(), 0, `${label}: witness or callback invoked`);
+        assert.equal(fetchCount, before[1], `${label}: fetch occurred`);
+        assert.equal(events.length, before[0], `${label}: compile/addModule occurred`);
+        assert.equal(FakeNode.count, before[2], `${label}: node constructed`);
+      };
+
+      const descriptorCases = [
+        ["factory", () => { const f = makeFactory(); return [f, f, "context"]; }],
+        ["boot", () => { const o = { ...limits }; return [makeFactory({ options: o }), o, "sourceRingFrames"]; }],
+        ["spectrum", () => {
+          const s = makeSpectrum(); const o = { ...limits, spectrum: s, spectrumCollection: null };
+          return [makeFactory({ options: o }), s, "target"];
+        }],
+        ["collection", () => {
+          const e = [makeEntry()]; const o = makeCollectionOptions(e);
+          return [makeFactory({ options: o }), o.spectrumCollection, "entries"];
+        }],
+        ["array-index", () => {
+          const e = [makeEntry()]; const o = makeCollectionOptions(e);
+          return [makeFactory({ options: o }), e, "0"];
+        }],
+        ["entry", () => {
+          const e = makeEntry(); const o = makeCollectionOptions([e]);
+          return [makeFactory({ options: o }), e, "targetId"];
+        }],
+      ];
+      for (const setterOnly of [false, true]) {
+        for (const [label, makeCase] of descriptorCases) {
+          const [factory, object, key] = makeCase();
+          await assertRefusal(`${setterOnly ? "setter-only" : "accessor"} ${label}`, factory,
+            addWitness(object, key, setterOnly));
+        }
+      }
+      for (const setterOnly of [false, true]) {
+        const factory = makeFactory();
+        await assertRefusal(`hidden ${setterOnly ? "setter-only" : "accessor"}`, factory,
+          addWitness(factory, "context", setterOnly, false));
+      }
+
+      const decoratedEntries = [
+        ["every=false", "every", false],
+        ["every=undefined", "every", undefined, false],
+        ["every callback", "every", "callback"],
+        ["map", "map", "callback"],
+        ["constructor", "constructor", "callback"],
+        ["Symbol.iterator", Symbol.iterator, "callback"],
+        ["Symbol.species", Symbol.species, "callback"],
+      ];
+      for (const [label, key, value, enumerable = true] of decoratedEntries) {
+        let calls = 0;
+        let retained = null;
+        const entries = [makeEntry()];
+        const decoration = value === "callback" ? (...args) => {
+          calls += 1;
+          retained = args[0] ?? null;
+          return true;
+        } : value;
+        Object.defineProperty(entries, key, {
+          configurable: true, enumerable, value: decoration, writable: true,
+        });
+        await assertRefusal(`decorated entries ${label}`, makeFactory({
+          options: makeCollectionOptions(entries),
+        }), () => calls);
+        assert.equal(retained, null, `decorated entries ${label}: callback escaped`);
+      }
+
+      const refusalCases = [
+        ["unknown enumerable", () => Object.assign(makeFactory(), { unknown: undefined })],
+        ["unknown hidden", () => {
+          const factory = makeFactory();
+          Object.defineProperty(factory, "unknown", { value: undefined });
+          return factory;
+        }],
+        ["unknown symbol", () => {
+          const factory = makeFactory();
+          Object.defineProperty(factory, Symbol("unknown"), { value: undefined });
+          return factory;
+        }],
+        ["custom-prototype entries", () => {
+          const entries = [makeEntry()]; Object.setPrototypeOf(entries, { custom: true });
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+        ["subclass entries", () => {
+          class EntriesSubclass extends Array {}
+          const entries = new EntriesSubclass(makeEntry());
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+        ["noncanonical array index", () => {
+          const entries = [makeEntry()]; Object.defineProperty(entries, "01", { value: makeEntry() });
+          return makeFactory({ options: makeCollectionOptions(entries) });
+        }],
+      ];
+      for (const [label, makeCase] of refusalCases) {
+        await assertRefusal(label, makeCase());
+      }
+
+      await assertRefusal("SharedArrayBuffer document", makeFactory({
+        document: new Uint8Array(new SharedArrayBuffer(4)),
+      }));
+      {
+        const backing = new ArrayBuffer(4);
+        const document = new Uint8Array(backing);
+        structuredClone(backing, { transfer: [backing] });
+        await assertRefusal("detached document", makeFactory({ document }));
+      }
+      {
+        let iteratorCalls = 0;
+        const forged = Object.create(Uint8Array.prototype);
+        Object.defineProperty(forged, Symbol.iterator, {
+          configurable: true,
+          get() {
+            iteratorCalls += 1;
+            throw new Error("forged document iterator invoked");
+          },
+        });
+        await assertRefusal("forged document", makeFactory({ document: forged }), () => iteratorCalls);
+      }
+      {
+        const backing = new ArrayBuffer(8);
+        const document = new Uint8Array(backing, 2, 3);
+        document.set([11, 22, 33]);
+        const originalVisible = [document[0], document[1], document[2]];
+        let decorationCalls = 0;
+        const decoration = {
+          configurable: true,
+          get() {
+            decorationCalls += 1;
+            throw new Error("document decoration invoked");
+          },
+        };
+        Object.defineProperty(document, "buffer", decoration);
+        Object.defineProperty(document, "constructor", decoration);
+        Object.defineProperty(document, Symbol.toStringTag, decoration);
+        Object.defineProperty(document, Symbol.iterator, decoration);
+        Object.defineProperty(backing, "slice", decoration);
+        const gate = snapshotGate();
+        compileGate = gate;
+        let hostValue;
+        try {
+          const boot = createMisoAudioWorkletHost(makeFactory({ document }));
+          await gate.started;
+          document[1] = 99;
+          gate.release();
+          hostValue = await boot;
+          const copied = FakeNode.latest.options.processorOptions.document;
+          assert.deepEqual([...copied], originalVisible, "decorated document copied before mutation");
+          assert.equal(copied.byteOffset, 0, "decorated document offset-zero copy");
+          assert.equal(copied.byteLength, originalVisible.length, "decorated document length");
+          assert.notEqual(copied.buffer, backing, "decorated document private copy");
+          assert.equal(decorationCalls, 0, "decorated document hooks were not invoked");
+        } finally {
+          gate.release();
+          if (compileGate === gate) compileGate = null;
+          if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
+        }
+      }
+      {
+        const emptyHost = await createMisoAudioWorkletHost(makeFactory({ document: new Uint8Array() }));
+        await emptyHost.dispose();
+      }
+
+      {
+        let audioWorkletReads = 0;
+        const unsupportedContext = Object.create(context);
+        Object.defineProperty(unsupportedContext, "audioWorklet", {
+          configurable: true,
+          get() {
+            audioWorkletReads += 1;
+            throw new Error("audioWorklet accessed before SIMD refusal");
+          },
+        });
+        const beforeEvents = events.length;
+        const beforeFetches = fetchCount;
+        const beforeNodes = FakeNode.count;
+        const validate = WebAssembly.validate;
+        try {
+          WebAssembly.validate = () => false;
+          const refusal = await createMisoAudioWorkletHost(makeFactory({
+            context: unsupportedContext,
+          })).then(() => assert.fail("expected unsupported SIMD refusal"), (error) => error);
+          assert.deepEqual(Object.keys(refusal).sort(), ["capability", "requestId", "result", "tag"]);
+          assert.equal(refusal.tag, "miso.unsupported.v1");
+          assert.equal(refusal.capability, "simd128");
+          assert.equal(refusal.result, 7);
+          assert.equal(refusal.requestId, 0);
+          assert.equal(audioWorkletReads, 0, "unsupported SIMD touched audioWorklet");
+          assert.equal(fetchCount, beforeFetches, "unsupported SIMD fetched a module");
+          assert.equal(events.length, beforeEvents, "unsupported SIMD compiled or loaded a module");
+          assert.equal(FakeNode.count, beforeNodes, "unsupported SIMD constructed a node");
+        } finally {
+          WebAssembly.validate = validate;
+        }
+      }
+      for (const [label, mutate, restore] of [
+        ["state", () => { context.state = "running"; }, () => { context.state = "suspended"; }],
+        ["sample rate", () => { context.sampleRate = 44100; }, () => { context.sampleRate = 48000; }],
+        ["quantum", () => { context.renderQuantumSize = 128; }, () => { context.renderQuantumSize = 64; }],
+      ]) {
+        const gate = snapshotGate();
+        addModuleGate = gate;
+        const beforeEvents = events.length;
+        const beforeNodes = FakeNode.count;
+        let boot;
+        try {
+          boot = createMisoAudioWorkletHost(makeFactory());
+          await gate.started;
+          mutate();
+          gate.release();
+          await localErrorResult(boot, 1);
+          assert.equal(FakeNode.count, beforeNodes, `${label} drift constructed a node`);
+          assert.deepEqual(
+            events.slice(beforeEvents),
+            [["compile", "simd.wasm"], ["addModule", "processor.js"]],
+            `${label} drift was checked after loading and before construction`,
+          );
+        } finally {
+          restore();
+          gate.release();
+          if (addModuleGate === gate) addModuleGate = null;
+        }
+      }
+    };
 
     const host = await createMisoAudioWorkletHost({
       context,
@@ -1998,6 +2250,7 @@ async function testMainRealm() {
     assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
+    await runPlainDataMatrix();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;
