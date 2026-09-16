@@ -12,9 +12,10 @@ use host_core::{
     HostSpectrumDemand, HostSpectrumMode, HostSpectrumReadError, ObservationRefusalReason,
     ObservationWorkCost, ObservationWorkLimits, PreparedHostMeter, SPECTRUM_WINDOW_FRAMES,
     SourceSubmission, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
-    SpectrumChannels, SpectrumTarget, StartedRenderSession, compile_host_session,
-    prepare_host_runtime, prepare_host_runtime_with_observation_demand,
+    SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget, StartedRenderSession,
+    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_observation_demand,
     prepare_host_runtime_with_observation_demand_between_render_calls,
+    prepare_host_runtime_with_spectrum, spectrum_capture_resources_for,
 };
 #[cfg(feature = "test-support")]
 use host_core::{
@@ -1461,7 +1462,7 @@ fn continuous_reads_wrap_failure_and_gap_epochs_and_close_with_renderer() {
 }
 
 #[test]
-fn protected_track_spectrum_preserves_pcm_and_counts_planar_final_partial_and_large_quantum() {
+fn protected_track_spectrum_preserves_pcm_and_counts_resident_final_partial_and_large_quantum() {
     use engine::realtime::audit;
 
     for (quantum, source_ring_frames) in [(192_usize, 1_152_u32), (4_096, 8_192)] {
@@ -1473,8 +1474,21 @@ fn protected_track_spectrum_preserves_pcm_and_counts_planar_final_partial_and_la
         test_caps.source_ring_frames = source_ring_frames;
         let compiled = compile_host_session(&document, &test_caps).expect("quantum fixture");
         let baseline_host = prepare_host_runtime(&compiled, &test_caps).expect("baseline host");
+        let target = SpectrumTarget::TrackPostMatrix("eq1".into());
+        let oracle_request = SpectrumCaptureRequest {
+            target: target.clone(),
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
+        };
+        let (oracle_host, mut oracle_capture) =
+            prepare_host_runtime_with_spectrum(&compiled, &test_caps, &oracle_request)
+                .expect("one-shot target oracle host");
+        oracle_capture.arm().expect("one-shot target oracle arm");
+        let (mut oracle_render, mut oracle_sources, _) = oracle_host
+            .start_render_session()
+            .expect("one-shot target oracle render");
         let request = controlled_spectrum_request(vec![SpectrumCaptureCollectionEntry {
-            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            target: target.clone(),
             channels: SpectrumChannels::Stereo,
         }]);
         let mut observation = demand(&[]);
@@ -1487,20 +1501,48 @@ fn protected_track_spectrum_preserves_pcm_and_counts_planar_final_partial_and_la
         )
         .expect("protected track spectrum host");
         let selected = HostSpectrumDemand {
-            target: SpectrumTarget::TrackPostMatrix("eq1".into()),
+            target: target.clone(),
             channels: SpectrumChannels::Stereo,
             mode: HostSpectrumMode::Continuous,
         };
         let accepted = owner
             .replace_spectrum(&selected)
             .expect("spectrum admission");
+        let blocks = SPECTRUM_WINDOW_FRAMES.div_ceil(quantum);
+        for block in 0..blocks {
+            let first_sample = (block * quantum) as u64;
+            let left = vec![0.25_f32; quantum];
+            let right = vec![-0.5_f32; quantum];
+            oracle_sources
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: first_sample,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: quantum as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("oracle source block");
+            let mut oracle_pcm = vec![f32::from_bits(0x7fc0_3990); quantum * 2];
+            oracle_render
+                .render_planar(&mut oracle_pcm, 2, quantum, quantum, first_sample)
+                .expect("oracle render block");
+        }
+        // The source is constant in every block. An independent one-shot capture at the same
+        // resident target supplies the exact per-sample target oracle, including its fixed filter
+        // startup state, for the continuous resident capture below.
+        let oracle_window = oracle_capture
+            .try_read()
+            .expect("one-shot target oracle window");
         let (mut baseline_render, mut baseline_sources, _) = baseline_host
             .start_render_session()
             .expect("baseline render");
         let (mut render, mut sources, _) = selected_host
             .start_render_session()
             .expect("selected render");
-        let blocks = SPECTRUM_WINDOW_FRAMES.div_ceil(quantum);
         #[cfg(feature = "test-support")]
         test_only_reset_spectrum_operation_counts();
         for block in 0..blocks {
@@ -1563,15 +1605,21 @@ fn protected_track_spectrum_preserves_pcm_and_counts_planar_final_partial_and_la
             .expect("protected window");
         assert_eq!(window.observation_generation, accepted.revision);
         assert_eq!(window.window.first_sample, 0);
-        assert!(window.window.left.iter().any(|value| *value != 0.0));
-        assert!(window.window.right.iter().any(|value| *value != 0.0));
+        assert_eq!(
+            window.window.left, oracle_window.left,
+            "resident continuous left payload differs from the constant-source target oracle at quantum {quantum}"
+        );
+        assert_eq!(
+            window.window.right, oracle_window.right,
+            "resident continuous right payload differs from the constant-source target oracle at quantum {quantum}"
+        );
         #[cfg(feature = "test-support")]
         {
             let counts = test_only_spectrum_operation_counts();
             assert_eq!(counts.validation_samples, (2 * blocks * quantum) as u64);
             assert_eq!(
                 counts.selected_storage_writes,
-                (2 * SPECTRUM_WINDOW_FRAMES) as u64
+                (2 * blocks * quantum) as u64
             );
             assert_eq!(counts.payload_constructions, 1);
             assert_eq!(counts.publication_attempts, 1);

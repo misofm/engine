@@ -78,3 +78,18 @@ accessor spellings. Root reran the five focused projection tests, explicit-hop v
 strict host-core all-feature/all-target Clippy successfully. Implementer also reports the complete
 host-core all-feature suite/doctests, host-web all-feature check, formatting and diff checks PASS.
 Checkpoint source follows the pushed planning baseline `2313a93d`; N2 remains unstarted.
+
+**N2 circular-history producer — complete.** Fresh Luna MAX replaced the non-overlapping fill/reset
+state with private preallocated dual-plane circular history and per-sample validity. It emits exact
+owned `[S+kH,S+kH+2048)` records at arbitrary block boundaries, handles several completions per
+block, advances sequence/drop facts without overwriting the one queued record, and preserves the
+existing default spaced profile. Planar ramp/impulse oracles cover every explicit hop and channel
+mask across wrap; Q192, Q768/H256 and Q4096/H256 cover nonaligned and multiple completions.
+Underrun membership/clear, discontinuity/nonfinite/failure fencing, held-record immutability,
+allocation freedom and operation attempts are exercised. A real resident-bank integration compares
+every continuous sample against an independent one-shot target oracle at Q192 and Q4096 and proves
+PCM identity. Luna round 1 left that integration's old `2*N` storage-write expectation failing;
+round 2 corrected it to the actual `2*blocks*Q` history work and strengthened the payload oracle.
+Root reran the complete locked host-core all-feature suite/doctests and strict all-target Clippy:
+PASS. Implementer also reports release spectrum unit 38/38, spectrum integration 9/9, formatting
+and diff checks PASS. N3 remains unstarted.
