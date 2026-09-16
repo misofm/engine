@@ -31,6 +31,15 @@ download. Keep the SDK, Wasm, host, worklets, and metadata from the same package
 
 Use these entry points rather than deep imports. The package also installs the `enginectl` CLI.
 
+```ts
+import { catalog } from "@misofm/engine";
+import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
+
+export function packageInfo() {
+  return { parameterCount: catalog().length, wasmUrl: BUNDLED_ENGINE_ASSETS.wasm };
+}
+```
+
 ## Render offline
 
 Node 20+ and Bun use the packaged Wasm runtime. Supply a Session V1 document as JSON text, bytes,
