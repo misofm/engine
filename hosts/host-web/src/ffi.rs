@@ -7419,11 +7419,11 @@ mod spectrum_ffi_tests {
         let document = include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         stage_left_output_request();
         BOOT_STAGING.with(|slot| {
-            slot.borrow_mut().options = Box::new(WebBootOptions {
+            *slot.borrow_mut().options = WebBootOptions {
                 require_sample_rate_hz: 48_000,
                 require_quantum_frames: 128,
                 ..WebBootOptions::explicit_defaults()
-            });
+            };
         });
         test_stage_document(document);
         document

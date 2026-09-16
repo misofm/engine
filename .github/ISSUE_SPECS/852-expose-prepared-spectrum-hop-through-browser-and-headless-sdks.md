@@ -258,3 +258,9 @@ surface, strict types, seven-file membership, candidate digest, companion source
 diff, HEAD, and clean-tree checks pass. Only the correction and this evidence changed after the
 prior review, so its native/browser/resource/package PASS evidence remains applicable. No blocker
 remains.
+
+**PR qualification correction.** PR #854's Rust 1.97.1 Clippy gate identified one needless
+allocation in a spectrum FFI test helper that replaced an existing boxed `WebBootOptions`. The
+helper now assigns through the existing box with unchanged values and behavior. The focused
+19-test spectrum FFI module, package Clippy, full workspace all-target/all-feature Clippy with
+warnings denied, formatting, and diff checks pass.
