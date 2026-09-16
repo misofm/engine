@@ -113,3 +113,7 @@ The focused gates all pass:
 
 The candidate is locally qualified for fresh review. No commit, push, pull request, workflow
 dispatch, npm publication, or registry mutation occurred in this attempt.
+
+## Fresh Astra MEDIUM adversarial review
+
+PASS on frozen implementation commit `f6328d836c9ed9861b2def49c5ea3ddef857c822`. The reviewer confirmed the diff is confined to the issue spec and five authorized release-metadata/fixture files; runtime, DSP, ABI, defaults, and generated assets are unchanged. The workflow retains exactly five `0.4.1` literals, one accepted Wasm pin, exact-SHA qualification, immutable publication, prior-qualified archive reuse, OIDC, and provenance guards. Publish-mode/trust tests, fresh archive smoke, recorded archive SHA-256, and all seven closure byte comparisons pass. A direct packaged managed-spectrum probe observed omitted-hop end samples `2048, 4096` and explicit H256 end samples `2048, 2304`. Review approval covers release preparation; required PR qualification and exact-main registry delivery remain.
