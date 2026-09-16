@@ -40,6 +40,10 @@ Baseline was synchronized Engine main `704b8a3dddd3c91c6cbcb98c869ba67c4c0ae39e`
 - A fresh Astra MEDIUM adversarial review found one stale shipped-effect claim. Commit `30404121`
   removed the two undelivered effects; the same reviewer then returned PASS and confirmed the
   eight-effect list matches the generated catalog.
+- The first PR qualification exposed a documentation-gate requirement: the README retained only
+  two executable runtime import examples after the rewrite, while the package gate requires four.
+  Commit `3dd4ee86` added a useful root-catalog and packaged-asset example. The focused README
+  import test and full `sdk/test/package-evals.mjs` suite then passed 9/9; no runtime code changed.
 
 Decision: PASS. The README describes the current 0.4.0 product and its material boundaries without
 changing code, package metadata, generated files, or artifacts.
