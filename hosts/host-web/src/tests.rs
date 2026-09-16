@@ -8342,6 +8342,135 @@ fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
     )
 }
 
+#[derive(Debug, PartialEq)]
+struct ProtectedNativeState {
+    status: WebObservationStatus,
+    ingress: (u64, bool, bool, bool),
+    application_len: u64,
+    pending_count: u64,
+    completed_count: u64,
+    reserved_mask: u64,
+    receipt_count: u64,
+    receipt_fingerprint: u64,
+    capture_identity: WebObservationCaptureIdentity,
+    queue_fingerprint: u64,
+    command_staging: Option<(usize, u64)>,
+    companion_staging: Option<(usize, u64)>,
+}
+
+fn protected_state_mix(hash: u64, value: u64) -> u64 {
+    hash ^ value
+        .wrapping_add(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(hash << 6)
+        .wrapping_add(hash >> 2)
+}
+
+fn protected_bytes_fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        protected_state_mix(hash, u64::from(*byte))
+    })
+}
+
+fn protected_queue_fingerprint(host: &AudioWorkletEngineHost) -> u64 {
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    hash = protected_state_mix(hash, ready.command_wanted.len() as u64);
+    for value in &ready.command_wanted {
+        hash = protected_state_mix(hash, *value as u64);
+    }
+    hash = protected_state_mix(hash, ready.in_flight.len() as u64);
+    for value in &ready.in_flight {
+        hash = protected_state_mix(hash, *value as u64);
+    }
+    hash = protected_state_mix(hash, ready.command_decoded.len() as u64);
+    for entry in &ready.command_decoded {
+        hash = protected_state_mix(hash, entry.queue_slot as u64);
+        hash = protected_state_mix(hash, entry.original_wire_index as u64);
+    }
+    hash = protected_state_mix(hash, ready.has_in_flight_commands as u64);
+    for control in &ready.controls {
+        hash = protected_state_mix(hash, control.producer.success_count());
+        hash = protected_state_mix(hash, control.producer.available_capacity() as u64);
+        hash = protected_state_mix(hash, control.fader.success_count());
+        hash = protected_state_mix(hash, control.fader.available_capacity() as u64);
+        hash = protected_state_mix(hash, control.input.success_count());
+        hash = protected_state_mix(hash, control.input.available_capacity() as u64);
+    }
+    for shadow in &ready.input_filter_shadows {
+        for value in [shadow.committed, shadow.candidate] {
+            hash = protected_state_mix(hash, value.map(f32::to_bits).unwrap_or(0) as u64);
+        }
+        hash = protected_state_mix(hash, shadow.dirty as u64);
+        hash = protected_state_mix(hash, shadow.revision);
+    }
+    hash
+}
+
+fn protected_native_state(host: &mut AudioWorkletEngineHost) -> ProtectedNativeState {
+    let status = *host.observation_status();
+    let ingress = {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+            panic!("protected owner");
+        };
+        (
+            storage.ingress.epoch,
+            storage.ingress.ordinary_used,
+            storage.ingress.removal_used,
+            storage.ingress.exhausted,
+        )
+    };
+    let side = &host.side_records;
+    let receipt_fingerprint = side.receipts.iter().fold(
+        0xcbf2_9ce4_8422_2325,
+        |hash, receipt| {
+            let hash = protected_state_mix(hash, receipt.state as u64);
+            let hash = protected_state_mix(hash, receipt.owner as u64);
+            let hash = protected_state_mix(hash, receipt.sequence as u64);
+            protected_state_mix(hash, receipt.application_sample as u64)
+        },
+    );
+    let capture_identity = *host.observation_capture_identity();
+    let queue_fingerprint = protected_queue_fingerprint(host);
+    let command_staging = host
+        .command_staging_mut()
+        .map(|bytes| (bytes.len(), protected_bytes_fingerprint(bytes)));
+    let companion_staging = host
+        .prepared_companion_mut()
+        .map(|bytes| (bytes.len(), protected_bytes_fingerprint(bytes)));
+    ProtectedNativeState {
+        status,
+        ingress,
+        application_len: side.application_len as u64,
+        pending_count: side.pending_count as u64,
+        completed_count: side.completed_count as u64,
+        reserved_mask: side.reserved_mask as u64,
+        receipt_count: side.receipts.len() as u64,
+        receipt_fingerprint,
+        capture_identity,
+        queue_fingerprint,
+        command_staging,
+        companion_staging,
+    }
+}
+
+fn set_protected_ingress_state(
+    host: &mut AudioWorkletEngineHost,
+    epoch: u64,
+    ordinary_used: bool,
+    removal_used: bool,
+    exhausted: bool,
+) {
+    let ready = host.ready.as_mut().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+        panic!("protected owner");
+    };
+    storage.ingress.epoch = epoch;
+    storage.ingress.ordinary_used = ordinary_used;
+    storage.ingress.removal_used = removal_used;
+    storage.ingress.exhausted = exhausted;
+}
+
 struct CountingResponseSink {
     calls: usize,
     error: Option<ResponseSnapshotError>,
@@ -8490,6 +8619,7 @@ fn protected_native_alias_guards_are_empty_and_do_not_spend_credit() {
     let mut host = protected_eq_console_host();
     let admission_before = *host.observation_admission();
     let ingress_before = protected_ingress_state(&host);
+    let state_before = protected_native_state(&mut host);
 
     assert_eq!(
         host.read_observations(&[]),
@@ -8571,6 +8701,11 @@ fn protected_native_alias_guards_are_empty_and_do_not_spend_credit() {
     assert_eq!(host.observation_admission().operation, 10);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert!(!protected_ingress_state(&host).2);
+    assert_eq!(
+        protected_native_state(&mut host),
+        state_before,
+        "unsupported native aliases changed protected state"
+    );
     assert_eq!(host.render_next(), RESULT_OK);
 
     assert_eq!(
@@ -8592,6 +8727,73 @@ fn protected_native_alias_guards_are_empty_and_do_not_spend_credit() {
     assert_eq!(host.observation_admission().operation, 12);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert!(!protected_ingress_state(&host).1);
+}
+
+#[test]
+fn protected_native_unsupported_families_preserve_compact_state_for_credit_states() {
+    let address = ObservationAddress {
+        track_index: u32::MAX,
+        rack: EffectRack::Dynamic,
+        effect_index: u32::MAX,
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    };
+    for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
+        ("free", (1, false, false, false)),
+        ("spent", (1, true, true, false)),
+        ("exhausted", (u64::MAX, true, true, true)),
+    ] {
+        let mut host = protected_eq_console_host();
+        set_protected_ingress_state(
+            &mut host,
+            epoch,
+            ordinary_used,
+            removal_used,
+            exhausted,
+        );
+        let before = protected_native_state(&mut host);
+        let mut output = [];
+        assert_eq!(
+            host.read_observations(&[]),
+            Err(ObservationReadError::Unsupported),
+            "{label} collection"
+        );
+        assert_eq!(
+            host.read_observation_addresses(&[address]),
+            Err(ObservationReadError::Unsupported),
+            "{label} addressed read"
+        );
+        assert_eq!(
+            host.read_observation_addresses_into(&[address], &mut output),
+            Err(ObservationReadError::Unsupported),
+            "{label} addressed output"
+        );
+        assert_eq!(
+            host.arm_spectrum(),
+            RESULT_UNSUPPORTED,
+            "{label} arm"
+        );
+        assert!(matches!(host.read_spectrum(), Err(RESULT_UNSUPPORTED)));
+        assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED, "{label} cancel");
+        assert_eq!(
+            host.select_spectrum(
+                &SpectrumTarget::TrackPostMatrix("missing".into()),
+                SpectrumChannels::Stereo,
+            ),
+            RESULT_UNSUPPORTED,
+            "{label} select"
+        );
+        assert_eq!(
+            host.set_meter_lease(false),
+            RESULT_UNSUPPORTED,
+            "{label} meter lease"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} unsupported native family changed protected state"
+        );
+    }
 }
 
 #[test]
