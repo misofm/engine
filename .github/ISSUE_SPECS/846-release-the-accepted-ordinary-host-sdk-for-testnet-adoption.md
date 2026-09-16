@@ -43,3 +43,19 @@ spellings); `bash scripts/check-sdk-types.sh` PASS (including the shipped-host m
 `git diff --check` PASS. Headless/package/AudioWorklet artifact gates were not started because the
 retained Worklet artifact is outside this bounded preparation tranche; no source or generated
 artifact was changed.
+
+Root qualified checkpoint `de79c6831c674060f751ec1fd5d9c4caca210b52` against exact-main
+artifact run 35075507202. `check-sdk-headless.sh` passed 257 tests; `sdk-package.sh check` passed
+the 98-file publishable tarball gate. A separately retained candidate archive is 1,332,704 bytes,
+SHA256 `5ca46401c29b8206cea348be811ad30623c43807dbe1b33935d57534185e2744`, SHA512
+`51955d42ba89594655774ec5d0e916de4085794ae330373864cdbf784abcdcd1c6d84330bdfc6b8f24485a9c83351586496f643ec40c029db11f36e72ecb329b`,
+and npm integrity `sha512-UZVdQrqJWUZVd07F0OkW3kCFeUrjMDc4ZM2/eEq83NHG2EMwvfxrjyRIWpyDNRWGSW9kPsQMAp2xHzbnLssymw==`.
+Its packaged host, declaration, ABI JSON and Wasm byte-match the accepted seven-file artifact;
+both #844 focused ownership selectors pass against that packed host with its helper and ABI
+siblings. The complete hermetic AudioWorklet suite and declaration mirror comparison pass.
+
+Fresh Astra MEDIUM independently reviewed `de79c683` and returned **PASS** with no blocking
+finding. It re-ran the publisher/trust/generated/type/package gates, seven-file byte comparison,
+both packed-host selectors, 257 headless tests and real-Wasm lifecycle checks. This establishes
+source/package readiness only; required PR/main qualification and immutable npm
+qualify/publish/registry verification remain.
