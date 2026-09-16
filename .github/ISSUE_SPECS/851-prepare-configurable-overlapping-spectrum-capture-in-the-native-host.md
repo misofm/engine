@@ -174,3 +174,8 @@ and the corresponding generated matrix sentence. Parsed browser rows, versions, 
 and every other result field remain identical. Matrix generation/check, session-identity validation,
 and diff hygiene pass. A new qualification run must execute the browser matrix successfully before
 merge; no failed browser workload was retried because the first run never passed lineage preflight.
+
+**Delivered.** PR #853 merged as `35e0e188` and automatically closed #851. Required `main`
+qualification run `35124104755` passed after merge, including the exact artifact, three-browser,
+SDK, workspace, Wasm, realtime audit, policy, and verdict jobs. Issue #852 continues from this
+delivered baseline.

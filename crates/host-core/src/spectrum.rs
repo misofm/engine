@@ -695,6 +695,24 @@ impl SpectrumCapture {
         Ok(cadence)
     }
 
+    /// Start scheduled windows with an explicitly prepared cadence.
+    pub fn start_continuous_with_hop(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+        hop: SpectrumHop,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+            || self.state.load(Ordering::Acquire) != IDLE
+        {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        }
+        let cadence = SpectrumCadence::with_hop(sample_rate_hz, quantum_frames, hop.get())
+            .map_err(SpectrumContinuousCaptureError::Cadence)?;
+        self.begin_continuous(cadence, false)?;
+        Ok(cadence)
+    }
+
     fn begin_continuous(
         &mut self,
         cadence: SpectrumCadence,
@@ -1078,6 +1096,25 @@ impl SpectrumCaptureCollection {
             return Err(SpectrumContinuousCaptureError::Busy);
         };
         let cadence = SpectrumCadence::new(sample_rate_hz, quantum_frames)
+            .map_err(SpectrumContinuousCaptureError::Cadence)?;
+        // `select` arms the entry so that the native replacement operation has the same semantics
+        // for one-shot and managed callers. This replacement preflights cadence, ownership and
+        // epoch before clearing that arm, preserving it when a reconfiguration is refused.
+        self.captures[index].begin_continuous(cadence, true)?;
+        Ok(cadence)
+    }
+
+    /// Start the selected entry with an explicitly prepared cadence.
+    pub fn start_continuous_with_hop(
+        &mut self,
+        sample_rate_hz: u32,
+        quantum_frames: u32,
+        hop: SpectrumHop,
+    ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
+        let Some(index) = self.selected else {
+            return Err(SpectrumContinuousCaptureError::Busy);
+        };
+        let cadence = SpectrumCadence::with_hop(sample_rate_hz, quantum_frames, hop.get())
             .map_err(SpectrumContinuousCaptureError::Cadence)?;
         // `select` arms the entry so that the native replacement operation has the same semantics
         // for one-shot and managed callers. This replacement preflights cadence, ownership and
@@ -3413,10 +3450,11 @@ mod tests {
     use super::{
         ARMED, CAPTURING, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB,
         SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError, SpectrumAnalysisHistory, SpectrumAnalyzer,
-        SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureCollectionEntry,
-        SpectrumCaptureCollectionRequest, SpectrumCaptureObserver, SpectrumCaptureReadError,
-        SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
-        SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
+        SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureCollection,
+        SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureObserver,
+        SpectrumCaptureReadError, SpectrumChannels, SpectrumContinuousReadError,
+        SpectrumContinuousWindow, SpectrumHop, SpectrumSmoothingConfig,
+        SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
     use crate::observation_demand::HostSpectrumMode;
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
@@ -4371,6 +4409,56 @@ mod tests {
             SpectrumCadence::with_hop(48_000, 0, 256),
             Err(SpectrumCadenceError::ZeroQuantum)
         );
+    }
+
+    #[test]
+    fn explicit_capture_starts_use_the_checked_hop_and_legacy_start_is_unchanged() {
+        for hop_frames in [256, 512, 1_024, 2_048] {
+            let (_observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+            let hop = SpectrumHop::new(hop_frames).expect("supported hop");
+            let cadence = capture
+                .start_continuous_with_hop(48_000, 128, hop)
+                .expect("explicit capture start");
+            assert_eq!(cadence.sample_rate_hz(), 48_000);
+            assert_eq!(cadence.quantum_frames(), 128);
+            assert_eq!(cadence.hop_frames(), hop_frames);
+            assert_eq!(capture.cadence(), Some(cadence));
+        }
+
+        let (_observer, mut legacy) = continuous_pair(SpectrumChannels::Stereo);
+        let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
+        assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
+        assert_eq!(legacy.cadence(), Some(expected));
+    }
+
+    #[test]
+    fn explicit_collection_start_uses_the_checked_hop() {
+        let target = SpectrumTarget::Output("main-out".into());
+        for hop_frames in [256, 512, 1_024, 2_048] {
+            let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
+            let mut collection = SpectrumCaptureCollection::new(vec![capture]);
+            collection
+                .select(&target, SpectrumChannels::Stereo)
+                .expect("prepared collection selection");
+            let cadence = collection
+                .start_continuous_with_hop(
+                    48_000,
+                    128,
+                    SpectrumHop::new(hop_frames).expect("supported hop"),
+                )
+                .expect("explicit collection start");
+            assert_eq!(cadence.hop_frames(), hop_frames);
+            assert_eq!(collection.cadence(), Some(cadence));
+        }
+
+        let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
+        let mut legacy = SpectrumCaptureCollection::new(vec![capture]);
+        legacy
+            .select(&target, SpectrumChannels::Stereo)
+            .expect("prepared legacy collection selection");
+        let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
+        assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
+        assert_eq!(legacy.cadence(), Some(expected));
     }
 
     #[test]

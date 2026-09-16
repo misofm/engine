@@ -68,3 +68,17 @@ Required integrated evidence:
 Assign B1-B4 sequentially to one fresh Luna MAX agent each after #851 is delivered and closed. An agent gets only this contract, its task, exact prior checkpoint, and focused commands. Root audits and commits/pushes each coherent checkpoint before the next task starts. Each Luna task has at most two implementation/revision rounds; if still unsatisfactory, escalate to Sol high for one round, then Astra xhigh for one round, then stop and rescope. Record one verdict per round and never weaken gates.
 
 After B4, a fresh Astra medium agent adversarially verifies both issue contracts and the exact integrated artifact candidate. Push PASS evidence, synchronize this body, close this issue, and verify remote closure. Keep #763 open unless its independent parent criteria are all complete.
+
+## Checkpoint evidence
+
+**B1a0 ordinary-capture prerequisite — complete in fresh Luna MAX round 1.** The initial combined
+B1 handoff was interrupted after inventory with no edits and does not count as an implementation
+attempt. Root reduced the work before any tranche accumulated. The replacement found that
+host-core's protected owner accepted a prepared hop, but the ordinary single/collection capture
+APIs exposed only the derived default. Its first coherent tranche adds typed
+`start_continuous_with_hop` methods to `SpectrumCapture` and `SpectrumCaptureCollection`; both take
+an already validated `SpectrumHop`, preserve the old start methods unchanged, and reuse the same
+continuous activation path. Focused tests cover all four supported hops on both shapes and pin the
+legacy derived cadence. Root reran both focused tests, strict host-core library Clippy, wasm32
+no-default compilation, formatting, and diff checks: PASS. B1's host-web ABI/configuration work
+will begin from this checkpoint with a fresh agent; Worker analysis remains a separate checkpoint.
