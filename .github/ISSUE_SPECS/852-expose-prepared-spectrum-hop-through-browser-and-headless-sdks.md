@@ -175,3 +175,15 @@ both optional spectrum fields omitted while the runtime required the full nine-f
 weakening exact-shape or anti-Proxy checks. Root reran the full hermetic harness, syntax, and diff
 checks: PASS. The render callback is unchanged. Actual candidate artifact qualification and pins
 remain B4.
+
+**B4a candidate generation and ABI publication — complete in fresh Luna MAX round 1.** The normal
+deterministic builder produced the exact seven-file candidate at
+`target/codex/issue852-candidate`; its Wasm SHA-256 is
+`e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`, byte-for-byte equal to the
+updated repository pin. Normal SDK asset/code generation changed only the ABI layout JSON and its
+TypeScript transcription by adding the two hop-aware boot exports and the capability export; no
+packed structure, constant, parameter catalog, or provenance row changed. Root independently
+verified membership, digest equality, SDK generated/type gates, and diff checks. The agent also
+reports the ABI validator and 27-mutation self-test plus the complete static/object/callgraph/
+resource/boot-budget Worklet gate PASS against this candidate. Integrated runtime/browser
+qualification, documentation, and result lineage remain B4b.
