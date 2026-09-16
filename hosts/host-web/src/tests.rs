@@ -8342,6 +8342,138 @@ fn protected_ingress_state(host: &AudioWorkletEngineHost) -> (u64, bool, bool) {
     )
 }
 
+type InputFilterShadow = ([u32; 4], [u32; 4], [bool; 4], u64);
+
+#[derive(Debug, PartialEq)]
+struct ProtectedNativeState {
+    status: WebObservationStatus,
+    ingress: (u64, bool, bool, bool),
+    application_len: u64,
+    pending_count: u64,
+    completed_count: u64,
+    reserved_mask: u64,
+    receipts: [WebObservationReceipt; 4],
+    applications: [WebObservationReceipt; 4],
+    pending_stop_slot: Option<usize>,
+    capture_identity: WebObservationCaptureIdentity,
+    command_wanted: Vec<u32>,
+    in_flight: Vec<u32>,
+    command_decoded: Vec<(u32, u32)>,
+    control_queues: Vec<(u64, usize, u64, usize, u64, usize)>,
+    input_filter_shadows: Vec<InputFilterShadow>,
+    has_in_flight_commands: bool,
+    command_staging: Option<Vec<u8>>,
+    companion_staging: Option<Vec<u8>>,
+}
+
+fn protected_native_state(host: &mut AudioWorkletEngineHost) -> ProtectedNativeState {
+    let status = host.observation_status();
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    let ingress = (
+        storage.ingress.epoch,
+        storage.ingress.ordinary_used,
+        storage.ingress.removal_used,
+        storage.ingress.exhausted,
+    );
+    let command_wanted = ready.command_wanted.to_vec();
+    let in_flight = ready.in_flight.to_vec();
+    let command_decoded = ready
+        .command_decoded
+        .iter()
+        .map(|entry| (entry.queue_slot, entry.original_wire_index))
+        .collect();
+    let control_queues = ready
+        .controls
+        .iter()
+        .map(|control| {
+            (
+                control.producer.success_count(),
+                control.producer.available_capacity(),
+                control.fader.success_count(),
+                control.fader.available_capacity(),
+                control.input.success_count(),
+                control.input.available_capacity(),
+            )
+        })
+        .collect();
+    let input_filter_shadows = ready
+        .input_filter_shadows
+        .iter()
+        .map(|shadow| {
+            (
+                shadow.committed.map(f32::to_bits),
+                shadow.candidate.map(f32::to_bits),
+                shadow.dirty,
+                shadow.revision,
+            )
+        })
+        .collect();
+    let has_in_flight_commands = ready.has_in_flight_commands;
+    let (
+        application_len,
+        pending_count,
+        completed_count,
+        reserved_mask,
+        receipts,
+        applications,
+        pending_stop_slot,
+    ) = {
+        let side = &host.side_records;
+        (
+            side.application_len as u64,
+            side.pending_count as u64,
+            side.completed_count as u64,
+            side.reserved_mask as u64,
+            side.receipts,
+            side.applications,
+            side.pending_stop_slot,
+        )
+    };
+    let capture_identity = *host.observation_capture_identity();
+    let command_staging = host.command_staging_mut().map(|bytes| bytes.to_vec());
+    let companion_staging = host.prepared_companion_mut().map(|bytes| bytes.to_vec());
+    ProtectedNativeState {
+        status,
+        ingress,
+        application_len,
+        pending_count,
+        completed_count,
+        reserved_mask,
+        receipts,
+        applications,
+        pending_stop_slot,
+        capture_identity,
+        command_wanted,
+        in_flight,
+        command_decoded,
+        control_queues,
+        input_filter_shadows,
+        has_in_flight_commands,
+        command_staging,
+        companion_staging,
+    }
+}
+
+fn set_protected_ingress_state(
+    host: &mut AudioWorkletEngineHost,
+    epoch: u64,
+    ordinary_used: bool,
+    removal_used: bool,
+    exhausted: bool,
+) {
+    let ready = host.ready.as_mut().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+        panic!("protected owner");
+    };
+    storage.ingress.epoch = epoch;
+    storage.ingress.ordinary_used = ordinary_used;
+    storage.ingress.removal_used = removal_used;
+    storage.ingress.exhausted = exhausted;
+}
+
 struct CountingResponseSink {
     calls: usize,
     error: Option<ResponseSnapshotError>,
@@ -8486,10 +8618,11 @@ fn protected_response_preserves_sink_error_and_shares_ordinary_credit_with_spect
 }
 
 #[test]
-fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
+fn protected_native_alias_guards_are_empty_and_do_not_spend_credit() {
     let mut host = protected_eq_console_host();
     let admission_before = *host.observation_admission();
     let ingress_before = protected_ingress_state(&host);
+    let state_before = protected_native_state(&mut host);
 
     assert_eq!(
         host.read_observations(&[]),
@@ -8558,19 +8691,24 @@ fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
     assert_eq!(host.observation_admission().operation, 10);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().reason, 8);
-    assert!(protected_ingress_state(&host).1);
+    assert!(!protected_ingress_state(&host).1);
     assert_eq!(host.status().last_result, RESULT_OK);
     assert!(
-        matches!(host.read_spectrum(), Err(RESULT_BACKPRESSURE)),
-        "a second ordinary alias spends no second permit"
+        matches!(host.read_spectrum(), Err(RESULT_UNSUPPORTED)),
+        "a repeated unsupported ordinary alias does not become backpressure"
     );
     assert_eq!(host.observation_admission().operation, 10);
-    assert_eq!(host.observation_admission().result, RESULT_BACKPRESSURE);
+    assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
 
     assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 10);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
-    assert!(protected_ingress_state(&host).2);
+    assert!(!protected_ingress_state(&host).2);
+    assert_eq!(
+        protected_native_state(&mut host),
+        state_before,
+        "unsupported native aliases changed protected state"
+    );
     assert_eq!(host.render_next(), RESULT_OK);
 
     assert_eq!(
@@ -8582,18 +8720,237 @@ fn protected_native_alias_guards_are_empty_and_spend_one_class_attempt() {
     );
     assert_eq!(host.observation_admission().operation, 11);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).1);
     assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 12);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).2);
     assert_eq!(host.render_next(), RESULT_OK);
     assert_eq!(host.set_meter_lease(true), RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().operation, 12);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
+    assert!(!protected_ingress_state(&host).1);
+}
+
+#[test]
+fn protected_native_unsupported_families_preserve_compact_state_for_credit_states() {
+    let address = ObservationAddress {
+        track_index: u32::MAX,
+        rack: EffectRack::Dynamic,
+        effect_index: u32::MAX,
+        tap_id: u32::MAX,
+        channels: ObservationReadChannels::Both,
+    };
+    for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
+        ("free", (1, false, false, false)),
+        ("spent", (1, true, true, false)),
+        ("exhausted", (u64::MAX, true, true, true)),
+    ] {
+        let mut host = protected_eq_console_host();
+        host.start_spectrum_stream()
+            .expect("seed Pending start row");
+        assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+        assert_eq!(host.side_records.pending_count, 2);
+        assert!(host.side_records.pending_stop_slot.is_some());
+        set_protected_ingress_state(&mut host, epoch, ordinary_used, removal_used, exhausted);
+        let before = protected_native_state(&mut host);
+        let mut output = [];
+        assert_eq!(
+            host.read_observations(&[]),
+            Err(ObservationReadError::Unsupported),
+            "{label} collection"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} collection state"
+        );
+        assert_eq!(
+            host.read_observation_addresses(&[address]),
+            Err(ObservationReadError::Unsupported),
+            "{label} addressed read"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} addressed read state"
+        );
+        assert_eq!(
+            host.read_observation_addresses_into(&[address], &mut output),
+            Err(ObservationReadError::Unsupported),
+            "{label} addressed output"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} addressed output state"
+        );
+        assert_eq!(host.arm_spectrum(), RESULT_UNSUPPORTED, "{label} arm");
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} arm state"
+        );
+        assert!(matches!(host.read_spectrum(), Err(RESULT_UNSUPPORTED)));
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} one-shot read state"
+        );
+        assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED, "{label} cancel");
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} cancel state"
+        );
+        assert_eq!(
+            host.select_spectrum(
+                &SpectrumTarget::TrackPostMatrix("missing".into()),
+                SpectrumChannels::Stereo,
+            ),
+            RESULT_UNSUPPORTED,
+            "{label} select"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} select state"
+        );
+        assert_eq!(
+            host.set_meter_lease(true),
+            RESULT_UNSUPPORTED,
+            "{label} meter acquisition"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} meter acquisition state"
+        );
+        assert_eq!(
+            host.set_meter_lease(false),
+            RESULT_UNSUPPORTED,
+            "{label} meter release"
+        );
+        assert_eq!(
+            protected_native_state(&mut host),
+            before,
+            "{label} unsupported native family changed protected state"
+        );
+    }
+}
+
+#[test]
+fn protected_unsupported_meter_release_preserves_removal_credit_for_no_render_stop() {
+    let mut host = protected_eq_console_host();
+    assert!(host.start_spectrum_stream().is_ok());
+    let after_start = protected_native_state(&mut host);
+    assert!(
+        !after_start.ingress.2,
+        "the real start must leave removal credit free"
+    );
+
+    let (release, allocations, frees) =
+        crate::ffi::live_response_ffi_tests::measured(|| host.set_meter_lease(false));
+    assert_eq!(release, RESULT_UNSUPPORTED);
+    assert_eq!((allocations, frees), (0, 0), "unsupported meter release");
+    assert_eq!(
+        protected_native_state(&mut host),
+        after_start,
+        "unsupported meter release must not mutate protected state"
+    );
+
+    let quantum = host.status().quantum_frames as usize;
+    let left = vec![0.25_f32; quantum];
+    let right = vec![-0.125_f32; quantum];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            0,
+            host.status().sample_rate_hz,
+            &planes,
+            quantum as u32,
+            false,
+        ),
+        RESULT_OK
+    );
+    let (stop, allocations, frees) =
+        crate::ffi::live_response_ffi_tests::measured(|| host.stop_spectrum_stream());
+    assert_eq!(stop, RESULT_OK, "genuine no-render stop remains admissible");
+    assert_eq!((allocations, frees), (0, 0), "genuine protected stop");
+    let stop_receipt = host.observation_admission().receipt;
+    assert_eq!(stop_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+
+    let (render, allocations, frees) =
+        crate::ffi::live_response_ffi_tests::measured(|| host.render_next());
+    assert_eq!(render, RESULT_OK);
+    assert_eq!((allocations, frees), (0, 0), "prepared render");
+    assert!(
+        host.output_pcm()
+            .expect("rendered output")
+            .iter()
+            .any(|sample| sample.to_bits() != 0)
+    );
+}
+
+#[test]
+fn protected_unsupported_meter_release_is_pcm_transparent() {
+    fn render_twin(insert_release: bool) -> Vec<u32> {
+        let mut host = protected_eq_console_host();
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_FADER_DB,
+            u8::MAX,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(host.submit_commands(1), RESULT_OK);
+        host.start_spectrum_stream().expect("protected start");
+
+        let quantum = host.status().quantum_frames as usize;
+        let left = vec![0.375_f32; quantum];
+        let right = vec![-0.25_f32; quantum];
+        let planes: [&[f32]; 2] = [&left, &right];
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                0,
+                host.status().sample_rate_hz,
+                &planes,
+                quantum as u32,
+                false,
+            ),
+            RESULT_OK
+        );
+        if insert_release {
+            assert_eq!(host.set_meter_lease(false), RESULT_UNSUPPORTED);
+        }
+        assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+        assert_eq!(host.render_next(), RESULT_OK);
+        host.output_pcm()
+            .expect("rendered protected twin")
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect()
+    }
+
+    let control = render_twin(false);
+    let treatment = render_twin(true);
+    assert!(control.iter().any(|bits| *bits != 0), "nonzero PCM oracle");
+    assert_eq!(treatment, control, "unsupported release changed PCM bits");
 }
 
 #[test]
 fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     let mut host = protected_eq_console_host();
+    let ingress_before = protected_ingress_state(&host);
     let before = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let solo = host.console_solo().expect("solo state");
@@ -8671,7 +9028,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(host.observation_admission().operation, 9);
     assert_eq!(host.observation_admission().result, RESULT_UNSUPPORTED);
     assert_eq!(host.observation_admission().reason, 8);
-    assert!(protected_ingress_state(&host).1);
+    assert_eq!(protected_ingress_state(&host), ingress_before);
     let after = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let solo = host.console_solo().expect("solo state");
@@ -8705,6 +9062,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(after, before);
 
     let mut prepared = protected_eq_console_host();
+    let prepared_ingress_before = protected_ingress_state(&prepared);
     stage_command(
         &mut prepared,
         0,
@@ -8729,8 +9087,7 @@ fn protected_raw_observation_gate_is_before_lowering_for_both_command_routes() {
     assert_eq!(prepared.command_report().rejected_index, 0);
     assert_eq!(prepared.observation_admission().operation, 9);
     assert_eq!(prepared.observation_admission().result, RESULT_UNSUPPORTED);
-    assert!(!protected_ingress_state(&prepared).1);
-    assert!(protected_ingress_state(&prepared).2);
+    assert_eq!(protected_ingress_state(&prepared), prepared_ingress_before);
 }
 
 #[test]
@@ -8750,7 +9107,7 @@ fn protected_audio_only_commands_skip_observation_credit_after_refusal() {
     );
     assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
     let admission = *host.observation_admission();
-    assert!(protected_ingress_state(&host).1);
+    assert!(!protected_ingress_state(&host).1);
 
     stage_command(
         &mut host,
@@ -9371,6 +9728,36 @@ fn protected_eq_admission_diagnostic_maps_refusal_and_preserves_headers() {
 fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     let document = one_track_resource_session(128);
     let request = protected_eq_request();
+    let demand = host_core::HostSpectrumDemand {
+        target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+        channels: SpectrumChannels::Stereo,
+        mode: host_core::HostSpectrumMode::Continuous,
+    };
+
+    // A dormant stop has both removal credit and a free row. It reserves that row before the
+    // native controller reports Quiescent, then releases the temporary reservation. The permit
+    // remains one-shot, so a repeat at the same boundary backpressures without fabricating a row.
+    let mut quiescent = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("quiescent protected boot");
+    assert_ne!(
+        quiescent.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0
+    );
+    let quiescent_rows = quiescent.side_records.receipts;
+    assert!(quiescent_rows.iter().all(|receipt| receipt.state == 0));
+    assert_eq!(quiescent.stop_spectrum_stream(), RESULT_OK);
+    assert_eq!(quiescent.side_records.reserved_mask, 0);
+    assert_eq!(quiescent.side_records.pending_count, 0);
+    assert_eq!(quiescent.side_records.pending_stop_slot, None);
+    assert_eq!(quiescent.side_records.receipts, quiescent_rows);
+    assert_eq!(quiescent.stop_spectrum_stream(), RESULT_BACKPRESSURE);
+    assert_eq!(quiescent.side_records.reserved_mask, 0);
+    assert_eq!(quiescent.side_records.receipts, quiescent_rows);
+
     let mut host = AudioWorkletEngineHost::boot_with_observation_demand(
         document.as_bytes(),
         WebBootOptions {
@@ -9380,11 +9767,6 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
         &protected_eq_preparation(&request),
     )
     .expect("protected boot");
-    let demand = host_core::HostSpectrumDemand {
-        target: SpectrumTarget::TrackPostMatrix("eq0".into()),
-        channels: SpectrumChannels::Stereo,
-        mode: host_core::HostSpectrumMode::Continuous,
-    };
     let held0 = host
         .reserve_receipt(ObservationClass::Ordinary)
         .expect("first ordinary reservation");
@@ -9508,6 +9890,225 @@ fn protected_eq_receipts_reconcile_and_survive_terminal_handoff() {
     assert_eq!(terminal.len(), 1);
     assert_eq!(terminal[0].state, OBSERVATION_RECEIPT_STATE_CLOSED);
     assert_eq!(terminal[0].result, RESULT_WRONG_STATE);
+
+    // One real Pending start and two synthetic occupancy rows leave the fourth row for removal.
+    // The synthetic rows prove only occupancy; the live controller has exactly one real
+    // outstanding ordinary publication and no removal publication.
+    let mut capacity = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("capacity protected boot");
+    let start_slot = capacity
+        .reserve_receipt(ObservationClass::Ordinary)
+        .expect("real start row");
+    let accepted_start = {
+        let ready = capacity.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        storage
+            .controller
+            .replace_spectrum(&demand)
+            .expect("live outstanding start")
+    };
+    capacity.commit_receipt(
+        start_slot,
+        accepted_start,
+        OBSERVATION_OPERATION_START_SPECTRUM,
+    );
+    for revision in [accepted_start.revision + 10, accepted_start.revision + 11] {
+        let slot = capacity
+            .reserve_receipt(ObservationClass::Removal)
+            .expect("occupied evidence row");
+        capacity.commit_receipt(
+            slot,
+            host_core::ObservationAccepted {
+                revision,
+                ..accepted_start
+            },
+            OBSERVATION_OPERATION_START_SPECTRUM,
+        );
+    }
+    assert_eq!(capacity.side_records.pending_count, 3);
+    assert_eq!(capacity.side_records.reserved_mask, 0);
+    assert_eq!(capacity.side_records.pending_stop_slot, None);
+    assert_ne!(
+        capacity.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0,
+        "removal credit is available before the fourth publication"
+    );
+    {
+        let ready = capacity.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.owner(), accepted_start.owner);
+        assert_eq!(storage.controller.work().active_spectrum_captures, 1);
+        assert_eq!(
+            storage.controller.spectrum_state().accepted_generation,
+            accepted_start.revision
+        );
+        assert_eq!(storage.controller.spectrum_state().applied_generation, 0);
+        assert_eq!(storage.controller.try_applied(), None);
+    }
+    assert_eq!(capacity.status().rendered_quanta, 0);
+    let three_rows = capacity.side_records.receipts;
+    assert_eq!(capacity.stop_spectrum_stream(), RESULT_OK);
+    let stop_receipt = capacity.observation_admission().receipt;
+    assert_eq!(stop_receipt.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(stop_receipt.owner, accepted_start.owner.get());
+    assert_eq!(capacity.side_records.pending_count, 4);
+    assert_eq!(capacity.side_records.reserved_mask, 0);
+    assert_eq!(capacity.side_records.pending_stop_slot, Some(3));
+    assert_eq!(capacity.side_records.receipts[..3], three_rows[..3]);
+    assert_eq!(capacity.side_records.receipts[3], stop_receipt);
+    assert_eq!(stop_receipt.sequence, accepted_start.revision + 1);
+    let four_rows = capacity.side_records.receipts;
+    assert_eq!(capacity.stop_spectrum_stream(), RESULT_OK);
+    assert_eq!(capacity.observation_admission().receipt, stop_receipt);
+    assert_eq!(capacity.side_records.receipts, four_rows);
+    assert_eq!(capacity.side_records.pending_stop_slot, Some(3));
+    assert_eq!(capacity.side_records.reserved_mask, 0);
+    assert_eq!(capacity.side_records.pending_count, 4);
+
+    // Isolate capacity from native publication backpressure: apply/reconcile a real start but
+    // retain its completed row, then fill the other three rows with synthetic occupancy only.
+    // There is no outstanding native Ordinary or Removal work, and the live spectrum needs a
+    // real removal. Taking the one completed row will leave exactly enough space for that stop.
+    let mut full = AudioWorkletEngineHost::boot_with_observation_demand(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+    )
+    .expect("full-row protected boot");
+    full.start_spectrum_stream().expect("real capacity start");
+    let real_start = full.observation_admission().receipt;
+    assert_eq!(real_start.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(full.render_next(), RESULT_OK);
+    full.reconcile_observation_applications();
+    assert_eq!(full.side_records.pending_count, 0);
+    assert_eq!(full.side_records.completed_count, 1);
+    let completed_start = WebObservationReceipt {
+        state: OBSERVATION_RECEIPT_STATE_APPLIED,
+        application_sample: 0,
+        ..real_start
+    };
+    assert_eq!(full.side_records.receipts[0], completed_start);
+    let (owner, spectrum, work) = {
+        let ready = full.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.try_applied(), None);
+        (
+            storage.controller.owner(),
+            storage.controller.spectrum_state(),
+            storage.controller.work(),
+        )
+    };
+    assert_eq!(owner.get(), real_start.owner);
+    assert_eq!(spectrum.accepted_generation, real_start.sequence);
+    assert_eq!(spectrum.applied_generation, real_start.sequence);
+    assert_eq!(work.active_spectrum_captures, 1);
+    for sequence in [
+        real_start.sequence + 10,
+        real_start.sequence + 11,
+        real_start.sequence + 12,
+    ] {
+        let slot = full
+            .reserve_receipt(ObservationClass::Removal)
+            .expect("synthetic occupancy row");
+        full.commit_receipt(
+            slot,
+            host_core::ObservationAccepted {
+                owner,
+                revision: sequence,
+                work,
+            },
+            OBSERVATION_OPERATION_START_SPECTRUM,
+        );
+    }
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 1);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, None);
+    assert_ne!(
+        full.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0
+    );
+    let full_rows = full.side_records.receipts;
+    let applications = full.side_records.applications;
+    let application_len = full.side_records.application_len;
+    // The native revision counter is private. The next genuine receipt must follow this real
+    // publication's sequence, independently of the synthetic rows and spectrum generation.
+    let expected_stop_sequence = real_start.sequence + 1;
+    assert_eq!(full.stop_spectrum_stream(), RESULT_BACKPRESSURE);
+    let refusal = full.observation_admission();
+    assert_eq!(refusal.operation, OBSERVATION_OPERATION_STOP_SPECTRUM);
+    assert_eq!(refusal.result, RESULT_BACKPRESSURE);
+    assert_eq!(refusal.reason, OBSERVATION_REFUSAL_REASON_BACKPRESSURE);
+    assert_eq!(
+        refusal.flags,
+        OBSERVATION_ADMISSION_REQUESTED | OBSERVATION_ADMISSION_MAXIMUM
+    );
+    assert_eq!(
+        &refusal.limit[..refusal.limit_bytes as usize],
+        b"observation.application_capacity"
+    );
+    assert_eq!((refusal.requested, refusal.maximum), (5, 4));
+    assert_eq!(refusal.receipt, WebObservationReceipt::default());
+    assert_eq!(full.side_records.receipts, full_rows);
+    assert_eq!(full.side_records.applications, applications);
+    assert_eq!(full.side_records.application_len, application_len);
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 1);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, None);
+    {
+        let ready = full.ready.as_mut().expect("ready ownership");
+        let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+            panic!("protected owner");
+        };
+        assert!(!storage.controller.is_closed());
+        assert_eq!(storage.controller.owner(), owner);
+        assert_eq!(storage.controller.spectrum_state(), spectrum);
+        assert_eq!(storage.controller.work(), work);
+        assert_eq!(storage.controller.try_applied(), None);
+    }
+
+    assert_eq!(full.take_observation_applications(), &[completed_start]);
+    assert_eq!(
+        full.side_records.receipts[0],
+        WebObservationReceipt::default()
+    );
+    assert_eq!(full.side_records.receipts[1..], full_rows[1..]);
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 0);
+    // The capacity refusal legitimately spent Removal ingress credit. Render replenishes it;
+    // no new native publication should be waiting to apply at this boundary.
+    assert_eq!(full.render_next(), RESULT_OK);
+    full.reconcile_observation_applications();
+    assert_eq!(full.side_records.pending_count, 3);
+    assert_eq!(full.side_records.completed_count, 0);
+    assert_ne!(
+        full.observation_status().flags & OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+        0
+    );
+    assert_eq!(full.stop_spectrum_stream(), RESULT_OK);
+    let recovered_stop = full.observation_admission().receipt;
+    assert_eq!(recovered_stop.state, OBSERVATION_RECEIPT_STATE_PENDING);
+    assert_eq!(recovered_stop.owner, owner.get());
+    assert_eq!(recovered_stop.sequence, expected_stop_sequence);
+    assert_eq!(full.side_records.receipts[0], recovered_stop);
+    assert_eq!(full.side_records.receipts[1..], full_rows[1..]);
+    assert_eq!(full.side_records.pending_count, 4);
+    assert_eq!(full.side_records.completed_count, 0);
+    assert_eq!(full.side_records.reserved_mask, 0);
+    assert_eq!(full.side_records.pending_stop_slot, Some(0));
 }
 
 #[test]

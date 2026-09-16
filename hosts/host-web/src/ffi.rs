@@ -645,15 +645,11 @@ fn with_host_mut<R>(
 
 /// Refuse an unsupported protected alias before it touches caller-owned staging or input.
 ///
-/// The native owner records the classified attempt and diagnostic. `Ok(None)` means that a
+/// The native owner records the unsupported attempt and diagnostic. `Ok(None)` means that a
 /// successfully inspected matching handle is legacy, so the existing alias path remains
 /// responsible for its legacy behavior. A failed live-host borrow or invalid handle is terminal
 /// and must return before any alias-owned staging is touched.
-fn refuse_protected_observation_alias(
-    handle: u32,
-    class: ObservationClass,
-    operation: u32,
-) -> Result<Option<u32>, u32> {
+fn refuse_protected_observation_alias(handle: u32, operation: u32) -> Result<Option<u32>, u32> {
     if handle == 0 {
         return Err(RESULT_INVALID_ARGUMENT);
     }
@@ -664,9 +660,7 @@ fn refuse_protected_observation_alias(
             .filter(|live| live.handle == handle)
             .ok_or(RESULT_INVALID_ARGUMENT)?;
         if live.host.protected_observation_prepared() {
-            Ok(Some(
-                live.host.refuse_unsupported_observation(class, operation),
-            ))
+            Ok(Some(live.host.refuse_unsupported_observation(operation)))
         } else {
             Ok(None)
         }
@@ -3153,11 +3147,7 @@ fn select_spectrum_with_smoothing(
     target_id_bytes: u32,
     smoothing: Option<SpectrumSmoothingConfig>,
 ) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_COLLECTION_SELECTION,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_COLLECTION_SELECTION) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3299,11 +3289,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_COLLECTION_SELECTION,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_COLLECTION_SELECTION) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -3323,11 +3309,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_ONE_SHOT,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_ONE_SHOT) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -4260,11 +4242,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Removal,
-        OBSERVATION_OPERATION_ONE_SHOT,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_ONE_SHOT) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -4616,6 +4594,31 @@ fn apply_observation_demand(
     let header_valid = demand.struct_size == size_of::<WebObservationDemand>() as u32
         && demand.abi_version == ABI_VERSION
         && demand.reserved == [0; 2];
+
+    // These meter operations are known but unsupported in V1. Validate their fixed header and
+    // owner first so their diagnostics retain the established precedence, then refuse without
+    // acquiring either protected credit.
+    if matches!(
+        operation,
+        crate::OBSERVATION_OPERATION_REPLACE_METERS | OBSERVATION_OPERATION_REMOVE_METERS_TO
+    ) {
+        if !header_valid {
+            return observation_demand_refusal(
+                host,
+                operation,
+                ObservationRefusalReason::InvalidRequest,
+            );
+        }
+        if demand.owner != owner.get() {
+            return observation_demand_refusal(
+                host,
+                operation,
+                ObservationRefusalReason::WrongOwner,
+            );
+        }
+        return host.refuse_unsupported_observation(operation);
+    }
+
     let valid_stop = header_valid
         && operation == OBSERVATION_OPERATION_STOP_GRAPH
         && demand.count == 0
@@ -5498,12 +5501,7 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
-    let class = if enabled == 0 {
-        ObservationClass::Removal
-    } else {
-        ObservationClass::Ordinary
-    };
-    match refuse_protected_observation_alias(handle, class, OBSERVATION_OPERATION_METER_LEASE) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_METER_LEASE) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -5696,11 +5694,7 @@ pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    match refuse_protected_observation_alias(
-        handle,
-        ObservationClass::Ordinary,
-        OBSERVATION_OPERATION_RESIDENT_READ,
-    ) {
+    match refuse_protected_observation_alias(handle, OBSERVATION_OPERATION_RESIDENT_READ) {
         Err(result) | Ok(Some(result)) => return result,
         Ok(None) => {}
     }
@@ -6933,6 +6927,28 @@ pub(crate) mod live_response_ffi_tests {
                     ingress_epoch: 1,
                     ..WebObservationAdmission::default()
                 }
+            );
+        });
+
+        // Unsupported selection is not a protected admission. Spend the Ordinary credit through
+        // a genuine malformed stream start before exercising response backpressure.
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, f64::NAN),
+            RESULT_INVALID_ARGUMENT
+        );
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            let admission = host.observation_admission();
+            assert_eq!(admission.operation, OBSERVATION_OPERATION_START_SPECTRUM);
+            assert_eq!(admission.result, RESULT_INVALID_ARGUMENT);
+            assert_eq!(admission.reason, 8);
+            assert_eq!(status.ingress_epoch, 1);
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "the genuine malformed stream start spends Ordinary credit"
             );
         });
 
@@ -8706,6 +8722,9 @@ mod observation_checkpoint_b1_tests {
     use crate::ffi::observation_checkpoint_a_tests::{
         no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
     };
+    use crate::ffi::observation_checkpoint_c1_tests::{
+        protected_ffi_state, seed_pending_receipts, set_ingress_state,
+    };
 
     fn boot_protected() -> u32 {
         no_live_host();
@@ -8740,6 +8759,17 @@ mod observation_checkpoint_b1_tests {
                 .host
                 .observation_status()
                 .owner
+        })
+    }
+
+    fn status(handle: u32) -> WebObservationStatus {
+        LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
         })
     }
 
@@ -8826,29 +8856,112 @@ mod observation_checkpoint_b1_tests {
     }
 
     #[test]
-    fn demand_class_credits_are_spent_by_unsupported_and_malformed_records() {
+    fn known_meter_demands_do_not_spend_credit_but_stop_still_does() {
+        // Both known meter tags retain header-before-owner precedence, then refuse as unsupported
+        // without consuming either protected attempt or disturbing existing Pending identities.
+        for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
+            ("free", (1, false, false, false)),
+            ("spent", (1, true, true, false)),
+            ("exhausted", (u64::MAX, true, true, true)),
+        ] {
+            let handle = boot_protected();
+            let expected_owner = owner(handle);
+            seed_pending_receipts(handle);
+            set_ingress_state(handle, epoch, ordinary_used, removal_used, exhausted);
+            let before = protected_ffi_state(handle);
+            for operation in [
+                crate::OBSERVATION_OPERATION_REPLACE_METERS,
+                OBSERVATION_OPERATION_REMOVE_METERS_TO,
+            ] {
+                stage_demand(handle, operation, 0, expected_owner.wrapping_add(1));
+                OBSERVATION_STAGING.with(|slot| {
+                    slot.borrow_mut().endpoint.demand.struct_size = 0;
+                });
+                assert_eq!(
+                    miso_engine_web_v1_observation_demand_apply(handle),
+                    RESULT_INVALID_ARGUMENT
+                );
+                let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+                let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+                assert_eq!(malformed.operation, operation);
+                assert_eq!(malformed.result, RESULT_INVALID_ARGUMENT);
+                assert_eq!(malformed.reason, 8);
+                assert_eq!(malformed.receipt, WebObservationReceipt::default());
+                assert_eq!(
+                    protected_ffi_state(handle),
+                    before,
+                    "{label} malformed meter"
+                );
+
+                stage_demand(handle, operation, 0, expected_owner.wrapping_add(1));
+                assert_eq!(
+                    miso_engine_web_v1_observation_demand_apply(handle),
+                    RESULT_INVALID_ARGUMENT
+                );
+                let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+                let wrong_owner = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+                assert_eq!(wrong_owner.operation, operation);
+                assert_eq!(wrong_owner.result, RESULT_INVALID_ARGUMENT);
+                assert_eq!(wrong_owner.reason, 2);
+                assert_eq!(wrong_owner.receipt, WebObservationReceipt::default());
+                assert_eq!(
+                    protected_ffi_state(handle),
+                    before,
+                    "{label} wrong-owner meter"
+                );
+
+                stage_demand(handle, operation, 0, expected_owner);
+                assert_eq!(
+                    miso_engine_web_v1_observation_demand_apply(handle),
+                    RESULT_UNSUPPORTED
+                );
+                let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+                let unsupported = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+                assert_eq!(unsupported.operation, operation);
+                assert_eq!(unsupported.result, RESULT_UNSUPPORTED);
+                assert_eq!(unsupported.reason, 8);
+                assert_eq!(unsupported.receipt, WebObservationReceipt::default());
+                assert_eq!(
+                    protected_ffi_state(handle),
+                    before,
+                    "{label} unsupported meter"
+                );
+            }
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+            no_live_host();
+        }
+
+        // An unknown tag remains on the historical admission path: it is classified as an
+        // unsupported demand only after the Ordinary permit is spent.
         let handle = boot_protected();
         let expected_owner = owner(handle);
-
-        // An unsupported ordinary operation consumes the ordinary attempt before semantic
-        // classification; its retry is therefore backpressure.
-        stage_demand(handle, 1, 0, expected_owner);
+        let available = crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+            | crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE;
+        let before = status(handle);
+        stage_demand(handle, u32::MAX, 0, expected_owner);
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_UNSUPPORTED
         );
         let _ = miso_engine_web_v1_observation_admission_ptr(handle);
-        let ordinary = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
-        assert_eq!(ordinary.operation, 1);
-        assert_eq!(ordinary.reason, 8);
-        assert_eq!(ordinary.result, RESULT_UNSUPPORTED);
+        let unknown = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(unknown.operation, u32::MAX);
+        assert_eq!(unknown.result, RESULT_UNSUPPORTED);
+        assert_eq!(unknown.reason, 8);
+        let after_unknown = status(handle);
         assert_eq!(
-            miso_engine_web_v1_observation_demand_apply(handle),
-            RESULT_BACKPRESSURE
+            after_unknown.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+            0,
+            "unknown demand tags retain ordinary credit spending"
         );
+        assert_eq!(
+            after_unknown.flags & available,
+            before.flags & available & !crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+        );
+        assert_eq!(after_unknown.ingress_epoch, before.ingress_epoch);
 
-        // A malformed removal record spends the removal attempt too. The owner is matching here,
-        // so the fixed header failure is observable rather than a native stop attempt.
+        // A malformed genuine StopGraph still spends its removal attempt, preserving protected
+        // admission semantics for an actual protected operation.
         stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
         OBSERVATION_STAGING.with(|slot| {
             slot.borrow_mut().endpoint.demand.struct_size = 0;
@@ -8858,8 +8971,14 @@ mod observation_checkpoint_b1_tests {
             RESULT_INVALID_ARGUMENT
         );
         let _ = miso_engine_web_v1_observation_admission_ptr(handle);
-        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
-        assert_eq!(malformed.reason, 8);
+        let malformed_stop = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed_stop.reason, 8);
+        assert_eq!(
+            status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+            0
+        );
+
+        stage_demand(handle, OBSERVATION_OPERATION_STOP_GRAPH, 0, expected_owner);
         assert_eq!(
             miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_BACKPRESSURE
@@ -8995,7 +9114,9 @@ mod observation_checkpoint_c1_tests {
     use crate::ffi::observation_checkpoint_a_tests::{
         no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
     };
-    use crate::{COMMAND_RECORD_BYTES, WebCommandReport};
+    use crate::{
+        COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS, PreparedObservationStorage, WebCommandReport,
+    };
 
     fn boot_protected() -> u32 {
         no_live_host();
@@ -9032,6 +9153,47 @@ mod observation_checkpoint_c1_tests {
                 .host
                 .observation_status()
         })
+    }
+
+    pub(super) fn set_ingress_state(
+        handle: u32,
+        epoch: u64,
+        ordinary_used: bool,
+        removal_used: bool,
+        exhausted: bool,
+    ) {
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host;
+            let ready = host.ready.as_mut().expect("ready ownership");
+            let PreparedObservationStorage::Protected(storage) = &mut ready.observation else {
+                panic!("protected owner");
+            };
+            storage.ingress.epoch = epoch;
+            storage.ingress.ordinary_used = ordinary_used;
+            storage.ingress.removal_used = removal_used;
+            storage.ingress.exhausted = exhausted;
+        });
+    }
+
+    pub(super) fn seed_pending_receipts(handle: u32) {
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host;
+            host.start_spectrum_stream()
+                .expect("seed Pending start row");
+            assert_eq!(host.stop_spectrum_stream(), RESULT_OK);
+            assert_eq!(host.side_records.pending_count, 2);
+            assert!(host.side_records.pending_stop_slot.is_some());
+        });
     }
 
     fn stage_spectrum_markers() -> (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>) {
@@ -9273,11 +9435,18 @@ mod observation_checkpoint_c1_tests {
     }
 
     #[test]
-    fn each_unsupported_alias_spends_its_classified_attempt_once() {
-        let ordinary_calls: [fn(u32) -> u32; 5] = [
-            |handle| miso_engine_web_v1_spectrum_read(handle, u32::MAX),
-            |handle| miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX),
-            |handle| {
+    fn each_unsupported_alias_does_not_spend_its_classified_attempt() {
+        type UnsupportedCall = (&'static str, fn(u32) -> u32);
+
+        let calls: [UnsupportedCall; 8] = [
+            ("arm", |handle| miso_engine_web_v1_spectrum_arm(handle)),
+            ("read", |handle| {
+                miso_engine_web_v1_spectrum_read(handle, u32::MAX)
+            }),
+            ("select", |handle| {
+                miso_engine_web_v1_spectrum_select(handle, u32::MAX, u32::MAX, u32::MAX)
+            }),
+            ("stream select", |handle| {
                 miso_engine_web_v1_spectrum_stream_select(
                     handle,
                     u32::MAX,
@@ -9285,56 +9454,59 @@ mod observation_checkpoint_c1_tests {
                     u32::MAX,
                     f64::NAN,
                 )
-            },
-            |handle| miso_engine_web_v1_observation_read(handle, u32::MAX),
-            |handle| miso_engine_web_v1_meter_lease(handle, 2),
+            }),
+            ("resident read", |handle| {
+                miso_engine_web_v1_observation_read(handle, u32::MAX)
+            }),
+            ("meter acquire", |handle| {
+                miso_engine_web_v1_meter_lease(handle, 1)
+            }),
+            ("cancel", |handle| {
+                miso_engine_web_v1_spectrum_cancel(handle)
+            }),
+            ("meter release", |handle| {
+                miso_engine_web_v1_meter_lease(handle, 0)
+            }),
         ];
-        for call in ordinary_calls {
+        for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
+            ("free", (1, false, false, false)),
+            ("spent", (1, true, true, false)),
+            ("exhausted", (u64::MAX, true, true, true)),
+        ] {
             let handle = boot_protected();
-            let before = live_status(handle);
-            assert_ne!(
-                before.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-                0
-            );
-            assert_eq!(call(handle), RESULT_UNSUPPORTED);
-            let spent = live_status(handle);
+            seed_pending_receipts(handle);
+            set_ingress_state(handle, epoch, ordinary_used, removal_used, exhausted);
+            let spectrum_markers = stage_spectrum_markers();
+            let resident_markers = stage_resident_markers();
+            let before = protected_ffi_state(handle);
             assert_eq!(
-                spent.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-                0
+                before.status.profile,
+                crate::OBSERVATION_PROFILE_EQ_SPECTRUM
             );
-            assert_eq!(spent.ingress_epoch, before.ingress_epoch);
-            assert_eq!(
-                spent.flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
-                crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE
-            );
-            assert_eq!(call(handle), RESULT_BACKPRESSURE);
-            assert_eq!(
-                live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-                0
-            );
+            assert_ne!(before.status.owner, 0);
+            for &(alias, call) in &calls {
+                for repeat in 0..2 {
+                    let (result, allocations, frees) =
+                        crate::ffi::live_response_ffi_tests::measured(|| call(handle));
+                    assert_eq!(result, RESULT_UNSUPPORTED, "{label} {alias} call {repeat}");
+                    assert_eq!(allocations, 0, "{label} {alias} call {repeat} allocated");
+                    assert_eq!(frees, 0, "{label} {alias} call {repeat} freed");
+                    let after = protected_ffi_state(handle);
+                    assert_eq!(after.status.owner, before.status.owner);
+                    assert_eq!(
+                        after.status.flags & crate::OBSERVATION_STATUS_FLAG_TERMINAL,
+                        0
+                    );
+                    assert_eq!(
+                        after, before,
+                        "{label} {alias} call {repeat} changed protected state"
+                    );
+                }
+            }
+            assert_spectrum_markers(spectrum_markers);
+            assert_resident_markers(&resident_markers);
             dispose(handle);
         }
-
-        let handle = boot_protected();
-        let before = live_status(handle);
-        assert_eq!(
-            miso_engine_web_v1_spectrum_cancel(handle),
-            RESULT_UNSUPPORTED
-        );
-        assert_eq!(
-            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
-            0
-        );
-        assert_eq!(
-            miso_engine_web_v1_meter_lease(handle, 0),
-            RESULT_BACKPRESSURE
-        );
-        assert_eq!(
-            live_status(handle).flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
-            crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
-        );
-        assert_eq!(before.ingress_epoch, live_status(handle).ingress_epoch);
-        dispose(handle);
     }
 
     struct WireCommandInput {
@@ -9421,13 +9593,167 @@ mod observation_checkpoint_c1_tests {
         revision: u64,
     }
 
+    #[derive(Debug, PartialEq)]
     struct CommandStateSnapshot {
         command_wanted: Vec<u32>,
         in_flight: Vec<u32>,
         controls: Vec<ControlStateSnapshot>,
         input_filter_shadows: Vec<InputFilterStateSnapshot>,
         has_in_flight_commands: bool,
-        report: WebCommandReport,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct HostStagingState {
+        command: Option<Vec<u8>>,
+        companion: Option<Vec<u8>>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ProtectedSideState {
+        application_len: u64,
+        pending_count: u64,
+        completed_count: u64,
+        reserved_mask: u64,
+        receipts: [WebObservationReceipt; 4],
+        applications: [WebObservationReceipt; 4],
+        pending_stop_slot: Option<usize>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct SpectrumStagingState {
+        capture: Option<Vec<u8>>,
+        capture_len: usize,
+        result: Option<Vec<u8>>,
+        result_len: usize,
+        stream_metadata: WebSpectrumStreamMetadata,
+        stream_active: bool,
+        stream_smoothing_bits: Option<u64>,
+        stream_window: Option<(u64, u64, u64)>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ObservationStagingState {
+        addresses: Vec<ObservationAddress>,
+        results: Vec<WebObservationResult>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub(super) struct ProtectedFfiState {
+        status: WebObservationStatus,
+        ingress: (u64, bool, bool, bool),
+        side: ProtectedSideState,
+        capture_identity: WebObservationCaptureIdentity,
+        command: CommandStateSnapshot,
+        host_staging: HostStagingState,
+        spectrum_staging: SpectrumStagingState,
+        observation_staging: ObservationStagingState,
+    }
+
+    fn side_state(handle: u32) -> ProtectedSideState {
+        LIVE_HOST.with(|slot| {
+            let live_slot = slot.borrow();
+            let live = live_slot
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host");
+            let side = &live.host.side_records;
+            ProtectedSideState {
+                application_len: side.application_len as u64,
+                pending_count: side.pending_count as u64,
+                completed_count: side.completed_count as u64,
+                reserved_mask: side.reserved_mask as u64,
+                receipts: side.receipts,
+                applications: side.applications,
+                pending_stop_slot: side.pending_stop_slot,
+            }
+        })
+    }
+
+    fn host_staging_state(handle: u32) -> HostStagingState {
+        LIVE_HOST.with(|slot| {
+            let mut live = slot.borrow_mut();
+            let host = &mut live
+                .as_mut()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host;
+            let command = host.command_staging_mut().map(|bytes| bytes.to_vec());
+            let companion = host.prepared_companion_mut().map(|bytes| bytes.to_vec());
+            HostStagingState { command, companion }
+        })
+    }
+
+    fn spectrum_staging_state() -> SpectrumStagingState {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            SpectrumStagingState {
+                capture: staging.capture.as_ref().map(|bytes| bytes.to_vec()),
+                capture_len: staging.capture_len,
+                result: staging.result.as_ref().map(|bytes| bytes.to_vec()),
+                result_len: staging.result_len,
+                stream_metadata: staging.stream_metadata,
+                stream_active: staging.stream_active,
+                stream_smoothing_bits: staging
+                    .stream_smoothing
+                    .map(|smoothing| smoothing.smoothing_ms().to_bits()),
+                stream_window: staging.stream_window.map(|window| {
+                    (
+                        window.stream_epoch,
+                        window.sequence,
+                        window.dropped_captures,
+                    )
+                }),
+            }
+        })
+    }
+
+    fn observation_staging_state() -> ObservationStagingState {
+        OBSERVATION_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            ObservationStagingState {
+                addresses: staging.addresses.clone(),
+                results: staging.results.clone(),
+            }
+        })
+    }
+
+    pub(super) fn protected_ffi_state(handle: u32) -> ProtectedFfiState {
+        let ingress = LIVE_HOST.with(|slot| {
+            let live_slot = slot.borrow();
+            let live = live_slot
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host");
+            let ready = live.host.ready.as_ref().expect("ready ownership");
+            let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+                panic!("protected owner");
+            };
+            (
+                storage.ingress.epoch,
+                storage.ingress.ordinary_used,
+                storage.ingress.removal_used,
+                storage.ingress.exhausted,
+            )
+        });
+        let capture_identity = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_capture_identity()
+        });
+        ProtectedFfiState {
+            status: live_status(handle),
+            ingress,
+            side: side_state(handle),
+            capture_identity,
+            command: command_state(handle),
+            host_staging: host_staging_state(handle),
+            spectrum_staging: spectrum_staging_state(),
+            observation_staging: observation_staging_state(),
+        }
     }
 
     fn command_state(handle: u32) -> CommandStateSnapshot {
@@ -9465,7 +9791,6 @@ mod observation_checkpoint_c1_tests {
                     })
                     .collect(),
                 has_in_flight_commands: ready.has_in_flight_commands,
-                report: *host.command_report(),
             }
         })
     }
@@ -9473,6 +9798,7 @@ mod observation_checkpoint_c1_tests {
     fn assert_mixed_batch_refused_before_companion(
         handle: u32,
         prepared: bool,
+        observation_kind: u32,
     ) -> WebCommandReport {
         let audio = wire_command(WireCommandInput {
             kind: crate::COMMAND_PAN,
@@ -9485,7 +9811,7 @@ mod observation_checkpoint_c1_tests {
             values: [0.0; 4],
         });
         let observation = wire_command(WireCommandInput {
-            kind: crate::COMMAND_OBSERVE_SUBSCRIBE,
+            kind: observation_kind,
             rack: 0,
             channel: u8::MAX,
             track_index: 0,
@@ -9495,34 +9821,32 @@ mod observation_checkpoint_c1_tests {
             values: [0.0; 4],
         });
         stage_commands(handle, &[audio, observation]);
-        let before = command_state(handle);
-        let result = if prepared {
-            // The companion span is deliberately malformed; raw observation classification must
-            // refuse before it is even inspected.
-            miso_engine_web_v1_prepared_command_submit(handle, 2, 1)
-        } else {
-            miso_engine_web_v1_command_submit(handle, 2)
-        };
+        let before = protected_ffi_state(handle);
+        let (result, allocations, frees) = crate::ffi::live_response_ffi_tests::measured(|| {
+            if prepared {
+                // The companion span is deliberately malformed; raw observation classification
+                // must refuse before it is even inspected.
+                miso_engine_web_v1_prepared_command_submit(handle, 2, 1)
+            } else {
+                miso_engine_web_v1_command_submit(handle, 2)
+            }
+        });
+        assert_eq!((allocations, frees), (0, 0));
         assert_eq!(result, RESULT_UNSUPPORTED);
-        let after = command_state(handle);
+        let after = protected_ffi_state(handle);
         assert_eq!(
-            after.command_wanted, before.command_wanted,
-            "queue room shadow changed"
+            after, before,
+            "unsupported raw observation changed protected state"
         );
-        assert_eq!(
-            after.in_flight, before.in_flight,
-            "in-flight queue shadow changed"
-        );
-        assert_eq!(after.controls, before.controls, "producer queue changed");
-        assert_eq!(
-            after.input_filter_shadows, before.input_filter_shadows,
-            "input-filter shadow changed"
-        );
-        assert_eq!(
-            after.has_in_flight_commands, before.has_in_flight_commands,
-            "in-flight flag changed"
-        );
-        let report = after.report;
+        let report = LIVE_HOST.with(|slot| {
+            *slot
+                .borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .command_report()
+        });
         assert_eq!(report.result, RESULT_UNSUPPORTED);
         assert_eq!(report.reason, crate::COMMAND_REASON_UNSUPPORTED_KIND);
         assert_eq!(report.rejected_index, 1);
@@ -9533,7 +9857,11 @@ mod observation_checkpoint_c1_tests {
     #[test]
     fn both_command_submit_exports_refuse_mixed_observation_batches_before_mutation() {
         let handle = boot_protected_with_console();
-        let _plain = assert_mixed_batch_refused_before_companion(handle, false);
+        let _plain = assert_mixed_batch_refused_before_companion(
+            handle,
+            false,
+            crate::COMMAND_OBSERVE_SUBSCRIBE,
+        );
         let audio = wire_command(WireCommandInput {
             kind: crate::COMMAND_PAN,
             rack: u8::MAX,
@@ -9548,12 +9876,16 @@ mod observation_checkpoint_c1_tests {
         assert_eq!(
             miso_engine_web_v1_command_submit(handle, 1),
             RESULT_OK,
-            "audio-only command remains admissible after ordinary observation credit is spent"
+            "audio-only command remains admissible after unsupported observation refusal"
         );
         dispose(handle);
 
         let handle = boot_protected_with_console();
-        let _prepared = assert_mixed_batch_refused_before_companion(handle, true);
+        let _prepared = assert_mixed_batch_refused_before_companion(
+            handle,
+            true,
+            crate::COMMAND_OBSERVE_SUBSCRIBE,
+        );
         stage_commands(
             handle,
             &[wire_command(WireCommandInput {
@@ -9571,9 +9903,104 @@ mod observation_checkpoint_c1_tests {
         assert_eq!(
             miso_engine_web_v1_prepared_command_submit(handle, 1, companion_bytes),
             RESULT_OK,
-            "prepared audio-only command remains admissible after ordinary observation credit is spent"
+            "prepared audio-only command remains admissible after unsupported observation refusal"
         );
         dispose(handle);
+    }
+
+    #[test]
+    fn raw_observation_refusal_preserves_compact_state_across_credit_states() {
+        for observation_kind in [
+            crate::COMMAND_OBSERVE_SUBSCRIBE,
+            crate::COMMAND_OBSERVE_UNSUBSCRIBE,
+        ] {
+            for (prepared, route) in [(false, "plain"), (true, "prepared")] {
+                for (label, (epoch, ordinary_used, removal_used, exhausted)) in [
+                    ("free", (1, false, false, false)),
+                    ("spent", (1, true, true, false)),
+                    ("exhausted", (u64::MAX, true, true, true)),
+                ] {
+                    let handle = boot_protected_with_console();
+                    seed_pending_receipts(handle);
+                    set_ingress_state(handle, epoch, ordinary_used, removal_used, exhausted);
+                    let _spectrum_markers = stage_spectrum_markers();
+                    let _resident_markers = stage_resident_markers();
+                    let _ = assert_mixed_batch_refused_before_companion(
+                        handle,
+                        prepared,
+                        observation_kind,
+                    );
+                    let report = LIVE_HOST.with(|slot| {
+                        *slot
+                            .borrow()
+                            .as_ref()
+                            .filter(|live| live.handle == handle)
+                            .expect("protected live host")
+                            .host
+                            .command_report()
+                    });
+                    assert_eq!(report.rejected_index, 1, "{route} {label}");
+                    dispose(handle);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raw_observation_refusal_scans_one_last_observe_record_within_bound() {
+        for (prepared, route) in [(false, "plain"), (true, "prepared")] {
+            let handle = boot_protected_with_console();
+            let audio = wire_command(WireCommandInput {
+                kind: crate::COMMAND_PAN,
+                rack: u8::MAX,
+                channel: u8::MAX,
+                track_index: 0,
+                effect_index: 0,
+                parameter_id: 0,
+                smoothing_samples: 0,
+                values: [0.0; 4],
+            });
+            let observation = wire_command(WireCommandInput {
+                kind: crate::COMMAND_OBSERVE_SUBSCRIBE,
+                rack: 0,
+                channel: u8::MAX,
+                track_index: 0,
+                effect_index: 0,
+                parameter_id: 0,
+                smoothing_samples: 0,
+                values: [0.0; 4],
+            });
+            let mut commands = vec![audio; MAXIMUM_COMMAND_RECORDS as usize];
+            let last = MAXIMUM_COMMAND_RECORDS as usize - 1;
+            commands[last] = observation;
+            stage_commands(handle, &commands);
+            let before = protected_ffi_state(handle);
+            let result = if prepared {
+                // The malformed companion must remain uninspected after the bounded scan finds
+                // the last Observe record.
+                miso_engine_web_v1_prepared_command_submit(handle, MAXIMUM_COMMAND_RECORDS, 1)
+            } else {
+                miso_engine_web_v1_command_submit(handle, MAXIMUM_COMMAND_RECORDS)
+            };
+            assert_eq!(result, RESULT_UNSUPPORTED, "{route} last Observe");
+            assert_eq!(
+                protected_ffi_state(handle),
+                before,
+                "{route} last-record refusal changed protected state"
+            );
+            let report = LIVE_HOST.with(|slot| {
+                *slot
+                    .borrow()
+                    .as_ref()
+                    .filter(|live| live.handle == handle)
+                    .expect("protected live host")
+                    .host
+                    .command_report()
+            });
+            assert_eq!(report.rejected_index, MAXIMUM_COMMAND_RECORDS - 1);
+            assert_eq!(report.admitted, 0);
+            dispose(handle);
+        }
     }
 }
 
@@ -9592,6 +10019,28 @@ mod observation_checkpoint_c2a_tests {
         let handle = boot_staged_observation_demand(document.len() as u32);
         assert_ne!(handle, 0, "protected fixture must boot");
         handle
+    }
+
+    fn stage_stop_demand(handle: u32) {
+        let owner = LIVE_HOST.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|live| live.handle == handle)
+                .expect("protected live host")
+                .host
+                .observation_status()
+                .owner
+        });
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand = WebObservationDemand {
+                struct_size: size_of::<WebObservationDemand>() as u32,
+                abi_version: ABI_VERSION,
+                operation: OBSERVATION_OPERATION_STOP_GRAPH,
+                count: 0,
+                owner,
+                reserved: [0; 2],
+            };
+        });
     }
 
     fn boot_legacy() -> u32 {
@@ -9806,6 +10255,22 @@ mod observation_checkpoint_c2a_tests {
 
     fn assert_markers(markers: &CommittedMarkers) {
         assert_staged_markers(markers);
+        assert_eq!(capture_identity(), markers.capture_identity);
+    }
+
+    fn assert_stopped_output(markers: &CommittedMarkers) {
+        SPECTRUM_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            assert_eq!(staging.capture_len, 0);
+            assert_eq!(staging.result_len, 0);
+            let capture = staging.capture.as_ref().expect("capture bytes");
+            let result = staging.result.as_ref().expect("result bytes");
+            assert_eq!(
+                &capture[..markers.capture.len()],
+                markers.capture.as_slice()
+            );
+            assert_eq!(&result[..markers.result.len()], markers.result.as_slice());
+        });
         assert_eq!(capture_identity(), markers.capture_identity);
     }
 
@@ -10817,12 +11282,33 @@ mod observation_checkpoint_c2a_tests {
         assert_markers(&markers);
         assert_eq!(capture_identity(), identity);
 
-        // Unsupported ordinary selection work spends the same ingress credit. The queued native
-        // window remains available for the next admitted read after a successful render boundary.
+        // The staging-borrow refusal already spends Ordinary credit. Unsupported selection must
+        // leave that spent state alone; the queued native window remains available for the next
+        // admitted read after a successful render boundary.
+        let spent_after_borrow = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            assert_eq!(
+                status.flags & crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE,
+                0,
+                "a staging-borrow refusal spends the Ordinary attempt"
+            );
+            (status.ingress_epoch, status.flags)
+        });
         assert_eq!(
             miso_engine_web_v1_spectrum_select(handle, 0, 0, 0),
-            RESULT_BACKPRESSURE
+            RESULT_UNSUPPORTED
         );
+        let after_selection = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            let status = host.observation_status();
+            (status.ingress_epoch, status.flags)
+        });
+        assert_eq!(after_selection, spent_after_borrow);
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
         assert_eq!(
             miso_engine_web_v1_spectrum_stream_read(handle),
             RESULT_BACKPRESSURE
@@ -11125,18 +11611,53 @@ mod observation_checkpoint_c2a_tests {
             );
         });
 
-        // Spend removal credit through an unrelated protected refusal. The valid repeated stop
-        // must return the original native Pending identity without another native call/permit.
+        // Unsupported cancel must not spend Removal or disturb the Pending row.
         assert_eq!(
             miso_engine_web_v1_spectrum_cancel(handle),
+            RESULT_UNSUPPORTED
+        );
+        assert_stopped_output(&markers);
+
+        // A malformed genuine StopGraph is refused against the already-spent Removal credit. The
+        // valid repeated stop must return the original native Pending identity.
+        stage_stop_demand(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
             RESULT_BACKPRESSURE
         );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(malformed.result, RESULT_BACKPRESSURE);
+        assert_eq!(malformed.reason, 5);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.side_records.pending_count, 1);
+            assert!(
+                host.side_records.receipts.contains(&first_receipt),
+                "the authoritative Pending receipt survives the intervening refusal"
+            );
+        });
+        assert_stopped_output(&markers);
+
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         LIVE_HOST.with(|slot| {
             let live = slot.borrow();
             let host = &live.as_ref().expect("protected live host").host;
             assert_eq!(host.observation_admission().result, RESULT_OK);
             assert_eq!(host.observation_admission().receipt, first_receipt);
+            assert_eq!(
+                host.observation_admission().receipt.owner,
+                first_receipt.owner
+            );
+            assert_eq!(
+                host.observation_admission().receipt.sequence,
+                first_receipt.sequence
+            );
             assert_eq!(host.side_records.pending_count, 1);
         });
         assert_eq!(capture_identity(), identity);
@@ -11207,10 +11728,64 @@ mod observation_checkpoint_c2a_tests {
         let handle = boot_protected();
         let markers = stage_markers();
         let identity = stage_capture_identity();
+        let before = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
         assert_eq!(
             miso_engine_web_v1_spectrum_cancel(handle),
             RESULT_UNSUPPORTED
         );
+
+        // A matching-owner malformed genuine StopGraph spends Removal but cannot publish a row.
+        stage_stop_demand(handle);
+        OBSERVATION_STAGING.with(|slot| {
+            slot.borrow_mut().endpoint.demand.struct_size = 0;
+        });
+        assert_eq!(
+            miso_engine_web_v1_observation_demand_apply(handle),
+            RESULT_INVALID_ARGUMENT
+        );
+        let _ = miso_engine_web_v1_observation_admission_ptr(handle);
+        let malformed = OBSERVATION_STAGING.with(|slot| slot.borrow().endpoint.admission);
+        assert_eq!(malformed.operation, OBSERVATION_OPERATION_STOP_GRAPH);
+        assert_eq!(malformed.result, RESULT_INVALID_ARGUMENT);
+        assert_eq!(malformed.reason, 8);
+        let after_malformed = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
+        assert_eq!(after_malformed, before);
+        LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            assert_eq!(host.observation_status().accepted_generation, 0);
+            assert_eq!(host.observation_status().applied_generation, 0);
+            assert_eq!(host.observation_status().pending_count, 0);
+            assert_eq!(
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                0
+            );
+        });
+        assert_markers(&markers);
+        assert_eq!(capture_identity(), identity);
+
         assert_eq!(
             miso_engine_web_v1_spectrum_stream_stop(handle),
             RESULT_BACKPRESSURE
@@ -11223,6 +11798,19 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(host.observation_status().accepted_generation, 0);
             assert_eq!(host.side_records.pending_count, 0);
         });
+        let after_stop = LIVE_HOST.with(|slot| {
+            let live = slot.borrow();
+            let host = &live.as_ref().expect("protected live host").host;
+            (
+                host.side_records.application_len,
+                host.side_records.pending_count,
+                host.side_records.completed_count,
+                host.side_records.reserved_mask,
+                host.side_records.receipts,
+                *host.observation_capture_identity(),
+            )
+        });
+        assert_eq!(after_stop, before);
         dispose(handle);
     }
 }
