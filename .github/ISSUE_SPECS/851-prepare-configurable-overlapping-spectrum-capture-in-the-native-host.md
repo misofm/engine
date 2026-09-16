@@ -156,3 +156,11 @@ retained resources, PCM identity, realtime rules, additive compatibility, host-c
 no-default suites, wasm32 scalar/SIMD checks, and host-web compilation all passed. The only notes
 were two existing nightly-only ignored budget tests and an existing no-default internal-helper
 warning; neither affects delivery.
+
+**Delivery artifact reconciliation.** PR #853's first qualification run reached the intended
+shipped-artifact guard and refused the stale AudioWorklet digest: the linked host-core/host-web
+Wasm necessarily changed with this native implementation. A pinned Rust 1.97.1 reproducible build
+produced `082e04b609278e016bfa194358952600321552e3322e6a549ef51cf974062034` twice, once through the
+ordinary refusing path and once through the explicit print-only repin path. The checked-in digest
+now names those exact source bytes; no ABI record, JavaScript asset, package, or deployment state
+changed. Qualification must rerun and pass before merge.
