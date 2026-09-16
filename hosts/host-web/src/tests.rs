@@ -8316,6 +8316,117 @@ fn protected_eq_request() -> SpectrumCaptureCollectionRequest {
     }
 }
 
+#[test]
+fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
+    let document = one_track_resource_session(128);
+    let target = SpectrumTarget::TrackPostMatrix("eq0".into());
+
+    let single_hop = SpectrumHop::new(256).expect("supported single hop");
+    let mut single = AudioWorkletEngineHost::boot_with_spectrum_config(
+        document.as_bytes(),
+        boot_options(128),
+        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+            target: target.clone(),
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: u64::MAX,
+        })),
+        Some(single_hop),
+    )
+    .expect("single explicit-hop boot");
+    assert_eq!(single.spectrum_hop, Some(single_hop));
+    assert_eq!(
+        single
+            .start_spectrum_stream()
+            .expect("single explicit-hop start")
+            .hop_frames(),
+        single_hop.get()
+    );
+
+    let collection_hop = SpectrumHop::new(1024).expect("supported collection hop");
+    let mut collection = AudioWorkletEngineHost::boot_with_spectrum_config(
+        document.as_bytes(),
+        boot_options(128),
+        Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![host_core::SpectrumCaptureCollectionEntry {
+                    target: target.clone(),
+                    channels: SpectrumChannels::Stereo,
+                }],
+                maximum_capture_bytes: u64::MAX,
+            },
+        )),
+        Some(collection_hop),
+    )
+    .expect("collection explicit-hop boot");
+    assert_eq!(
+        collection.select_spectrum(&target, SpectrumChannels::Stereo),
+        RESULT_OK
+    );
+    assert_eq!(collection.spectrum_hop, Some(collection_hop));
+    assert_eq!(
+        collection
+            .start_spectrum_stream()
+            .expect("collection explicit-hop start")
+            .hop_frames(),
+        collection_hop.get()
+    );
+}
+
+#[test]
+fn ordinary_spectrum_omitted_hop_keeps_default_cadence() {
+    let document = one_track_resource_session(128);
+    let mut host = AudioWorkletEngineHost::boot_with_spectrum(
+        document.as_bytes(),
+        boot_options(128),
+        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+            target: SpectrumTarget::TrackPostMatrix("eq0".into()),
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: u64::MAX,
+        })),
+    )
+    .expect("default-hop boot");
+    assert_eq!(host.spectrum_hop, None);
+    assert_eq!(
+        host.start_spectrum_stream().expect("default-hop start"),
+        SpectrumCadence::new(48_000, 128).expect("default cadence")
+    );
+}
+
+#[test]
+fn protected_spectrum_uses_explicit_prepared_hop() {
+    let document = one_track_resource_session(128);
+    let request = protected_eq_request();
+    let hop = SpectrumHop::new(256).expect("supported protected hop");
+    let mut host = AudioWorkletEngineHost::boot_with_observation_demand_config(
+        document.as_bytes(),
+        boot_options(128),
+        &protected_eq_preparation(&request),
+        Some(hop),
+    )
+    .expect("protected explicit-hop boot");
+
+    assert_eq!(host.spectrum_hop, None);
+    assert_eq!(
+        host.start_spectrum_stream()
+            .expect("protected explicit-hop start")
+            .hop_frames(),
+        hop.get()
+    );
+    let ready = host.ready.as_ref().expect("ready ownership");
+    let PreparedObservationStorage::Protected(storage) = &ready.observation else {
+        panic!("protected owner");
+    };
+    assert_eq!(storage.spectrum_cadence.hop_frames(), hop.get());
+    assert_eq!(
+        storage
+            .controller
+            .spectrum_cadence()
+            .expect("native protected cadence")
+            .hop_frames(),
+        hop.get()
+    );
+}
+
 fn protected_eq_console_host() -> AudioWorkletEngineHost {
     let document = one_track_resource_session(128);
     let request = protected_eq_request();

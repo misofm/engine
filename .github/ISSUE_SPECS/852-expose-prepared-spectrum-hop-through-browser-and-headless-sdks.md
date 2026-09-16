@@ -82,3 +82,15 @@ continuous activation path. Focused tests cover all four supported hops on both 
 legacy derived cadence. Root reran both focused tests, strict host-core library Clippy, wasm32
 no-default compilation, formatting, and diff checks: PASS. B1's host-web ABI/configuration work
 will begin from this checkpoint with a fresh agent; Worker analysis remains a separate checkpoint.
+
+**B1a1 host-web internal configuration seam — complete after escalation.** Two fresh Luna MAX
+rounds spent their bounded inventory windows without producing an edit, so root stopped them and
+escalated this two-file slice exactly as directed. Sol high preserved every existing boot method as
+a default wrapper and added internal configured paths carrying `Option<SpectrumHop>` through boot,
+resource projection, protected preparation, and ordinary stream start. Protected preparation uses
+`HostObservationPreparationConfig`; ordinary single/collection capture uses the typed host-core
+start methods; omitted configuration retains the derived cadence. No FFI export, packed record,
+SDK, Worker, artifact, or deployment surface changed. Tests cover ordinary H256, collection H1024,
+protected H256, and omitted default. Root reran the complete host-web library suite (195 passed,
+2 existing ignored), strict host-web library Clippy, wasm32 compilation, formatting, and diff
+checks: PASS. The additive FFI/capability boundary remains a fresh bounded task.
