@@ -8866,12 +8866,7 @@ mod observation_checkpoint_b1_tests {
             crate::OBSERVATION_OPERATION_REPLACE_METERS,
             OBSERVATION_OPERATION_REMOVE_METERS_TO,
         ] {
-            stage_demand(
-                handle,
-                operation,
-                0,
-                expected_owner.wrapping_add(1),
-            );
+            stage_demand(handle, operation, 0, expected_owner.wrapping_add(1));
             OBSERVATION_STAGING.with(|slot| {
                 slot.borrow_mut().endpoint.demand.struct_size = 0;
             });
@@ -8932,7 +8927,10 @@ mod observation_checkpoint_b1_tests {
             0,
             "unknown demand tags retain ordinary credit spending"
         );
-        assert_eq!(after_unknown.flags & available, before.flags & available & !crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE);
+        assert_eq!(
+            after_unknown.flags & available,
+            before.flags & available & !crate::OBSERVATION_STATUS_FLAG_ORDINARY_AVAILABLE
+        );
         assert_eq!(after_unknown.ingress_epoch, before.ingress_epoch);
 
         // A malformed genuine StopGraph still spends its removal attempt, preserving protected
@@ -9090,8 +9088,7 @@ mod observation_checkpoint_c1_tests {
         no_live_host, protected_document, protected_preparation_record, stage_protected_boot,
     };
     use crate::{
-        COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS, PreparedObservationStorage,
-        WebCommandReport,
+        COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS, PreparedObservationStorage, WebCommandReport,
     };
 
     fn boot_protected() -> u32 {
@@ -9131,7 +9128,13 @@ mod observation_checkpoint_c1_tests {
         })
     }
 
-    fn set_ingress_state(handle: u32, epoch: u64, ordinary_used: bool, removal_used: bool, exhausted: bool) {
+    fn set_ingress_state(
+        handle: u32,
+        epoch: u64,
+        ordinary_used: bool,
+        removal_used: bool,
+        exhausted: bool,
+    ) {
         LIVE_HOST.with(|slot| {
             let mut live = slot.borrow_mut();
             let host = &mut live
@@ -9412,6 +9415,8 @@ mod observation_checkpoint_c1_tests {
         ] {
             let handle = boot_protected();
             set_ingress_state(handle, epoch, ordinary_used, removal_used, exhausted);
+            let spectrum_markers = stage_spectrum_markers();
+            let resident_markers = stage_resident_markers();
             let before = protected_ffi_state(handle);
             for &call in &ordinary_calls {
                 assert_eq!(call(handle), RESULT_UNSUPPORTED, "{label} ordinary alias");
@@ -9420,7 +9425,11 @@ mod observation_checkpoint_c1_tests {
                     before,
                     "{label} ordinary unsupported alias changed protected state"
                 );
-                assert_eq!(call(handle), RESULT_UNSUPPORTED, "{label} repeated ordinary alias");
+                assert_eq!(
+                    call(handle),
+                    RESULT_UNSUPPORTED,
+                    "{label} repeated ordinary alias"
+                );
                 assert_eq!(
                     protected_ffi_state(handle),
                     before,
@@ -9447,6 +9456,8 @@ mod observation_checkpoint_c1_tests {
                 before,
                 "{label} repeated removal-class alias changed protected state"
             );
+            assert_spectrum_markers(spectrum_markers);
+            assert_resident_markers(&resident_markers);
             dispose(handle);
         }
     }
@@ -9612,15 +9623,15 @@ mod observation_checkpoint_c1_tests {
                 .filter(|live| live.handle == handle)
                 .expect("protected live host");
             let side = &live.host.side_records;
-            let receipt_fingerprint = side.receipts.iter().fold(
-                0xcbf2_9ce4_8422_2325,
-                |hash, receipt| {
-                    let hash = fingerprint_mix(hash, receipt.state as u64);
-                    let hash = fingerprint_mix(hash, receipt.owner as u64);
-                    let hash = fingerprint_mix(hash, receipt.sequence as u64);
-                    fingerprint_mix(hash, receipt.application_sample as u64)
-                },
-            );
+            let receipt_fingerprint =
+                side.receipts
+                    .iter()
+                    .fold(0xcbf2_9ce4_8422_2325, |hash, receipt| {
+                        let hash = fingerprint_mix(hash, receipt.state as u64);
+                        let hash = fingerprint_mix(hash, receipt.owner as u64);
+                        let hash = fingerprint_mix(hash, receipt.sequence as u64);
+                        fingerprint_mix(hash, receipt.application_sample as u64)
+                    });
             ProtectedSideState {
                 application_len: side.application_len as u64,
                 pending_count: side.pending_count as u64,
@@ -9683,16 +9694,17 @@ mod observation_checkpoint_c1_tests {
     fn observation_staging_state() -> ObservationStagingState {
         OBSERVATION_STAGING.with(|slot| {
             let staging = slot.borrow();
-            let address_fingerprint = staging.addresses.iter().fold(
-                0xcbf2_9ce4_8422_2325,
-                |hash, address| {
-                    let hash = fingerprint_mix(hash, address.track_index as u64);
-                    let hash = fingerprint_mix(hash, address.rack as u64);
-                    let hash = fingerprint_mix(hash, address.effect_index as u64);
-                    let hash = fingerprint_mix(hash, address.tap_id as u64);
-                    fingerprint_mix(hash, address.channels as u64)
-                },
-            );
+            let address_fingerprint =
+                staging
+                    .addresses
+                    .iter()
+                    .fold(0xcbf2_9ce4_8422_2325, |hash, address| {
+                        let hash = fingerprint_mix(hash, address.track_index as u64);
+                        let hash = fingerprint_mix(hash, address.rack as u64);
+                        let hash = fingerprint_mix(hash, address.effect_index as u64);
+                        let hash = fingerprint_mix(hash, address.tap_id as u64);
+                        fingerprint_mix(hash, address.channels as u64)
+                    });
             ObservationStagingState {
                 address_count: staging.addresses.len(),
                 address_fingerprint,
@@ -9890,6 +9902,8 @@ mod observation_checkpoint_c1_tests {
             ] {
                 let handle = boot_protected_with_console();
                 set_ingress_state(handle, epoch, ordinary_used, removal_used, exhausted);
+                let _spectrum_markers = stage_spectrum_markers();
+                let _resident_markers = stage_resident_markers();
                 let _ = assert_mixed_batch_refused_before_companion(handle, prepared);
                 let report = LIVE_HOST.with(|slot| {
                     *slot
@@ -9938,11 +9952,7 @@ mod observation_checkpoint_c1_tests {
             let result = if prepared {
                 // The malformed companion must remain uninspected after the bounded scan finds
                 // the last Observe record.
-                miso_engine_web_v1_prepared_command_submit(
-                    handle,
-                    MAXIMUM_COMMAND_RECORDS,
-                    1,
-                )
+                miso_engine_web_v1_prepared_command_submit(handle, MAXIMUM_COMMAND_RECORDS, 1)
             } else {
                 miso_engine_web_v1_command_submit(handle, MAXIMUM_COMMAND_RECORDS)
             };
@@ -10229,7 +10239,10 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(staging.result_len, 0);
             let capture = staging.capture.as_ref().expect("capture bytes");
             let result = staging.result.as_ref().expect("result bytes");
-            assert_eq!(&capture[..markers.capture.len()], markers.capture.as_slice());
+            assert_eq!(
+                &capture[..markers.capture.len()],
+                markers.capture.as_slice()
+            );
             assert_eq!(&result[..markers.result.len()], markers.result.as_slice());
         });
         assert_eq!(capture_identity(), markers.capture_identity);
@@ -11614,7 +11627,10 @@ mod observation_checkpoint_c2a_tests {
             let host = &live.as_ref().expect("protected live host").host;
             assert_eq!(host.observation_admission().result, RESULT_OK);
             assert_eq!(host.observation_admission().receipt, first_receipt);
-            assert_eq!(host.observation_admission().receipt.owner, first_receipt.owner);
+            assert_eq!(
+                host.observation_admission().receipt.owner,
+                first_receipt.owner
+            );
             assert_eq!(
                 host.observation_admission().receipt.sequence,
                 first_receipt.sequence
@@ -11740,8 +11756,7 @@ mod observation_checkpoint_c2a_tests {
             assert_eq!(host.observation_status().applied_generation, 0);
             assert_eq!(host.observation_status().pending_count, 0);
             assert_eq!(
-                host.observation_status().flags
-                    & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
+                host.observation_status().flags & crate::OBSERVATION_STATUS_FLAG_REMOVAL_AVAILABLE,
                 0
             );
         });

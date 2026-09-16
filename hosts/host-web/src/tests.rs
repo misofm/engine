@@ -8397,17 +8397,19 @@ fn protected_queue_fingerprint(host: &AudioWorkletEngineHost) -> u64 {
         hash = protected_state_mix(hash, control.input.available_capacity() as u64);
     }
     for shadow in &ready.input_filter_shadows {
-        for value in [shadow.committed, shadow.candidate] {
-            hash = protected_state_mix(hash, value.map(f32::to_bits).unwrap_or(0) as u64);
+        for value in shadow.committed.iter().chain(shadow.candidate.iter()) {
+            hash = protected_state_mix(hash, value.to_bits() as u64);
         }
-        hash = protected_state_mix(hash, shadow.dirty as u64);
+        for dirty in &shadow.dirty {
+            hash = protected_state_mix(hash, *dirty as u64);
+        }
         hash = protected_state_mix(hash, shadow.revision);
     }
     hash
 }
 
 fn protected_native_state(host: &mut AudioWorkletEngineHost) -> ProtectedNativeState {
-    let status = *host.observation_status();
+    let status = host.observation_status();
     let ingress = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let PreparedObservationStorage::Protected(storage) = &ready.observation else {
@@ -8420,16 +8422,33 @@ fn protected_native_state(host: &mut AudioWorkletEngineHost) -> ProtectedNativeS
             storage.ingress.exhausted,
         )
     };
-    let side = &host.side_records;
-    let receipt_fingerprint = side.receipts.iter().fold(
-        0xcbf2_9ce4_8422_2325,
-        |hash, receipt| {
-            let hash = protected_state_mix(hash, receipt.state as u64);
-            let hash = protected_state_mix(hash, receipt.owner as u64);
-            let hash = protected_state_mix(hash, receipt.sequence as u64);
-            protected_state_mix(hash, receipt.application_sample as u64)
-        },
-    );
+    let (
+        application_len,
+        pending_count,
+        completed_count,
+        reserved_mask,
+        receipt_count,
+        receipt_fingerprint,
+    ) = {
+        let side = &host.side_records;
+        let receipt_fingerprint =
+            side.receipts
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325, |hash, receipt| {
+                    let hash = protected_state_mix(hash, receipt.state as u64);
+                    let hash = protected_state_mix(hash, receipt.owner as u64);
+                    let hash = protected_state_mix(hash, receipt.sequence as u64);
+                    protected_state_mix(hash, receipt.application_sample as u64)
+                });
+        (
+            side.application_len as u64,
+            side.pending_count as u64,
+            side.completed_count as u64,
+            side.reserved_mask as u64,
+            side.receipts.len() as u64,
+            receipt_fingerprint,
+        )
+    };
     let capture_identity = *host.observation_capture_identity();
     let queue_fingerprint = protected_queue_fingerprint(host);
     let command_staging = host
@@ -8441,11 +8460,11 @@ fn protected_native_state(host: &mut AudioWorkletEngineHost) -> ProtectedNativeS
     ProtectedNativeState {
         status,
         ingress,
-        application_len: side.application_len as u64,
-        pending_count: side.pending_count as u64,
-        completed_count: side.completed_count as u64,
-        reserved_mask: side.reserved_mask as u64,
-        receipt_count: side.receipts.len() as u64,
+        application_len,
+        pending_count,
+        completed_count,
+        reserved_mask,
+        receipt_count,
         receipt_fingerprint,
         capture_identity,
         queue_fingerprint,
@@ -8744,13 +8763,7 @@ fn protected_native_unsupported_families_preserve_compact_state_for_credit_state
         ("exhausted", (u64::MAX, true, true, true)),
     ] {
         let mut host = protected_eq_console_host();
-        set_protected_ingress_state(
-            &mut host,
-            epoch,
-            ordinary_used,
-            removal_used,
-            exhausted,
-        );
+        set_protected_ingress_state(&mut host, epoch, ordinary_used, removal_used, exhausted);
         let before = protected_native_state(&mut host);
         let mut output = [];
         assert_eq!(
@@ -8768,11 +8781,7 @@ fn protected_native_unsupported_families_preserve_compact_state_for_credit_state
             Err(ObservationReadError::Unsupported),
             "{label} addressed output"
         );
-        assert_eq!(
-            host.arm_spectrum(),
-            RESULT_UNSUPPORTED,
-            "{label} arm"
-        );
+        assert_eq!(host.arm_spectrum(), RESULT_UNSUPPORTED, "{label} arm");
         assert!(matches!(host.read_spectrum(), Err(RESULT_UNSUPPORTED)));
         assert_eq!(host.cancel_spectrum(), RESULT_UNSUPPORTED, "{label} cancel");
         assert_eq!(
