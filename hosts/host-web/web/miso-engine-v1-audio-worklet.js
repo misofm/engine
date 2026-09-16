@@ -72,9 +72,12 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum", "spectrumCollection",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "spectrumCollection",
 ];
-const LEGACY_OPTION_FIELDS = OPTION_FIELDS.slice(0, -2);
+const SPECTRUM_OPTION_FIELDS = OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
+const LEGACY_OPTION_FIELDS = SPECTRUM_OPTION_FIELDS.slice(0, -2);
+const SPECTRUM_HOP_FRAMES = new Set([0, 256, 512, 1024, 2048]);
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
   "endOfRegion",
@@ -263,15 +266,33 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   initialize(init) {
+    const currentOptions = exactFields(init?.options, OPTION_FIELDS);
+    const oldSpectrumOptions = exactFields(init?.options, SPECTRUM_OPTION_FIELDS);
+    const oldOptions = init?.options?.spectrum === undefined
+      && exactFields(init?.options, LEGACY_OPTION_FIELDS);
     if (!exactFields(init, INIT_FIELDS) || !(init.document instanceof Uint8Array)
-        || (!exactFields(init.options, OPTION_FIELDS)
-          && !(init.options?.spectrum === undefined && exactFields(init.options, LEGACY_OPTION_FIELDS)))) {
+        || (!currentOptions && !oldSpectrumOptions && !oldOptions)) {
       return RESULT_INVALID_ARGUMENT;
     }
+    const spectrumHopFrames = currentOptions ? init.options.spectrumHopFrames : 0;
+    if (!SPECTRUM_HOP_FRAMES.has(spectrumHopFrames)) return RESULT_INVALID_ARGUMENT;
     this.instance = new WebAssembly.Instance(init.module, {});
     this.exports = this.instance.exports;
     if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION) {
       return 2;
+    }
+    let spectrumHopBoot;
+    if (spectrumHopFrames !== 0) {
+      const capability = this.exports.miso_engine_web_v1_spectrum_hop_capability;
+      spectrumHopBoot = this.exports.miso_engine_web_v1_boot_with_spectrum_hop;
+      if (typeof capability !== "function" || typeof spectrumHopBoot !== "function") return 2;
+      let supported;
+      try {
+        supported = capability();
+      } catch (_) {
+        return 2;
+      }
+      if (supported !== 1) return 2;
     }
     const optionsPointer = this.exports.miso_engine_web_v1_boot_options_ptr();
     if (!u32(optionsPointer) || optionsPointer === 0) {
@@ -298,7 +319,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     new Uint8Array(this.exports.memory.buffer, documentPointer, init.document.byteLength)
       .set(init.document);
-    this.handle = this.exports.miso_engine_web_v1_boot(init.document.byteLength);
+    this.handle = spectrumHopFrames === 0
+      ? this.exports.miso_engine_web_v1_boot(init.document.byteLength)
+      : spectrumHopBoot(init.document.byteLength, spectrumHopFrames);
     if (this.handle === 0) {
       return this.exports.miso_engine_web_v1_boot_result();
     }

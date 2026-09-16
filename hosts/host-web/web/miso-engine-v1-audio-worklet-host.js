@@ -72,9 +72,13 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrum", "spectrumCollection",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "spectrumCollection",
 ];
-const LEGACY_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
+const NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
+const SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
+const LEGACY_BOOT_OPTION_FIELDS = SPECTRUM_BOOT_OPTION_FIELDS.slice(0, -2);
+const SPECTRUM_HOP_FRAMES = new Set([0, 256, 512, 1024, 2048]);
 
 const SOURCE_FIELDS = [
   "sourceId",
@@ -443,16 +447,31 @@ function snapshotSpectrumCollection(value) {
 function snapshotBootOptions(value) {
   const captured = capturePlainRecord(value, BOOT_OPTION_FIELDS);
   if (!captured || !hasRequiredEnumerableFields(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
+  const hopDescriptor = captured.descriptors.get("spectrumHopFrames");
   const spectrumDescriptor = captured.descriptors.get("spectrum");
   const collectionDescriptor = captured.descriptors.get("spectrumCollection");
-  const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
-  const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
-  if (spectrumIsEnumerable || collectionIsEnumerable) {
-    if (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
+  if (hopDescriptor !== undefined) {
+    // The current SDK shape carries the hop as an ordinary enumerable data field. A hidden field
+    // is neither a valid new shape nor an old compatibility shape, and must not bypass validation.
+    const noSpectrumFields = spectrumDescriptor === undefined && collectionDescriptor === undefined;
+    if (!hopDescriptor.enumerable
+        || (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)
+          && !(noSpectrumFields && hasEnumerableShape(captured, NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS)))) {
+      return undefined;
+    }
   } else {
-    if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
-    if (spectrumDescriptor !== undefined
-        && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
+    // Direct callers from before the hop was added remain accepted. Keep the old spectrum shape
+    // rules exactly: both spectrum fields enumerable means the eight-field shape, while hidden or
+    // absent optional fields may be normalized as before.
+    const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
+    const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
+    if (spectrumIsEnumerable || collectionIsEnumerable) {
+      if (!hasEnumerableShape(captured, SPECTRUM_BOOT_OPTION_FIELDS)) return undefined;
+    } else {
+      if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
+      if (spectrumDescriptor !== undefined
+          && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
+    }
   }
   const spectrumValue = spectrumDescriptor === undefined ? undefined : spectrumDescriptor.value;
   const spectrum = snapshotSpectrumBoot(spectrumValue ?? null);
@@ -467,6 +486,7 @@ function snapshotBootOptions(value) {
     consoleMeterBlocks: captured.descriptors.get("consoleMeterBlocks").value,
     consoleObservationTaps: captured.descriptors.get("consoleObservationTaps").value,
     consoleMasterTrackPlusOne: captured.descriptors.get("consoleMasterTrackPlusOne").value,
+    spectrumHopFrames: hopDescriptor === undefined ? 0 : hopDescriptor.value,
     spectrum,
     spectrumCollection,
   };
@@ -569,9 +589,9 @@ function validSpectrumStreamMetadata(metadata) {
 }
 
 function validBootOptions(options) {
-  if (!hasExactFields(options, BOOT_OPTION_FIELDS)
-      && !(options?.spectrum === undefined && hasExactFields(options, LEGACY_BOOT_OPTION_FIELDS))) return false;
-  return validU32(options.sourceRingFrames)
+  return hasExactFields(options, BOOT_OPTION_FIELDS)
+    && SPECTRUM_HOP_FRAMES.has(options.spectrumHopFrames)
+    && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
     && validU64(options.consoleCommandQueueRecords)
     && options.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)

@@ -161,3 +161,17 @@ explicit values unchanged. The authoritative host declaration and SDK mirror add
 numeric field and remain byte-identical. Root reran seven focused forwarding/refusal/mutation
 tests, the SDK type and declaration-mirror gate, syntax checks, and diff checks: PASS. Runtime host
 snapshotting, capability refusal, and AudioWorklet boot dispatch remain the isolated B3b slice.
+
+**B3b shipped host and AudioWorklet runtime — complete in two Luna MAX rounds.** The host factory
+copies and validates zero or H256/H512/H1024/H2048 before its first await, normalizes prior six-
+and eight-field direct-call shapes to zero, and preserves caller-mutation isolation. The Worklet
+checks ABI identity first, leaves zero on the legacy boot path without probing optional exports,
+and requires capability value 1 plus the additive boot export before staging an explicit H. Missing,
+wrong, or throwing capability and missing additive boot return a typed ABI refusal without calling
+legacy boot or publishing a handle; H256/H1024 reach only the additive export. Round 1 passed the
+full hermetic harness, but root found that the new public declaration permits an explicit hop with
+both optional spectrum fields omitted while the runtime required the full nine-field record. Round
+2 added the valid seven-field direct shape and normalizes its absent spectrum fields to null without
+weakening exact-shape or anti-Proxy checks. Root reran the full hermetic harness, syntax, and diff
+checks: PASS. The render callback is unchanged. Actual candidate artifact qualification and pins
+remain B4.
