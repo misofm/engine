@@ -93,3 +93,16 @@ round 2 corrected it to the actual `2*blocks*Q` history work and strengthened th
 Root reran the complete locked host-core all-feature suite/doctests and strict all-target Clippy:
 PASS. Implementer also reports release spectrum unit 38/38, spectrum integration 9/9, formatting
 and diff checks PASS. N3 remains unstarted.
+
+**N3 bounded loss recovery and smoothing — complete in Luna round 1.** The consumer now freezes
+the one-slot population at read entry and arms exactly one bounded recovery opportunity after
+reporting a Gap. New drops arriving before that recovery cannot starve the retained valid record;
+the following read reports the newer cumulative loss, while the immutable record keeps its
+original loss metadata. Failure/lifecycle reset clears the recovery state, bounded stale-record
+rules remain intact, and no refill is chased. A deterministic repeated-drop fixture proves three
+successive Gap→intervening-drop→record recoveries and exact cumulative counts. An independent
+power recurrence proves `exp(-H/(Fs*tau))` smoothing for H=256/512/1024/2048; existing load-bearing
+tests retain zero-smoothing equivalence and reset-on-loss/epoch/invalid/configuration coverage.
+Root reran both new focused tests, strict all-target Clippy, formatting and diff checks: PASS.
+Implementer reports spectrum unit 45, spectrum integration 9, protected-owner 23 and the complete
+host-core all-feature suite PASS. N4 remains unstarted.

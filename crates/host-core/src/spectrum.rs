@@ -483,6 +483,12 @@ pub struct SpectrumCapture {
     shared: Arc<SpectrumContinuousShared>,
     seen_failures: u64,
     seen_drops: u64,
+    /// Whether the next continuous read gets one bounded queue recovery attempt after a Gap.
+    ///
+    /// The producer may publish another drop between the Gap and its recovery read. Keeping this
+    /// arm separate from `seen_drops` lets that read consume the retained record while the next
+    /// read still reports the newer cumulative loss.
+    recovery_pending: bool,
     target: SpectrumTarget,
     channels: SpectrumChannels,
 }
@@ -501,6 +507,7 @@ impl SpectrumCapture {
             shared: SpectrumContinuousShared::new(),
             seen_failures: 0,
             seen_drops: 0,
+            recovery_pending: false,
             target,
             channels: SpectrumChannels::Left,
         }
@@ -519,6 +526,7 @@ impl SpectrumCapture {
         self.state.store(IDLE, Ordering::Release);
         self.seen_failures = 0;
         self.seen_drops = 0;
+        self.recovery_pending = false;
         self.shared.active.store(0, Ordering::Release);
         self.shared
             .phase
@@ -569,6 +577,7 @@ impl SpectrumCapture {
             .store(CONTINUOUS_WAITING, Ordering::Release);
         self.seen_failures = 0;
         self.seen_drops = 0;
+        self.recovery_pending = false;
     }
 
     /// Arm the capture for the next complete graph window.
@@ -596,6 +605,7 @@ impl SpectrumCapture {
             self.mode.store(ONE_SHOT_MODE, Ordering::Release);
         }
         self.state.store(IDLE, Ordering::Release);
+        self.recovery_pending = false;
     }
 
     /// Try to take the completed window from its control-side queue.
@@ -729,6 +739,7 @@ impl SpectrumCapture {
         self.shared.invalidated.store(0, Ordering::Release);
         self.seen_failures = 0;
         self.seen_drops = 0;
+        self.recovery_pending = false;
         self.mode.store(CONTINUOUS_MODE, Ordering::Release);
     }
 
@@ -744,6 +755,7 @@ impl SpectrumCapture {
             self.state.store(IDLE, Ordering::Release);
             self.seen_failures = 0;
             self.seen_drops = 0;
+            self.recovery_pending = false;
         }
     }
 
@@ -781,9 +793,9 @@ impl SpectrumCapture {
 
     /// Try to take one continuous record while retaining its private identity.
     ///
-    /// `None` preserves the legacy drain-until-a-result behavior. `Some(maximum_pops)` bounds
-    /// queue consumption to the supplied entry budget; a protected caller freezes that budget
-    /// before attempting its first pop, so a stale item cannot trigger a refill chase.
+    /// Queue consumption is always bounded by the population observed at this read entry.
+    /// `Some(maximum_pops)` supplies an additional upper bound; `None` uses the full frozen
+    /// population. A stale item therefore cannot trigger a producer-refill chase.
     pub(crate) fn try_read_continuous_record(
         &mut self,
         maximum_pops: Option<usize>,
@@ -793,25 +805,35 @@ impl SpectrumCapture {
         {
             return Err(SpectrumContinuousReadError::NotActive);
         }
+        // Freeze the queue population before inspecting status or entering the pop loop. A
+        // producer publication after this point belongs to a later read, even if this call has
+        // not yet consumed its first record.
+        let available = self.continuous_available_at_entry();
         let failures = self.shared.failures.load(Ordering::Acquire);
         if failures != self.seen_failures {
             self.seen_failures = failures;
             self.seen_drops = self.shared.drops.load(Ordering::Acquire);
+            self.recovery_pending = false;
             return Err(SpectrumContinuousReadError::Failed {
                 stream_epoch: self.shared.failure_epoch.load(Ordering::Acquire),
             });
         }
         let drops = self.shared.drops.load(Ordering::Acquire);
-        if drops != self.seen_drops {
+        if drops != self.seen_drops && !self.recovery_pending {
             self.seen_drops = drops;
+            self.recovery_pending = true;
             return Err(SpectrumContinuousReadError::Gap {
                 stream_epoch: self.shared.drop_epoch.load(Ordering::Acquire),
                 dropped_captures: drops,
             });
         }
-        let mut remaining_pops = maximum_pops;
+        // Consume the one post-Gap recovery opportunity even when no record was visible at this
+        // entry. A later producer publication belongs to a later read and cannot extend this
+        // budget.
+        self.recovery_pending = false;
+        let mut remaining_pops = maximum_pops.map_or(available, |maximum| maximum.min(available));
         loop {
-            if remaining_pops.is_some_and(|remaining| remaining == 0) {
+            if remaining_pops == 0 {
                 return Err(
                     if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WARMING {
                         SpectrumContinuousReadError::Warming
@@ -820,9 +842,7 @@ impl SpectrumCapture {
                     },
                 );
             }
-            if let Some(remaining) = remaining_pops.as_mut() {
-                *remaining -= 1;
-            }
+            remaining_pops -= 1;
             match self.consumer.try_pop() {
                 Ok(record)
                     if self.shared.invalidated.load(Ordering::Acquire) != 0
@@ -1418,6 +1438,7 @@ fn prepare_capture_with_handle(
         shared: Arc::clone(&shared),
         seen_failures: 0,
         seen_drops: 0,
+        recovery_pending: false,
         target: request.target.clone(),
         channels: request.channels,
     };
@@ -3417,6 +3438,7 @@ mod tests {
             shared,
             seen_failures: 0,
             seen_drops: 0,
+            recovery_pending: false,
             target: SpectrumTarget::Output("main-out".into()),
             channels,
         };
@@ -4792,6 +4814,105 @@ mod tests {
     }
 
     #[test]
+    fn continuous_gap_recovery_delivers_queued_records_despite_intervening_drops() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        let left = [0.5_f32; 128];
+        let right = [0.0_f32; 128];
+        let capture_blocks =
+            |observer: &mut SpectrumCaptureObserver, first_block: u64, last_block: u64| {
+                for block in first_block..last_block {
+                    observer.capture(
+                        &left,
+                        &right,
+                        block * 128,
+                        super::GraphObservationValidity::CLEAR,
+                    );
+                }
+            };
+
+        // Keep sequence zero in the one-slot queue while sequence one is dropped.
+        capture_blocks(&mut observer, 0, 32);
+        assert_eq!(
+            capture
+                .try_read_continuous_record(Some(1))
+                .expect_err("first drop is reported before queue recovery"),
+            SpectrumContinuousReadError::Gap {
+                stream_epoch: 1,
+                dropped_captures: 1,
+            }
+        );
+
+        // A new drop arrives between the Gap and its recovery read. The retained valid record is
+        // still delivered on the one bounded opportunity, and its original loss metadata stays
+        // immutable.
+        capture_blocks(&mut observer, 32, 48);
+        let first_recovery = capture
+            .try_read_continuous_record(Some(1))
+            .expect("recovery consumes the retained record");
+        assert_eq!(first_recovery.continuous_window().sequence, 0);
+        assert_eq!(first_recovery.continuous_window().dropped_captures, 0);
+        assert_eq!(
+            capture
+                .try_read_continuous_record(Some(1))
+                .expect_err("the second cumulative drop is reported once"),
+            SpectrumContinuousReadError::Gap {
+                stream_epoch: 1,
+                dropped_captures: 2,
+            }
+        );
+
+        // Repeat the same ordering twice more. Every recovery read is bounded to the record that
+        // was present at entry, while each following Gap reports the cumulative count exactly once.
+        capture_blocks(&mut observer, 48, 80);
+        let second_recovery = capture
+            .try_read_continuous_record(Some(1))
+            .expect("second bounded recovery");
+        assert_eq!(second_recovery.continuous_window().sequence, 3);
+        assert_eq!(second_recovery.continuous_window().dropped_captures, 2);
+        assert_eq!(
+            capture
+                .try_read_continuous_record(Some(1))
+                .expect_err("the third cumulative drop is reported once"),
+            SpectrumContinuousReadError::Gap {
+                stream_epoch: 1,
+                dropped_captures: 3,
+            }
+        );
+
+        capture_blocks(&mut observer, 80, 112);
+        let third_recovery = capture
+            .try_read_continuous_record(Some(1))
+            .expect("third bounded recovery");
+        assert_eq!(third_recovery.continuous_window().sequence, 5);
+        assert_eq!(third_recovery.continuous_window().dropped_captures, 3);
+        assert_eq!(
+            capture
+                .try_read_continuous_record(Some(1))
+                .expect_err("the fourth cumulative drop is reported once"),
+            SpectrumContinuousReadError::Gap {
+                stream_epoch: 1,
+                dropped_captures: 4,
+            }
+        );
+        assert_eq!(
+            capture
+                .try_read_continuous_record(Some(1))
+                .expect_err("a reported gap arms only one recovery read"),
+            SpectrumContinuousReadError::Pending
+        );
+        assert_eq!(
+            capture
+                .shared
+                .drops
+                .load(std::sync::atomic::Ordering::Acquire),
+            4
+        );
+    }
+
+    #[test]
     fn continuous_profile_skips_to_a_slower_hop_and_resets_after_discontinuity() {
         let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Right);
         capture
@@ -5079,6 +5200,54 @@ mod tests {
         assert_eq!(second_metadata.history_start_sample, 10);
         assert_eq!(second_metadata.fft_first_sample, 2_058);
         assert_eq!(history.history_start_sample(), Some(10));
+    }
+
+    #[test]
+    fn continuous_analysis_matches_independent_h_power_recurrence_for_every_explicit_hop() {
+        let analyzer = SpectrumAnalyzer::new();
+        let smoothing = SpectrumSmoothingConfig::new(100.0).expect("bounded smoothing");
+        let amplitudes = [0.25_f32, 1.0, 0.5, 0.125];
+        for hop in [256_u32, 512, 1_024, 2_048] {
+            let cadence =
+                SpectrumCadence::with_hop(48_000, 128, hop).expect("explicit test cadence");
+            let decay = math::exp(-f64::from(hop) / (48_000.0 * 0.1));
+            let mut expected_power = 0.0_f64;
+            let mut history = SpectrumAnalysisHistory::new();
+            let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+            let mut left = [0.0; SPECTRUM_BIN_COUNT];
+            let mut right = [0.0; SPECTRUM_BIN_COUNT];
+            for (sequence, amplitude) in amplitudes.into_iter().enumerate() {
+                let power = f64::from(amplitude) * f64::from(amplitude);
+                expected_power = if sequence == 0 {
+                    power
+                } else {
+                    decay * expected_power + (1.0 - decay) * power
+                };
+                let first_sample = u64::from(sequence as u32) * u64::from(hop);
+                let window = continuous_window(amplitude, first_sample, 1, sequence as u64);
+                {
+                    let mut output = super::SpectrumOutput {
+                        frequencies_hz: &mut frequencies,
+                        left_dbfs: Some(&mut left),
+                        right_dbfs: Some(&mut right),
+                    };
+                    analyzer
+                        .analyze_continuous(&window, cadence, smoothing, &mut history, &mut output)
+                        .expect("explicit-hop smoothing analysis");
+                }
+                let expected_db = 10.0 * math::log10(expected_power);
+                assert!(
+                    (f64::from(left[0]) - expected_db).abs() < 0.01,
+                    "hop {hop}, sequence {sequence}: {} vs {expected_db}",
+                    left[0]
+                );
+                assert!(
+                    (f64::from(right[0]) - expected_db).abs() < 0.01,
+                    "right hop {hop}, sequence {sequence}: {} vs {expected_db}",
+                    right[0]
+                );
+            }
+        }
     }
 
     #[test]
