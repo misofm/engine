@@ -1,626 +1,263 @@
 # `@misofm/engine`
 
-The TypeScript SDK for Engine V1: a Session V1 builder, a boot-v1 host for Node and the browser,
-and an agent-facing parameter surface that speaks decimals and ranks rather than floats.
+Engine V1 is a headless Rust mixing and mastering engine. This package provides its TypeScript
+session builder, semantic controls, analysis APIs, and packaged WebAssembly runtime for offline
+rendering and browser playback. The engine produces planar `Float32Array` PCM; your application
+owns source delivery, playback UI, storage, and output encoding.
 
-## Installing the package
+Sessions are strict, versioned canonical JSON. Tracks have independent left/right processing,
+three effect racks, explicit routing and integer-sample delay compensation. The native effect
+library includes EQ, compressor, gate/expander, de-esser, limiter, dynamic EQ, multiband compressor,
+saturator/clipper, transient shaper, and delay. The generated catalog describes their parameters,
+units, domains, and observation capabilities.
+
+## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine
+npm install @misofm/engine@0.4.0
 ```
 
-The published package is a self-contained Engine V1 release: compiled ESM, declarations, the
-simd128 Wasm engine, the AudioWorklet modules, parameter metadata, ABI layout, and a manifest with
-the byte length and SHA-256 of every artifact. A Node or Bun headless consumer needs neither a Rust
-toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
-so the host and Wasm cannot silently come from different releases.
+The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
+AudioWorklet host and processor, scratch/analysis Workers, PCM-feed worklet, parameter metadata,
+ABI layout, and an artifact manifest. Headless consumers need no Rust toolchain or separate engine
+download. Keep the SDK, Wasm, host, worklets, and metadata from the same package release together.
 
-### Release 0.4.0 compatibility
+| Public import | Use |
+| --- | --- |
+| `@misofm/engine` | `session`, `effect`, generated catalog/ABI, parameter helpers, `EngineConsole`, `ConsoleWriter`, and shared types |
+| `@misofm/engine/headless` | `createOfflineEngine`, validation, bundled-asset loading, and response previews |
+| `@misofm/engine/browser` | `createEngine`, browser preparation, PCM rings/feed, measurements, and response previews |
+| `@misofm/engine/assets` | `BUNDLED_ENGINE_ASSETS` URLs and `BUNDLED_ENGINE_FILES` names |
 
-`@misofm/engine@0.4.0` carries the accepted ordinary-host AudioWorklet boot-input ownership
-contract from #844 and the qualified observation ABI/native closure. It uses the matching
-AudioWorklet Wasm artifact (`b47d05f053dca81687f0065306fb97159f892277e9543326cea7e21544186b61`),
-so metadata, host, and runtime bytes must be taken from this package together. Combined
-protected/ordinary observation preparation and a protected-EQ coexistence claim remain outside
-this release; #835 is the policy boundary and #824 remains separate.
+Use these entry points rather than deep imports. The package also installs the `enginectl` CLI.
 
-### Release 0.3.0 compatibility
+## Render offline
 
-`@misofm/engine@0.3.0` carries the accepted live EQ cuts and builtin HPF/LPF controls. It uses
-the matching AudioWorklet Wasm artifact (`7e925d939234b67d14be41a647b4cc6de23099501a763d27e8a56c77524999e7`),
-so metadata and runtime bytes must be taken from this package together. The dedicated EQ state is
-464 bytes (116 words) per channel, with the existing common header; the legacy 304-byte and
-intermediate 456-byte channel payloads are refused. Existing Session V1 defaults and the original
-four-band parameter IDs remain compatible. This minor release does not overwrite or promise binary
-state compatibility with `0.2.6`.
+Node 20+ and Bun use the packaged Wasm runtime. Supply a Session V1 document as JSON text, bytes,
+or a builder returned by `session(...)`. `validate()` checks a document by booting the actual
+engine; `shape()` reports the rate, quantum, sources, tracks, and ring size the engine compiled.
 
-`npm run build` prepares `dist/`; `npm run check:package` additionally packs it, imports every
-public entry from a fresh extraction, boots the embedded Wasm, renders one quantum, and proves a
-one-byte Wasm mutation is rejected by the manifest digest before compilation.
+This example renders the first quantum from caller-decoded PCM. Each declared source must contain
+at least one quantum; the map supplies that many frames per channel at the session's sample rate.
 
-The four entry points are the only supported import sites:
+```ts
+import { createOfflineEngine } from "@misofm/engine/headless";
 
-| specifier | file | for |
-| --- | --- | --- |
-| `@misofm/engine` | `src/index.ts` | catalog, Session V1 builder, agent surface, `ConsoleWriter` |
-| `@misofm/engine/headless` | `src/headless/index.ts` | the Node/Bun offline engine |
-| `@misofm/engine/browser` | `src/browser/index.ts` | the Worker scratch boot, policy, host mirror |
-| `@misofm/engine/assets` | `src/assets.ts` | URLs and names for the embedded release artifacts |
+export async function renderFirstQuantum(
+  document: string,
+  pcmBySource: ReadonlyMap<string, readonly Float32Array[]>,
+) {
+  const engine = await createOfflineEngine(document);
+  try {
+    const shape = engine.shape();
+    for (const source of shape.sources) {
+      const planes = pcmBySource.get(source.id);
+      if (!planes) throw new Error(`Missing PCM for ${source.id}`);
+      const result = engine.submitSource({
+        sourceId: source.id,
+        generation: 1n,
+        startFrame: 0n,
+        planes,
+        endOfRegion: source.frames === BigInt(shape.quantumFrames),
+      });
+      if (!result.ok) throw new Error(`Source refused: ${result.code}`);
+    }
+    return engine.render(); // Owned left/right output arrays, one quantum.
+  } finally {
+    engine.dispose();
+  }
+}
+```
 
-Import through those barrels; do not deep-import `src/core/*`. Every symbol that previously had to
-be reached by a deep path is on a barrel as of #278, and `sdk/test/barrel-surface.ts` fails
-compilation if one stops being reachable or starts resolving to a different declaration.
+For a full render, keep the engine alive, submit bounded source chunks with increasing
+`startFrame`, and render each quantum. Handle submission backpressure before advancing your
+producer. `seekSource()` changes the source generation; stale chunks cannot satisfy the new seek.
+`loadSession()` replaces the headless session on the same instance and invalidates its old
+subscriptions. Use `loadBundledEngineAsset()` and the `asset` option to share one compiled module
+across engines.
 
-## `enginectl session build`
+## Play in the browser
 
-The package installs `enginectl`, a Node 20+ machine interface for producing one
-canonical, engine-accepted Session V1 file from a bounded JSON request:
+`createEngine()` scratch-boots in a Worker, learns the session's shape, verifies the `AudioContext`
+rate and render quantum, and boots the AudioWorklet. Package-relative asset URLs are the defaults;
+your bundler/server must deliver the shipped Worker, worklet, Wasm, and companion files.
+
+The callback below is your source-delivery integration: attach and prefill decoded PCM before
+resuming playback. Call `startMix` from your application's playback action.
+
+```ts
+import { createEngine } from "@misofm/engine/browser";
+import type { BrowserEngine } from "@misofm/engine/browser";
+
+export async function startMix(
+  document: string,
+  prepareSources: (engine: BrowserEngine) => Promise<void>,
+) {
+  const engine = await createEngine({
+    document,
+    policy: { console: { commandQueueRecords: 64, meterBlocks: 12 } },
+  });
+  try {
+    await prepareSources(engine);
+    engine.host.node.connect(engine.context.destination);
+    await engine.context.resume();
+    return engine; // Call await engine.close() when finished.
+  } catch (error) {
+    await engine.close();
+    throw error;
+  }
+}
+```
+
+For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attachEngineFeed`,
+`Msb1RingWriter`, and `waitForPcmRunway`. These transport already-decoded PCM; they do not fetch or
+decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.
+The host also exposes bounded source submission. Source underruns produce silence and counters.
+
+Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
+is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
+The device/context must accept the session rate and quantum (normally 128 frames); mismatches are
+refused. Browser source delivery supports declared 16- and 24-bit sources at launch, decoded to
+`f32` PCM. Declared `32f` sources remain outside browser launch delivery; raw-document consumers
+must enforce that restriction at their ingest boundary.
+
+The npm hosts both execute Wasm. Native and mobile applications must integrate the separate
+Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
+mobile audio-device adapter.
+
+## Change a mix and correlate the acknowledgement
+
+Prepare a positive `console.commandQueueRecords` capacity at boot: pass `console` directly to
+`createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid without
+it. `engine.console()` is synchronous headlessly and asynchronous in the browser; `await` works
+for either. With an existing `vocal` track and an EQ in its first SIMD rack slot:
+
+```ts
+import type { EngineConsole } from "@misofm/engine";
+
+export async function adjustVocal(controls: EngineConsole) {
+  const vocal = controls.edit.track("vocal");
+  const report = await controls.submit(
+    vocal.faderDb(-3, { channel: "both", smoothingSamples: 64 }),
+    vocal.effect("simd1", 0, "miso.parametric-eq")
+      .parameter({ key: "band-1-gain", value: 6, channel: "both" }),
+  );
+  if (!report.ok) throw new Error(`${report.code}: ${report.reasonName}`);
+  return report.appliedAtSample;
+}
+```
+
+One `submit()` is one atomic admission: all edits are accepted or none are. A successful report's
+`appliedAtSample` is the absolute engine sample at which the edits take effect, at the start of
+the next rendered block. It is not a wall-clock time or proof that playback has already reached
+that block. Smoothing may continue after that boundary. Refusals carry typed result/reason names;
+queue saturation must be handled, and acknowledged batches are not silently dropped.
+
+Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })` changes both
+builtin cutoffs atomically; zero disables a filter. `ConsoleWriter` adds bounded batch submission
+and latest-value coalescing for gesture loops. The root entry's `parameter()` helper provides exact
+decimal/lattice edits for agent-facing controls.
+
+## Observe the rendered mix
+
+Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery
+are bounded; notifications can arrive later than the samples they describe.
+
+| Observation | API and meaning of its time |
+| --- | --- |
+| Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. |
+| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. Ready values retain the effect owner's own window and native unit. |
+| Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
+| Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
+| Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
+| Render telemetry | Browser `subscribeTelemetry()` reports CPU/deadline measurements. It has no audio sample span. |
+
+For spectrum, pass either `spectrum` for one boundary or `spectrumCollection` for several
+budgeted boundaries at engine creation. Supported targets are `trackPostInputBuiltins`,
+`trackPostMatrix`, and `output`. A collection permits atomic managed selection among prepared
+entries, with one active spectrum producer. It does not enable simultaneous independent streams.
+
+Managed observation, response, and spectrum handles expose `readLatest()`, `update()`, and
+`close()`. Browser delivery progresses automatically; headless consumers call `pump()` between
+explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
+preserve the prior configuration. Prepare `console.observationTaps` for resident effect taps.
+
+Use the recorded sample spans to compare observations with `appliedAtSample`. A window crossing
+the command boundary can contain both states. A later window may still contain filter settling
+or smoothing history. Response subscriptions suppress unchanged state and retain its original
+capture timestamp; a new polling callback does not imply a new capture. These APIs do not promise
+sample-identical display timing, a shared publication clock across hosts, or an instantaneous
+match between a target curve and measured PCM.
+
+Browser meters additionally expose generation, validity, and loss fields. Inspect them before
+joining windows; gaps can mean omitted publications. Gain reduction is non-negative dB; track
+zero can also mean unobserved, while master `null` means unavailable. For hypothetical or paused
+edits, `createResponsePreview()` evaluates an explicit configuration without a live session or
+live-session timestamp.
+
+The release also carries an additive **protected-observation native/Wasm ABI** for explicitly
+prepared hosts, with bounded observation work, admission, and receipts. “Protected” describes
+resource/ownership guarantees, not DRM or encrypted PCM. Ordinary SDK creation does not activate
+that profile. Combined ordinary/protected preparation and protected EQ coexistence are not part
+of this release; see the [coexistence policy](https://github.com/misofm/engine/issues/835).
+
+## Ownership and artifact integrity
+
+The realtime engine owns a preallocated render plan and executes on one render thread. Render
+performs no allocation/free, locks, file/network I/O, logging, or syscalls. Compilation, structural
+preparation, source decoding, and analysis stay off render. The headless JavaScript wrapper copies
+output into owned arrays; the engine's realtime guarantee does not make arbitrary SDK calls or
+application callbacks allocation-free. See the
+[realtime policy](https://github.com/misofm/engine/blob/main/docs/REALTIME_DEPENDENCY_POLICY.md).
+
+Use bounded source delivery rather than loading complete stems solely for rendering. Content
+resolution, transport-byte verification, decoding, and seek coordination belong to the caller.
+There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
+
+`BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
+artifacts, including Wasm, host, processor, metadata, ABI layout, and prepared-control helper.
+`loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
+the exported ABI version. Browser package-relative URLs bind deployment locations but do not
+constitute runtime digest verification. Custom delivery must preserve the matching artifact set;
+`MisoEngineAsset.load(bytes, expectedSha256)` is available for explicit byte verification.
+
+Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
+published archive to its source/workflow; the
+[0.4.0 release record](https://github.com/misofm/engine/issues/846) contains the accepted artifact
+and archive identities. The manifest is an integrity reference, not an independent trust root.
+
+## Build a session from the command line
 
 ```sh
 enginectl session build --request request.json --output session.json
 enginectl session build --request - --output - < request.json
 ```
 
-`--request` is required. `--stems`, `--session-id`, and `--quantum-frames`
-are unknown flags: they exit 2 without loading an engine asset or publishing output. Callers
-resolve, decode, verify, and retain transport bytes outside this package, then submit decoded PCM
-through the generic source APIs.
-
-The request has `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
-`submixes`, `outputs`, `routes`, and `automation` arrays. Sources and tracks are `{ id, spec }`;
-rack entries are `{ effectId, parameters?, options? }`. Every durable u64 accepts either a safe
-nonnegative JSON integer or a canonical unsigned decimal string through `18446744073709551615`;
-the canonical Session V1 document always writes it as a decimal string. Unknown keys are refused.
-The complete input is limited to 4 MiB and must be valid UTF-8 JSON.
-
-`--output -` writes exactly the canonical JSON, including its final LF, and successful stderr is
-empty. No receipt shares stdout in this mode. A path writes a same-directory temporary file and
-publishes it atomically only after the embedded Wasm engine has accepted the document; stdout then
-receives one compact JSON receipt plus LF. Existing files, directories, and symlinks are preserved
-by default. `--overwrite` authorizes replacement of one filesystem destination and is invalid with
-stdout.
-
-A successful request-mode file receipt has this exact shape (values shown are illustrative):
-
-```json
-{
-  "schemaVersion": 1,
-  "command": "session.build",
-  "output": {
-    "path": "../sessions/song.session.json",
-    "bytes": 7642,
-    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-}
-```
-
-`path` preserves the exact argument string. Raw-output mode adds no receipt.
-
-The executable is always non-interactive: it never prompts, pages, opens another program, reads
-configuration or credentials, loads plugins, invokes media subprocesses, emits telemetry, or uses
-the network. Machine
-failures leave stdout empty and write one compact JSON document to stderr. Exit status is `2` for
-command/flag usage, `3` for request or builder refusal, `4` for embedded-engine refusal, `5` for output refusal, and `70` for an unexpected internal or packaged-
-asset failure. Success, help, and version use `0`.
-
-### Pinning the embedded engine
-
-A package release is pinned at both ends:
-
-- **Source provenance.** The package build runs `scripts/check-sdk-generated.sh`: it re-derives
-  `sdk/assets/*.json` from the Rust and `sdk/src/generated/*.ts` from those assets, and compares
-  byte for byte. `PROVENANCE` carries the ABI version, schema IDs, and expected artifact set.
-- **Artifact provenance.** The package build copies the artifacts produced by
-  `scripts/build-web-audioworklet.sh` and writes `miso-engine-v1-sdk-manifest.json` beside them.
-  `loadBundledEngineAsset()` checks the Wasm's byte count and SHA-256 against that manifest before
-  compilation, then checks the module's exported ABI word before boot.
-
-Explicit `MisoEngineAsset.load(bytes, sha256)` remains available for deployments whose release
-manifest or content store is the artifact authority.
-
-## What this package is not
-
-It is not a second implementation of anything the engine already decides.
-
-There is **no second session parser** here. `validate()` boots the
-real engine and throws the result away, so its diagnostics *are* the engine's diagnostics and its
-budget checks are the real ones under the real physics gate. A grammar written twice is a grammar
-that disagrees with itself eventually, and the disagreement is always discovered in production.
-
-There is **no hand-written ABI table**. Every structure offset, result code, command reason, buffer
-kind and export name is read by name out of `src/generated/abi.ts`, which is transcribed from
-`miso-engine-v1-abi-layout.json`, which the engine emits from its own Rust `offset_of!`. Issue
-#207's review found *five* independent hand-written copies of the boot configuration table in the
-old code; one of them wrote a 192-byte struct's offsets into a 64-byte buffer and produced garbage
-in silence, because a wrong offset is still a valid address.
-
-There is **no guessing**. The predecessor to this package sniffed a document's sample rate with a
-regex over its text, could not see a quoted key, and silently fell back to 48 kHz and 128 frames
-when it failed — then fabricated a source ring of 1024 frames, which is not a multiple of a
-127-frame quantum, so a 96 kHz session was not merely mis-shaped but unbootable. Boot v1 removed the
-need for all of it: hand the engine bytes, and ask it what it compiled.
-
-## The transcription chain
-
-```
-Rust structures and frozen constants
-  └─ parameter-metadata          offset_of!, registry walk
-       └─ sdk/assets/*.json                   checked in
-            └─ sdk/src/generated/*.ts         checked in
-                 └─ the SDK's public types
-```
-
-`scripts/check-sdk-generated.sh` re-derives **both** arrows and compares byte for byte. Checking
-only the TypeScript would let a stale asset regenerate stale modules consistently; checking only the
-JSON would let a hand-edited constant sit in the modules consumers actually import.
-
-Refresh with `npm run assets && npm run codegen` (needs `cargo`).
-
-## Headless
-
-```ts
-import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
-
-// With no asset option, the package's embedded Wasm is verified and loaded automatically.
-const engine = await createOfflineEngine(document);
-
-// For several sessions, compile once and inject the shared asset:
-const asset = await loadBundledEngineAsset();
-const another = await createOfflineEngine(anotherDocument, { asset });
-const shape = engine.shape();   // the ENGINE's answer: rate, quantum, ring, sources, tracks
-const console = engine.console();
-
-// Names and values are catalog-derived; the SDK resolves track/parameter IDs.
-const vocal = console.edit.track("vocal");
-await console.submit(
-  vocal.faderDb(-3, { channel: "both" }),
-  vocal.effect("simd1", 0, "miso.compressor")
-    .parameter("threshold", -24, { channel: "both" }),
-);
-
-// The additive object form keeps the catalog name as the parameter key.
-await console.submit(
-  vocal.effect("simd1", 0, "miso.compressor").parameter({
-    key: "threshold",
-    value: -24,
-    channel: "both",
-    smoothingSamples: 64,
-  }),
-);
-
-for (let block = 0; block < blocks; block += 1) {
-  for (const source of shape.sources) {
-    engine.submitSource({ sourceId: source.id, generation: 1n, startFrame, planes, endOfRegion });
-  }
-  const { left, right } = engine.render();
-}
-
-engine.loadSession(anotherDocument);   // the mix switch: dispose and restage, same instance
-engine.dispose();
-```
-
-`shape()` is the whole point of boot v1. Nothing in it was parsed out of the document's text, so a
-consumer that reads its rate from it cannot be told 48000 by a fallback that never looked.
-
-Live effect edit `key` values are the catalog's semantic `name` strings, and `value` is already in
-the row's declared `unitName` (for example, compressor `threshold` is in `db`). The object form
-accepts `key`, `value`, `channel`, and `smoothingSamples`; unknown fields are refused before a
-transport call. The positional form remains available for existing callers.
-
-Builtin input filters use `track.hpfHz(hz, { channel? })`, `track.lpfHz(hz, { channel? })`,
-or `track.inputFilters({ hpfHz, lpfHz }, { channel? })`. Values are in Hz; zero disables
-that filter. Both enabled cutoffs must satisfy `hpfHz < lpfHz`. Use `inputFilters`
-when changing both cutoffs would otherwise pass through an invalid intermediate pair:
-it is one atomic command, including during writer backpressure. The filters have fixed
-12 dB/oct Butterworth response and a fixed 64-sample coefficient transition. Browser and
-headless consoles prepare targets through the same Rust authority.
-
-`BootOptions` is five optional keys over the engine's own 64-byte block. Absent means zero means
-*the engine's* default — in particular `maximumMemoryBytes` absent selects the engine's named
-`DEFAULT_MAXIMUM_MEMORY_BYTES`, which this SDK documents and never restates.
-
-## Browser
-
-```ts
-import { createEngine } from "@misofm/engine/browser";
-
-const engine = await createEngine({ document });
-await engine.context.resume();
-engine.host.node.connect(engine.context.destination);
-```
-
-The order matters, and each step exists because the next is expensive to undo: refuse what web
-delivery does not carry → scratch-boot the document in a Worker to learn its shape → construct,
-verify and if necessary close-and-retry the `AudioContext` → refuse a quantum mismatch *before*
-`addModule` → boot the worklet with the physical shape required as a backstop.
-
-Both boots read the same policy object, so the ring, the memory budget and all four console words
-are identical by construction; the two `require_*` words are role-defined (zero in the scratch boot,
-physical in the worklet). The browser entry supplies a packaged scratch module Worker, a guarded
-`AudioContext` constructor, and the shipped host factory. Source delivery remains caller-owned.
-
-`createContext`, `scratchBoot`, and `createHost` are optional independent overrides. An injected
-context factory preserves its exact return type; a default DOM consumer receives its native
-`AudioContext` type. The `simd128ModuleUrl`, `workletModuleUrl`, `hostModuleUrl`, and
-`scratchWorkerModuleUrl` overrides select individual assets. `createWorker(url, { type })` can
-forward the exported package Worker URL directly to `new Worker`; the packaged entry contains its
-imports, including after Vite copies it. `requestDeadlineMs` (default 5000) bounds each scratch
-handshake/request phase, and `signal` cancels scratch work. Every outcome terminates the Worker.
-
-For callers that compose boot explicitly, `scratchBootWithWorker` performs one scratch request
-and `createDefaultHost` imports and invokes the shipped host with `toWebBootOptions` mapping.
-`scratchBootInWorker` remains the low-level primitive for custom Worker entries. The browser
-helpers install no PCM feed or storage service.
-
-`prepareBrowserSessionWithWorker` additionally rehearses 64 fixed quanta of synthetic PCM in the
-throwaway instance and returns `{ shape, module }`. The instance is disposed and Worker terminated
-before the result resolves. Retain `module` while resolving and fully verifying real source data,
-then pass it as `preparedModule` to `createEngine`, with `scratchBoot: async () => shape`. The live
-host reuses that compiled module without a second Wasm fetch or compilation, and boots fresh DSP
-state at sample 0. Keep the same owned document and policy snapshot across preparation and live
-creation; the helpers copy inputs at each call boundary. `prepareBrowserSessionInWorker` is the
-corresponding primitive for custom Worker entries. This preparation proves no real source ready
-and performs no source delivery. The existing shape-only defaults and URL-only host remain valid.
-
-The SDK PCM feed accepts at most two fresh submissions per source per render callback and scans
-at most that source ring's capacity. Shared source runways remain available while internal queues
-fill gradually, avoiding a first-callback burst proportional to every queued source quantum.
-
-`waitForPcmRunway()` proves that caller supplied PCM is contiguous at a full acknowledged source
-generation and frame, without consuming the feed rings:
-
-```ts
-import { waitForPcmRunway } from "@misofm/engine/browser";
-
-await waitForPcmRunway({
-  sources: [{ sourceId: "vocals", frames: 480_000n, ring }],
-  targetFrame: 0n,
-  generation: 1n,
-  timeoutMs: 2_000,
-  // Omit minimumFrames for the ring's full capacity; a positive smaller value is also allowed.
-});
-```
-
-The helper observes existing MSB1 rings with bounded polling and closes its temporary observers on
-success, timeout, mismatch, or cancellation. It does not seek a producer, attach a feed, wait for
-network or resume an audio context; the caller completes those steps and their acknowledgements
-before asking for a runway proof. `PcmRunwayError.reason` is `"mismatch"` or `"timeout"`, while an
-abort signal's reason is passed through unchanged.
-
-`await engine.console()` binds the same semantic console shown above to the shipped browser host.
-Set `policy.console.commandQueueRecords` to a positive capacity when calling `createEngine` to
-attach controls. Omitting it, passing an empty console policy, or setting it to zero keeps audio-only
-boot valid; `engine.console()` then returns a rejected Promise with an actionable `MisoUsageError`
-before requesting the session map or sending commands. The captured boot policy controls attachment;
-changing the caller's policy object later cannot attach or detach a console.
-
-With controls attached, it resolves the browser session map once, then submits the same whole-batch
-edits over MessagePort. At the raw host boundary, `unsupportedKind` also means no console was attached;
-check the boot console capacity before interpreting it as an unrecognized command kind.
-All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;
-the browser and headless acknowledgements carry the same generated result/reason names and exact
-`appliedAtSample`.
-
-With the same console policy, the browser engine owns the shared meter and render-telemetry leases:
-
-```ts
-const stopMeters = await engine.subscribeMeters((update) => {
-  const vocal = update.tracks.get("vocal");
-  if (vocal) drawMeter(vocal.peakLeft, vocal.peakRight);
-});
-const stopTelemetry = await engine.subscribeTelemetry((update) => drawCpu(update.cpuPercent));
-// Each returned function is idempotent.
-stopMeters();
-stopTelemetry();
-```
-
-`TrackMeter` and `MasterMeter` expose left and right peak amplitudes as linear magnitudes and gain
-reduction as a non-negative dB value. `MasterMeter.gainReductionDb` stays `null` when the host has
-no measured master reduction; master `0` is a measured zero. `MeterUpdate.generation` changes
-on each real host lease transition or detected producer reset, starting a new delivery epoch.
-Its `validity` bits are complete (`1`), master aligned (`2`), loss (`4`), and gain reduction (`8`).
-`lossCount` is the saturating count of dropped or rejected meter windows observed before the
-frame; `windows` counts the complete windows folded into the frame, normally one.
-`[firstSample, endSample)` timestamps the peak window only. Within a generation, a gap between
-one frame's end and the next frame's start, or the loss bit/count, indicates omitted or rejected
-windows rather than contiguous measurement. A track's positional gain reduction still conflates
-an unobserved effect with zero and may fold independently aged effects; the SDK does not claim
-an exact peak/GR join or per-effect GR timing. `TelemetryUpdate` carries CPU utilization in percent,
-block/deadline-miss counts, peak/mean block duration, budget and clock resolution in milliseconds,
-and the host's below-resolution flag, without inventing a generation or sample span.
-
-Call `await engine.close()` when the browser session is finished. It disposes the worklet host
-before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
-host's MessagePort has already failed.
-
-To read an already armed resident tap, name the current owner with stable session IDs and choose
-the lanes explicitly. The headless call is synchronous; the browser call returns a Promise. Both
-return the owner's native value and its actual resident window, and a read does not consume that
-window:
-
-```ts
-const selection = {
-  trackId: "vocal", rack: "dynamic", effectSlotId: "compressor", tapId: 1, channels: "both",
-} as const;
-const console = offline.console();
-await console.submit(
-  console.edit.track("vocal").effect("dynamic", 0, "miso.compressor")
-    .observe("Gain Reduction", true, 2),
-);
-offline.render();
-const nativeRows = offline.readObservations([selection]);
-const browserRows = await browser.readObservations([selection]);
-console.log(nativeRows[0].status, nativeRows[0].window?.firstSample, nativeRows[0].left);
-console.log(browserRows[0].window?.sequence, browserRows[0].descriptor.displayUnit);
-```
-
-`pending` means the arm has no complete window yet and `unarmed` means the tap is disarmed. A
-re-arm suppresses the prior resident window until a fresh one closes. The map is resolved against
-the current prepared owner on every read, so a reload or closed browser host cannot reuse an old
-numeric position.
-
-For input-source spectrum, `Msb1RingObserver` from `@misofm/engine/browser` reads an
-existing feed ring without consuming audio or changing shared bytes:
-
-```ts
-const observer = new Msb1RingObserver(feed.rings[0]);
-observer.pull((chunk) => {
-  updateSourceSpectrum(chunk.planes, chunk.frames); // Use synchronously; scratch is reused.
-});
-const { underruns, drainBlocks, depth } = observer.counters();
-observer.close();
-```
-
-Each observer starts at the oldest live chunk and has an independent cursor. Pull attempts at
-most `min(ringCapacity, 32)` chunks by default, or an explicit integer from 1 to 32. Metadata and
-planar scratch are borrowed until the callback returns; only `frames` samples are valid. Pull
-creates no PCM buffers or views. It skips stale or concurrently reused slots and catches up after
-missed data or seeks; visualization is best effort. Use it on the control thread and do not
-reenter `pull` from its callback. Counters read existing wire words individually, not as an atomic
-multiword snapshot. Closing releases local storage; later pulls return zero and counters retain
-the final snapshot. Observation never holds slots or delays playback.
-
-## Agents
-
-```ts
-import { catalog, parameter } from "@misofm/engine";
-
-const gain = parameter("miso.parametric-eq", "band-1-gain");
-gain.set("-6.3");        // canonical decimal in, canonical decimal out
-gain.step("md", +2);     // two medium ladder steps: exactly `ladder.md * 2` ranks
-gain.value;              // "-5.3", never "-5.300000190734863"
-gain.index;              // the rank -- what a persisted edit carries on the wire
-```
-
-Every value is a decimal string and every edit is an integer rank. A value that went through an
-`f32` and came back would read `0.30000001192092896` where the agent asked for `0.3`: nothing errors,
-the audio is imperceptibly different, and the agent's next comparison against its own request fails
-for a reason it cannot see.
-
-Membership is decided in exact decimal arithmetic on the **text**, so every spelling of one number —
-`0.3`, `0.30`, `3e-1`, `+0.300` — is the same point, and an off-lattice value comes back with the two
-points that *bracket* it rather than with a bare refusal. `step` clamps at the endpoints because a
-gesture past the top of a dial lands on the top; `setSteps` refuses an out-of-range rank because an
-index is an address rather than a gesture.
-
-The SDK generates lattice points rather than shipping them — a one-cent lattice from 20 Hz to 20 kHz
-has about twelve thousand — and is held to the engine's own resolver point for point by
-`parameter_metadata_lattice_oracle` over the entire shipped catalog.
-
-`decimalToFloat32` is the single site where a lattice value stops being a decimal, mirroring
-`effect_contract::decimal_to_f32`. Auditing that boundary is one grep.
-
-## The writer
-
-```ts
-import { ConsoleWriter } from "@misofm/engine";
-```
-
-`ConsoleWriter` batches live-console edits against the engine's bounded per-track queue. Its
-contract is two sentences:
-
-- **A flow-control refusal is never an error and never terminal.** Nothing throws on backpressure,
-  and the writer is as usable after a refusal as before it.
-- **Re-staging is latest-wins coalesced.** Pending edits are keyed by what they address, so a
-  refused batch is never replayed as a queue's worth of stale intermediates. After the drain, what
-  lands is where the hand actually is.
-
-A refusal that is *not* flow control throws instead: backpressure succeeds on retry once the render
-thread drains, an unknown address never will, and retrying it silently would be an infinite loop
-wearing the costume of resilience.
-
-Choose exactly one submission callback. Encoded `submit(records, count)` keeps the existing
-`WriterOptions` contract. Semantic `submitEdits(edits)` accepts the selected readonly `LaneEdit[]`
-without an encode/decode round trip and is typed by `SemanticWriterOptions`:
-
-```ts
-const console = engine.console();
-const writer = new ConsoleWriter({
-  submitEdits: (edits) => console.submit(...edits),
-  maximumBatch: 32,
-});
-
-// Existing encoded integrations remain supported:
-const encodedWriter = new ConsoleWriter({
-  submit: (records, count) => engine.submitCommands(records, count),
-  maximumBatch: 32,
-});
-```
-
-Both callbacks return the actual `CommandReport` or a promise for it. Both use the same pending
-map, batch sizing and serialized flush chain; semantic submission adds no queue. Providing both
-callbacks or neither rejects. `maximumBatch` retains its existing default and positive-integer
-validation. The callback owns transport-specific encoding and validation; `FlushOutcome` remains
-the writer's admission/pending summary.
-
-`submit` and `submitEdits` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
-but a browser host reaches it over a worklet port, where the answer is a promise by construction —
-so `flush()` and `drain()` are async. Flushes serialize: a call entered while a prior submit is
-still outstanding waits for it rather than picking its batch out of a map the earlier flush has not
-yet applied to. The contract is otherwise identical on both paths, which the evals hold by running
-one episode through a sync and an async submit and comparing the transcripts element for element.
-
-`ConsoleWriter` is the expert-level, coalescing seam over already addressed wire edits. New code
-should normally start with `engine.console()`: its `edit.track(id)` builder provides typed strip,
-effect, and observation operations, locally checks generated domains, and makes one
-`console.submit(...edits)` one atomic engine transaction. `ConsoleWriter` remains useful for a
-high-rate gesture loop whose pending values need latest-wins coalescing.
-
-## Managed resident observations
-
-Both SDK entries can manage selected resident effect observations:
-
-```ts
-const subscription = await engine.subscribeObservations({
-  selections: [{
-    trackId: "vocals", rack: "dynamic", effectSlotId: "compressor",
-    tapId: 1, channels: "both",
-  }],
-  windowBlocks: 2,
-  cadenceMs: 100,
-  onUpdate: ({ handle }) => consume(handle.readLatest()),
-});
-// Headless: render normally, then await subscription.pump().
-// Browser: notifications arrive automatically at the requested cadence.
-await subscription.close();
-```
-
-Use the generated observation descriptors to choose supported tap IDs, and prepare console
-command and observation capacity when creating the engine. The returned handle reports effective
-configuration, bounds and the command's `appliedAtSample`. `update()` changes a selection atomically;
-a refused update preserves the previous subscription. Identical bindings share reads, and the
-last close disarms them. Manual console observation edits are refused while managed work conflicts.
-
-`readLatest()` returns owned rows with the effect owner's original sample spans and units.
-Notifications report missed native windows separately from skipped cached publications. Headless
-pumping never renders implicitly; browser delivery retains the latest values rather than a backlog.
-Session replacement or disposal invalidates old handles. SDK-local owner/epoch IDs do not claim to
-be portable engine-clock identities. Live EQ response subscriptions use the same managed lifetime;
-spectrum capture remains a separate API.
-
-## Explicit response previews
-
-Response previews are stopped analysis requests over an explicit generated effect or input-filter
-configuration. They do not boot a session or describe a live plan. Node and Bun instantiate the
-verified asset directly; browsers use a dedicated Worker and return owned channel arrays:
-
-```ts
-import { effect } from "@misofm/engine";
-import { createResponsePreview, loadBundledEngineAsset } from "@misofm/engine/headless";
-
-const preview = await createResponsePreview({ asset: await loadBundledEngineAsset() });
-const result = preview.query({
-  configurationId: 7n,
-  sampleRateHz: 48_000,
-  quantumFrames: 128,
-  configuration: effect("miso.parametric-eq", {
-    "band-1-enabled": true, "band-1-kind": "bell", "band-1-frequency": 1_000,
-    "band-1-gain": 3, "band-1-q": 1,
-  }),
-  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
-  channels: "both",
-  fields: "totalAndSections",
-});
-preview.close();
-```
-
-The browser entry exports the same `createResponsePreview` name and accepts a verified
-`MisoEngineAsset`; its one-request Worker can be closed repeatedly and refuses a concurrent query.
-The returned `requestedConfiguration`, `configurationId` (`bigint`), frequencies, totals and
-sections are explicit request results and carry no active-session identity.
-
-## Live track EQ/filter response
-
-A booted browser or headless engine can query the actual target response of one track:
-
-```ts
-const response = await engine.queryTrackResponse({
-  trackId: "vocals",
-  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
-  channels: "both",
-});
-```
-
-The engine captures its current EQ and input-filter target words at one render-block boundary,
-then evaluates the copied state off the audio thread. `capturedSample` is a `bigint`; queued
-commands appear only after the engine has applied them. During smoothing, the curve describes
-the stationary target, not the instantaneous response of the ramp.
-
-The result is an EQ/filter subtotal, with owned frequency and channel arrays and ordered owner
-metadata. Excluded effects remain identified in the result. Fader, pan, routing and other
-processing are outside this subtotal. Use `createResponsePreview` above for hypothetical
-configurations that have not been applied to the engine.
-
-For a live EQ panel, subscribe to the same explicit query:
-
-```ts
-const responseSubscription = await engine.subscribeTrackResponse({
-  trackId: "vocals",
-  grid: { kind: "logarithmic", points: 256, minimumHz: 20, maximumHz: 20_000 },
-  channels: "both",
-  cadenceMs: 100,
-  onUpdate: ({ handle }) => drawResponse(handle.readLatest()),
-});
-drawResponse(responseSubscription.readLatest()); // First capture is ready on admission.
-// Headless: after your normal render, await responseSubscription.pump().
-await responseSubscription.close();
-```
-
-Identical configurations share a job and its latest result. Browser polling compares captured
-active state before dispatching analysis to the existing response Worker; unchanged state causes
-no evaluation or notification. Headless pumping performs the same comparison without rendering.
-`update()` validates a replacement before releasing the old configuration; refusal preserves it.
-Each `readLatest()` returns owned arrays, and the last close releases the job.
-
-Engine creation accepts `responseSubscriptionLimits`: defaults allow 64 handles, 16 jobs,
-16 MiB of retained result/key payload, 16 capture attempts per poll, and 16 MiB/s of admitted
-vector delivery across consumers. The default cadence is 100 ms; the maximum is 60 seconds.
-Generated endpoint bounds also cap points and capture size. The engine-owned response Worker and
-its Wasm instance are fixed per-engine resources, separate from the per-job payload budget.
-
-The handle reports its effective configuration and bounds. Its bigint `revision` identifies an
-observed captured-state change within this SDK owner/epoch/job. It does not count every intervening
-engine edit. Results retain their original `snapshotToken` and `capturedSample`; unchanged polls
-never retimestamp cached vectors. Notifications count known skipped publications, not unknown
-uncaptured changes. Session replacement or disposal invalidates old handles.
-
-## Captured spectrum
-
-Prepare one spectrum target by passing `spectrum` when creating the browser or headless engine:
-
-```ts
-const spectrum = {
-  target: { kind: "trackPostMatrix", trackId: "vocals" },
-  channels: "both",
-} as const;
-// Pass spectrum alongside your existing createEngine/bootHeadless options.
-const result = await browserEngine.querySpectrum(spectrum);
-```
-
-Targets are `trackPostInputBuiltins`, `trackPostMatrix`, or `output` (with `outputId`).
-One target is prepared per engine; replacing the session permits selecting another target.
-Each query captures 2,048 contiguous samples and returns owned frequency and dBFS arrays,
-exact `bigint` sample boundaries, and a graph-wide source-underrun flag. Only one capture
-can be outstanding. FFT analysis runs off the audio thread.
-
-For headless use, call `armSpectrum()`, render normally, then call `readSpectrum()`;
-it returns `undefined` until the capture is ready. Queries never render implicitly.
-Use `cancelSpectrum()` to abandon a capture.
-
-## Tests
-
-The eval suites run under Node's native type stripping, so `sdk/src/**/*.ts` is imported directly
-with no build step and no `node_modules`:
+Requests use `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
+`submixes`, `outputs`, `routes`, and `automation` arrays. The CLI validates with the packaged engine before publishing
+canonical Session V1 JSON. File output preserves existing destinations unless `--overwrite` is
+specified; stdout output contains only the document. It does not download or decode stems.
+See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
+[Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Boundaries and contributing
+
+This package does not provide a DAW/timeline UI, delivery codecs, an unbounded media cache,
+implicit feedback routing, third-party Wasm effect execution, or a general remote audio transport.
+Native effect availability does not imply a third-party plugin loader.
+
+From a repository checkout, install locked SDK dependencies and check the generated/public surface:
 
 ```sh
-bash scripts/check-sdk-headless.sh              # builds the artifact, then runs every eval
-bash scripts/check-sdk-generated.sh             # the transcription chain, both arrows
-bash scripts/check-sdk-types.sh                 # needs `npm ci` in sdk/ once
+cd sdk
+npm ci
+npm run check:generated
+npm run check:assets
+bash ../scripts/check-sdk-types.sh
 ```
 
-Two files under `sdk/test/` run no assertions: they are checked by `tsc`, and their job is to fail
-*compilation*. `host-mirror.ts` fails when the shipped `.d.ts` and the SDK's adapter disagree.
-`barrel-surface.ts` fails when a symbol stops being barrel-reachable, or when a barrel starts
-re-exporting a different declaration than the module it names -- including the one collision the
-root barrel has to resolve by hand, where `generated/catalog.ts` and `core/lattice.ts` both spell
-`StepDeclaration` and `StepSizeName` and mean two different types.
+`npm run check:assets` requires Rust. `npm run build` prepares the packaged artifacts;
+`npm run check:package` additionally checks a fresh packed consumer, public imports, rendering,
+and digest rejection. See the [engine guide](https://github.com/misofm/engine/blob/main/AGENTS.md)
+for realtime, DSP, and contribution requirements. Licensed under Apache-2.0.
