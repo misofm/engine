@@ -189,7 +189,7 @@ resource/boot-budget Worklet gate PASS against this candidate. Integrated runtim
 qualification, documentation, and result lineage remain B4b.
 
 **B4b1 actual-candidate headless integration — complete in fresh Luna MAX round 1.** Tests against
-the exact `e18acf9c…81106` Wasm now prove H256 and H1024 subscription bounds, smoothing metadata,
+the exact `e18acf9c…8106` Wasm now prove H256 and H1024 subscription bounds, smoothing metadata,
 fixed 2048-frame spans, exact overlapping starts, sequences/windows, finite analysis, and retained
 array ownership across publications. Omission retains the 48 kHz/128-frame H2048 profile. An
 identical-input omitted-versus-H256 comparison is bit-identical for every PCM block and plane. A
@@ -198,3 +198,15 @@ dropped captures, drains the retained sample-zero window, and then resumes at se
 1536 after two further renders. Root reran the three focused actual-Wasm tests and SDK type/syntax
 checks; the agent reports the complete headless gate at 278/278 PASS. Browser/Worker candidate
 qualification, supported-browser lineage, and documentation remain B4b2.
+
+**B4b2a actual-candidate browser integration — complete in fresh Luna MAX round 1.** The shipped
+host, actual AudioWorklet Wasm, and browser SDK response Worker now exercise H256 in the existing
+continuous known-tone path and H1024 in a bounded live-context probe. Chromium
+151.0.7922.34 passed with H256 preserved through native-read and publication metadata, a fixed
+2048-frame span, the existing 750 Hz spectrum/response/meter/PCM correlation, capture-gap recovery,
+and owned arrays. H1024 produced overlapping `0..2048` and `1024..3072` publications with 37.5 ms
+smoothing preserved through native and SDK metadata, finite results, and owned arrays. The browser
+qualification passed all 19 red mutations; hermetic Worklet, SDK type, syntax, and diff checks also
+passed. The tracked standalone real-Wasm receiver helper still carries the prior candidate digest;
+a temporary digest substitution passed and was restored, so permanent candidate lineage, the full
+supported-browser run, and documentation remain B4b2b.

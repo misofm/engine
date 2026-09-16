@@ -340,7 +340,13 @@ function spectrumCollectionDocument(raw: string, frames: number): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(document));
 }
 
-async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES, peak = false) {
+async function createContinuousSpectrumBrowser(
+  query,
+  frames = CONTINUOUS_FRAMES,
+  peak = false,
+  spectrumHopFrames?: 256 | 512 | 1024 | 2048,
+  live = false,
+) {
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const document = spectrumDocument(raw, frames, peak);
   const browser = await createEngine({
@@ -349,6 +355,7 @@ async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES
     policy: {
       sourceRingFrames: frames,
       console: { commandQueueRecords: 64, meterBlocks: 16 },
+      ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
     },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -359,8 +366,10 @@ async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES
       tracks: ["track"],
     }),
     createContext: () => {
-      const context = new OfflineAudioContext(2, frames, 48_000);
-      Object.defineProperty(context, "close", { value: async () => {} });
+      const context = live
+        ? new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" })
+        : new OfflineAudioContext(2, frames, 48_000);
+      if (!live) Object.defineProperty(context, "close", { value: async () => {} });
       return context;
     },
     createHost: (request) => createDefaultHost({
@@ -373,6 +382,22 @@ async function createContinuousSpectrumBrowser(query, frames = CONTINUOUS_FRAMES
   });
   browser.host.node.connect(browser.context.destination);
   return browser;
+}
+
+function streamMetadataFields(metadata) {
+  if (metadata === undefined) return undefined;
+  return {
+    status: metadata.status,
+    hopFrames: metadata.hopFrames,
+    sampleRateHz: metadata.sampleRateHz,
+    quantumFrames: metadata.quantumFrames,
+    smoothingMs: metadata.smoothingMs,
+    capturedSample: metadata.capturedSample.toString(),
+    endSample: metadata.endSample.toString(),
+    sequence: metadata.sequence.toString(),
+    windows: metadata.windows.toString(),
+    droppedCaptures: metadata.droppedCaptures.toString(),
+  };
 }
 
 async function createSpectrumCollectionBrowser() {
@@ -453,7 +478,21 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     channels: "both" as const,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
   };
-  const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true);
+  const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true, 256);
+  const nativeStarts = [];
+  const nativeReads = [];
+  const nativeStartSpectrumStream = browser.host.startSpectrumStream.bind(browser.host);
+  browser.host.startSpectrumStream = async (...args) => {
+    const reply = await nativeStartSpectrumStream(...args);
+    nativeStarts.push(reply.metadata);
+    return reply;
+  };
+  const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
+  browser.host.readSpectrumStream = async (...args) => {
+    const reply = await nativeReadSpectrumStream(...args);
+    nativeReads.push(reply.metadata);
+    return reply;
+  };
   const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
   const automaticNotifications = [];
   let callbackCount = 0;
@@ -514,6 +553,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     const firstLeft = first.leftDb;
     const firstRight = first.rightDb;
     if (firstLeft === undefined || firstRight === undefined) throw new Error("continuous spectrum omitted a channel");
+    const effectiveHopFrames = subscription.bounds.hopFrames;
     const leftPeak = spectrumPeak(firstLeft);
     const rightPeak = spectrumPeak(firstRight);
     const sharedResult = shared.readLatest();
@@ -547,6 +587,11 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       windows: notifications.length,
       statuses: notifications.map((notification) => notification.status),
       sequences: notifications.map((notification) => notification.metadata.sequence.toString()),
+      hopFrames: effectiveHopFrames,
+      nativeStart: streamMetadataFields(nativeStarts[0]),
+      nativeReadHopFrames: nativeReads.map((metadata) => metadata.hopFrames),
+      publicationHopFrames: notifications.map((notification) => notification.metadata.hopFrames),
+      publicationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
       gap,
       ownedArrays,
       sharedAfterFirstClose,
@@ -556,6 +601,10 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
         endSample: first.endSample.toString(),
         sequence: readyNotification?.metadata.sequence.toString() ?? "",
         snapshotToken: first.snapshotToken.toString(),
+        hopFrames: notifications.find((notification) => notification.available
+          && notification.metadata.capturedSample === first.capturedSample)?.metadata.hopFrames,
+        smoothingMs: notifications.find((notification) => notification.available
+          && notification.metadata.capturedSample === first.capturedSample)?.metadata.smoothingMs,
         peakBins: [leftPeak.index, rightPeak.index],
         peakHz: [first.frequenciesHz[leftPeak.index], first.frequenciesHz[rightPeak.index]],
         peakDbfs: [leftPeak.value, rightPeak.value],
@@ -574,6 +623,113 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     };
   } finally {
     await shared?.close();
+    await subscription?.close();
+    await browser.close();
+  }
+}
+
+/** A short live-context probe keeps two H1024 windows readable through the real Worklet queue. */
+async function runConfiguredSpectrumHopQualification(): Promise<Record<string, unknown>> {
+  const query = {
+    target: { kind: "output" as const, outputId: "main-out" },
+    channels: "both" as const,
+    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+  };
+  const hopFrames = 1_024;
+  const smoothingMs = 37.5;
+  const frames = 8 * SPECTRUM_FRAMES;
+  const browser = await createContinuousSpectrumBrowser(query, frames, false, hopFrames, true);
+  const nativeStarts = [];
+  const nativeReads = [];
+  const nativeStartSpectrumStream = browser.host.startSpectrumStream.bind(browser.host);
+  browser.host.startSpectrumStream = async (...args) => {
+    const reply = await nativeStartSpectrumStream(...args);
+    nativeStarts.push(reply.metadata);
+    return reply;
+  };
+  const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
+  browser.host.readSpectrumStream = async (...args) => {
+    const reply = await nativeReadSpectrumStream(...args);
+    nativeReads.push(reply.metadata);
+    return reply;
+  };
+  let subscription;
+  const notifications = [];
+  const publications = [];
+  const publicationKeys = new Set();
+  const remember = (notification) => {
+    notifications.push(notification);
+    if (!notification.available || subscription === undefined) return;
+    const result = subscription.readLatest();
+    if (result === undefined || result.capturedSample !== notification.metadata.capturedSample) return;
+    const key = `${notification.metadata.captureEpoch}:${notification.metadata.sequence}`;
+    if (publicationKeys.has(key)) return;
+    publicationKeys.add(key);
+    publications.push({ metadata: notification.metadata, result });
+  };
+  try {
+    subscription = (await browser.subscribeSpectrum({
+      ...query,
+      smoothingMs,
+      cadenceMs: 1,
+      onUpdate: remember,
+    })).handle;
+    await submitSpectrumSource(browser, frames);
+    if (browser.context.state === "suspended") await browser.context.resume();
+    const deadline = performance.now() + 10_000;
+    for (let attempt = 0; attempt < 512 && publications.length < 2; attempt += 1) {
+      await subscription.pump();
+      if (performance.now() >= deadline) break;
+    }
+    if (publications.length < 2) {
+      throw new Error(`H1024 browser probe published ${publications.length} windows`);
+    }
+    const first = publications[0];
+    const second = publications[1];
+    const firstResult = first.result;
+    const secondResult = second.result;
+    const firstFrequencies = firstResult.frequenciesHz.slice();
+    const firstLeft = firstResult.leftDb?.slice();
+    const firstRight = firstResult.rightDb?.slice();
+    secondResult.leftDb?.set([secondResult.leftDb[0]! + 100], 0);
+    const ownedArrays = firstResult.frequenciesHz !== secondResult.frequenciesHz
+      && firstResult.leftDb !== secondResult.leftDb
+      && firstResult.rightDb !== secondResult.rightDb
+      && firstResult.frequenciesHz.every((value, index) => value === firstFrequencies[index])
+      && (firstLeft === undefined || firstResult.leftDb?.every((value, index) => value === firstLeft[index]))
+      && (firstRight === undefined || firstResult.rightDb?.every((value, index) => value === firstRight[index]));
+    return {
+      requestHopFrames: hopFrames,
+      smoothingMs,
+      boundsHopFrames: subscription.bounds.hopFrames,
+      nativeStart: streamMetadataFields(nativeStarts[0]),
+      nativeRead: nativeReads.slice(0, 4).map(streamMetadataFields),
+      publicationCount: publications.length,
+      notificationHops: notifications.map((notification) => notification.metadata.hopFrames),
+      notificationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
+      publications: publications.slice(0, 2).map(({ metadata, result }) => ({
+        metadata: streamMetadataFields(metadata),
+        result: {
+          capturedSample: result.capturedSample.toString(),
+          endSample: result.endSample.toString(),
+          windowFrames: result.windowFrames,
+          binCount: result.binCount,
+          finite: Array.from(result.frequenciesHz).every(Number.isFinite)
+            && Array.from(result.leftDb ?? []).every(Number.isFinite)
+            && Array.from(result.rightDb ?? []).every(Number.isFinite),
+          ownedArrays: result.frequenciesHz !== result.leftDb
+            && result.frequenciesHz !== result.rightDb
+            && result.leftDb !== result.rightDb,
+        },
+      })),
+      startDelta: (secondResult.capturedSample - firstResult.capturedSample).toString(),
+      firstSpan: (firstResult.endSample - firstResult.capturedSample).toString(),
+      secondSpan: (secondResult.endSample - secondResult.capturedSample).toString(),
+      resultHopFrames: first.metadata.hopFrames,
+      resultSmoothingMs: first.metadata.smoothingMs,
+      ownedArrays,
+    };
+  } finally {
     await subscription?.close();
     await browser.close();
   }
@@ -698,6 +854,7 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     closedRefused,
     continuous: await runContinuousSpectrumQualification(),
     collection: await runSpectrumCollectionQualification(),
+    configuredHop: await runConfiguredSpectrumHopQualification(),
   };
 }
 
