@@ -285,9 +285,10 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
-function validSpectrumBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_BOOT_FIELDS)
+function validCapturedSpectrumBoot(snapshot) {
+  const options = snapshot.value;
+  if (options === null || options === undefined) return snapshot.validShape;
+  return snapshot.validShape
     && SPECTRUM_TARGETS.has(options.target)
     && typeof options.targetId === "string"
     && options.targetId.length > 0
@@ -298,17 +299,22 @@ function validSpectrumBoot(options) {
     && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
 }
 
-function validSpectrumCollectionBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_COLLECTION_FIELDS)
+function validCapturedSpectrumCollectionEntry(entry) {
+  return SPECTRUM_TARGETS.has(entry.target)
+    && typeof entry.targetId === "string"
+    && entry.targetId.length > 0
+    && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
+    && SPECTRUM_CHANNELS.has(entry.channels);
+}
+
+function validCapturedSpectrumCollectionBoot(snapshot) {
+  const options = snapshot.value;
+  if (options === null || options === undefined) return snapshot.validShape;
+  return snapshot.validShape
     && Array.isArray(options.entries)
     && options.entries.length > 0
-    && options.entries.every((entry) => hasExactFields(entry, SPECTRUM_COLLECTION_ENTRY_FIELDS)
-      && SPECTRUM_TARGETS.has(entry.target)
-      && typeof entry.targetId === "string"
-      && entry.targetId.length > 0
-      && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-      && SPECTRUM_CHANNELS.has(entry.channels))
+    && options.entries.every((entry, index) => snapshot.entryShapes[index]
+      && validCapturedSpectrumCollectionEntry(entry))
     && Number.isSafeInteger(options.maximumCaptureBytes)
     && options.maximumCaptureBytes > 0;
 }
@@ -339,9 +345,11 @@ function validSpectrumStreamMetadata(metadata) {
     && metadata.smoothingMs >= 0 && metadata.smoothingMs <= 10_000;
 }
 
-function validBootOptions(options) {
-  if (!hasExactFields(options, BOOT_OPTION_FIELDS)
-      && !(options?.spectrum === undefined && hasExactFields(options, LEGACY_BOOT_OPTION_FIELDS))) return false;
+function validBootOptions(snapshot) {
+  const options = snapshot.value;
+  if (options === null || typeof options !== "object") return false;
+  if (!snapshot.extendedFields
+      && !(options.spectrum === undefined && snapshot.legacyFields)) return false;
   return validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
     && validU64(options.consoleCommandQueueRecords)
@@ -354,8 +362,8 @@ function validBootOptions(options) {
     && validU64(options.consoleMasterTrackPlusOne)
     && options.consoleMasterTrackPlusOne <= 0xffffffffn
     && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n)
-    && validSpectrumBoot(options.spectrum ?? null)
-    && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
+    && validCapturedSpectrumBoot(snapshot.spectrum)
+    && validCapturedSpectrumCollectionBoot(snapshot.spectrumCollection)
     && (options.spectrum === null || options.spectrum === undefined
       || options.spectrumCollection === null || options.spectrumCollection === undefined);
 }
@@ -431,23 +439,106 @@ function snapshotDocument(document) {
   }
 }
 
-function snapshotBootOptions(input) {
-  if (input === null || typeof input !== "object") return input;
-  const options = { ...input };
-  if (options.spectrum !== null && typeof options.spectrum === "object") {
-    options.spectrum = { ...options.spectrum };
+function snapshotSpectrumBoot(input) {
+  if (input === null || input === undefined) return { value: input, validShape: true };
+  if (typeof input !== "object" || !hasExactFields(input, SPECTRUM_BOOT_FIELDS)) {
+    return { value: null, validShape: false };
   }
-  if (options.spectrumCollection !== null
-      && typeof options.spectrumCollection === "object"
-      && Array.isArray(options.spectrumCollection.entries)) {
-    options.spectrumCollection = {
-      ...options.spectrumCollection,
-      entries: options.spectrumCollection.entries.map((entry) => (
-        entry === undefined ? undefined : { ...entry }
-      )),
+  return {
+    value: {
+      target: input.target,
+      targetId: input.targetId,
+      channels: input.channels,
+      maximumCaptureBytes: input.maximumCaptureBytes,
+    },
+    validShape: true,
+  };
+}
+
+function snapshotSpectrumCollectionEntry(input) {
+  if (input === null || typeof input !== "object"
+      || !hasExactFields(input, SPECTRUM_COLLECTION_ENTRY_FIELDS)) {
+    return { value: undefined, validShape: false };
+  }
+  return {
+    value: {
+      target: input.target,
+      targetId: input.targetId,
+      channels: input.channels,
+    },
+    validShape: true,
+  };
+}
+
+function snapshotSpectrumCollectionBoot(input) {
+  if (input === null || input === undefined) {
+    return { value: input, validShape: true, entryShapes: [] };
+  }
+  if (typeof input !== "object" || !hasExactFields(input, SPECTRUM_COLLECTION_FIELDS)) {
+    return { value: null, validShape: false, entryShapes: [] };
+  }
+  const entries = input.entries;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { value: null, validShape: false, entryShapes: [] };
+  }
+  const entryShapes = [];
+  const capturedEntries = entries.map((entry, index) => {
+    const snapshot = snapshotSpectrumCollectionEntry(entry);
+    entryShapes[index] = snapshot.validShape;
+    return snapshot.value;
+  });
+  return {
+    value: {
+      entries: capturedEntries,
+      maximumCaptureBytes: input.maximumCaptureBytes,
+    },
+    validShape: true,
+    entryShapes,
+  };
+}
+
+function snapshotBootOptions(input) {
+  if (input === null || typeof input !== "object") {
+    return {
+      value: input,
+      extendedFields: false,
+      legacyFields: false,
+      spectrum: { value: null, validShape: false },
+      spectrumCollection: { value: null, validShape: false, entryShapes: [] },
     };
   }
-  return options;
+  const extendedFields = hasExactFields(input, BOOT_OPTION_FIELDS);
+  const spectrumInput = input.spectrum;
+  const legacyFields = !extendedFields
+    && spectrumInput === undefined
+    && hasExactFields(input, LEGACY_BOOT_OPTION_FIELDS);
+  if (!extendedFields && !legacyFields) {
+    return {
+      value: null,
+      extendedFields,
+      legacyFields,
+      spectrum: { value: null, validShape: false },
+      spectrumCollection: { value: null, validShape: false, entryShapes: [] },
+    };
+  }
+  const spectrum = snapshotSpectrumBoot(spectrumInput);
+  const spectrumCollection = snapshotSpectrumCollectionBoot(input.spectrumCollection);
+  return {
+    value: {
+      sourceRingFrames: input.sourceRingFrames,
+      maximumMemoryBytes: input.maximumMemoryBytes,
+      consoleCommandQueueRecords: input.consoleCommandQueueRecords,
+      consoleMeterBlocks: input.consoleMeterBlocks,
+      consoleObservationTaps: input.consoleObservationTaps,
+      consoleMasterTrackPlusOne: input.consoleMasterTrackPlusOne,
+      spectrum: spectrum.value,
+      spectrumCollection: spectrumCollection.value,
+    },
+    extendedFields,
+    legacyFields,
+    spectrum,
+    spectrumCollection,
+  };
 }
 
 /// The typed refusal for a browser that cannot run the shipped artifact.
@@ -1371,7 +1462,7 @@ export async function createMisoAudioWorkletHost(options) {
 
   const context = options.context;
   const document = options.document;
-  const bootOptions = snapshotBootOptions(options.options);
+  const bootSnapshot = snapshotBootOptions(options.options);
   const simd128ModuleUrl = options.simd128ModuleUrl;
   const workletModuleUrl = options.workletModuleUrl;
   const contextState = context?.state;
@@ -1384,11 +1475,12 @@ export async function createMisoAudioWorkletHost(options) {
       || !validU32(quantumFrames) || quantumFrames === 0
       || !validU32(sampleRateHz) || sampleRateHz === 0
       || documentSnapshot === undefined
-      || !validBootOptions(bootOptions)
+      || !validBootOptions(bootSnapshot)
       || typeof simd128ModuleUrl !== "string"
       || typeof workletModuleUrl !== "string") {
     throw webError(1);
   }
+  const bootOptions = bootSnapshot.value;
   bootOptions.spectrum = bootOptions.spectrum ?? null;
   bootOptions.spectrumCollection = bootOptions.spectrumCollection ?? null;
   // W4-D1: attest before allocating anything. Thrown outside the `try` below so it reaches the
