@@ -237,3 +237,14 @@ passed 278/278 tests, the AudioWorklet static/object/realtime/callgraph gates pa
 SDK package and 11/11 CLI tests passed, and generated/type, 26 resource-mutation, boot-budget,
 matrix-freshness, candidate membership/digest, and diff gates passed. B4 implementation and local
 qualification are complete; the requested fresh Astra medium adversarial review remains.
+
+**Final-review correction — complete in fresh Luna MAX round 1.** Astra medium reproduced one
+blocking omission regression against the actual pre-hop #851 artifact: generic ABI inventory
+validation exempted the capability and ordinary hop-aware boot but still required the new protected
+hop-aware boot, so an omitted `spectrumHopFrames` could not reach legacy boot. The correction treats
+all three new exports as additive during generic inventory validation while retaining exact
+capability and ordinary hop-aware-boot enforcement for explicit requests. The regression now removes
+all three exports and proves legacy boot occurs without a capability probe. Focused boot tests passed
+26/26, the exact-candidate headless gate passed 278/278, and the actual #851 asset accepts omission
+while refusing explicit H256. Generated/type and diff gates pass. A fresh Astra medium re-review is
+required before final PASS.

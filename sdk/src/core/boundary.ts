@@ -88,16 +88,22 @@ type ExportTable = Record<ExportName, (...args: (number | bigint)[]) => number |
 
 const SPECTRUM_HOP_CAPABILITY = "miso_engine_web_v1_spectrum_hop_capability";
 const SPECTRUM_HOP_BOOT = "miso_engine_web_v1_boot_with_spectrum_hop";
+const OBSERVATION_SPECTRUM_HOP_BOOT =
+  "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop";
+const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
+  SPECTRUM_HOP_CAPABILITY,
+  SPECTRUM_HOP_BOOT,
+  OBSERVATION_SPECTRUM_HOP_BOOT,
+]);
 type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
 
 function exportsOf(instance: WebAssembly.Instance): ExportTable {
   const table = instance.exports as Record<string, unknown>;
   for (const name of ABI_LAYOUT.exports) {
-    // These are additive capability exports. An older asset remains valid for the legacy boot
+    // These are additive spectrum-hop exports. An older asset remains valid for the legacy boot
     // path and is checked only when a caller explicitly requests the prepared spectrum hop.
-    if ((name as string) === SPECTRUM_HOP_CAPABILITY
-      || (name as string) === SPECTRUM_HOP_BOOT) continue;
+    if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
         phase: "asset",

@@ -766,12 +766,15 @@ describe("eval 8 -- lifecycle", () => {
 describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
   const capabilityExport = "miso_engine_web_v1_spectrum_hop_capability";
   const hopBootExport = "miso_engine_web_v1_boot_with_spectrum_hop";
+  const observationHopBootExport =
+    "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop";
 
   function proxiedAsset({
     abiVersion = ABI_LAYOUT.abiVersion,
     capability = 1,
     capabilityMissing = false,
     hopBoot = true,
+    observationHopBoot = true,
     throwOnCapability = false,
   } = {}) {
     const calls = { instantiates: 0, capability: 0, legacy: 0, hop: [] };
@@ -789,8 +792,9 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
               }
               if (name === capabilityExport) {
                 calls.capability += 1;
+                if (capabilityMissing) return undefined;
                 if (throwOnCapability) throw new Error("capability probe failed");
-                return capabilityMissing ? undefined : () => capability;
+                return () => capability;
               }
               if (name === hopBootExport) {
                 if (!hopBoot) return undefined;
@@ -799,6 +803,7 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
                   return target.miso_engine_web_v1_boot(length);
                 };
               }
+              if (name === observationHopBootExport && !observationHopBoot) return undefined;
               if (name === "miso_engine_web_v1_boot") {
                 return (...args) => {
                   calls.legacy += 1;
@@ -834,10 +839,16 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
     }
   });
 
-  test("omission uses the legacy boot without probing the optional exports", async () => {
-    const { fake, calls } = proxiedAsset({ throwOnCapability: true, hopBoot: false });
+  test("old assets with all additive exports omitted still use legacy boot", async () => {
+    const { fake, calls } = proxiedAsset({
+      capabilityMissing: true,
+      hopBoot: false,
+      observationHopBoot: false,
+      throwOnCapability: true,
+    });
     const boundary = await WasmBoundary.boot(fake, document);
     try {
+      assert.equal(calls.capability, 0);
       assert.equal(calls.legacy, 1);
       assert.deepEqual(calls.hop, []);
     } finally {
