@@ -187,3 +187,14 @@ verified membership, digest equality, SDK generated/type gates, and diff checks.
 reports the ABI validator and 27-mutation self-test plus the complete static/object/callgraph/
 resource/boot-budget Worklet gate PASS against this candidate. Integrated runtime/browser
 qualification, documentation, and result lineage remain B4b.
+
+**B4b1 actual-candidate headless integration — complete in fresh Luna MAX round 1.** Tests against
+the exact `e18acf9c…81106` Wasm now prove H256 and H1024 subscription bounds, smoothing metadata,
+fixed 2048-frame spans, exact overlapping starts, sequences/windows, finite analysis, and retained
+array ownership across publications. Omission retains the 48 kHz/128-frame H2048 profile. An
+identical-input omitted-versus-H256 comparison is bit-identical for every PCM block and plane. A
+bounded slow-read test renders 26 blocks to complete six H256 windows, reports one Gap with five
+dropped captures, drains the retained sample-zero window, and then resumes at sequence 6/sample
+1536 after two further renders. Root reran the three focused actual-Wasm tests and SDK type/syntax
+checks; the agent reports the complete headless gate at 278/278 PASS. Browser/Worker candidate
+qualification, supported-browser lineage, and documentation remain B4b2.
