@@ -1592,11 +1592,15 @@ export class ObservationSubscriptionOwner {
     // once now: waiting another hop can fill the queue again and perpetually return only gaps.
     // Manual pumps already let their caller request the next read without waiting for a timer.
     if (this.#transport.scheduler === undefined || read.metadata.status !== "gap") return;
-    for (const state of this.#spectrumHandles.values()) this.#notifySpectrum(state, true);
-    const recovery = await spectrumRead(job.query);
-    this.#assertEpoch(epoch);
-    this.#publishSpectrumRead(job, recovery);
-    this.#recordSpectrumLoss(job);
+    try {
+      const recovery = await spectrumRead(job.query);
+      this.#assertEpoch(epoch);
+      this.#publishSpectrumRead(job, recovery);
+      this.#recordSpectrumLoss(job);
+    } catch (error) {
+      for (const state of this.#spectrumHandles.values()) this.#notifySpectrum(state, true);
+      throw error;
+    }
   }
 
   #publishSpectrumRead(job: SpectrumJobState, read: SpectrumStreamRead): void {

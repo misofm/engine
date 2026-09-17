@@ -50,6 +50,85 @@ function queryFor(target, channels = CHANNELS) {
   };
 }
 
+function managedMetadata(query, status, sequence, droppedCaptures, captureEpoch = 1n, hopFrames = 256) {
+  return Object.freeze({
+    result: 0,
+    status,
+    target: query.target,
+    channels: query.channels,
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames,
+    sourceUnderrun: false,
+    captureEpoch,
+    sequence: BigInt(sequence),
+    droppedCaptures,
+    windows: BigInt(sequence),
+    capturedSample: BigInt(sequence * hopFrames),
+    endSample: BigInt((sequence + 1) * hopFrames),
+    analysisEpoch: captureEpoch,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+}
+
+function managedRead(query, status, sequence, droppedCaptures, captureEpoch = 1n, hopFrames = 256) {
+  const metadata = managedMetadata(query, status, sequence, droppedCaptures, captureEpoch, hopFrames);
+  if (status !== "ready") return { metadata };
+  return {
+    metadata,
+    result: {
+      target: query.target,
+      channels: query.channels,
+      sampleRateHz: 48_000,
+      windowFrames: WINDOW_FRAMES,
+      binCount: 1,
+      floorDb: -120,
+      frequenciesHz: new Float32Array([0]),
+      leftDb: new Float32Array([0]),
+      rightDb: new Float32Array([0]),
+      capturedSample: BigInt(sequence * hopFrames),
+      endSample: BigInt((sequence + 1) * hopFrames),
+      snapshotToken: captureEpoch * 1_000n + BigInt(sequence),
+      graphSourceUnderrun: false,
+      resultBytes: 37n,
+    },
+  };
+}
+
+function queuedManagedSpectrumOwner(query, queued) {
+  let reads = 0;
+  let timer;
+  let stopped = false;
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }),
+    readObservations: () => [],
+    console: () => { throw new Error("unused"); },
+    spectrumPrepared: () => query,
+    spectrumStart: async () => ({
+      ok: true,
+      result: 0,
+      code: "ok",
+      metadata: managedMetadata(query, "warming", 0, 0n),
+    }),
+    spectrumRead: async () => {
+      reads += 1;
+      const next = queued.shift();
+      assert.ok(next, "the test must queue a managed spectrum read");
+      return await next;
+    },
+    spectrumStop: async () => {
+      stopped = true;
+      return { ok: true, result: 0, code: "ok" };
+    },
+    scheduler: {
+      setInterval: (callback) => { timer = callback; return 1; },
+      clearInterval: () => { timer = undefined; },
+    },
+  }, undefined, undefined, { maximumDeliveredBytesPerSecond: 64 * 1024 * 1024 });
+  return { owner, counts: () => ({ reads, stopped }), timer: () => timer };
+}
+
 let candidateAssetPromise;
 
 function candidateAsset() {
@@ -898,8 +977,10 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   queued.push(read("gap", 1, 3n), read("ready", 2, 0n));
   await tick(86);
   assert.equal(calls, 3);
-  assert.equal(fast.at(-1).status, "gap");
+  assert.equal(fast.at(-1).status, "ready");
+  assert.equal(fast.at(-1).available, true);
   assert.equal(fast.at(-1).nativeMissedWindows, 3n);
+  assert.equal(fast.at(-1).skippedPublications, 1n);
   assert.equal(slow.length, 1, "recovery must respect the slower delivery cadence");
   assert.ok(fastHandle.readLatest(), "the immediate drain recovers an owned window");
   queued.push(read("pending", 2, 0n));
@@ -931,6 +1012,156 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   release(read("ready", 1, 0n, 2n));
   await closing;
   assert.equal(stopped, true);
+});
+
+test("managed spectrum cold-start H256 recovery publishes every ready window for 1.2 seconds", async (t) => {
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const queued = [];
+  for (let cycle = 0; cycle < 60; cycle += 1) {
+    queued.push(
+      managedRead(query, "gap", cycle * 2, BigInt(cycle + 1)),
+      managedRead(query, "ready", cycle * 2 + 1, BigInt(cycle + 1)),
+    );
+  }
+  const callbacks = [];
+  let subscription;
+  const { owner, counts, timer } = queuedManagedSpectrumOwner(query, queued);
+  subscription = (await owner.subscribeSpectrum({
+    ...query,
+    cadenceMs: 1,
+    onUpdate: (notification) => {
+      const latest = subscription.readLatest();
+      assert.ok(latest);
+      assert.equal(notification.status, "ready");
+      assert.equal(notification.available, true);
+      assert.equal(notification.nativeMissedWindows, 1n);
+      assert.equal(notification.skippedPublications, 1n);
+      assert.equal(notification.metadata.capturedSample, latest.capturedSample);
+      assert.equal(notification.metadata.endSample, latest.endSample);
+      callbacks.push(notification);
+    },
+  })).handle;
+  try {
+    for (let cycle = 0; cycle < 60; cycle += 1) {
+      now = (cycle + 1) * 20;
+      timer()();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(now, 1_200);
+    assert.equal(counts().reads, 120);
+    assert.equal(callbacks.length, 60);
+    assert.equal(callbacks.at(-1).metadata.sequence, 119n);
+    assert.equal(subscription.readLatest().snapshotToken, 1_119n);
+  } finally {
+    await subscription.close();
+  }
+});
+
+test("managed spectrum manual pump returns the recovered publication and callback once", async () => {
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const queued = [
+    managedRead(query, "gap", 0, 1n),
+    managedRead(query, "ready", 1, 1n),
+  ];
+  const callbacks = [];
+  const { owner, counts } = queuedManagedSpectrumOwner(query, queued);
+  const subscription = (await owner.subscribeSpectrum({
+    ...query,
+    cadenceMs: 100,
+    onUpdate: (notification) => callbacks.push(notification),
+  })).handle;
+  try {
+    const notification = await subscription.pump();
+    assert.equal(counts().reads, 2);
+    assert.equal(callbacks.length, 1);
+    assert.strictEqual(notification, callbacks[0]);
+    assert.equal(notification.status, "ready");
+    assert.equal(notification.available, true);
+    assert.equal(notification.nativeMissedWindows, 1n);
+    assert.equal(notification.skippedPublications, 1n);
+    assert.equal(notification.metadata.capturedSample, subscription.readLatest().capturedSample);
+    assert.equal(notification.metadata.endSample, subscription.readLatest().endSample);
+  } finally {
+    await subscription.close();
+  }
+});
+
+test("managed spectrum recovery rejection publishes a cadence-gated gap and preserves the error", async (t) => {
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const sentinel = new Error("recovery sentinel");
+  const queued = [
+    managedRead(query, "gap", 0, 1n), Promise.reject(sentinel),
+    managedRead(query, "gap", 1, 2n), Promise.reject(sentinel),
+    managedRead(query, "pending", 1, 2n),
+  ];
+  const callbacks = [];
+  const { owner, counts } = queuedManagedSpectrumOwner(query, queued);
+  const subscription = (await owner.subscribeSpectrum({
+    ...query,
+    cadenceMs: 10,
+    onUpdate: (notification) => callbacks.push(notification),
+  })).handle;
+  try {
+    await assert.rejects(subscription.pump(), (error) => error === sentinel);
+    assert.equal(counts().reads, 2);
+    assert.equal(callbacks.length, 1);
+    assert.equal(callbacks[0].status, "gap");
+    assert.equal(callbacks[0].available, false);
+    assert.equal(callbacks[0].nativeMissedWindows, 1n);
+    assert.equal(callbacks[0].skippedPublications, 0n);
+    assert.equal(subscription.readLatest(), undefined);
+
+    now = 1;
+    await assert.rejects(subscription.pump(), (error) => error === sentinel);
+    assert.equal(counts().reads, 4);
+    assert.equal(callbacks.length, 1, "a recovery rejection inside cadence must remain coalesced");
+    assert.equal(subscription.readLatest(), undefined);
+
+    now = 10;
+    const resumed = await subscription.pump();
+    assert.equal(resumed.status, "gap");
+    assert.equal(resumed.available, false);
+    assert.equal(resumed.nativeMissedWindows, 1n);
+    assert.equal(callbacks.length, 2);
+  } finally {
+    await subscription.close();
+  }
+});
+
+test("managed spectrum recovery terminal reads publish the bounded final state", async () => {
+  const query = queryFor({ kind: "output", outputId: "out" });
+  for (const scenario of [
+    { status: "pending", expected: "gap" },
+    { status: "gap", expected: "gap" },
+    { status: "failed", expected: "failed" },
+  ]) {
+    const queued = [
+      managedRead(query, "gap", 0, 1n),
+      managedRead(query, scenario.status, 1, 2n),
+    ];
+    const callbacks = [];
+    const { owner, counts } = queuedManagedSpectrumOwner(query, queued);
+    const subscription = (await owner.subscribeSpectrum({
+      ...query,
+      cadenceMs: 1,
+      onUpdate: (notification) => callbacks.push(notification),
+    })).handle;
+    try {
+      const notification = await subscription.pump();
+      assert.equal(counts().reads, 2, `${scenario.status} recovery must use two reads`);
+      assert.equal(callbacks.length, 1);
+      assert.strictEqual(notification, callbacks[0]);
+      assert.equal(notification.status, scenario.expected);
+      assert.equal(notification.available, false);
+      assert.equal(subscription.readLatest(), undefined);
+    } finally {
+      await subscription.close();
+    }
+  }
 });
 
 test("managed spectrum publication metadata survives pending and lifecycle reads", async (t) => {
@@ -1038,7 +1269,14 @@ test("managed spectrum publication metadata survives pending and lifecycle reads
 
     // A gap followed by a recovered ready window and then pending remains ready.
     await tick(read("gap", 3, 4n), read("ready", 4, 4n));
-    assert.equal(notifications.at(-1).status, "gap");
+    assert.equal(notifications.at(-1).status, "ready");
+    assert.equal(notifications.at(-1).available, true);
+    assert.equal(notifications.at(-1).metadata.sequence, 4n);
+    assert.equal(notifications.at(-1).metadata.status, "ready");
+    assert.equal(
+      notifications.at(-1).metadata.capturedSample,
+      subscription.readLatest().capturedSample,
+    );
     await tick(read("pending", 4, 4n));
     assert.equal(notifications.at(-1).status, "ready");
     assert.equal(notifications.at(-1).available, true);
