@@ -1132,6 +1132,41 @@ test("managed spectrum recovery rejection publishes a cadence-gated gap and pres
   }
 });
 
+test("managed spectrum fulfilled-invalid recovery rejects without a fallback publication", async () => {
+  const query = queryFor({ kind: "output", outputId: "out" });
+  const invalidRecovery = managedRead(query, "ready", 1, 1n);
+  invalidRecovery.result.resultBytes = BigInt(ABI_LAYOUT.constants.spectrumCaptureBytes) + 1n;
+  const queued = [
+    managedRead(query, "gap", 0, 1n),
+    invalidRecovery,
+    managedRead(query, "ready", 1, 1n),
+  ];
+  const callbacks = [];
+  const { owner, counts } = queuedManagedSpectrumOwner(query, queued);
+  const subscription = (await owner.subscribeSpectrum({
+    ...query,
+    cadenceMs: 1,
+    onUpdate: (notification) => callbacks.push(notification),
+  })).handle;
+  try {
+    await assert.rejects(subscription.pump(), /exceeded the subscription capture bound/);
+    assert.equal(counts().reads, 2);
+    assert.equal(callbacks.length, 0, "fulfilled validation failure must not emit a fallback gap");
+    assert.equal(subscription.revision, 1n, "the unpublished recovery must not advance the revision");
+    assert.equal(subscription.readLatest(), undefined);
+
+    const recovered = await subscription.pump();
+    assert.equal(counts().reads, 3);
+    assert.equal(callbacks.length, 1);
+    assert.strictEqual(recovered, callbacks[0]);
+    assert.equal(recovered.status, "ready");
+    assert.equal(recovered.available, true);
+    assert.equal(recovered.skippedPublications, 1n, "the gap cursor remains pending after validation failure");
+  } finally {
+    await subscription.close();
+  }
+});
+
 test("managed spectrum recovery terminal reads publish the bounded final state", async () => {
   const query = queryFor({ kind: "output", outputId: "out" });
   for (const scenario of [
