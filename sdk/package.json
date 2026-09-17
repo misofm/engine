@@ -1,6 +1,6 @@
 {
   "name": "@misofm/engine",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Typed Engine V1 SDK for agentic music production",
   "license": "Apache-2.0",
   "type": "module",

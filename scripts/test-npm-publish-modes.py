@@ -28,11 +28,11 @@ WORKFLOW = ROOT / ".github/workflows/npm-publish.yml"
 QUALIFICATION = ROOT / ".github/workflows/qualification.yml"
 
 PACKAGE = "@misofm/engine"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 EXPECTED_SHA = "a" * 40
 
 # The workflow was read and hashed before the authorized release edits. Normalizing precisely the
-# current #855 version/pin and the standing mode edits back out makes the test an invariant audit
+# current #860 version/pin and the standing mode edits back out makes the test an invariant audit
 # for all dispatch, publication, registry, consumer, attestation, pin and evidence statements.
 BASELINE_WORKFLOW_SHA256 = "478111e6393fda9e99dce3de8c521b71de0dcba141cc041ada2b0846352d107c"
 QUALIFY_PACK_STEP_SHA256 = "65f9cdee7267135423f20785b180ee192c3173ca60a7c2e47e7300601e4eaf91"
@@ -192,13 +192,13 @@ def normalize_authorized_edits(text: str) -> str:
             "shared re-smoke step must export MODE exactly once")
     require(text.count(PUBLISH_GUARD) == 1,
             "shared re-smoke step must carry exactly one publish-only dry-run guard")
-    # #855 changes only five version literals and the accepted artifact pin.
+    # #860 changes only five version literals and the accepted artifact pin.
     # Keep the historical baseline hash, so no other workflow edits are normalized away.
-    require(text.count("0.4.1") == 5, "expected five exact #855 release-version guards")
+    require(text.count("0.4.2") == 5, "expected five exact #860 release-version guards")
     release_pin = "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106"
     baseline_pin = "47d12d99c034a3209b9d142d51d5a1ea62c4bcbdbbb90dc074546b7a6f6d85ba"
-    require(text.count(release_pin) == 1, "expected the exact accepted #855 artifact pin")
-    text = text.replace("0.4.1", "0.2.4").replace(release_pin, baseline_pin, 1)
+    require(text.count(release_pin) == 1, "expected the exact accepted #860 artifact pin")
+    text = text.replace("0.4.2", "0.2.4").replace(release_pin, baseline_pin, 1)
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 
@@ -210,7 +210,7 @@ def check_static_contract(text: str, steps: list[Step]) -> None:
     named = step_map(steps)
     pack = named.get(PACK_NAME)
     require(pack is not None, "missing qualify-only pack step")
-    normalized_pack = pack.raw.replace('item.version !== "0.4.1"', 'item.version !== "0.2.4"', 1)
+    normalized_pack = pack.raw.replace('item.version !== "0.4.2"', 'item.version !== "0.2.4"', 1)
     require(hashlib.sha256(normalized_pack.encode()).hexdigest() == QUALIFY_PACK_STEP_SHA256,
             "qualify-only pack step is not byte-equivalent to the approved baseline")
     shared = named.get(SHARED_NAME)
@@ -333,7 +333,7 @@ def write_consumer_package():
         (root / name).write_text(source, encoding="utf-8")
     bindir = root / "bin"
     bindir.mkdir(exist_ok=True)
-    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.4.1");\n'
+    enginectl = '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; appendFileSync(process.env.ENGINECTL_MARKER, "enginectl\\n"); if (process.argv.includes("--version")) console.log("enginectl 0.4.2");\n'
     path = bindir / "enginectl.mjs"
     path.write_text(enginectl, encoding="utf-8")
     path.chmod(0o755)
@@ -402,7 +402,7 @@ SMOKE = '''import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const packageDir = process.argv[2];
 if (!packageDir || !existsSync(`${packageDir}/package.json`)) throw new Error("fixture smoke package is missing");
 const packageJson = JSON.parse(readFileSync(`${packageDir}/package.json`, "utf8"));
-if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.4.1") throw new Error("fixture package identity mismatch");
+if (packageJson.name !== "@misofm/engine" || packageJson.version !== "0.4.2") throw new Error("fixture package identity mismatch");
 appendFileSync(process.env.SMOKE_MARKER, "smoke\\n");
 '''
 
@@ -463,7 +463,7 @@ def valid_audit_report(sha512: str) -> dict:
     statement = {
         "_type": "https://in-toto.io/Statement/v1",
         "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": [{"name": "pkg:npm/%40misofm/engine@0.4.1", "digest": {"sha512": sha512}}],
+        "subject": [{"name": "pkg:npm/%40misofm/engine@0.4.2", "digest": {"sha512": sha512}}],
         "predicate": {
             "buildDefinition": {
                 "externalParameters": {"workflow": {
@@ -683,7 +683,7 @@ def test_invalid_shapes(workflow: str) -> None:
     )
     expect_invalid("folded run block", lambda: extract_steps(unknown_run))
     for label, old, new in (
-        ("wrong release version", 'PACKAGE_VERSION: "0.4.1"', 'PACKAGE_VERSION: "0.4.0"'),
+        ("wrong release version", 'PACKAGE_VERSION: "0.4.2"', 'PACKAGE_VERSION: "0.4.1"'),
         ("wrong release pin", "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106", "0" * 64),
     ):
         mutated = workflow.replace(old, new, 1)
