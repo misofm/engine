@@ -654,6 +654,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   let starts = 0;
   let stops = 0;
   let sequence = 0n;
+  let pendingAfterSelection = false;
   const metadata = (query, status = "warming") => Object.freeze({
     result: 0,
     status,
@@ -699,6 +700,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
       streamSelects += 1;
       activeQuery = query;
       activeSmoothing = smoothingMs;
+      pendingAfterSelection = true;
       return { ok: true, result: 0, code: "ok", metadata: metadata(query) };
     },
     spectrumStart: async (smoothingMs, query) => {
@@ -709,6 +711,10 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
     },
     spectrumRead: async (query) => {
       sequence += 1n;
+      if (pendingAfterSelection) {
+        pendingAfterSelection = false;
+        return { metadata: metadata(query, "pending") };
+      }
       return { metadata: metadata(query, "ready"), result: spectrumResult(query) };
     },
     spectrumStop: async () => {
@@ -737,6 +743,10 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   assert.deepEqual(update.configuration.target, secondQuery.target);
   assert.equal(update.configuration.smoothingMs, 250.5);
   assert.equal(first.readLatest(), undefined, "a changed selection starts with no old result");
+
+  const pendingNotification = await first.pump();
+  assert.equal(pendingNotification, undefined, "a collection replacement cannot publish its warming/pending state");
+  assert.equal(first.readLatest(), undefined, "a pending replacement read cannot resurrect the old result");
 
   const secondNotification = await first.pump();
   assert.equal(secondNotification.available, true);
@@ -894,6 +904,10 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   assert.ok(fastHandle.readLatest(), "the immediate drain recovers an owned window");
   queued.push(read("pending", 2, 0n));
   await tick(150);
+  assert.equal(slow.at(-1).status, "ready", "a pending read cannot relabel the waiting ready publication");
+  assert.equal(slow.at(-1).available, true);
+  assert.equal(slow.at(-1).metadata.status, "ready");
+  assert.equal(slow.at(-1).metadata.sequence, 2n);
   assert.equal(slow.at(-1).nativeMissedWindows, 3n, "older queued metadata cannot erase coalesced loss");
   assert.equal(slow.at(-1).skippedPublications, 1n);
   // A second gap in the recovery slot is published, but never recursively drained.
@@ -917,6 +931,145 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   release(read("ready", 1, 0n, 2n));
   await closing;
   assert.equal(stopped, true);
+});
+
+test("managed spectrum publication metadata survives pending and lifecycle reads", async (t) => {
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const prepared = queryFor({ kind: "output", outputId: "out" });
+  const metadata = (status, sequence, droppedCaptures, captureEpoch = 1n) => Object.freeze({
+    result: 0,
+    status,
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+    hopFrames: 256,
+    sourceUnderrun: false,
+    captureEpoch,
+    sequence: BigInt(sequence),
+    droppedCaptures,
+    windows: BigInt(sequence),
+    capturedSample: BigInt(sequence * 256),
+    endSample: BigInt((sequence + 1) * 256),
+    analysisEpoch: captureEpoch,
+    historyStartSample: 0n,
+    smoothingMs: 0,
+  });
+  const result = (sequence, captureEpoch = 1n) => ({
+    target: prepared.target,
+    channels: "both",
+    sampleRateHz: 48_000,
+    windowFrames: WINDOW_FRAMES,
+    binCount: 1,
+    floorDb: -120,
+    frequenciesHz: new Float32Array([0]),
+    leftDb: new Float32Array([0]),
+    rightDb: new Float32Array([0]),
+    capturedSample: BigInt(sequence * 256),
+    endSample: BigInt((sequence + 1) * 256),
+    snapshotToken: captureEpoch * 100n + BigInt(sequence),
+    graphSourceUnderrun: false,
+    resultBytes: 37n,
+  });
+  const read = (status, sequence, droppedCaptures, captureEpoch = 1n) => ({
+    metadata: metadata(status, sequence, droppedCaptures, captureEpoch),
+    ...(status === "ready" ? { result: result(sequence, captureEpoch) } : {}),
+  });
+  const queued = [];
+  const notifications = [];
+  let timer;
+  const owner = new ObservationSubscriptionOwner({
+    observationMap: () => ({ bindings: [] }),
+    readObservations: () => [],
+    console: () => { throw new Error("unused"); },
+    spectrumPrepared: () => prepared,
+    spectrumStart: async () => ({
+      ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n),
+    }),
+    spectrumRead: async () => {
+      const next = queued.shift();
+      assert.ok(next, "the test must queue a managed spectrum read before each tick");
+      return next;
+    },
+    spectrumStop: async () => ({ ok: true, result: 0, code: "ok" }),
+    scheduler: {
+      setInterval: (callback) => { timer = callback; return 1; },
+      clearInterval: () => { timer = undefined; },
+    },
+  }, undefined, undefined, { maximumDeliveredBytesPerSecond: 64 * 1024 * 1024 });
+  const subscription = (await owner.subscribeSpectrum({
+    ...prepared,
+    cadenceMs: 16,
+    onUpdate: (notification) => notifications.push(notification),
+  })).handle;
+  const tick = async (...reads) => {
+    queued.push(...reads);
+    now += 16;
+    timer();
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  try {
+    await tick(read("pending", 0, 0n));
+    assert.equal(notifications.length, 0, "initial pending metadata cannot create a publication");
+    assert.equal(subscription.readLatest(), undefined);
+
+    await tick(read("ready", 1, 0n));
+    assert.equal(notifications.at(-1).status, "ready");
+    assert.equal(notifications.at(-1).available, true);
+    assert.equal(notifications.at(-1).metadata.sequence, 1n);
+    assert.equal(
+      notifications.at(-1).metadata.capturedSample,
+      subscription.readLatest().capturedSample,
+    );
+    assert.equal(
+      notifications.at(-1).metadata.endSample,
+      subscription.readLatest().endSample,
+    );
+
+    // A ready publication followed by a gap and then pending remains a gap publication.
+    await tick(read("gap", 2, 3n), read("pending", 2, 3n));
+    assert.equal(notifications.at(-1).status, "gap");
+    assert.equal(notifications.at(-1).available, false);
+    assert.equal(notifications.at(-1).metadata.sequence, 2n);
+    await tick(read("pending", 2, 3n));
+    assert.equal(notifications.at(-1).status, "gap");
+    assert.equal(notifications.at(-1).metadata.status, "gap");
+
+    // A gap followed by a recovered ready window and then pending remains ready.
+    await tick(read("gap", 3, 4n), read("ready", 4, 4n));
+    assert.equal(notifications.at(-1).status, "gap");
+    await tick(read("pending", 4, 4n));
+    assert.equal(notifications.at(-1).status, "ready");
+    assert.equal(notifications.at(-1).available, true);
+    assert.equal(notifications.at(-1).metadata.sequence, 4n);
+    assert.equal(notifications.at(-1).metadata.status, "ready");
+    assert.equal(
+      notifications.at(-1).metadata.capturedSample,
+      subscription.readLatest().capturedSample,
+    );
+    assert.equal(
+      notifications.at(-1).metadata.endSample,
+      subscription.readLatest().endSample,
+    );
+
+    // A failed new epoch stays failed through pending/warming reads; the old ready state cannot
+    // be relabeled and surfaced as available until a new-epoch ready publication arrives.
+    await tick(read("failed", 0, 0n, 2n));
+    assert.equal(notifications.at(-1).status, "failed");
+    assert.equal(notifications.at(-1).available, false);
+    assert.equal(notifications.at(-1).metadata.captureEpoch, 2n);
+    await tick(read("pending", 0, 0n, 2n));
+    await tick(read("warming", 0, 0n, 2n));
+    assert.equal(notifications.at(-1).status, "failed");
+    assert.equal(notifications.at(-1).available, false);
+    await tick(read("ready", 1, 0n, 2n));
+    assert.equal(notifications.at(-1).status, "ready");
+    assert.equal(notifications.at(-1).available, true);
+    assert.equal(notifications.at(-1).metadata.captureEpoch, 2n);
+  } finally {
+    await subscription.close();
+  }
 });
 
 test("managed spectrum admission refuses before start and preserves a working stream on update refusal", async () => {
