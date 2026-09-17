@@ -1263,6 +1263,7 @@ export class ObservationSubscriptionOwner {
           query: Object.freeze({ ...desiredQuery }),
           smoothingMs: normalized.configuration.smoothingMs,
           metadata,
+          publicationMetadata: undefined,
           result: undefined,
           revision: current.revision + 1n,
           publicationSequence: current.publicationSequence + 1n,
@@ -1451,6 +1452,7 @@ export class ObservationSubscriptionOwner {
           ...query,
         }), smoothingMs: configuration.smoothingMs, refs: 0,
         metadata: cloneSpectrumStreamMetadata(metadata),
+        publicationMetadata: undefined,
         result: undefined, revision: 0n, publicationSequence: 0n,
         retainedBytes: 0, captureCadenceMs, nextCaptureAt: 0,
         publicationStamp: spectrumPublicationStamp(metadata),
@@ -1611,24 +1613,29 @@ export class ObservationSubscriptionOwner {
           phase: "output", code: "abiMismatch", result: 2,
         });
       }
+      // Keep the live native state current for loss accounting. Publication metadata is updated
+      // below only when a new public result/status is committed, so a pending read cannot relabel
+      // an undispatched ready publication.
+      job.metadata = metadata;
       if (job.publicationStamp !== stamp || job.result === undefined) {
         const retainedBytes = spectrumResultRetainedBytes(read.result);
         job.result = copySpectrumResult(read.result);
         job.retainedBytes = retainedBytes;
-        job.metadata = metadata;
+        job.publicationMetadata = metadata;
         job.revision += 1n;
         job.publicationSequence += 1n;
         job.publicationStamp = stamp;
       }
       return;
     }
+    // A non-result read still advances the live native state for loss accounting, while only a
+    // gap or failure is allowed to replace the public publication snapshot.
+    job.metadata = metadata;
     if (job.publicationStamp !== stamp && (metadata.status === "gap" || metadata.status === "failed")) {
-      job.metadata = metadata;
+      job.publicationMetadata = metadata;
       job.revision += 1n;
       job.publicationSequence += 1n;
       job.publicationStamp = stamp;
-    } else {
-      job.metadata = metadata;
     }
   }
 
@@ -1660,6 +1667,8 @@ export class ObservationSubscriptionOwner {
     const now = Date.now();
     if (respectCadence && now < state.nextDeliveryAt) return undefined;
     if (job.publicationSequence <= state.cursor) return undefined;
+    const publicationMetadata = job.publicationMetadata;
+    if (publicationMetadata === undefined) return undefined;
     const skippedPublications = job.publicationSequence - state.cursor - 1n;
     const nativeMissedWindows = state.pendingNativeMissed;
     state.pendingNativeMissed = 0n;
@@ -1671,9 +1680,9 @@ export class ObservationSubscriptionOwner {
       epoch: this.#epoch,
       job: job.id,
       revision: job.revision,
-      status: job.metadata.status,
-      metadata: job.metadata,
-      available: job.result !== undefined && job.metadata.status === "ready",
+      status: publicationMetadata.status,
+      metadata: publicationMetadata,
+      available: job.result !== undefined && publicationMetadata.status === "ready",
       nativeMissedWindows,
       skippedPublications,
     });
@@ -2125,6 +2134,8 @@ interface SpectrumJobState {
   smoothingMs: number;
   refs: number;
   metadata: SpectrumStreamMetadata;
+  /** Metadata belonging to the latest public publication, kept separate from live native state. */
+  publicationMetadata: SpectrumStreamMetadata | undefined;
   result: SpectrumResult | undefined;
   revision: bigint;
   publicationSequence: bigint;
