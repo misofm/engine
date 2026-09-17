@@ -21,11 +21,15 @@ Freeze SDK 0.4.3 without a new runtime change. The release-preparation tranche m
 
 Change package and root lockfile identities from 0.4.2 to 0.4.3 without dependency or integrity changes. Update the README install and release-record link to 0.4.3 and this issue. Update only the five workflow release/job/archive/provenance version literals. Keep the accepted Worklet pin unchanged. Update only current release identities and diagnostics in the publish fixture; preserve the historical normalized baseline, fixed workflow/qualify-step hashes, and accepted-pin literals.
 
+The six authorized paths are this spec, `sdk/package.json`, `sdk/package-lock.json`, `sdk/README.md`, `.github/workflows/npm-publish.yml`, and `scripts/test-npm-publish-modes.py`. The exact metadata delta is one package version, two root lockfile versions, two README identities, and five workflow literals. The fixture changes eight current 0.4.2 release literals to 0.4.3, four #860 diagnostics to #865, and the invalid-version mutation predecessor from 0.4.1 to 0.4.2. Preserve the 0.2.4 normalization baseline, both fixed hashes, both accepted-pin literals, and every dependency/integrity entry byte-for-byte. Commit `c78e1fbed267b8e1382a59beaf266eac015335bc` must remain an ancestor of the candidate.
+
 Do not edit runtime source/tests, Rust, DSP, ABI, hosts, generated files, policy defaults, session schema, generic publisher behavior, benchmarks, or V1 contract identities. Preserve exact-main SHA enforcement, qualify→publish→verify archive ownership, OIDC-only publication, immutable-version refusal, one real publication attempt, registry-convergence handling, and trusted SLSA provenance verification.
 
 ## Objective gates
 
-Before review, prove package install; release-mode/trust/artifact/generated/deletion/type gates; one fresh seven-file AudioWorklet closure with the unchanged accepted Wasm pin; headless/package and AudioWorklet gates; retained candidate archive extraction and artifact identity; a built-package repeated H256 gap/recovery pressure test showing every recovered publication reaches the managed callback; archive identities; exact-path/diff audit; and independent review before PR/exact-main qualification.
+Before review, prove package install; release-mode/trust/artifact/generated/deletion/type gates; one fresh seven-file AudioWorklet closure with the unchanged accepted Wasm pin; headless/package and AudioWorklet gates; retained candidate archive extraction and artifact identity; archive identities; exact-path/diff audit; and independent review before PR/exact-main qualification.
+
+The H256 gate must import `dist/core/observation-subscriptions.js` from the freshly extracted candidate archive and reproduce #863's cold-start scheduler shape with `hopFrames = 256`: 60 consecutive `gap -> ready` cycles over 1.2 seconds, exactly 120 transport reads with no capture exceeding two, and exactly 60 callbacks that are all ready/available. Every callback's captured sample, end sample, and snapshot identity must match `readLatest()`. Every recovered callback must retain one native miss and one skipped/coalesced publication, and the final sequence/token must equal the final ready result. A source TypeScript test does not satisfy this release gate.
 
 ## Immutable publication sequence
 
