@@ -52,3 +52,9 @@ Record all release commits, PR and exact-main qualification runs, npm qualify/pu
 - Registry 0.4.2 before work: parsed E404 / unused.
 - Existing release metadata matches the accepted 0.4.1 release at `1f754cb415e5f39123333c526c75110e33ad24df`.
 - No 0.4.2 preparation, workflow dispatch, publication, or registry mutation has occurred.
+
+## Implementation attempt 1 evidence
+
+The release-preparation tranche changes exactly the five authorized metadata paths. Package and lockfile identities are 0.4.2; the README install command and release record identify 0.4.2/#860; the publish workflow contains exactly five 0.4.2 literals and retains the accepted Worklet pin; the fixture updates only release identities and diagnostics while preserving the historical 0.2.4 normalization and fixed workflow/step hashes. No runtime, generated, ABI, dependency, integrity, or artifact content changed.
+
+`npm ci --ignore-scripts` passed in `sdk/`. The publish-mode reachability/trust gate, trust-list parser, artifact-builder contract, generated-surface checks, deletion gate and its 37-mutation self-test, SDK type gate, exact-path/literal audit, and `git diff --check` passed. Fresh closure/package qualification, retained archive evidence, independent review, PR/exact-main qualification, and immutable registry delivery remain.
