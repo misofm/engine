@@ -20,6 +20,8 @@ Authorized paths are only:
 
 In the fixture result, expose the recovered callback's status, availability, native-loss count, skipped/coalesced-publication count, notification identity, and owned-result identity. Update the obsolete pump comment/break so it waits for the recovered available publication rather than a visible gap. In `run.mjs`, replace the mandatory observed-gap callback with a dedicated recovery-delivery gate requiring ready/available status, positive truthful loss evidence, and exact notification/result identity. Add narrow mutation checks that prove the gate rejects erased loss, unavailable/non-ready recovery, and mismatched identity.
 
+Capture `recoveryDelivery` from the first ready/available callback and call `readLatest()` inside that callback so the sampled result cannot advance. Record only status, availability, decimal native/skipped loss counters, and notification/result captured/end sample identities. The gate parses those values canonically, requires both loss counters to be positive, requires a nonempty span, and requires exact notification/result span equality. Do not pin the observed values 16 and 1. Add exactly three mutation categories: zero both loss counters, change ready/available to gap/unavailable, and change only the result captured sample. Preserve the existing aggregate `continuous.gap` lifecycle assertion and remove only the obsolete `statuses.includes("gap")` conjunct from the known-signal gate.
+
 Do not change Engine/SDK runtime, native host, Wasm/artifacts, DSP, spectrum window/hop/smoothing, package/release identities, CI routing, timings, browser skips, numerical tolerances, or unrelated qualification behavior. Do not assert the scheduling-specific exact loss value 16; require positive truthful loss and identity preservation.
 
 ## Objective gates
@@ -30,6 +32,8 @@ Do not change Engine/SDK runtime, native host, Wasm/artifacts, DSP, spectrum win
 4. Existing SDK type, static Worklet, real-Wasm receiver, and hermetic gates pass proportionally.
 5. Exact three-path audit and `git diff --check` pass.
 6. Fresh adversarial review verifies the change tests #863's intended public contract rather than weakening qualification.
+
+The attempt-1 browser evidence must run each browser with `--check-matrix --self-test-mutations` against the accepted artifact. Also run SDK type/headless, static and real-Wasm Worklet checks, `node --check` for `run.mjs`, exact-path audit, and `git diff --check`. Every existing numeric signal assertion and tolerance must remain byte-for-byte unchanged.
 
 ## Delivery
 
