@@ -64,3 +64,14 @@ real-Wasm receiver lifecycle with red controls, and the hermetic Worklet suite p
 --check`, the exact three-path audit, and `git diff --check` passed. No Engine/SDK runtime, native
 host, Wasm/artifact, package/version, CI routing, timing, browser skip, DSP fixture, or tolerance
 changed. Sol's escalated attempt-1 implementation/review verdict is **PASS**.
+
+## Fresh Astra medium review
+
+PASS at clean checkpoint `d7a35063`, with no blockers. The reviewer confirmed the exact
+three-path scope, callback-time identity capture, canonical positive loss counters, exact nonempty
+notification/result span equality, and all three registered mutation controls. Only the obsolete
+visible-gap conjunct was removed; the aggregate gap assertion and every numeric, timing, browser,
+DSP, and tolerance requirement remain unchanged. An independent rerun of Chromium, Firefox, and
+WebKit with matrix and all self-test mutations passed against the accepted artifact. Focused
+managed-spectrum tests passed 10 with 3 artifact-dependent skips; syntax and diff checks passed.
+Review log: `/tmp/engine-867-astra-browser.log`.
