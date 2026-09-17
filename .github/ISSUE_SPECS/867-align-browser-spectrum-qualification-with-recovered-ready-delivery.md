@@ -46,3 +46,21 @@ This issue unblocks #865/#866. Merge this bounded qualification correction to `m
 - Current three-browser raw results: `/tmp/issue866-browser-current-Yklt0Q/`.
 - Pre-#863 Chromium control: `/tmp/issue866-browser-pre863-qcTQZY/chromium-continuous-result.json`.
 - No runtime/artifact correction is authorized or required.
+
+## Attempt 1 evidence
+
+The two-file implementation records the first ready/available callback together with its
+callback-time `readLatest()` span, positive native/coalesced loss counters, and exact notification
+span. The validator replaces only the obsolete visible-gap status requirement with a dedicated
+recovery-delivery gate. Three registered red mutations independently erase loss, change the
+delivery to gap/unavailable, and mismatch the result identity. The aggregate loss/lifecycle gate,
+H256, and every existing DSP, frequency, magnitude, meter, PCM, underrun, hop, smoothing, timing,
+and numerical-tolerance assertion remain unchanged.
+
+Against the accepted `/tmp/issue865-worklet` seven-file artifact, Chromium 151.0.7922.34,
+Firefox 153.0, and WebKit 26.5 each passed `--check-matrix --self-test-mutations`. SDK headless
+passed 284/284; SDK types, the focused SDK response bundle, Worklet static/source policy,
+real-Wasm receiver lifecycle with red controls, and the hermetic Worklet suite passed. `node
+--check`, the exact three-path audit, and `git diff --check` passed. No Engine/SDK runtime, native
+host, Wasm/artifact, package/version, CI routing, timing, browser skip, DSP fixture, or tolerance
+changed. Sol's escalated attempt-1 implementation/review verdict is **PASS**.
