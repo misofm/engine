@@ -56,3 +56,36 @@ artifact-builder output contract, generated-surface, deletion, and type gates. T
 authorized-path/literal audit passed for the specified package, lockfile, README, workflow, and
 fixture deltas; `git diff --check` passed. No closure build, archive pack, workflow dispatch,
 commit, push, PR, registry mutation, or publication was attempted in this tranche.
+
+## One-round candidate qualification evidence
+
+Sol qualified clean source checkpoint `172964aed7db43fc080191d41e94a7a5e02d8294`
+with accepted `c78e1fbed267b8e1382a59beaf266eac015335bc` ancestry. Against the fresh
+seven-file closure at `/tmp/issue865-worklet`, whose Wasm SHA-256 is the unchanged
+`e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`, the scripted SDK
+headless gate passed 284/284 tests in 31 suites, the package gate passed, and the Worklet
+static/object, explicit real-Wasm receiver, and full hermetic gates passed. The real-Wasm gate
+also passed its corrupt-Wasm and acknowledged-disposal mutation controls.
+
+npm 11.19.0 packed exactly one retained 98-file candidate at
+`/tmp/issue865-qualification/misofm-engine-0.4.3.tgz`. It is 1,331,353 bytes packed and
+5,460,599 bytes unpacked, with npm shasum
+`8a48c97c8f12f37b17436216552f4b259c2bbf65`, SHA-256
+`0b81dc9cec57d89703e42da5da592f5cb450ffec71a980ea0c4a00517cd294a0`, SHA-512
+`73b4226365f67288123599def4cf42d49f5bd279e0fc97cce901a1ce1bc7b5217492e9dc1b27189ff138a6d7fb2b3a94d104ef8c9c6d91b4163ab4f4f4c08a16`,
+and integrity
+`sha512-c7QiY2X2cogSNZne9M9C1J9b0nng/JfM6QGhzhvHtSF0kuncGycYn/E4ptf7KzqU0QTvjJxtkbQWOrT09MCKFg==`.
+A fresh extraction passed the independent archive smoke, strict declaration consumer, all four
+package-name imports, and `enginectl --version` = `0.4.3`; all seven packaged Engine artifacts
+are byte-identical to the qualified closure.
+
+The release-only H256 proof imported the fresh extraction's compiled
+`dist/core/observation-subscriptions.js`. It passed 60 consecutive `gap -> ready` cycles over
+1,200 ms with exactly 120 reads and exactly two reads per capture, 60/60 callbacks all
+`ready`/available, and callback captured sample, end sample, and snapshot token equal to
+`readLatest()` on every cycle. Every callback retained exactly one native miss and one
+skipped/coalesced publication. The final ready identity was sequence `119`, snapshot token
+`1119`, captured sample `30464`, and end sample `30720`. Qualification records and the sole
+archive are retained under `/tmp/issue865-qualification`. No source/runtime/test change, push,
+PR, workflow dispatch, registry mutation, or publication occurred. Sol's one-round local
+candidate-qualification verdict is **PASS**.
