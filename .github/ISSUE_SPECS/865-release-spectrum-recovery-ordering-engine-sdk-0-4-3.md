@@ -101,3 +101,28 @@ and strict-declaration checks passed. The reviewer reran the extracted compiled 
 observed 60/60 ready/available callbacks, exactly 120 reads and two per capture, matching
 publication identities, and one native miss plus one skipped publication per callback. No blocker
 remains before PR qualification and immutable registry delivery.
+
+## Public delivery evidence
+
+PR #866 merged the reviewed release preparation to `main` as
+`a3d71148e4144a396aa1ceb7fb83b6e671a0eced`. Exact-main qualification run
+35182753816 passed. Manual release qualification run 35183221601 rebuilt the frozen package at
+that exact SHA and produced a byte-identical archive: SHA-256
+`0b81dc9cec57d89703e42da5da592f5cb450ffec71a980ea0c4a00517cd294a0`, npm shasum
+`8a48c97c8f12f37b17436216552f4b259c2bbf65`, and integrity
+`sha512-c7QiY2X2cogSNZne9M9C1J9b0nng/JfM6QGhzhvHtSF0kuncGycYn/E4ptf7KzqU0QTvjJxtkbQWOrT09MCKFg==`.
+
+The single publication attempt was run 35183439402. Its OIDC publication step succeeded, while
+the bounded registry-convergence step timed out before npm's public read path exposed the new
+version. Publication was not retried. After the registry exposed 0.4.3 with the expected shasum
+and integrity, verify-only run 35183599463 passed public version/latest/access convergence, fresh
+registry imports, `enginectl --version`, npm signature audit, and the trusted SLSA v1 binding to
+the exact package, source SHA, and publication workflow.
+
+An independent public `npm pack @misofm/engine@0.4.3` was byte-identical to the reviewed and
+workflow-qualified archives. Its packaged AudioWorklet remains
+`e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106`. Fresh public archive
+imports and `enginectl --version` passed. The public compiled H256 proof again produced 60/60
+ready/available callbacks across 60 forced gap recoveries, exactly 120 reads and two reads per
+capture, matching callback/result identities, one native miss plus one skipped publication per
+callback, and final sequence/token `119`/`1119`.
