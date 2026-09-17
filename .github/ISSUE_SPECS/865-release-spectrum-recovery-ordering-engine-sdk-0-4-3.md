@@ -45,3 +45,14 @@ Record all commits, PR and exact-main qualification runs, release workflow IDs, 
 - Registry latest before work: 0.4.2.
 - Registry 0.4.3 before work: parsed E404 / unused.
 - No 0.4.3 preparation, workflow dispatch, publication, or registry mutation has occurred.
+
+## Attempt 1 preparation evidence
+
+Luna completed the metadata-only preparation pass in the release worktree based at
+`ccc6a64d5b66968089b4aa12a849948d69edba23`; `c78e1fbed267b8e1382a59beaf266eac015335bc`
+remains an ancestor. `npm ci --ignore-scripts` in `sdk` passed (5 packages added, 6 audited,
+0 vulnerabilities). The hermetic publish-mode fixture passed, as did the trust parser,
+artifact-builder output contract, generated-surface, deletion, and type gates. The exact
+authorized-path/literal audit passed for the specified package, lockfile, README, workflow, and
+fixture deltas; `git diff --check` passed. No closure build, archive pack, workflow dispatch,
+commit, push, PR, registry mutation, or publication was attempted in this tranche.
