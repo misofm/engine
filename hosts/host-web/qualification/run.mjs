@@ -30,7 +30,8 @@ const MUTATIONS = [
   "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
-  "sdk-spectrum-hop-wrong",
+  "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
+  "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
 ];
 
 function option(name) {
@@ -452,6 +453,13 @@ function validateSdkResponse(browserName, response) {
   "SDK spectrum query did not prove owned arrays, graph-boundary distinction, or lifecycle refusals");
   const continuous = spectrum?.continuous;
   const continuousFirst = continuous?.first;
+  const recoveryDelivery = continuous?.recoveryDelivery;
+  const recoveryNativeMissedWindows = canonicalU64(recoveryDelivery?.nativeMissedWindows);
+  const recoverySkippedPublications = canonicalU64(recoveryDelivery?.skippedPublications);
+  const recoveryNotificationCapturedSample = canonicalU64(recoveryDelivery?.notificationCapturedSample);
+  const recoveryNotificationEndSample = canonicalU64(recoveryDelivery?.notificationEndSample);
+  const recoveryResultCapturedSample = canonicalU64(recoveryDelivery?.resultCapturedSample);
+  const recoveryResultEndSample = canonicalU64(recoveryDelivery?.resultEndSample);
   gate(browserName, "sdk-spectrum-continuous", continuous?.pendingBeforeRender === true
     && continuous?.sharedJob === true && continuous?.automaticDelivery === true
     && continuous?.windows >= 1 && continuous?.gap === true
@@ -459,7 +467,6 @@ function validateSdkResponse(browserName, response) {
     && continuous?.staleReadRefused === true,
   "continuous spectrum did not prove warmup, shared ownership, capture loss, or close lifecycle");
   gate(browserName, "sdk-spectrum-continuous", continuous?.statuses?.includes("ready") === true
-    && continuous?.statuses?.includes("gap") === true
     && continuous?.hopFrames === 256
     && continuous?.nativeStart?.hopFrames === 256
     && continuous?.nativeStart?.smoothingMs === 0
@@ -494,6 +501,19 @@ function validateSdkResponse(browserName, response) {
     && Math.abs(continuousFirst.responseGainDb?.[0] - 6) < 0.02
     && Math.abs(continuousFirst.responseGainDb?.[1] - 6) < 0.02,
   "continuous spectrum did not align the 750 Hz peak with response, meter, and owned PCM");
+  gate(browserName, "sdk-spectrum-recovery", recoveryDelivery?.status === "ready"
+    && recoveryDelivery?.available === true
+    && recoveryNativeMissedWindows !== undefined && recoveryNativeMissedWindows > 0n
+    && recoverySkippedPublications !== undefined && recoverySkippedPublications > 0n
+    && recoveryNotificationCapturedSample !== undefined
+    && recoveryNotificationEndSample !== undefined
+    && recoveryNotificationEndSample > recoveryNotificationCapturedSample
+    && recoveryResultCapturedSample !== undefined
+    && recoveryResultEndSample !== undefined
+    && recoveryResultEndSample > recoveryResultCapturedSample
+    && recoveryNotificationCapturedSample === recoveryResultCapturedSample
+    && recoveryNotificationEndSample === recoveryResultEndSample,
+  "continuous spectrum recovery did not preserve positive loss and exact notification/result identity");
   const collection = spectrum?.collection;
   const collectionFirstCaptured = canonicalU64(collection?.firstCapturedSample);
   const collectionFirstEnd = canonicalU64(collection?.firstEndSample);
@@ -602,6 +622,18 @@ function mutate(result, mutation) {
   }
   if (mutation === "sdk-spectrum-hop-wrong") {
     copy.sdkResponse.spectrum.continuous.first.hopFrames = 2_048;
+  }
+  if (mutation === "sdk-spectrum-recovery-loss") {
+    copy.sdkResponse.spectrum.continuous.recoveryDelivery.nativeMissedWindows = "0";
+    copy.sdkResponse.spectrum.continuous.recoveryDelivery.skippedPublications = "0";
+  }
+  if (mutation === "sdk-spectrum-recovery-unavailable") {
+    copy.sdkResponse.spectrum.continuous.recoveryDelivery.status = "gap";
+    copy.sdkResponse.spectrum.continuous.recoveryDelivery.available = false;
+  }
+  if (mutation === "sdk-spectrum-recovery-identity") {
+    const recovery = copy.sdkResponse.spectrum.continuous.recoveryDelivery;
+    recovery.resultCapturedSample = (BigInt(recovery.notificationCapturedSample) + 1n).toString();
   }
   return copy;
 }
