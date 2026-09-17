@@ -89,3 +89,15 @@ skipped/coalesced publication. The final ready identity was sequence `119`, snap
 archive are retained under `/tmp/issue865-qualification`. No source/runtime/test change, push,
 PR, workflow dispatch, registry mutation, or publication occurred. Sol's one-round local
 candidate-qualification verdict is **PASS**.
+
+## Fresh Astra medium review
+
+PASS at clean checkpoint `85bef8f7`. The reviewer independently confirmed the exact six-path
+metadata-only diff and literal counts, accepted-source ancestry, unchanged dependencies,
+integrities, pins, historical hashes, and publisher semantics. The retained archive hashes and
+all 98 extracted members matched; all seven closure artifacts were byte-identical. Independent
+publisher, trust, type, generated/deletion, artifact-builder, spectrum, fresh-extraction smoke,
+and strict-declaration checks passed. The reviewer reran the extracted compiled H256 proof and
+observed 60/60 ready/available callbacks, exactly 120 reads and two per capture, matching
+publication identities, and one native miss plus one skipped publication per callback. No blocker
+remains before PR qualification and immutable registry delivery.
