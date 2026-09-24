@@ -30,7 +30,7 @@ compile, not deployment defaults.
 
 ## Reproducible checks
 
-The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
+The pinned `rust-toolchain.toml` installs Rust 1.98.1 with `clippy`, `rustfmt`, and the browser
 Wasm standard library. After the workspace exists, the relevant commands are:
 
 ```bash

@@ -53,7 +53,7 @@ STEP_HEADERS = (
     "      - name: Guard release identity, accepted ancestry, and rejected commits",
     "      - name: Require a successful qualification dispatch before publication or recovery",
     "      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification",
-    "      - name: Install Rust 1.97.1 and the Wasm target",
+    "      - name: Install Rust 1.98.1 and the Wasm target",
     "      - name: Install locked SDK dependencies",
     "      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin",
     "      - name: Run generated, deletion, type, headless, and package preparation gates",
@@ -195,10 +195,14 @@ def normalize_authorized_edits(text: str) -> str:
     # #860 changes only five version literals and the accepted artifact pin.
     # Keep the historical baseline hash, so no other workflow edits are normalized away.
     require(text.count("0.4.2") == 5, "expected five exact #860 release-version guards")
-    release_pin = "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106"
+    # #877 repins the artifact for Rust 1.98.1 and changes only the two toolchain literals
+    # (the `RUSTUP_TOOLCHAIN` env and the install step name); both normalize back to 1.97.1.
+    release_pin = "08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd"
     baseline_pin = "47d12d99c034a3209b9d142d51d5a1ea62c4bcbdbbb90dc074546b7a6f6d85ba"
-    require(text.count(release_pin) == 1, "expected the exact accepted #860 artifact pin")
+    require(text.count(release_pin) == 1, "expected the exact accepted #877 artifact pin")
+    require(text.count("1.98.1") == 2, "expected exactly two #877 toolchain literals")
     text = text.replace("0.4.2", "0.2.4").replace(release_pin, baseline_pin, 1)
+    text = text.replace("1.98.1", "1.97.1")
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 
@@ -684,7 +688,7 @@ def test_invalid_shapes(workflow: str) -> None:
     expect_invalid("folded run block", lambda: extract_steps(unknown_run))
     for label, old, new in (
         ("wrong release version", 'PACKAGE_VERSION: "0.4.2"', 'PACKAGE_VERSION: "0.4.1"'),
-        ("wrong release pin", "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106", "0" * 64),
+        ("wrong release pin", "08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd", "0" * 64),
     ):
         mutated = workflow.replace(old, new, 1)
         expect_invalid(label, lambda: check_static_contract(mutated, extract_steps(mutated)))
