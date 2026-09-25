@@ -947,8 +947,9 @@ fn chains_into_model(
     if earlier.len() != later.len() || earlier.is_empty() {
         return false;
     }
+    // Issue #916 dropped the model's `producer.output != program.output` clause together with the
+    // runtime's: it compared slots, and the host reads no arena buffer.
     earlier.iter().zip(later.iter()).all(|(before, after)| {
-        let producer = &program.ops[*before];
         let consumer = &program.ops[*after];
         consumer.input_count() == 1
             && consumer.sidechain.is_none()
@@ -956,7 +957,6 @@ fn chains_into_model(
             && first_producer[*after] == Some(*before)
             && readers[*before].len() == 1
             && readers[*before][0] == *after
-            && producer.output != program.output
     })
 }
 
@@ -1805,8 +1805,14 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
     assert!(route_accepted > 0, "route corpus must admit folds");
     assert!(route_refused > 0, "route corpus must refuse folds");
     assert_eq!(chained_graphs, 3563, "the chained corpus moved");
+    // 3752 until issue #916. Dedicating the session output let the colouring hand the Output the
+    // slot of a chain's retired earlier slot, and `chains_into`'s slot comparison with
+    // `program.output` then declined that merge by coincidence. #916 removed the comparison: the
+    // host reads no arena buffer, and the Output op reads its producer, which the readership
+    // clause counts. Every one of the 110 chains that now also merge interprets without a
+    // divergence above.
     assert_eq!(
-        merged_runs, 3752,
+        merged_runs, 3862,
         "the number of realised multi-slot chains moved: if this ever falls to zero the arm \
          above is passing on a corpus where nothing merges"
     );

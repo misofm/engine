@@ -4200,6 +4200,11 @@ fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usi
 /// The deferred fader's physical buffer must stay private until its original matrix operation.
 /// Any intervening read, write, delayed staging slot or observer-visible alias declines the split
 /// pair, leaving both original owners in the ordinary scalar path.
+///
+/// The fader's buffer is no longer compared with `program.output` (issue #916). The host reads
+/// no arena buffer, and the Output op, being dedicated, never shares a live buffer with the
+/// fader. A matching slot only means the colouring gave the Output that slot after the pair
+/// retired it: see [`chains_into`]'s session-output bullet.
 fn scalar_split_interval_is_clear(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -4209,9 +4214,6 @@ fn scalar_split_interval_is_clear(
     matrix: usize,
 ) -> bool {
     let buffer = program.ops[fader].output;
-    if program.output == buffer {
-        return false;
-    }
     let fader_node = &spec.nodes[program.ops[fader].node as usize].id;
     if parts.observers.contains_key(fader_node)
         || taps
@@ -5221,12 +5223,16 @@ type ScatterRedirect = (usize, usize, usize);
 ///   producer's buffer directly ([`bank_gather_source`]), and redirecting the scatter away from it
 ///   would hand that gather the previous block's words. The two redirects are each other's only
 ///   incompatibility, so this is where they are kept apart.
-/// * **Not the session output.** A producer whose buffer is the session output's is declined. Since
-///   issue #916 the Output is dedicated storage and never in place, so no producer shares its
-///   buffer and this clause cannot fire; it stays as a conservative guard. The consumer side of
-///   the same hazard -- a redirect *into* the Output op, whose storage is the host's planes -- is
-///   declined in `build_sequential`, outside this predicate, so the corpus that drives this
-///   function through [`scatter_redirects_over_program`] still sees every clause it models.
+/// * **Not the session output.** A producer whose buffer is `program.output` is declined. Since
+///   issue #916 this is a slot comparison and nothing more. The Output is dedicated storage and
+///   never in place, so no producer shares its *live* buffer. The clause can still fire when the
+///   colouring hands the Output a producer's slot after that producer retired. That declines a
+///   redirect that would have been sound. [`chains_into`] and `scalar_split_interval_is_clear`
+///   dropped the same comparison in #916. This one is kept because the program-level model
+///   mirrors it and the corpus drives the two against each other through
+///   [`scatter_redirects_over_program`], so restating it is a change of its own. The consumer side
+///   -- a redirect *into* the Output op, whose storage is the host's planes -- is declined in
+///   `build_sequential`, outside this predicate.
 /// * **Nothing between the scatter and the consumer names the consumer's buffer.** This is the one
 ///   clause with no counterpart on the gather side, and it is the load-bearing one. The scatter now
 ///   writes the consumer's buffer at the *chain's* position, which is earlier -- often much
@@ -5330,10 +5336,10 @@ fn scatter_redirects(
 ///   buffer. It re-derives the fact from the colouring rather than inferring it.
 /// * **not already in place** is an early-out: if the consumer already writes the producer's
 ///   buffer, the redirect's target *is* that buffer and nothing changes.
-/// * **not the session output** can no longer fire at all: since issue #916 the Output is dedicated
-///   storage, so it is never folded onto its producer in place and no producer shares its buffer.
-///   Before that it was subsumed by the clause above wherever it could fire. It is kept as a
-///   conservative guard. The hazard it defended, a stale session output, now lives on the consumer
+/// * **not the session output** no longer defends a live hazard. Since issue #916 the Output is
+///   dedicated storage, never folded onto its producer in place, and the host reads no arena
+///   buffer. It can still fire by slot coincidence (see the clause's own bullet above), which only
+///   declines. The hazard it once defended, a stale session output, now lives on the consumer
 ///   side, and `build_sequential` declines a redirect into the Output op.
 ///
 /// **Pairwise-distinct scatter targets is defensive by construction, not merely unreached.** The
@@ -6116,8 +6122,17 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send, a
 ///   second consumer or a sidechain source would read the pre-stage signal; `op_dataflow` counts
 ///   sidechain reads, so a sidechained consumer of `earlier` is one of these and not an omission.
-/// * **No observer, and not the session output.** An observer bound to `earlier` fires after the
-///   unit and would see the chain's input; the session output is read by the host.
+/// * **No observer.** An observer bound to `earlier` fires after the unit and would see the
+///   chain's input.
+/// * **Not the session output, and not by buffer index (issue #916).** This used to decline
+///   `earlier.output == program.output`, because the host copied that buffer out after the last
+///   unit. The host no longer reads any arena buffer: the Output op writes the host's planes.
+///   The Output is dedicated storage, so its op is never in place over a producer. It *reads*
+///   its producer, and the readership clause above already counts that read. What the slot
+///   comparison still matched was a producer whose physical slot the colouring hands the Output
+///   *after* that producer retired. That is a colouring coincidence, not a hazard. On the
+///   builtins harness, it moved the scalar pair from the track that retires last to the other
+///   one. `crates/graph/tests/MUTATIONS.md` row 916-16 is the evidence.
 /// * **No *observed* alias.** A `program::Tap` aliases an elided stage boundary onto `earlier`'s
 ///   buffer. The alias is a name, not a read -- an edge out of it resolves to `earlier` and is
 ///   already counted as a second reader above -- so a tap on its own is not a reason to decline.
@@ -6165,9 +6180,6 @@ fn chains_into(
             return false;
         }
         if readers[*before].len() != 1 || readers[*before][0] != *after {
-            return false;
-        }
-        if producer.output == program.output {
             return false;
         }
         let node = &spec.nodes[producer.node as usize].id;
