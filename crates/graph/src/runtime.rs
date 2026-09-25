@@ -4216,7 +4216,7 @@ pub(crate) fn build_sequential(
             .collect();
         units.push(finish_unit(&mut parts, &membership, members, installation));
     }
-    apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
+    apply_scatter_redirects(program, &redirects, &unit_of_run, &op_slot, &mut units);
     let folds = fold.as_ref().map_or(0, |fold| {
         fold.runs.iter().map(|(_, lanes)| lanes.len() as u64).sum()
     });
@@ -4702,15 +4702,27 @@ pub(crate) fn scatter_redirects_over_program(
 /// becomes its own output, which is the shape `reduce_plane` already treats as "nothing to copy".
 /// The consumer therefore runs exactly as an `in_place` op does, which is what it would have been
 /// had its producer not been dedicated storage.
+///
+/// A redirect names its chain by *run* (`run_units`), and `units` holds only the emitted ones: a
+/// route the fold retired emits no unit, so every chain after it sits at a lower index than its
+/// run. `unit_of_run` is that mapping, and indexing `units` by the run directly -- as this did
+/// until it was found under issue #886 -- panics at bind, or repoints another unit's member, for
+/// any chain that redirects after a folded one.
 fn apply_scatter_redirects(
     program: &ExecutionProgram,
     redirects: &[ScatterRedirect],
+    unit_of_run: &[Option<usize>],
     op_slot: &[Option<(usize, usize)>],
     units: &mut [RuntimeUnit],
 ) {
     for (run, member, consumer) in redirects.iter().copied() {
         let target = ARENA_BASE + program.ops[consumer].output.0;
-        let RuntimeUnit::Bank { members, .. } = &mut units[run] else {
+        let Some(RuntimeUnit::Bank { members, .. }) = unit_of_run
+            .get(run)
+            .copied()
+            .flatten()
+            .and_then(|unit| units.get_mut(unit))
+        else {
             continue;
         };
         members[member].output = target;
@@ -8624,5 +8636,305 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A scatter redirect in a chain rendered after a folded one (found under issue #886).
+    // -----------------------------------------------------------------------------------------
+
+    /// A bound scalar fader that is not an identity and mixes its planes: its buffer changes the
+    /// moment it runs, so anything that read that buffer after the fader ran would see other words.
+    struct ScalarTilt;
+
+    impl GraphRuntimeProcessor for ScalarTilt {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                let (a, b) = (*left, *right);
+                *left = a * 0.625 + b * 0.0625;
+                *right = b * 0.875 - a * 0.1875;
+            }
+            Ok(())
+        }
+    }
+
+    /// Four tracks `Input -> PostMatrix (one W4 builtin bank) -> Route -> bus`, then the bus
+    /// `Input (the four routes' reduction) -> PostInputBuiltins (a one-lane builtin bank) ->
+    /// PostFader (bound) -> Route -> Output`.
+    ///
+    /// The tracks' routes fold into the bus input, which retires four route runs; the bus's bank
+    /// renders after them, and its dedicated last slot redirects its scatter into the fader. Three
+    /// dangling pad strips (`Input -> PostFader`, bound, read by nothing) take the three lowest
+    /// arena slots and free them before the bus allocates, so the bus -- and the session output in
+    /// place on it -- lands on slots no track uses: `foldable_lane` declines a lane that shares the
+    /// session output's slot, and without the pads the colouring hands the output a track's.
+    fn folded_bus_plan(fold_declined: bool) -> engine::realtime::PreparedRenderPlan {
+        const FRAMES: u32 = 13;
+        let id = |text: &str| crate::StableGraphId::parse(text).expect("stable id");
+        let stage = |track: &str, stage| GraphNodeId::TrackStage {
+            track_id: id(track),
+            stage,
+        };
+        let tracks: Vec<String> = (0..4).map(|track| format!("track{track:02}")).collect();
+        let inputs: Vec<_> = tracks
+            .iter()
+            .map(|track| stage(track, TrackStage::Input))
+            .collect();
+        let members: Vec<_> = tracks
+            .iter()
+            .map(|track| stage(track, TrackStage::PostMatrix))
+            .collect();
+        let route_ids: Vec<_> = (0..4)
+            .map(|track| id(&format!("route{track:02}")))
+            .collect();
+        let routes: Vec<_> = route_ids
+            .iter()
+            .map(|route_id| GraphNodeId::Route {
+                route_id: route_id.clone(),
+            })
+            .collect();
+        let pads: Vec<_> = (0..3)
+            .map(|pad| stage(&format!("pad{pad}"), TrackStage::Input))
+            .collect();
+        let pad_ends: Vec<_> = (0..3)
+            .map(|pad| stage(&format!("pad{pad}"), TrackStage::PostFader))
+            .collect();
+        let bus_input = stage("bus", TrackStage::Input);
+        let bus_member = stage("bus", TrackStage::PostInputBuiltins);
+        let bus_fader = stage("bus", TrackStage::PostFader);
+        let bus_route_id = id("routebus");
+        let bus_route = GraphNodeId::Route {
+            route_id: bus_route_id.clone(),
+        };
+        let output = GraphNodeId::Output {
+            output_id: id("main"),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue886".to_owned(),
+        };
+        let main = |target: &GraphNodeId| GraphEdgeId::TrackMain {
+            target: target.clone(),
+        };
+        let mut edges = Vec::new();
+        for track in 0..4 {
+            edges.push(edge(main(&members[track]), &inputs[track], &members[track]));
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_ids[track].clone(),
+                },
+                &members[track],
+                &routes[track],
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: route_ids[track].clone(),
+                },
+                &routes[track],
+                &bus_input,
+            ));
+        }
+        for (pad, end) in pads.iter().zip(&pad_ends) {
+            edges.push(edge(main(end), pad, end));
+        }
+        edges.push(edge(main(&bus_member), &bus_input, &bus_member));
+        edges.push(edge(main(&bus_fader), &bus_member, &bus_fader));
+        edges.push(edge(
+            GraphEdgeId::RouteSource {
+                route_id: bus_route_id.clone(),
+            },
+            &bus_fader,
+            &bus_route,
+        ));
+        edges.push(edge(
+            GraphEdgeId::RouteDestination {
+                route_id: bus_route_id,
+            },
+            &bus_route,
+            &output,
+        ));
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let levels: Vec<Vec<GraphNodeId>> = vec![
+            pads.iter().chain(&inputs).cloned().collect(),
+            pad_ends.iter().chain(&members).cloned().collect(),
+            routes.clone(),
+            vec![bus_input.clone()],
+            vec![bus_member.clone()],
+            vec![bus_fader.clone()],
+            vec![bus_route.clone()],
+            vec![output.clone()],
+        ];
+        let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(FRAMES),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let bank = |members: Vec<GraphNodeId>| GraphPreparedBuiltinBank {
+            backend: lane::Backend::Simd4,
+            members: members.into_boxed_slice(),
+            processor: Box::new(CrossTilt),
+            scratch: AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
+        };
+        let transform = |index: usize| RouteTransform {
+            gain: 0.5 + 0.0625 * index as f32,
+            ll: 0.875,
+            lr: -0.25 + 0.03125 * index as f32,
+            rl: 0.3,
+            rr: 1.125 - 0.046875 * index as f32,
+        };
+        let required_bindings: Vec<_> = inputs
+            .iter()
+            .chain(&members)
+            .chain(&pads)
+            .chain(&pad_ends)
+            .chain([&bus_input, &bus_member, &bus_fader, &output])
+            .cloned()
+            .collect();
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 886,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: nodes.clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: routes
+                .iter()
+                .chain([&bus_route])
+                .enumerate()
+                .map(|(index, node)| crate::PreparedRoute {
+                    node: node.clone(),
+                    transform: transform(index),
+                })
+                .collect(),
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: vec![bank(members.clone()), bank(vec![bus_member])],
+            observers: Vec::new(),
+        });
+        let mut bindings: Vec<GraphNodeBinding> = inputs
+            .iter()
+            .chain(&pads)
+            .enumerate()
+            .map(|(seed, node)| {
+                GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(seed as u32)))
+            })
+            .collect();
+        bindings.extend(
+            pad_ends
+                .iter()
+                .chain([&bus_fader])
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(ScalarTilt))),
+        );
+        bindings.push(GraphNodeBinding::identity(bus_input));
+        bindings.push(GraphNodeBinding::identity(output));
+        test_only_set_route_fold_declined(fold_declined);
+        let bound = plan
+            .bind(crate::GraphRuntimeBindings {
+                envelope,
+                nodes: bindings,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        test_only_set_route_fold_declined(false);
+        bound
+    }
+
+    /// A chain that redirects its scatter after a folded chain binds, and redirects its own lane.
+    ///
+    /// `apply_scatter_redirects` indexed `units` by run, and the fold retires route runs without
+    /// emitting units for them; in this plan the bus's run is 16 and `units` has 16 entries, so the
+    /// folded bind panicked (index out of bounds). Where more units follow, the same index lands on
+    /// another unit instead. The oracle is the same plan with the fold declined: the redirect is
+    /// then the only index in play and both arms must render the master bit for bit.
+    ///
+    /// Red mutation: index `units[run]` again -- the folded arm panics at bind.
+    #[test]
+    fn a_redirect_after_a_retired_route_lands_on_its_own_chain() {
+        const BLOCKS: u64 = 6;
+        let mut unfolded = folded_bus_plan(true);
+        assert_eq!(
+            [
+                unfolded.bank_scatter_redirects(),
+                unfolded.bank_route_folds()
+            ],
+            [1, 0],
+            "the oracle redirects the bus's lane and folds nothing"
+        );
+        let mut folded = folded_bus_plan(false);
+        assert_eq!(
+            [folded.bank_scatter_redirects(), folded.bank_route_folds()],
+            [1, 4],
+            "the tracks' routes fold into the bus, and the bus still redirects"
+        );
+        let oracle = render_fold_fixture(&mut unfolded, 13, BLOCKS);
+        assert!(
+            oracle.iter().any(|word| *word != 0),
+            "the plan renders audio"
+        );
+        assert_eq!(
+            render_fold_fixture(&mut folded, 13, BLOCKS),
+            oracle,
+            "the folded plan's master is the unfolded plan's bits"
+        );
     }
 }
