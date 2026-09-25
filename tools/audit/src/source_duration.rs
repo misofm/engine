@@ -321,12 +321,20 @@ mod tests {
         let capture = capture(&path, QUANTUM.into()).expect("capture bounded unit accounting");
         remove_file(&path).expect("remove bounded unit WAVE");
 
-        assert_eq!(capture.layout.len(), 17);
+        // #919 removes the `worker.planar_staging` row (one 128-frame mono f32 quantum): 17 -> 16.
+        assert_eq!(capture.layout.len(), 16);
         // #84 phases B/C re-pin (+1,168 = six ring headers at +184, eight endpoints at +8).
-        assert_eq!(layout_total(&capture.layout).expect("layout total"), 6_416);
+        // #919 re-pin (-520 = the 512-byte `worker.planar_staging` row, and an 8-byte smaller
+        // `worker.job_array`: the job's 16-byte staging slice out, one 8-byte reserved-block slot
+        // in).
+        // #917 re-pin (+576 = the retained transfer block the render consumer holds: one
+        // 128-frame mono f32 quantum at 512 bytes, its 48-byte `TransferBlock`, and one extra
+        // slot in each of the two queues). Combined at the copy-removal batch boundary: 6,472.
+        assert_eq!(layout_total(&capture.layout).expect("layout total"), 6_472);
         let canonical = canonical_accounting(&capture);
         // #84 phases B/C: the canonical accounting text embeds the re-derived byte counts.
-        assert_eq!(fnv1a64(canonical.as_bytes()), 0xfc47_9666_aec5_0448);
+        // #919 and #917: re-derived without the staging row and with the retained block (batch boundary).
+        assert_eq!(fnv1a64(canonical.as_bytes()), 0xde96_92fb_4797_b2a5);
         println!(
             "issue041 accounting fnv1a64={:016x} bytes={} minute_identity=wave-f32le-mono-48000-2880000-11520044-materialized multi_hour_identity=wave-f32le-mono-48000-518400000-2073600044-sparse accounting={canonical}",
             fnv1a64(canonical.as_bytes()),

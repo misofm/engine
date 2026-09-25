@@ -220,6 +220,33 @@ impl<'a> PlanarBufferMut<'a> {
             .ok_or(BufferArenaError::CapacityOverflow)?;
         Ok(&mut self.storage[start..end])
     }
+    /// Borrow both planes of a two-channel buffer at once, each exactly `frames` words long.
+    ///
+    /// The planes are the words [`Self::plane_mut`] returns for channels 0 and 1, split at the
+    /// stride, so a caller can hold both for as long as it holds this buffer. The `stride - frames`
+    /// padding words after each plane are part of neither borrow.
+    ///
+    /// # Errors
+    ///
+    /// [`BufferArenaError::InvalidPlane`] unless this buffer has exactly two channels. The
+    /// validated layout already guarantees the split and both trims, so their
+    /// [`BufferArenaError::InvalidBorrow`] refusal is unreachable; it is returned, not panicked.
+    pub fn stereo_planes_mut(&mut self) -> Result<(&mut [f32], &mut [f32]), BufferArenaError> {
+        if self.channels != 2 {
+            return Err(BufferArenaError::InvalidPlane);
+        }
+        let (left, right) = self
+            .storage
+            .split_at_mut_checked(self.stride)
+            .ok_or(BufferArenaError::InvalidBorrow)?;
+        let left = left
+            .get_mut(..self.frames)
+            .ok_or(BufferArenaError::InvalidBorrow)?;
+        let right = right
+            .get_mut(..self.frames)
+            .ok_or(BufferArenaError::InvalidBorrow)?;
+        Ok((left, right))
+    }
 }
 // REALTIME_POLICY_END
 fn validate_borrow(
@@ -258,4 +285,72 @@ fn plane_range(
         .checked_add(frames)
         .ok_or(BufferArenaError::CapacityOverflow)?;
     Ok(&storage[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BufferArenaError, PlanarBufferMut};
+
+    /// Issue #916: both planes at once, each trimmed to `frames`, at a stride wider than the
+    /// block, with the padding words after each plane outside both borrows.
+    #[test]
+    fn stereo_planes_are_the_two_strided_planes_and_leave_the_padding_alone() {
+        const FRAMES: usize = 5;
+        const STRIDE: usize = FRAMES + 3;
+        let pad = f32::from_bits(0x7fc0_0916);
+        let mut storage = [pad; STRIDE + FRAMES + 2];
+        let mut buffer =
+            PlanarBufferMut::try_new(&mut storage, 2, FRAMES, STRIDE).expect("stereo layout");
+        {
+            let (left, right) = buffer.stereo_planes_mut().expect("two planes");
+            assert_eq!((left.len(), right.len()), (FRAMES, FRAMES));
+            for (index, word) in left.iter_mut().enumerate() {
+                *word = index as f32;
+            }
+            for (index, word) in right.iter_mut().enumerate() {
+                *word = -(index as f32) - 1.0;
+            }
+        }
+        // The same words `plane_mut` names, so the two accessors agree plane for plane.
+        assert_eq!(
+            buffer.plane_mut(0).expect("left"),
+            &[0.0, 1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            buffer.plane_mut(1).expect("right"),
+            &[-1.0, -2.0, -3.0, -4.0, -5.0]
+        );
+        for (index, word) in storage.iter().enumerate() {
+            let in_left = index < FRAMES;
+            let in_right = (STRIDE..STRIDE + FRAMES).contains(&index);
+            if !in_left && !in_right {
+                assert_eq!(
+                    word.to_bits(),
+                    pad.to_bits(),
+                    "padding word {index} was written"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stereo_planes_refuse_every_other_channel_count() {
+        let mut mono = [0.0_f32; 4];
+        let mut buffer = PlanarBufferMut::try_new(&mut mono, 1, 4, 4).expect("mono layout");
+        assert_eq!(
+            buffer.stereo_planes_mut().map(|_| ()),
+            Err(BufferArenaError::InvalidPlane)
+        );
+        let mut three = [0.0_f32; 12];
+        let mut buffer = PlanarBufferMut::try_new(&mut three, 3, 4, 4).expect("three planes");
+        assert_eq!(
+            buffer.stereo_planes_mut().map(|_| ()),
+            Err(BufferArenaError::InvalidPlane)
+        );
+        // Stride equal to frames, the layout every host but the C ABI builds.
+        let mut tight = [0.0_f32; 8];
+        let mut buffer = PlanarBufferMut::try_new(&mut tight, 2, 4, 4).expect("tight stereo");
+        let (left, right) = buffer.stereo_planes_mut().expect("two planes");
+        assert_eq!((left.len(), right.len()), (4, 4));
+    }
 }

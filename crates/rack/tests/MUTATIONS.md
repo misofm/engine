@@ -285,3 +285,23 @@ Two rows, both argued-equivalent, and both deliberately so: a cost regression ha
 because "red" is a statement about rendered bits and a cost defect moves none. The instrument that
 holds these two rows honest is the sealed paired benchmark arm, not this file. The input bank's
 half of the same fix does have red rows, in `builtins/tests/MUTATIONS.md` (C-1, C-2).
+
+## Issue #915 — the resident fold offer
+
+Every row below was applied to the working tree at `62c76b08`, the named suites were run, the
+failure (or its absence) was recorded, and the tree was restored with `git checkout` before the
+next row. Host: `x86_64`, workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`, debug
+profile. Suites: `cargo test -p rack --lib -- a_fully_folded_full_bank_offers resident_fold_cohort`,
+the graph suites of `graph/tests/MUTATIONS.md` issue #915, and console-workload
+`the_folded_master_is_the_reductions_own_bits`. "The offer test" is
+`a_fully_folded_full_bank_offers_its_resident_block_before_writing_staging`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 915-R1 | the offer moves to after the staging transpose (the transpose into staging and the tail copy run first, then the offer is made) | `rack/src/lib.rs` `scatter_tiled` | the offer test | RED (`4 lanes, 1 frames: an accepted offer must leave the left staging block unwritten`). **GREEN on every graph and console gate**, disclosed: the extra staging writes move no rendered bit. That is why the NaN-filled staging block is asserted here, the only crate that can see it. |
+| 915-R2 | the offer is made when *any* lane folds (`self.fold.iter().all(..)` becomes `.any(..)`) | `rack/src/lib.rs` `scatter_tiled` | the offer test | RED (`4 lanes, 1 frames: mixed mask was offered`). GREEN on the graph and console gates: every compiled full bank folds all of its lanes or none. |
+| 915-R3 | an accepted offer does not return, so the staged path runs as well | `rack/src/lib.rs` `scatter_tiled` | the offer test; graph gate 1; graph metered; console-workload | RED on all four (staging written; `every cohort must take the resident fold`; `Four/8`, where the continuation is added twice; `sixty_four_track_console`) |
+| 915-R4 | the whole scratch is offered instead of the used `frames * W` prefix | `rack/src/lib.rs` `scatter_tiled` | the offer test; graph gate 1 | RED, RED (`one offer per block`; `every cohort must take the resident fold`). GREEN on graph metered and console-workload, disclosed: a production block is always a full quantum, so there the prefix *is* the whole scratch. On a shorter block the constructor declines and the staged path renders the same bits. |
+
+Row 915-R1 is the reason the rack half of gate 1 exists. Whether the staging block is written is
+invisible to every digest, so it is pinned where it can be seen.

@@ -134,7 +134,12 @@ fn plain_track(track: &str, routes: &[&str]) -> (Vec<GraphNode>, Vec<GraphEdge>)
 }
 
 /// The headline #99 F2 result: nine semantic nodes and eight edges become six ops, three
-/// aliases and a two-buffer arena.
+/// aliases and a three-buffer arena.
+///
+/// It was a two-buffer arena until issue #916 dedicated the session output. The Output op used
+/// to fold in place onto the route's buffer. It now owns a third buffer, because its storage for
+/// a block is the host's planes. The input, the dedicated post-input builtins and the one
+/// fader/matrix/route slot are unchanged.
 ///
 /// Before lowering this graph executed nine schedule items, allocated one contribution buffer
 /// per edge (eight) plus nine coloured node outputs, copied every edge every block, and ran a
@@ -149,7 +154,7 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
 
     assert_eq!(program.ops.len(), 6);
     assert_eq!(program.taps.len(), 3);
-    assert_eq!(program.buffers, 2);
+    assert_eq!(program.buffers, 3);
     // Nothing needs a per-frame reduction: every op has exactly one input.
     assert_eq!(program.reduction_count(), 0);
     assert_eq!(program.delayed_input_count(), 0);
@@ -173,9 +178,10 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
         ]
     );
     // Input has no producer; the builtin stage is bank-eligible so it must own its buffer;
-    // everything downstream of it reads in place.
+    // everything downstream of it reads in place, except the session output, which is dedicated
+    // storage since issue #916 and so never folds onto its producer.
     let in_place: Vec<bool> = program.ops.iter().map(|op| op.in_place).collect();
-    assert_eq!(in_place, vec![false, false, false, true, true, true]);
+    assert_eq!(in_place, vec![false, false, false, true, true, false]);
 
     // The three elided stages alias the builtin stage's buffer and observe right after it.
     for tap in &program.taps {
@@ -941,8 +947,9 @@ fn chains_into_model(
     if earlier.len() != later.len() || earlier.is_empty() {
         return false;
     }
+    // Issue #916 dropped the model's `producer.output != program.output` clause together with the
+    // runtime's: it compared slots, and the host reads no arena buffer.
     earlier.iter().zip(later.iter()).all(|(before, after)| {
-        let producer = &program.ops[*before];
         let consumer = &program.ops[*after];
         consumer.input_count() == 1
             && consumer.sidechain.is_none()
@@ -950,7 +957,6 @@ fn chains_into_model(
             && first_producer[*after] == Some(*before)
             && readers[*before].len() == 1
             && readers[*before][0] == *after
-            && producer.output != program.output
     })
 }
 
@@ -1799,8 +1805,14 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
     assert!(route_accepted > 0, "route corpus must admit folds");
     assert!(route_refused > 0, "route corpus must refuse folds");
     assert_eq!(chained_graphs, 3563, "the chained corpus moved");
+    // 3752 until issue #916. Dedicating the session output let the colouring hand the Output the
+    // slot of a chain's retired earlier slot, and `chains_into`'s slot comparison with
+    // `program.output` then declined that merge by coincidence. #916 removed the comparison: the
+    // host reads no arena buffer, and the Output op reads its producer, which the readership
+    // clause counts. Every one of the 110 chains that now also merge interprets without a
+    // divergence above.
     assert_eq!(
-        merged_runs, 3752,
+        merged_runs, 3862,
         "the number of realised multi-slot chains moved: if this ever falls to zero the arm \
          above is passing on a corpus where nothing merges"
     );
