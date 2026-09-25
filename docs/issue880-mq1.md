@@ -1,6 +1,6 @@
 # Issue 880 MQ-1 timing evidence
 
-One timing invocation completed at candidate `2a8977f5f0fb9b3384e2d71632f21c7f9896dce`, with the
+One timing invocation completed at candidate `2a8977f5f0fb9b3384e2d71632f21c7f9896dce4`, with the
 effect source tree unchanged from E1 checkpoint
 `6f662fee7b47a5eb38b67e0ddc6d007edd438cfa`. The harness ran one warmup and two measured rounds
 for each arm over the frozen four-second, 48 kHz, 128-frame workload:
