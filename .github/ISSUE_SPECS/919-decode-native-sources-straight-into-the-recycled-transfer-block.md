@@ -111,3 +111,206 @@ implemented concurrently; the second to merge rebases.
   and after a `Full` commit the block lives in the producer's `deferred_block`, not in the job.
 - `decode_planar` requires `out.len() == channels * frames`; pass `quantum` frames and read
   `decoded_frames` from the report as today.
+
+## Attempt 1 evidence
+
+Terra, branch `codex/919-decode-into-recycled-block` on `12b621f2`. Commits: `c03848a3` (gate-1
+oracle recorded against the pre-change worker, before any production edit), `92905c91`
+(implementation), `22126bdc` (block-conservation check in the harness), `18eca7a8` (rejected
+block stays with the caller; see deviation 1), and this evidence commit. Paths touched:
+`crates/source/src/lib.rs`, `crates/source/src/native_source.rs`, this spec. No performance
+claim.
+
+### Design
+
+- Producer (`lib.rs`, all `cfg(not(target_arch = "wasm32"))`; placed after `publish_block`, so
+  `submit_planes`..`publish_block` is untouched). `take_recycled_block`, `submit_planes` and
+  `publish_block` are byte-identical to `12b621f2` (sha256 of the span compared).
+  - `struct ReservedBlock { block: Box<TransferBlock> }` (`:980`), `planes_mut()` = the whole
+    `[channel][quantum]` `samples` slice.
+  - `reserve_block()` (`:903`) = `take_recycled_block()` wrapped: a deferred block is pushed
+    first, then one recycled block is popped; `Full` is the same error a submission reports.
+  - `commit_block(&mut Option<ReservedBlock>, generation, start_frame, frames, end_of_region,
+    sanitized)` (`:916`): `validate_submission_metadata(..)?` (block still in the caller's slot),
+    then `reserved.take()`, stamp the five fields, raise the producer watermark, then
+    `publish_block`. Its `Full` arm stores the stamped block in `deferred_block` (unchanged
+    `publish_block`).
+  - `commit_deferred()` (`:953`): take `deferred_block` (none: `InternalInvariant`), revalidate its
+    stamp against the producer (fail: the block goes back to `deferred_block`, error returned),
+    then `publish_block` it.
+  - `HostChunkProvider` forwards all three (`:1023-1052`); `submit_native_planar` is deleted.
+- Worker (`native_source.rs`): `SourceJob.planar_staging` is gone and `reserved:
+  Option<ReservedBlock>` sits beside `pending` (`:637`). The staging allocation in
+  `prepare_native_source_job`, the `worker_planar_staging_bytes` report field (and its
+  contribution to `total_engine_owned_bytes` and `largest_allocation_bytes`, and in
+  `base_source_resources`), and the `worker.planar_staging` layout row are deleted. Nothing
+  outside `native_source.rs` read them.
+
+### The reserve/decode/commit sequence (`service_job`, `:1546`)
+
+1. Commands and seek admission are unchanged. An admitted seek sets `pending = None` and leaves
+   `reserved` alone: a block that holds a discarded quantum is kept for the next decode, which
+   overwrites it.
+2. `pending` is `Some`:
+   - `reserved` is `Some` (the decode filled it): `commit_block(&mut job.reserved, ..)`.
+   - `reserved` is `None` (an earlier commit returned `Full`, and its stamped block waits in
+     `deferred_block`): `commit_deferred()`. It never calls `commit_block` a second time.
+   - `Ok` takes the unchanged ack arm (audit acknowledgements, `end_submitted`, `SourceReady`).
+     `Full` keeps `pending` and returns `WaitingForRender` (or `Progress` if a command was
+     popped), exactly as before. Any other error is `SubmitFailed`.
+3. `end_submitted` returns idle before any reservation.
+4. The block is taken from `job.reserved` (kept across a seek) or `reserve_block()`. On `Full`
+   the worker returns the same `WaitingForRender`/`Progress` a failed submission returned and
+   decodes nothing. With both queues sized to the block count, a full data queue implies an
+   empty recycle queue, so this is where the ring's backpressure is met.
+5. `decode_planar(reserved.planes_mut(), quantum)`. The block goes back into `job.reserved`
+   *before* the decode result is propagated, so a decode error cannot drop it. `pending`
+   records the metadata as before, and the call returns `Progress`. The commit happens on the
+   next call, so blocks are still published on the same service calls as before.
+
+### Why the ack cannot precede a drop
+
+- The only acks are `publish_block`'s `Ok` arm, which runs after `try_push` put the block in the
+  data queue. The producer's `next_write_frame`, `cumulative_written_frames` and
+  `end_of_region_submitted` move only there. The worker's ack effects run only on
+  `commit_block`/`commit_deferred` `Ok`, and those return `Ok` only from that arm.
+- Every block is always in exactly one place: the data queue, the recycle queue, the render, the
+  job's `reserved`, or the producer's `deferred_block`. `commit_block` either leaves the block in
+  `reserved` (failed validation) or moves it to the data queue or `deferred_block`.
+  `commit_deferred` moves it to the data queue or back to `deferred_block`. A seek and a decode
+  error both leave it in `reserved`. The harness asserts this count after every script step
+  (`run_worker_script`, `:4237`).
+- No duplicate: the retry after `Full` pushes the deferred block itself (M6 below). No stale
+  ack: a seek admitted between a `Full` commit and its retry makes the retry fail validation.
+  The block then stays deferred and is published unacked by the next reservation, and the
+  consumer discards it as stale (M7).
+
+### Tests (exact names)
+
+- Gate 1, `native_source.rs`. `run_worker_script` drives a prepared job's `service_job` on the
+  test thread. A scripted render takes blocks raw off the data queue, so stale blocks are
+  recorded too; it observes seeks and holds the played block until the next boundary. Fixture:
+  stereo float32; region `[1, 43)`; quantum 4; three blocks; a subnormal, NaN, ±inf and -0.0.
+  Script: fill, two more service rounds on a full ring, a boundary that plays a block but frees
+  none, a seek on a stalled ring, a newer seek backpressured on the seek slot, run to a one-frame
+  end-of-region block, drain, an in-phase restart whose first decoded quantum a second seek
+  discards (this exercises the kept reserved block), and run to a three-frame end-of-region
+  block.
+  - `native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks`: 23
+    `(generation, start, frames, end, sanitized watermark, FNV-1a of the published words)` rows
+    and the 36 Run/ServiceOnce idle states. Recorded from the pre-change worker in `c03848a3`,
+    where the test passes against the old code.
+  - `native_worker_matches_the_pre_change_worker_block_for_block`: `pre_change_service_job`
+    and `pre_change_submit_native_planar` are the parent's code verbatim. The only differences:
+    staging passed as a parameter, and the removed method inlined as a test helper (a diff of
+    the text shows exactly those lines). Every published word, stamp and idle state is equal,
+    and the live oracle equals the recorded rows. Producer telemetry is equal except
+    `recycle_empty_count`, which the test pins to exactly +1 from step 10 (deviation 3).
+  - `a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead`
+    (deviation 2).
+  - `worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication`. One
+    injected extra block makes a commit meet a full data queue. Nothing is acked (cumulative 12,
+    `data_full_count > 0`), the retry publishes it once, and the six published blocks equal the
+    old worker's no-stall stream word for word.
+- Producer, `lib.rs`:
+  - `native_commit_publishes_the_decoded_block_without_a_copy` (gate 2 sibling): no
+    `copy_from_slice`, one `validate_submission_metadata`, one `publish_block`; order is
+    validate < take < stamp < publish.
+  - `native_commit_rejects_a_stale_generation_and_keeps_the_block_unpublished`: the stale
+    generation is rejected, telemetry is unchanged, the same block stays with the caller and is
+    committed after the seek, and the render discards nothing.
+  - `native_full_commit_defers_the_block_and_its_retry_acks_it_exactly_once`.
+  - `native_deferred_retry_never_acks_a_block_a_seek_made_stale`.
+- Ported off `submit_native_planar`:
+  - `prepared_contiguous_native_submission_matches_planar_ring_shape`.
+  - `host_and_native_submission_share_exact_short_eof_metadata_and_validation_order`. The
+    `InternalInvariant` wrong-length case is unrepresentable now, so it is replaced by a
+    `FrameCount` rejection whose block is then reused for the short end-of-region commit.
+  - `stamped_native_watermark_survives_seek_stale_discard_and_saturates`.
+- Report tests updated: `resolver_preparation_validates_identity_rate_channels_region_and_fixed_caps`,
+  `native_worker_and_host_provider_produce_identical_prepared_ring_pcm`,
+  `native_queue_layout_and_per_source_caps_use_exact_requests`,
+  `prepared_source_job_is_inert_until_the_single_start_boundary` (staging assertions removed;
+  `reserved.is_none()` asserted).
+- `producer_submission_has_one_stamping_and_copy_body` is unchanged and passes.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo test -p source --all-features` | 68 + 1 doc passed (3 runs) |
+| `cargo test -p source` | 65 + 1 passed |
+| `cargo test --no-fail-fast -p capi -p host-core -p native-pcm-runner -p stem-hasher` | 28 binaries, 291 passed |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo clippy -p source --target wasm32-unknown-unknown -- -D warnings` | clean |
+| `cargo fmt --all --check` | clean |
+| `scripts/check-realtime-policy.sh` | ok (50 regions, 14 files) |
+| `scripts/check-native-pcm-runner.sh` | ok (V1 and portability) |
+| `scripts/test-native-pcm-runner-v1-policy.sh` | ok |
+| `audit source` (live, audited allocator) | 0 violations; underrun 128/1; resume 384 |
+| `audit source-duration` | layout equal across durations: 16 rows, 5 896 bytes |
+| `cargo test -p audit --all-features` | 48 passed, 1 failed: the out-of-scope pin below |
+
+### Mutations (all red; each applied alone, then restored)
+
+| mutation | red tests |
+|---|---|
+| M1 commit without validation | `native_commit_rejects_a_stale_generation_and_keeps_the_block_unpublished`, `host_and_native_submission_share_exact_short_eof_metadata_and_validation_order`, the gate-2 sibling |
+| M2 stamp the metadata before the decode (quantum frames, no end flag, pre-decode watermark) | `native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks`, `native_worker_matches_the_pre_change_worker_block_for_block`, `a_stalled_seek_...`, `worker_retries_a_full_commit_...`, `native_worker_and_host_provider_produce_identical_prepared_ring_pcm`, `multiblock_native_watermark_does_not_readd_the_cumulative_decoder_report` |
+| M3 drop the block on a `Full` commit | `worker_retries_a_full_commit_...` (the retry finds nothing and the worker terminates), `native_full_commit_defers_...`, `native_deferred_retry_never_acks_...` |
+| M4 a seek drops the reserved block | the three gate-1 script tests ("a transfer block left circulation at Run": 2 of 3) |
+| M5 failed validation moves the block to `deferred_block` (the brief's wording) | `native_commit_rejects_a_stale_generation_...`, `host_and_native_submission_...` |
+| M6 the retry re-reserves and commits again instead of `commit_deferred` | `worker_retries_a_full_commit_...` (the quantum is published twice) |
+| M7 `commit_deferred` without revalidation | `native_deferred_retry_never_acks_a_block_a_seek_made_stale` |
+| M8 failed validation drops the block | `native_commit_rejects_a_stale_generation_...`, `host_and_native_submission_...` |
+
+Brief gate 4 wording: M1 is red on the stale-generation case at the producer. The worker-level
+gate-1 tests stay green under M1 because the worker cannot commit stale metadata: an admitted
+seek clears `pending` before any commit. Validation is the producer's defence for every caller.
+With a prepared ring the `Full` commit is unreachable, since the reservation absorbs the full
+ring. So M3 is red only where one test-injected extra block makes it reachable.
+
+### Deviations and findings
+
+1. **A failed validation does not go to `deferred_block`** (the brief says it does). The next
+   reservation's `take_recycled_block` publishes whatever `deferred_block` holds, with no ack.
+   A rejected block there would reach the render still carrying its last trip's metadata (M5 is
+   red). Attempt 1 first added a producer `returned_block` slot. That grew `PcmSourceProducer`
+   by one pointer, which `crates/capi/tests/resource_lifecycle.rs` pins to the byte (two tests
+   read +8). So `commit_block` instead takes the worker's `&mut Option<ReservedBlock>` and
+   takes the block only after validation, leaving a rejected block with the worker as a seek
+   does. The producer is main's size. The brief's by-value `block: ReservedBlock` became
+   `&mut Option<ReservedBlock>`.
+2. **No decode ahead of a full ring** (the brief's "no decode into nowhere"). The old worker
+   decoded one quantum into staging while stalled. A seek that discarded that quantum still left
+   its replacements in the cumulative sanitation watermark. The new worker never decodes it.
+   After such a seek, stamps and worker events can be lower by that quantum's replacement count.
+   No PCM word changes. Pinned by
+   `a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead` (old = new + 1
+   on every post-seek block).
+3. **`recycle_empty_count` counts one more failed poll** after a seek admitted on a full ring.
+   On that call the old worker decoded, while the new one polls for a block first. It is a
+   producer telemetry poll counter, and nothing in the workspace reads it.
+4. **A failing read is discovered when a block is free.**
+   `decoder_failure_after_accepted_seek_keeps_typed_terminal` never rendered, so it relied on
+   decode-ahead; unchanged, it waits forever for its terminal. It now takes one render boundary
+   (`read_one`) after the seek, which recycles the stale blocks, and then gets the same typed
+   `DecodeFailed(Io(Other))`. In a running render the terminal comes one boundary later. With
+   the render stopped it waits until rendering resumes.
+5. **Published-sequence identity is per schedule.** Script steps land where both workers are
+   in the same phase: after a `Run`, or single-stepped from a drained ring. After a stall is
+   released, the old worker is one service call ahead (it had decoded ahead). A seek injected
+   one service call after that release would make the old worker publish one more stale-
+   generation block, which the consumer discards. Real threaded interleavings were never
+   deterministic.
+6. **Out-of-scope pin (not edited; needs owner authorization).** Removing the 512-byte
+   staging row, plus the job array shrinking by one pointer (a 16-byte slice out, an 8-byte slot
+   in), moves:
+   - `tools/audit/src/source_duration.rs:324`: `17` → `16`.
+   - `:326`: `6_416` → `5_896`.
+   - `:329`: `0xfc47_9666_aec5_0448` → `0xafc6_12be_270e_b257`.
+   - `.github/workflows/qualification.yml:660`: `"layout_entries": 17, "layout_total_bytes": 6416`
+     → `16, 5896`. The release `audit source-duration` record measured here gives exactly those.
+
+   Until they are re-pinned, `cargo test -p audit` and the qualification job fail on these pins
+   only.
