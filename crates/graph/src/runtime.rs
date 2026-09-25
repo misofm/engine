@@ -94,6 +94,29 @@ fn test_only_observation_dispatch_member_access() {
     });
 }
 
+// Issue #900: calls to the permanent path's per-op observer walk, and the switch that restores the
+// unconditional unit walk so one test build can compare both paths. Unit tests only: neither the
+// count nor the switch exists in a production or `test-support` build.
+#[cfg(test)]
+thread_local! {
+    static TEST_ONLY_OBSERVE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_OBSERVER_SKIP_DISABLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Reset the `observe` call count; `skip_disabled` makes `observe_unit` walk every unit again.
+#[cfg(test)]
+pub(crate) fn test_only_observe_calls_reset(skip_disabled: bool) {
+    TEST_ONLY_OBSERVER_SKIP_DISABLED.with(|value| value.set(skip_disabled));
+    TEST_ONLY_OBSERVE_CALLS.with(|value| value.set(0));
+}
+
+/// Calls to the permanent path's per-op observer walk, `observe`, since the last reset.
+#[cfg(test)]
+pub(crate) fn test_only_observe_calls() -> u64 {
+    TEST_ONLY_OBSERVE_CALLS.with(std::cell::Cell::get)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_only_meter_input_reset(disabled: bool) {
     TEST_ONLY_METER_RESIDENT_DISABLED.with(|value| value.set(disabled));
@@ -281,48 +304,143 @@ fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) 
                 output.copy_from_slice(input);
             }
         }
-        [first, second, rest @ ..] => {
-            reduce_many::<FrameLane>(lease, plane, out, *first, *second, rest);
+        [_, _, ..] => reduce_many::<FrameLane>(lease, plane, out, inputs),
+    }
+}
+
+/// Reads one arena borrow forms at once: [`ArenaLease::write_read_many`] takes one to eight.
+const REDUCE_GROUP: usize = 8;
+
+/// Fan-in two or more: `((in0 + in1) + in2) + ...` per frame, in edge order (issue #898).
+///
+/// The inputs are taken in consecutive groups of up to [`REDUCE_GROUP`]. One `write_read_many`
+/// call forms a group's output and input slices once, and one pass walks them together in
+/// `chunks_exact` steps, so no slice is re-derived per vector. The first group stores
+/// `in0 + in1 + ...`; each later group loads that running sum back from the output and keeps
+/// adding. A store and a reload move an `f32`'s bits unchanged, and every add still takes the
+/// running sum and the next input in the same order, so the result is the one left-to-right chain
+/// at every fan-in. Starting a later group from a fresh subtotal instead would not be:
+/// `reduction_is_left_to_right_bit_identical_to_scalar_reference` pins the difference.
+#[inline(always)]
+fn reduce_many<L: Lane>(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+    debug_assert!(
+        inputs.len() >= 2,
+        "fan-in zero is a fill and fan-in one a copy"
+    );
+    for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
+        let initial_store = index == 0;
+        let reduced = match group.len() {
+            1 => reduce_group::<L, 1>(lease, plane, out, group, initial_store),
+            2 => reduce_group::<L, 2>(lease, plane, out, group, initial_store),
+            3 => reduce_group::<L, 3>(lease, plane, out, group, initial_store),
+            4 => reduce_group::<L, 4>(lease, plane, out, group, initial_store),
+            5 => reduce_group::<L, 5>(lease, plane, out, group, initial_store),
+            6 => reduce_group::<L, 6>(lease, plane, out, group, initial_store),
+            7 => reduce_group::<L, 7>(lease, plane, out, group, initial_store),
+            8 => reduce_group::<L, 8>(lease, plane, out, group, initial_store),
+            _ => false,
+        };
+        // Unreachable for a lowered program: a multi-input op's output is a fresh slot, never one
+        // of its own reads, because a slot retires one op after its last reader. Were a group ever
+        // refused, the later groups must not add into a running sum that was never stored.
+        debug_assert!(reduced, "a reduction group's arena borrow was refused");
+        if !reduced {
+            return;
         }
     }
 }
 
-#[inline(always)]
-fn reduce_many<L: lane::Lane>(
+/// One group of `N` consecutive inputs: one arena borrow, one pass over the output.
+#[inline]
+fn reduce_group<L: Lane, const N: usize>(
     lease: &mut ArenaLease,
     plane: usize,
     out: u32,
-    first: u32,
-    second: u32,
-    rest: &[u32],
-) {
-    let frames = lease.frames();
+    group: &[u32],
+    initial_store: bool,
+) -> bool {
+    let Ok(ids) = <&[u32; N]>::try_from(group) else {
+        return false;
+    };
+    let Some((output, sources)) = lease.write_read_many(plane, out, ids) else {
+        return false;
+    };
+    accumulate_group::<L, N>(output, sources, initial_store)
+}
+
+/// `output = s0 + s1 + ...` when `initial_store`, otherwise `output = ((output + s0) + s1) + ...`,
+/// per frame and left to right, in one pass over `output`.
+///
+/// The vector body runs at `L`, and the frames that do not fill a whole vector run the same body
+/// at `L = f32`, as every D9 kernel finishes its tail, so the result does not depend on the width.
+/// The one shape check happens before the first write.
+#[inline(always)]
+fn accumulate_group<L: Lane, const N: usize>(
+    output: &mut [f32],
+    sources: [&[f32]; N],
+    initial_store: bool,
+) -> bool {
+    let frames = output.len();
+    if sources.iter().any(|source| source.len() != frames) {
+        return false;
+    }
     let vectored = frames - frames % L::WIDTH;
-    let mut index = 0;
-    while index < vectored {
-        let mut acc = {
-            let source = lease.read(plane, first);
-            L::load(&source[index..])
+    let (vectors, tail) = output.split_at_mut(vectored);
+    accumulate_run::<L, N>(
+        vectors,
+        sources.map(|source| &source[..vectored]),
+        initial_store,
+    ) && accumulate_run::<f32, N>(
+        tail,
+        sources.map(|source| &source[vectored..]),
+        initial_store,
+    )
+}
+
+/// One width's share of [`accumulate_group`]. `output` and every source have one common length,
+/// a multiple of `L::WIDTH`, and each source is walked by its own `chunks_exact` iterator in step
+/// with the output's.
+///
+/// The store and accumulate forms are two loops rather than one branch per vector, so each loop
+/// walks a fixed number of sources.
+#[inline(always)]
+fn accumulate_run<L: Lane, const N: usize>(
+    output: &mut [f32],
+    sources: [&[f32]; N],
+    initial_store: bool,
+) -> bool {
+    let mut chunks = sources.map(|source| source.chunks_exact(L::WIDTH));
+    if initial_store {
+        let Some((first, rest)) = chunks.split_first_mut() else {
+            return false;
         };
-        for input in std::iter::once(second).chain(rest.iter().copied()) {
-            let value = {
-                let source = lease.read(plane, input);
-                L::load(&source[index..])
+        for out in output.chunks_exact_mut(L::WIDTH) {
+            let Some(acc) = first
+                .next()
+                .and_then(|chunk| add_chunks(L::load(chunk), rest))
+            else {
+                return false;
             };
-            acc = acc.add(value);
+            acc.store(out);
         }
-        acc.store(&mut lease.write(plane, out)[index..]);
-        index += L::WIDTH;
-    }
-    while index < frames {
-        let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
-        for input in std::iter::once(second).chain(rest.iter().copied()) {
-            let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
-            acc = acc.add(value);
+    } else {
+        for out in output.chunks_exact_mut(L::WIDTH) {
+            let Some(acc) = add_chunks(L::load(out), &mut chunks) else {
+                return false;
+            };
+            acc.store(out);
         }
-        acc.store(&mut lease.write(plane, out)[index..]);
-        index += 1;
     }
+    true
+}
+
+/// `((acc + c0) + c1) + ...` over the next chunk of every source, or `None` if one has run out.
+#[inline(always)]
+fn add_chunks<L: Lane>(mut acc: L, chunks: &mut [core::slice::ChunksExact<'_, f32>]) -> Option<L> {
+    for chunk in chunks {
+        acc = acc.add(L::load(chunk.next()?));
+    }
+    Some(acc)
 }
 
 // REALTIME_POLICY_END
@@ -960,6 +1078,15 @@ pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
 }
 
 impl RuntimeUnit {
+    /// Whether `observe_unit` would dispatch any observer for this unit (issue #900): the same
+    /// op observer slices its walk visits. Bind-time only.
+    fn has_observers(&self) -> bool {
+        match self {
+            Self::Op(op) => !op.observers.is_empty(),
+            Self::Bank { members, .. } => members.iter().any(|member| !member.observers.is_empty()),
+        }
+    }
+
     pub(crate) fn qualification_counters(&self) -> [u64; 2] {
         match self {
             Self::Op(_) => [0, 0],
@@ -1317,6 +1444,11 @@ pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
+    /// Whether any op of this unit holds an observer binding (issue #900). Derived from the final
+    /// units by [`Runtime::new_with_observation_activation`], the one constructor every runtime
+    /// passes through, so a caller's value is a placeholder; nothing changes an op's observer
+    /// slice after that. Fits the existing identity padding.
+    observed: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
@@ -1611,13 +1743,16 @@ impl Runtime {
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
         split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
-        identity: Vec<UnitIdentity>,
+        mut identity: Vec<UnitIdentity>,
         response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
         folds: u64,
         observation_activation: Option<RealtimeObservationActivation>,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
+        for (row, unit) in identity.iter_mut().zip(&units) {
+            row.observed = unit.has_observers();
+        }
         #[cfg(any(test, feature = "test-support"))]
         if !split_pairs.is_empty() {
             TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
@@ -1862,7 +1997,7 @@ impl Runtime {
             return Ok(());
         };
         let entries = activation.entries();
-        let mut planar: Option<(&[f32], &[f32])> = Option::None;
+        let mut planar = false;
         let mut planar_member = None;
         while let Some(entry) = entries.get(*observation_cursor).copied() {
             if entry.unit > index {
@@ -1873,7 +2008,7 @@ impl Runtime {
                 continue;
             }
             if planar_member != Some(entry.member) {
-                planar = None;
+                planar = false;
                 planar_member = Some(entry.member);
             }
             observe_active_entry(units, lease, entry, first_sample, validity, &mut planar)?;
@@ -1918,21 +2053,33 @@ impl Runtime {
         first_sample: u64,
         validity: GraphObservationValidity,
     ) -> Result<(), RenderError> {
+        // Issue #900: a unit bound without any observer has nothing to dispatch and the walk
+        // below has no other production effect, so one bind-time flag answers it. `execute` has
+        // already indexed this unit's identity row in this block.
+        let observed = self.identity[index].observed;
+        #[cfg(test)]
+        let observed = observed || TEST_ONLY_OBSERVER_SKIP_DISABLED.with(std::cell::Cell::get);
+        if !observed {
+            return Ok(());
+        }
         let Self { lease, units, .. } = self;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, validity),
+            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity),
             RuntimeUnit::Bank {
                 members,
                 lanes,
                 chain,
-                fold,
                 ..
             } => {
                 let population = *lanes;
                 let width = chain.width().lanes() as usize;
-                // execute scatters exactly the final slot's output members. Observed direct
-                // and alias outputs cannot be redirected by scatter_target; extra readers
-                // and sends still consume that unchanged scatter. Folded forms decline.
+                // execute scatters exactly the final slot's output members. A redirected
+                // member's output is its consumer's buffer, which holds those scattered words
+                // until the consumer's later unit, so a planar read here is the same words
+                // redirected or not (issue #886); extra readers and sends decline the redirect
+                // and consume the unchanged scatter. A folded lane's scatter goes to the
+                // epilogue instead, which leaves the resident words untouched: they are what its
+                // post-matrix observers read (issue #885).
                 let eligible = population > 0
                     && population <= width
                     && !members.is_empty()
@@ -1943,8 +2090,6 @@ impl Runtime {
                         .iter()
                         .enumerate()
                         .all(|(lane, active)| *active == (lane < population))
-                    && fold.is_empty()
-                    && chain.fold_lanes().is_empty()
                     && chain.aux_lanes().is_empty();
                 let frames = u32::try_from(lease.frames()).ok();
                 let final_start = members.len().checked_sub(population);
@@ -1952,14 +2097,16 @@ impl Runtime {
                 for (index, member) in members.iter_mut().enumerate() {
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_observation_dispatch_member_access();
+                    let final_lane = final_start.and_then(|start| index.checked_sub(start));
                     let resident = if eligible {
-                        final_start
-                            .and_then(|start| index.checked_sub(start))
-                            .and_then(|lane| chain.final_output_lane(frames?, lane))
+                        final_lane.and_then(|lane| chain.final_output_lane(frames?, lane))
                     } else {
                         None
                     };
-                    observe(member, lease, first_sample, resident, validity)?;
+                    // The member buffer a folded lane's scatter skipped (issue #885).
+                    let folded =
+                        final_lane.is_some_and(|lane| chain.fold_lanes().get(lane) == Some(&true));
+                    observe(member, lease, first_sample, resident, folded, validity)?;
                 }
                 Ok(())
             }
@@ -2092,13 +2239,13 @@ fn observer_at_entry(
     }
 }
 
-fn observe_active_entry<'a>(
+fn observe_active_entry(
     units: &mut [RuntimeUnit],
-    lease: &'a ArenaLease,
+    lease: &mut ArenaLease,
     entry: ActivationEntry,
     first_sample: u64,
     validity: GraphObservationValidity,
-    planar: &mut Option<(&'a [f32], &'a [f32])>,
+    planar: &mut bool,
 ) -> Result<(), RenderError> {
     match units.get_mut(entry.unit) {
         Some(RuntimeUnit::Op(op)) if entry.member.is_none() => {
@@ -2114,6 +2261,7 @@ fn observe_active_entry<'a>(
                 lease,
                 output,
                 None,
+                false,
                 first_sample,
                 validity,
                 planar,
@@ -2123,7 +2271,6 @@ fn observe_active_entry<'a>(
             members,
             lanes,
             chain,
-            fold,
             ..
         }) => {
             let member_index = entry.member.ok_or(RenderError::InvalidEnvelope)?;
@@ -2140,19 +2287,20 @@ fn observe_active_entry<'a>(
                         .iter()
                         .enumerate()
                         .all(|(lane, active)| *active == (lane < population))
-                    && fold.is_empty()
-                    && chain.fold_lanes().is_empty()
                     && chain.aux_lanes().is_empty()
             };
             let frames = u32::try_from(lease.frames()).ok();
+            let final_lane = members
+                .len()
+                .checked_sub(*lanes)
+                .and_then(|start| member_index.checked_sub(start));
             let resident = if eligible {
-                let final_start = members.len().checked_sub(*lanes);
-                final_start
-                    .and_then(|start| member_index.checked_sub(start))
-                    .and_then(|lane| BankChain::final_output_lane(chain, frames?, lane))
+                final_lane.and_then(|lane| BankChain::final_output_lane(chain, frames?, lane))
             } else {
                 None
             };
+            // The member buffer a folded lane's scatter skipped (issue #885).
+            let folded = final_lane.is_some_and(|lane| chain.fold_lanes().get(lane) == Some(&true));
             let member = members
                 .get_mut(member_index)
                 .ok_or(RenderError::InvalidEnvelope)?;
@@ -2170,6 +2318,7 @@ fn observe_active_entry<'a>(
                 lease,
                 output,
                 resident,
+                folded,
                 first_sample,
                 validity,
                 planar,
@@ -2387,17 +2536,28 @@ fn execute_op(
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
+/// Run one op's observers in binding order, offering each the resident view first.
+///
+/// `folded` says the chain folded this member's route (issue #885), so its scatter never wrote
+/// `op.output`: the first observer that declines the resident view has the resident words written
+/// there before any planar block is formed. `resident` is the only source of those words. The
+/// planar block is re-sliced per declining observer rather than cached, because the lease has to
+/// stay writable until that first acquisition.
 fn observe(
     op: &mut RuntimeOp,
-    lease: &ArenaLease,
+    lease: &mut ArenaLease,
     first_sample: u64,
     resident: Option<rack::ResidentOutputLane<'_>>,
+    folded: bool,
     validity: GraphObservationValidity,
 ) -> Result<(), RenderError> {
+    #[cfg(test)]
+    TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let words = resident;
     #[cfg(any(test, feature = "test-support"))]
     let resident =
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
-    let mut planar = None;
+    let mut planar = false;
     for observer in op.observers.iter_mut() {
         #[cfg(any(test, feature = "test-support"))]
         test_only_observation_dispatch_observer_access();
@@ -2427,15 +2587,19 @@ fn observe(
                 continue;
             }
         }
-        let (left, right) = *planar.get_or_insert_with(|| {
+        if !planar {
             #[cfg(any(test, feature = "test-support"))]
             TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
                 let mut counts = value.get();
                 counts[0] += 1;
                 value.set(counts);
             });
-            lease.read_stereo(op.output)
-        });
+            if folded {
+                write_resident_lane(lease, op.output, words)?;
+            }
+            planar = true;
+        }
+        let (left, right) = lease.read_stereo(op.output);
         observer.observer.observe_with_validity(
             GraphObservationBlock {
                 left,
@@ -2451,15 +2615,23 @@ fn observe(
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
-fn observe_one<'a>(
+/// One active observer entry: [`observe`]'s body for a single row, with `planar` recording whether
+/// this member's planar block was already acquired -- and, when `folded`, written -- this block.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "issue #885 adds the folded-lane flag to the existing seven-parameter dispatch"
+)]
+fn observe_one(
     observer: &mut GraphNodeObserverBinding,
-    lease: &'a ArenaLease,
+    lease: &mut ArenaLease,
     output: u32,
     resident: Option<rack::ResidentOutputLane<'_>>,
+    folded: bool,
     first_sample: u64,
     validity: GraphObservationValidity,
-    planar: &mut Option<(&'a [f32], &'a [f32])>,
+    planar: &mut bool,
 ) -> Result<(), RenderError> {
+    let words = resident;
     #[cfg(any(test, feature = "test-support"))]
     let resident =
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
@@ -2489,15 +2661,19 @@ fn observe_one<'a>(
             return Ok(());
         }
     }
-    let (left, right) = *planar.get_or_insert_with(|| {
+    if !*planar {
         #[cfg(any(test, feature = "test-support"))]
         TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
             let mut counts = value.get();
             counts[0] += 1;
             value.set(counts);
         });
-        lease.read_stereo(output)
-    });
+        if folded {
+            write_resident_lane(lease, output, words)?;
+        }
+        *planar = true;
+    }
+    let (left, right) = lease.read_stereo(output);
     observer.observer.observe_with_validity(
         GraphObservationBlock {
             left,
@@ -2506,6 +2682,42 @@ fn observe_one<'a>(
         },
         validity,
     )
+}
+
+/// Write one folded lane's resident final words into its own member buffer (issue #885).
+///
+/// This is that lane's share of the scatter the fold replaced, done only when an observer asks for
+/// a planar block: a pure word copy out of the resident AoSoA block, lane `words.lane()` of every
+/// frame, so the block a declining observer reads is bit for bit the one an unfolded chain would
+/// have scattered there. Nothing else reads the buffer -- its sole reader was the route, which the
+/// fold retired -- and the write cannot land on a live neighbour: an unfolded chain scatters these
+/// same words into this buffer at this same point, and its observers read them here, so the
+/// lowering's colouring already reserves the slot for this value from the chain's unit until the
+/// retired route's position.
+///
+/// `words` is `None` only for a chain without the full-population lane shape `final_output_lane`
+/// and the dispatchers' `eligible` clauses require -- a shape no rendering chain has, because a
+/// chain gathers lane `l` from member `l`. The render fails rather than hand an observer last
+/// block's words.
+fn write_resident_lane(
+    lease: &mut ArenaLease,
+    output: u32,
+    words: Option<rack::ResidentOutputLane<'_>>,
+) -> Result<(), RenderError> {
+    let Some(words) = words else {
+        return Err(RenderError::InvalidEnvelope);
+    };
+    let width = words.width().lanes() as usize;
+    let (left, right) = lease.write_stereo(output);
+    for (plane, source) in [(left, words.left()), (right, words.right())] {
+        for (word, value) in plane
+            .iter_mut()
+            .zip(source.iter().skip(words.lane()).step_by(width))
+        {
+            *word = *value;
+        }
+    }
+    Ok(())
 }
 
 // REALTIME_POLICY_END
@@ -3591,6 +3803,46 @@ pub(crate) fn inject_fold_fault(fault: FoldFault) {
     });
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Issue #885's unfolded oracle: the same plan bound with the route fold declined, which is the
+    /// path a post-matrix meter forced before that issue. Bind-time only; render never reads it.
+    static ROUTE_FOLD_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Decline (`true`) or restore (`false`) the route fold for every later bind on this thread.
+///
+/// The unfolded oracle for a fold test (issue #885): until then a post-matrix meter declined the
+/// fold and doubled as that oracle, and it no longer does. Read once per bind, in
+/// `preflight_sequential`, before any owner moves; render never reads it, and it does not exist
+/// without `test-support`. Callers restore `false` after the bind they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_route_fold_declined(declined: bool) {
+    ROUTE_FOLD_DECLINED.with(|slot| slot.set(declined));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Issue #886's unredirected oracle: the same plan bound with every scatter redirect declined,
+    /// which is the path an observer of a chain's last slot forced before that issue. Bind-time
+    /// only; render never reads it.
+    static SCATTER_REDIRECT_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Decline (`true`) or restore (`false`) every scatter redirect for every later bind on this
+/// thread.
+///
+/// The unredirected oracle for a direct-scatter test (issue #886), on the pattern of
+/// [`test_only_set_route_fold_declined`]: read once per bind, in `build_sequential`, where the
+/// redirects are decided and before any unit is built; render never reads it, and it does not exist
+/// without `test-support`. Callers restore `false` after the bind they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_scatter_redirect_declined(declined: bool) {
+    SCATTER_REDIRECT_DECLINED.with(|slot| slot.set(declined));
+}
+
 /// Prepared before caller-owned processors, observers, banks or sources move. Emission consumes
 /// this exact schedule and its owned fold configurations; it never replans route retirement.
 pub(crate) struct SequentialPlan {
@@ -3633,6 +3885,8 @@ pub(crate) fn preflight_sequential(
         })
         .collect();
     let fold = route_fold(program, &plan.spec, &metadata, &run_units);
+    #[cfg(any(test, feature = "test-support"))]
+    let fold = fold.filter(|_| !ROUTE_FOLD_DECLINED.with(std::cell::Cell::get));
     validate_fold_installation(plan, program, run_units, fold)
 }
 
@@ -3842,24 +4096,25 @@ pub(crate) fn build_sequential(
     let retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map_or_else(Default::default, |fold| fold.retired.clone());
-    // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
-    // the clauses are about what is bound to a node rather than about the program.
+    // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
+    // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
+    // last slot reads the redirected buffer (see `scatter_target`).
     //
     // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
     // and a folded lane has no scatter to point anywhere -- its tile goes to the epilogue and its
     // consumer no longer runs. Excluding it keeps the two counters honest as well as the code:
     // `bank_scatter_redirects` reports the lanes that still relocate a scatter, not the lanes the
     // fold made the question moot for.
-    let redirects: Vec<ScatterRedirect> = scatter_redirects(
-        program,
-        spec,
-        &parts.membership,
-        &parts.observers,
-        &run_units,
-    )
-    .into_iter()
-    .filter(|(run, _, _)| !folded_runs.contains(run))
-    .collect();
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
+        .into_iter()
+        .filter(|(run, _, _)| !folded_runs.contains(run))
+        .collect();
+    #[cfg(any(test, feature = "test-support"))]
+    let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
+        Vec::new()
+    } else {
+        redirects
+    };
     let mut split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
 
     // Serialized scalar fader/matrix pairing is decided while both original owners and the
@@ -4071,6 +4326,8 @@ pub(crate) fn build_sequential(
             identity.push(UnitIdentity {
                 banked: !membership.is_empty(),
                 resident_input: false,
+                // Derived from the finished unit by the runtime constructor.
+                observed: false,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
                     (0..stages)
@@ -4131,7 +4388,7 @@ pub(crate) fn build_sequential(
             .collect();
         units.push(finish_unit(&mut parts, &membership, members, installation));
     }
-    apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
+    apply_scatter_redirects(program, &redirects, &unit_of_run, &op_slot, &mut units);
     let folds = fold.as_ref().map_or(0, |fold| {
         fold.runs.iter().map(|(_, lanes)| lanes.len() as u64).sum()
     });
@@ -4355,10 +4612,6 @@ type ScatterRedirect = (usize, usize, usize);
 ///   incompatibility, so this is where they are kept apart.
 /// * **Not the session output.** The host copies the session output out of its buffer after the
 ///   last unit; leaving it stale would silence the render.
-/// * **No observer, and no observed alias, on the producer.** After the redirect the last slot's
-///   own buffer is never written, so anything that reads it reads the previous block. That is the
-///   same pair of clauses `chains_into` carries, keyed the same way -- `parts.observers` is keyed
-///   by node, so the alias check names the elided stage node and not the producing one.
 /// * **Nothing between the scatter and the consumer names the consumer's buffer.** This is the one
 ///   clause with no counterpart on the gather side, and it is the load-bearing one. The scatter now
 ///   writes the consumer's buffer at the *chain's* position, which is earlier -- often much
@@ -4375,9 +4628,7 @@ type ScatterRedirect = (usize, usize, usize);
 ///   hoisted it past the consumer would be the #169 defect the bank window already forbids.
 fn scatter_redirects(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
     bank_membership: &BankMembership,
-    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     run_units: &[(Vec<Membership>, Vec<usize>)],
 ) -> Vec<ScatterRedirect> {
     let (readers, first_producer) = op_dataflow(program);
@@ -4398,9 +4649,7 @@ fn scatter_redirects(
                 producer,
                 scatter_target(
                     program,
-                    spec,
                     bank_membership,
-                    observers,
                     &readers,
                     &first_producer,
                     ops,
@@ -4442,10 +4691,6 @@ fn scatter_redirects(
 ///   is_reusable`
 /// * **the consumer is not a bank member** -> `misaligned_lane_sets_decline_the_merge` and two
 ///   others
-/// * **no observed alias** ->
-///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`
-/// * **no observer on the producer** ->
-///   `a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect`
 /// * **nothing in between names the buffer** -> seven session-level tests, including the fixture's
 ///   own `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`, *and* --
 ///   for the scan's **end boundary**, which none of those seven pin --
@@ -4488,14 +4733,34 @@ fn scatter_redirects(
 /// about what the consumer's buffer holds by the time its observers run, so there is nothing there
 /// for one to see.
 ///
+/// Nor, since issue #886, are the **producer's** observers -- bound to the last slot's own node,
+/// or through a `program::Tap` to a stage boundary elided onto its buffer. Both used to decline,
+/// on the reasoning that the last slot's own buffer goes unwritten after the redirect; but no
+/// observer reads that buffer. Every one of them reads the chain's final output, and is dispatched
+/// from the last slot's own `RuntimeOp`, whose `output` [`apply_scatter_redirects`] repoints at
+/// the consumer's buffer. Both dispatchers (`Runtime::observe_unit`, `observe_active_entry`) run
+/// them straight after the chain's unit: after its scatter wrote that buffer, and before the
+/// consumer's unit -- later by construction -- rewrites it in place. Each is first offered the
+/// chain's resident final lane (`BankChain::final_output_lane`, the words the scatter
+/// transposed), and one that declines it reads the member's output, which is the consumer's buffer
+/// holding those same words; [`scatter_redirects`]' in-between clause keeps that slot the
+/// scatter's alone until the consumer runs. So an observer of the chain's final output publishes
+/// the same bits whether the lane redirects or not --
+/// `a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit` holds it to
+/// that (and, with the production meter, graph-compiler's
+/// `a_meter_on_a_bank_member_keeps_that_lanes_scatter_redirect`), and restoring either clause
+/// reddens `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A redirect consumer
+/// stays out of the scalar split fader/matrix pair, so a metered plan now takes the redirect where
+/// it took the split pair before -- the unmetered plan's shape, with the same bits
+/// (`a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits`). A stage boundary
+/// *inside* a chain is not this function's question: `chains_into` still declines the merge across
+/// an observed one, unchanged.
+///
 /// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
 /// for what each clause is defending.
-#[allow(clippy::too_many_arguments)]
 fn scatter_target(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
     membership: &BankMembership,
-    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
     run: &[usize],
@@ -4519,18 +4784,6 @@ fn scatter_target(
         return None;
     }
     if membership.contains_key(&consumer_op.node) {
-        return None;
-    }
-    let node = &spec.nodes[producer_op.node as usize].id;
-    if observers.contains_key(node) {
-        return None;
-    }
-    if program
-        .taps
-        .iter()
-        .filter(|tap| tap.after_op as usize == producer)
-        .any(|tap| observers.contains_key(&spec.nodes[tap.node as usize].id))
-    {
         return None;
     }
     let target = consumer_op.output;
@@ -4572,13 +4825,14 @@ fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::
 /// both sides of the model/runtime pair -- the same correspondence #194 established on the gather
 /// side.
 ///
-/// Returns `producer op -> consumer op` for every admitted lane. A program-level fixture binds no
-/// observers, which is why the two observer clauses take an empty map here: they are covered by
-/// the session-level tests in the graph compiler, and this eval covers the rest.
+/// Returns `producer op -> consumer op` for every admitted lane. Every clause is a question about
+/// the lowered program and the bank membership, so this eval drives all of them. `_spec` keeps the
+/// corpus's call site unchanged: the only clauses that named a node were the two observer clauses
+/// issue #886 removed, and the program-level fixture bound no observers to ask them about anyway.
 #[cfg(test)]
 pub(crate) fn scatter_redirects_over_program(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
+    _spec: &GraphSpec,
     lanes: &BTreeMap<u32, (usize, usize)>,
     runs: &[Vec<Vec<usize>>],
 ) -> BTreeMap<usize, usize> {
@@ -4586,7 +4840,6 @@ pub(crate) fn scatter_redirects_over_program(
         .iter()
         .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
         .collect();
-    let observers = BTreeMap::new();
     // `build_sequential` builds this shape from `units_of`; here it is built from the model's runs,
     // so the only thing that differs between the two sides is which copy of the clauses answers.
     // A plain unit carries an empty membership list, which is what marks it as not a bank.
@@ -4603,7 +4856,7 @@ pub(crate) fn scatter_redirects_over_program(
             (membership, run.iter().flatten().copied().collect())
         })
         .collect();
-    scatter_redirects(program, spec, &bank_membership, &observers, &run_units)
+    scatter_redirects(program, &bank_membership, &run_units)
         .into_iter()
         .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
         .collect()
@@ -4617,15 +4870,27 @@ pub(crate) fn scatter_redirects_over_program(
 /// becomes its own output, which is the shape `reduce_plane` already treats as "nothing to copy".
 /// The consumer therefore runs exactly as an `in_place` op does, which is what it would have been
 /// had its producer not been dedicated storage.
+///
+/// A redirect names its chain by *run* (`run_units`), and `units` holds only the emitted ones: a
+/// route the fold retired emits no unit, so every chain after it sits at a lower index than its
+/// run. `unit_of_run` is that mapping, and indexing `units` by the run directly -- as this did
+/// until it was found under issue #886 -- panics at bind, or repoints another unit's member, for
+/// any chain that redirects after a folded one.
 fn apply_scatter_redirects(
     program: &ExecutionProgram,
     redirects: &[ScatterRedirect],
+    unit_of_run: &[Option<usize>],
     op_slot: &[Option<(usize, usize)>],
     units: &mut [RuntimeUnit],
 ) {
     for (run, member, consumer) in redirects.iter().copied() {
         let target = ARENA_BASE + program.ops[consumer].output.0;
-        let RuntimeUnit::Bank { members, .. } = &mut units[run] else {
+        let Some(RuntimeUnit::Bank { members, .. }) = unit_of_run
+            .get(run)
+            .copied()
+            .flatten()
+            .and_then(|unit| units.get_mut(unit))
+        else {
             continue;
         };
         members[member].output = target;
@@ -4755,27 +5020,56 @@ fn plain_route_gains(
     parts.route(node).map(folded_route)
 }
 
-/// Whether anything can *see* the buffer op `index` writes other than by reading it as an input.
+/// Whether anything can *see* the buffer op `index` writes other than by reading it as an input,
+/// leaving out observers bound to a node `served` says the caller reaches some other way.
 ///
-/// Two ways, and they are the pair [`chains_into`] and [`scatter_target`] already carry: an
-/// observer bound to the producing node, and an observer bound to an elided node whose alias
-/// resolves to this op's buffer (`program::Tap`). `parts.observers` is keyed by node, so the second
-/// has to name the alias node rather than the producing one.
+/// Two ways, and they are the pair [`chains_into`] carries (as [`scatter_target`] did until issue
+/// #886; a redirected lane's observers read the redirected buffer): an observer bound to the
+/// producing node, and an observer bound to an elided node whose alias resolves to this op's
+/// buffer (`program::Tap`). `parts.observers` is keyed by node, so the second has to name the
+/// alias node rather than the producing one. `served` is asked about the node an observer is bound
+/// to, never about the op: the alias and the producer are one buffer, but only the node says which
+/// boundary the observer declared.
 fn observed(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     parts: &impl PlanningMetadata,
     index: usize,
+    served: fn(&GraphNodeId) -> bool,
 ) -> bool {
     let node = &spec.nodes[program.ops[index].node as usize].id;
-    if parts.has_observer(node) {
+    if parts.has_observer(node) && !served(node) {
         return true;
     }
     program
         .taps
         .iter()
         .filter(|tap| tap.after_op as usize == index)
-        .any(|tap| parts.has_observer(&spec.nodes[tap.node as usize].id))
+        .map(|tap| &spec.nodes[tap.node as usize].id)
+        .any(|node| parts.has_observer(node) && !served(node))
+}
+
+/// The one observation boundary a folded lane still serves (issue #885): post-matrix.
+///
+/// A folded lane's last-slot buffer is never scattered, but the words it would have held are the
+/// chain's resident final lane (`BankChain::final_output_lane`) -- untouched by the epilogue, which
+/// mixes a transposed *copy* of them in the staging tile. `Runtime::observe_unit` offers exactly
+/// those words to the lane's observers, and writes them into the member buffer first for one that
+/// declines the resident view. Every other boundary keeps declining the fold: the route's own
+/// output never exists once it folds, and any other stage tap is outside what this slice admits.
+const fn served_by_the_resident_lane(node: &GraphNodeId) -> bool {
+    matches!(
+        node,
+        GraphNodeId::TrackStage {
+            stage: TrackStage::PostMatrix,
+            ..
+        }
+    )
+}
+
+/// No observer is served another way: every one of them declines.
+const fn served_by_nothing(_node: &GraphNodeId) -> bool {
+    false
 }
 
 /// One chain's folded epilogue: which run unit it is, and one entry per rendered lane.
@@ -4847,7 +5141,12 @@ fn foldable_lane(
     if producer_op.output == program.output || route_op.output == program.output {
         return None;
     }
-    if observed(program, spec, parts, producer) || observed(program, spec, parts, route) {
+    // A post-matrix observer on the last slot reads the chain's resident final lane instead of
+    // the member buffer the fold stops writing (issue #885). The route has no such stand-in: its
+    // output is mixed straight into the master and never exists on its own.
+    if observed(program, spec, parts, producer, served_by_the_resident_lane)
+        || observed(program, spec, parts, route, served_by_nothing)
+    {
         return None;
     }
     let node = &spec.nodes[route_op.node as usize].id;
@@ -4887,12 +5186,19 @@ fn foldable_lane(
 ///
 /// * **the association order** -> `route_ids_ordered_against_the_cohorts_decline_the_route_fold`,
 ///   plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and
-///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`. Keeping the length
-///   check and dropping the element-wise comparison is the unsound direction, and it is the one
-///   measured.
-/// * **no observer on the route/output path** -> `the_folded_master_is_the_reductions_own_bits`.
-///   That test's oracle is a post-matrix meter, so dropping this clause destroys the oracle *and*
-///   the plan it was oracle for; it goes red either way, which is what the ledger records.
+///   `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter` (named
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect` until issue #886,
+///   the name `crates/graph/tests/MUTATIONS.md` row 218-3 still records). Keeping the length check
+///   and dropping the element-wise comparison is the unsound direction, and it is the one measured.
+/// * **no observer on the route/output path other than post-matrix** (issue #885) ->
+///   `a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed`, both ways:
+///   excusing no observer leaves the metered arms unfolded, and excusing every observer folds the
+///   post-fader-metered arm. What makes the post-matrix excuse sound -- the resident view, and
+///   the member buffer written for an observer that declines it -- is
+///   `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, and with the
+///   production meter `a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`. Before #885
+///   this clause declined post-matrix meters too, and two fold oracles were such a metered plan;
+///   they now decline the fold through `test_only_set_route_fold_declined` instead.
 /// * **the opening chain's ops are excluded from the in-between scan** -> every fold in the tree
 ///   stops firing and `every_standing_workload_folds_one_route_per_track` goes red. That is the
 ///   conservative direction, and it is worth pinning: the colouring gives the session output the
@@ -5538,6 +5844,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -5627,6 +5934,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -5744,9 +6052,10 @@ mod tests {
             test_only_meter_input_reset(false);
             let result = observe(
                 &mut op,
-                &lease,
+                &mut lease,
                 71,
                 Some(view),
+                false,
                 GraphObservationValidity::CLEAR,
             );
             let take = accepts
@@ -5796,18 +6105,18 @@ mod tests {
                 return false;
             };
             dispatcher.matches(".observe_resident(").count() == 1
+                && dispatcher.contains("if folded {")
+                && dispatcher.contains("write_resident_lane(lease, op.output, words)?;")
                 && production.matches(".final_output_lane(").count() == 1
                 && [
                     "let Self { lease, units, .. } = self;",
-                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, validity)",
+                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity)",
                     "let eligible = population > 0",
                     "population <= width",
                     "!members.is_empty()",
                     "members.len().is_multiple_of(population)",
                     "chain.active().len() == width",
                     "*active == (lane < population)",
-                    "fold.is_empty()",
-                    "chain.fold_lanes().is_empty()",
                     "chain.aux_lanes().is_empty()",
                     "u32::try_from(lease.frames()).ok()",
                     "members.len().checked_sub(population)",
@@ -5815,7 +6124,8 @@ mod tests {
                     "let resident = if eligible",
                     "index.checked_sub(start)",
                     "chain.final_output_lane(frames?, lane)",
-                    "observe(member, lease, first_sample, resident, validity)?;",
+                    "chain.fold_lanes().get(lane) == Some(&true)",
+                    "observe(member, lease, first_sample, resident, folded, validity)?;",
                 ]
                 .iter()
                 .all(|term| observation.contains(term))
@@ -5828,8 +6138,8 @@ mod tests {
                 ".observe_other(crate::GraphResidentObservationBlock",
             ),
             (
-                "let mut planar = None;",
-                "let mut planar = None; observer.observe_resident(block);",
+                "write_resident_lane(lease, op.output, words)?;",
+                "write_resident_lane(lease, op.output, words)?; observer.observe_resident(block);",
             ),
             ("let resident = if eligible", "let resident = if true"),
             ("index.checked_sub(start)", "Some(index)"),
@@ -5838,8 +6148,16 @@ mod tests {
                 "chain.final_output_lane(1, lane)",
             ),
             (
-                "observe(member, lease, first_sample, resident, validity)?;",
-                "observe(member, lease, first_sample, resident).ok();",
+                "chain.fold_lanes().get(lane) == Some(&true)",
+                "chain.fold_lanes().get(lane) == Some(&false)",
+            ),
+            (
+                "write_resident_lane(lease, op.output, words)?;",
+                "write_resident_lane(lease, op.output, None).ok();",
+            ),
+            (
+                "observe(member, lease, first_sample, resident, folded, validity)?;",
+                "observe(member, lease, first_sample, resident, false, validity).ok();",
             ),
         ] {
             assert!(!valid(&source.replacen(from, to, 1)), "control: {from}");
@@ -5997,6 +6315,7 @@ mod tests {
         let identity = |population| UnitIdentity {
             banked: true,
             resident_input: false,
+            observed: false,
             stages: 1,
             upstream_of_seam_stages: 1,
             lane_tracks: (0..population)
@@ -6109,6 +6428,124 @@ mod tests {
         );
         // build_sequential retains the same vector capacity and boxes it once; no separate
         // resident table, per-block allocation, or transient acquisition buffer is introduced.
+    }
+
+    /// Issue #900: the constructor derives every unit's observed flag from the observer slices
+    /// the unit actually holds, whatever the caller wrote -- each placeholder below is the wrong
+    /// answer -- and `observe_unit` then walks exactly the units that hold one, including a bank
+    /// whose only observer sits on its last member. Forcing the unconditional walk back on is the
+    /// control that the counters see the skipped units.
+    #[test]
+    fn observed_flag_is_derived_at_construction_and_skips_only_unobserved_units() {
+        struct Visit(Arc<AtomicUsize>);
+        impl crate::GraphRuntimeObserver for Visit {
+            fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let visits = Arc::new(AtomicUsize::new(0));
+        let observers = |count: usize| -> Box<[GraphNodeObserverBinding]> {
+            (0..count)
+                .map(|handle| {
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::Output {
+                            output_id: crate::StableGraphId::parse("out").expect("id"),
+                        },
+                        handle as u64,
+                        Box::new(Visit(Arc::clone(&visits))),
+                    )
+                })
+                .collect()
+        };
+        let op = |observers| RuntimeOp {
+            inputs: Box::new([]),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::BankMember,
+            split_pair: None,
+            observers,
+        };
+        let bank = |observed_member: Option<usize>| RuntimeUnit::Bank {
+            members: (0..4)
+                .map(|member| op(observers(usize::from(observed_member == Some(member)))))
+                .collect(),
+            lanes: 4,
+            chain: BankChain::new(
+                AoSoaScratch::new(effect_contract::BankWidth::Four, 2).expect("scratch"),
+                Box::new([true; 4]),
+                vec![],
+            )
+            .expect("chain"),
+            fold: Box::new([]),
+            master: 0,
+        };
+        let row = |observed| UnitIdentity {
+            banked: false,
+            resident_input: false,
+            observed,
+            stages: 1,
+            upstream_of_seam_stages: 0,
+            lane_tracks: Box::new([]),
+        };
+        let mut runtime = Runtime::new(
+            stereo_lease(2, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RuntimeUnit::Op(op(observers(0))),
+                RuntimeUnit::Op(op(observers(2))),
+                bank(Some(3)),
+                bank(None),
+            ],
+            Vec::new(),
+            vec![row(true), row(false), row(false), row(true)],
+            Vec::new(),
+            0,
+            0,
+        );
+        assert_eq!(
+            runtime
+                .identity
+                .iter()
+                .map(|row| row.observed)
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+        // Per unit: [observe calls, observer accesses, bank member accesses, observer visits].
+        for (skip_disabled, expected) in [
+            (
+                false,
+                [[0, 0, 0, 0], [1, 2, 0, 2], [4, 1, 4, 1], [0, 0, 0, 0]],
+            ),
+            (
+                true,
+                [[1, 0, 0, 0], [1, 2, 0, 2], [4, 1, 4, 1], [4, 0, 4, 0]],
+            ),
+        ] {
+            for (unit, expected) in expected.into_iter().enumerate() {
+                test_only_observe_calls_reset(skip_disabled);
+                test_only_observation_dispatch_reset();
+                visits.store(0, Ordering::Relaxed);
+                assert_eq!(
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR),
+                    Ok(())
+                );
+                let [observers, members] = test_only_observation_dispatch_counts();
+                assert_eq!(
+                    [
+                        test_only_observe_calls(),
+                        observers,
+                        members,
+                        visits.load(Ordering::Relaxed) as u64,
+                    ],
+                    expected,
+                    "unit {unit}, unconditional walk {skip_disabled}"
+                );
+            }
+        }
+        test_only_observe_calls_reset(false);
     }
 
     #[test]
@@ -6294,6 +6731,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
@@ -6710,7 +7148,7 @@ mod tests {
                     actual.write(0, ids[index]).copy_from_slice(values);
                     old.write(0, ids[index]).copy_from_slice(values);
                 }
-                reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
+                reduce_many::<L>(&mut actual, 0, 1, &ids);
                 {
                     let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
                     sum2_block::<L>(output, first, second);
@@ -6762,6 +7200,267 @@ mod tests {
         assert_width_matches_old::<f32>();
         assert_width_matches_old::<lane::Simd4>();
         assert_width_matches_old::<lane::Simd8>();
+    }
+
+    /// Frozen pre-#898 oracle: `reduce_many` exactly as it stood before issue #898, re-deriving
+    /// every input's arena slice once per vector. It is the "before" side of the before/after gate.
+    fn frozen_per_vector_reduce_many<L: Lane>(
+        lease: &mut ArenaLease,
+        plane: usize,
+        out: u32,
+        first: u32,
+        second: u32,
+        rest: &[u32],
+    ) {
+        let frames = lease.frames();
+        let vectored = frames - frames % L::WIDTH;
+        let mut index = 0;
+        while index < vectored {
+            let mut acc = {
+                let source = lease.read(plane, first);
+                L::load(&source[index..])
+            };
+            for input in std::iter::once(second).chain(rest.iter().copied()) {
+                let value = {
+                    let source = lease.read(plane, input);
+                    L::load(&source[index..])
+                };
+                acc = acc.add(value);
+            }
+            acc.store(&mut lease.write(plane, out)[index..]);
+            index += L::WIDTH;
+        }
+        while index < frames {
+            let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
+            for input in std::iter::once(second).chain(rest.iter().copied()) {
+                let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
+                acc = acc.add(value);
+            }
+            acc.store(&mut lease.write(plane, out)[index..]);
+            index += 1;
+        }
+    }
+
+    /// The one NaN payload the #898 corpus uses; see `hoisting_word`.
+    const HOISTING_NAN: u32 = 0x7fc0_4898;
+
+    /// Xorshift32, frozen here so the #898 corpus does not depend on host RNG state.
+    fn hoisting_draw(state: &mut u32) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        *state
+    }
+
+    /// One #898 corpus word. Most are finite, with magnitudes spread over `2^-24..2^25` so that
+    /// association shows in the rounding. About one word in 170 is a signed zero, a subnormal,
+    /// `infinity` or the one NaN payload.
+    fn hoisting_word(state: &mut u32, infinity: f32) -> f32 {
+        let draw = hoisting_draw(state);
+        let sign = draw & 0x8000_0000;
+        let mantissa = hoisting_draw(state) & 0x007f_ffff;
+        match (draw >> 8) % 1024 {
+            0 | 1 => f32::from_bits(sign),
+            2 | 3 => f32::from_bits(sign | mantissa),
+            4 => infinity,
+            5 => f32::from_bits(HOISTING_NAN),
+            _ => f32::from_bits(sign | (127 - 24 + (draw >> 18) % 49) << 23 | mantissa),
+        }
+    }
+
+    /// Both planes of one reduction into buffer 1 of a fresh stereo lease whose buffers `2..` hold
+    /// `contents`, as bit patterns. The output starts at a sentinel, and every input buffer must
+    /// come out exactly as it went in.
+    fn hoisting_reduction_bits(
+        frames: usize,
+        contents: &[[Vec<f32>; 2]],
+        reduce: impl Fn(&mut ArenaLease, usize),
+    ) -> [Vec<u32>; 2] {
+        let mut lease = stereo_lease(frames, contents.len() + 1);
+        for plane in 0..2 {
+            lease.write(plane, 1).fill(f32::from_bits(0x7f7f_7f7f));
+            for (index, words) in contents.iter().enumerate() {
+                lease
+                    .write(plane, index as u32 + 2)
+                    .copy_from_slice(&words[plane]);
+            }
+        }
+        for plane in 0..2 {
+            reduce(&mut lease, plane);
+        }
+        let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        for (index, words) in contents.iter().enumerate() {
+            for (plane, plane_words) in words.iter().enumerate() {
+                assert_eq!(
+                    bits(lease.read(plane, index as u32 + 2)),
+                    bits(plane_words),
+                    "input buffer {} plane {plane} was written",
+                    index + 2
+                );
+            }
+        }
+        [bits(lease.read(0, 1)), bits(lease.read(1, 1))]
+    }
+
+    /// One width of the #898 gate: the hoisted kernel against the frozen per-vector one.
+    fn assert_hoisting_matches_frozen<L: Lane>(
+        frames: usize,
+        contents: &[[Vec<f32>; 2]],
+        ids: &[u32],
+        reference: &[Vec<u32>; 2],
+    ) {
+        let hoisted = hoisting_reduction_bits(frames, contents, |lease, plane| {
+            reduce_many::<L>(lease, plane, 1, ids);
+        });
+        let frozen = hoisting_reduction_bits(frames, contents, |lease, plane| {
+            frozen_per_vector_reduce_many::<L>(lease, plane, 1, ids[0], ids[1], &ids[2..]);
+        });
+        let context = format!(
+            "width {} fan-in {} frames {frames} ids {ids:?}",
+            L::WIDTH,
+            ids.len()
+        );
+        assert_eq!(hoisted, frozen, "hoisted vs frozen, {context}");
+        assert_eq!(
+            &hoisted, reference,
+            "hoisted vs scalar reference, {context}"
+        );
+    }
+
+    /// Issue #898 gate 1: random N-input reductions are bit-identical before and after the arena
+    /// slices were hoisted out of the vector loop.
+    ///
+    /// "Before" is `frozen_per_vector_reduce_many`, the pre-#898 kernel kept verbatim. The scalar
+    /// left-to-right `reduce` is the D9 definition both must equal. Every lane width runs, and so
+    /// does the production `reduce_plane`. Fan-in is random in `2..=64` and also pinned at every
+    /// group edge up to 65. Block lengths are random, including non-multiples of every lane
+    /// width. Edge lists repeat buffers and name the silence buffer, and both planes differ.
+    /// Every NaN in the corpus carries one payload and each case uses infinities of one sign, so
+    /// no expected bit depends on which operand of an add the compiler puts first.
+    ///
+    /// Red mutations: start each group after the first from a fresh subtotal, or take the groups
+    /// in reverse order. The test checks that its own corpus tells both apart from the reference.
+    #[test]
+    fn random_fan_in_reductions_are_bit_identical_before_and_after_slice_hoisting() {
+        use engine::realtime::ARENA_SILENCE_BUFFER;
+        let _fp_env = lane::fpenv::CanonicalFpEnv::enter();
+        let mut state = 0x0898_5eed_u32;
+        let mut cases: Vec<(usize, usize)> = [2, 7, 8, 9, 15, 16, 17, 63, 64, 65]
+            .into_iter()
+            .flat_map(|fan_in| [(fan_in, 1), (fan_in, 13), (fan_in, 128)])
+            .collect();
+        for _ in 0..120 {
+            let fan_in = 2 + hoisting_draw(&mut state) as usize % 63;
+            let frames = 1 + hoisting_draw(&mut state) as usize % 131;
+            cases.push((fan_in, frames));
+        }
+        let (mut fresh_subtotal_differs, mut reversed_groups_differ) = (0_usize, 0_usize);
+        for (case, &(fan_in, frames)) in cases.iter().enumerate() {
+            let infinity = if case % 2 == 0 {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            let contents: Vec<[Vec<f32>; 2]> = (0..fan_in)
+                .map(|_| {
+                    [0, 1].map(|_| {
+                        (0..frames)
+                            .map(|_| hoisting_word(&mut state, infinity))
+                            .collect()
+                    })
+                })
+                .collect();
+            // Buffer 1 is the output and `2..=fan_in + 1` hold `contents`; about one edge in
+            // sixteen reads the silence buffer, and the rest pick a content buffer with repeats.
+            let ids: Vec<u32> = (0..fan_in)
+                .map(|_| {
+                    let draw = hoisting_draw(&mut state);
+                    if draw.is_multiple_of(16) {
+                        ARENA_SILENCE_BUFFER
+                    } else {
+                        2 + (draw >> 4) % fan_in as u32
+                    }
+                })
+                .collect();
+            let word = |plane: usize, id: u32, frame: usize| {
+                if id == ARENA_SILENCE_BUFFER {
+                    0.0_f32
+                } else {
+                    contents[id as usize - 2][plane][frame]
+                }
+            };
+            let chain = |plane: usize, frame: usize, ids: &mut dyn Iterator<Item = u32>| {
+                ids.map(|id| word(plane, id, frame))
+                    .reduce(|a, b| a + b)
+                    .expect("a non-empty edge list")
+            };
+            let reference: [Vec<u32>; 2] = [0, 1].map(|plane| {
+                (0..frames)
+                    .map(|frame| chain(plane, frame, &mut ids.iter().copied()).to_bits())
+                    .collect()
+            });
+            for (plane, expected_plane) in reference.iter().enumerate() {
+                for (frame, &expected) in expected_plane.iter().enumerate() {
+                    let fresh = ids
+                        .chunks(REDUCE_GROUP)
+                        .map(|group| chain(plane, frame, &mut group.iter().copied()))
+                        .reduce(|a, b| a + b)
+                        .expect("a non-empty edge list");
+                    let reversed = chain(
+                        plane,
+                        frame,
+                        &mut ids.chunks(REDUCE_GROUP).rev().flatten().copied(),
+                    );
+                    fresh_subtotal_differs += usize::from(fresh.to_bits() != expected);
+                    reversed_groups_differ += usize::from(reversed.to_bits() != expected);
+                }
+            }
+
+            assert_hoisting_matches_frozen::<f32>(frames, &contents, &ids, &reference);
+            assert_hoisting_matches_frozen::<lane::Simd4>(frames, &contents, &ids, &reference);
+            assert_hoisting_matches_frozen::<lane::Simd8>(frames, &contents, &ids, &reference);
+            let production = hoisting_reduction_bits(frames, &contents, |lease, plane| {
+                reduce_plane(lease, plane, 1, &ids);
+            });
+            assert_eq!(
+                production, reference,
+                "reduce_plane vs scalar reference, fan-in {fan_in} frames {frames} ids {ids:?}"
+            );
+        }
+        assert!(
+            fresh_subtotal_differs > 0,
+            "the corpus cannot tell a fresh subtotal per group from the chain"
+        );
+        assert!(
+            reversed_groups_differ > 0,
+            "the corpus cannot tell reversed groups from the chain"
+        );
+    }
+
+    /// Issue #898: a fan-in of all `-0.0` stays `-0.0` across every group edge. A later group
+    /// that restarted from a `0.0` fill, rather than from the stored running sum, would return
+    /// `+0.0` here.
+    #[test]
+    fn negative_zero_survives_every_reduction_group_edge() {
+        for fan_in in [2_usize, 8, 9, 16, 17, 64, 65] {
+            for frames in [1_usize, 5, 8, 13] {
+                let contents: Vec<[Vec<f32>; 2]> = (0..fan_in)
+                    .map(|_| [vec![-0.0; frames], vec![-0.0; frames]])
+                    .collect();
+                let ids: Vec<u32> = (2..=fan_in as u32 + 1).collect();
+                let reduced = hoisting_reduction_bits(frames, &contents, |lease, plane| {
+                    reduce_plane(lease, plane, 1, &ids);
+                });
+                assert_eq!(
+                    reduced,
+                    [
+                        vec![(-0.0_f32).to_bits(); frames],
+                        vec![(-0.0_f32).to_bits(); frames]
+                    ],
+                    "fan-in {fan_in} frames {frames}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7868,5 +8567,1470 @@ mod tests {
             unfolded,
             "the folded route is a distinct rounding, not a coincidence"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #885: the route fold stays armed when every track carries a post-matrix meter.
+    // -----------------------------------------------------------------------------------------
+
+    /// One published meter frame: the exact words the observer was handed, and the peak and
+    /// energy a meter derives from them in one fixed order. The words are the strong half -- equal
+    /// words through equal arithmetic are equal snapshots -- and the two numbers keep the claim
+    /// about meters rather than about copies. The input path (resident or planar) is deliberately
+    /// not part of a frame: the arms below differ in exactly that and must not differ in anything a
+    /// meter publishes.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct MeterFrame {
+        handle: u64,
+        first_sample: u64,
+        left: Vec<u32>,
+        right: Vec<u32>,
+        peak: [u32; 2],
+        energy: [u32; 2],
+    }
+
+    type Published = Arc<std::sync::Mutex<Vec<MeterFrame>>>;
+
+    /// A meter that reads the resident view when `accepts_resident`, and declines it otherwise --
+    /// which is the host observer the materialization fallback exists for.
+    struct WordMeter {
+        handle: u64,
+        accepts_resident: bool,
+        published: Published,
+    }
+
+    impl WordMeter {
+        fn publish(&self, first_sample: u64, left: &[f32], right: &[f32]) {
+            let measure = |plane: &[f32]| {
+                let mut peak = 0.0_f32;
+                let mut energy = 0.0_f32;
+                for sample in plane {
+                    peak = peak.max(sample.abs());
+                    energy += sample * sample;
+                }
+                (peak.to_bits(), energy.to_bits())
+            };
+            let (left_peak, left_energy) = measure(left);
+            let (right_peak, right_energy) = measure(right);
+            let bits = |plane: &[f32]| plane.iter().map(|sample| sample.to_bits()).collect();
+            self.published.lock().unwrap().push(MeterFrame {
+                handle: self.handle,
+                first_sample,
+                left: bits(left),
+                right: bits(right),
+                peak: [left_peak, right_peak],
+                energy: [left_energy, right_energy],
+            });
+        }
+    }
+
+    impl crate::GraphRuntimeObserver for WordMeter {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            self.publish(block.first_sample, block.left, block.right);
+            Ok(())
+        }
+
+        fn observe_resident(
+            &mut self,
+            block: crate::GraphResidentObservationBlock<'_>,
+        ) -> Option<Result<(), RenderError>> {
+            if !self.accepts_resident {
+                return None;
+            }
+            // The documented strided layout, written out rather than shared with the production
+            // copy: frame `f` of lane `l` is word `f * width + l`.
+            let lane = block.lane;
+            let width = lane.width().lanes() as usize;
+            let pick = |plane: &[f32]| -> Vec<f32> {
+                (0..lane.frames() as usize)
+                    .map(|frame| plane[frame * width + lane.lane()])
+                    .collect()
+            };
+            self.publish(block.first_sample, &pick(lane.left()), &pick(lane.right()));
+            Some(Ok(()))
+        }
+    }
+
+    /// Seeded noise per track and per block, so every lane and every block carries new words.
+    struct NoiseInput(u32);
+
+    impl GraphRuntimeProcessor for NoiseInput {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            let mut state = (self.0 + 1).wrapping_mul(0x9e37_79b9)
+                ^ (block.first_sample as u32).wrapping_mul(0x85eb_ca6b);
+            for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                *sample = lcg(&mut state);
+            }
+            Ok(())
+        }
+    }
+
+    /// A builtin bank that is not an identity: the resident words are the chain's own output, and
+    /// its cross term makes the two planes depend on each other.
+    struct CrossTilt;
+
+    impl GraphPreparedBuiltinBankProcessor for CrossTilt {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            for (left, right) in left.iter_mut().zip(right.iter_mut()) {
+                let (a, b) = (*left, *right);
+                *left = a * 0.75 - b * 0.125;
+                *right = b * 1.25 + a * 0.5;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FoldFixture {
+        width: BankWidth,
+        tracks: usize,
+        frames: u32,
+        /// The stage every bank member -- each chain's last slot -- sits at.
+        stage: TrackStage,
+        /// Meters on every track, at the stages `meter_at` names.
+        metered: bool,
+        accepts_resident: bool,
+        /// Bind through the controlled-activation catalog and activate every meter.
+        controlled: bool,
+        /// Bind with the route fold declined: the path this plan took before issue #885.
+        fold_declined: bool,
+        /// Issue #886: an elided `PostSimd1` boundary after each member -- a later tap on the
+        /// chain's last slot, which reads that slot's buffer.
+        alias: bool,
+        /// Issue #886: a bound scalar `PostFader` op between the member (or its alias) and the
+        /// route, so no fold is possible and the member's consumer is a plain op.
+        fader: bool,
+        /// The stages each track is metered at, one meter per stage; empty is `stage` alone.
+        meter_at: &'static [TrackStage],
+        /// Bind with every scatter redirect declined: the path a metered last slot took before
+        /// issue #886.
+        scatter_declined: bool,
+        /// Issue #886: a bound scalar `PostMatrix` after each fader, and a fader owner that offers
+        /// the scalar split fader/matrix pair. Needs `fader`.
+        split_pair: bool,
+    }
+
+    impl FoldFixture {
+        const fn metered(width: BankWidth, tracks: usize, frames: u32) -> Self {
+            Self {
+                width,
+                tracks,
+                frames,
+                stage: TrackStage::PostMatrix,
+                metered: true,
+                accepts_resident: true,
+                controlled: false,
+                fold_declined: false,
+                alias: false,
+                fader: false,
+                meter_at: &[],
+                scatter_declined: false,
+                split_pair: false,
+            }
+        }
+
+        /// Issue #886's shape: `Input -> PostInputBuiltins (bank) -> PostSimd1 (elided) ->
+        /// PostFader (bound) -> Route -> Output`, with a meter on the last slot's own node and one
+        /// on its later tap. `PostInputBuiltins` is dedicated storage (`program::is_dedicated`), so
+        /// the fader cannot run in place on it and the chain's scatter is redirected into the
+        /// fader's buffer.
+        const fn scattered(width: BankWidth, tracks: usize, frames: u32) -> Self {
+            Self {
+                stage: TrackStage::PostInputBuiltins,
+                alias: true,
+                fader: true,
+                meter_at: &[TrackStage::PostInputBuiltins, TrackStage::PostSimd1],
+                ..Self::metered(width, tracks, frames)
+            }
+        }
+    }
+
+    /// [`ScalarTilt`]'s arithmetic, from an owner that also offers the scalar split fader/matrix
+    /// pair (issue #886's split-pair arm).
+    struct SplitFader;
+
+    impl GraphRuntimeProcessor for SplitFader {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            ScalarTilt.process(block)
+        }
+
+        fn scalar_split_pair_factory(&self) -> Option<crate::ScalarSplitPairFactory> {
+            Some(|fader, matrix| {
+                Ok(Box::new(DeferredSplit {
+                    fader,
+                    matrix,
+                    pending: false,
+                }))
+            })
+        }
+    }
+
+    /// A bound scalar matrix that is not an identity and mixes its planes.
+    struct MatrixTilt;
+
+    impl GraphRuntimeProcessor for MatrixTilt {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                let (a, b) = (*left, *right);
+                *left = a * 1.125 - b * 0.25;
+                *right = b * 0.75 + a * 0.3125;
+            }
+            Ok(())
+        }
+    }
+
+    /// A split pair that defers the fader's in-place arithmetic to the matrix slot, as the
+    /// production owner may: the fader's buffer holds the fader's *input* in between, which the
+    /// split pair's admission proves nothing reads.
+    struct DeferredSplit {
+        fader: Box<dyn GraphRuntimeProcessor>,
+        matrix: Box<dyn GraphRuntimeProcessor>,
+        pending: bool,
+    }
+
+    impl GraphRuntimeSplitPairProcessor for DeferredSplit {
+        fn begin_fader(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            self.pending = true;
+            Ok(())
+        }
+
+        fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            if core::mem::take(&mut self.pending) {
+                self.fader.process(GraphBindingBlock {
+                    left: &mut *block.left,
+                    right: &mut *block.right,
+                    first_sample: block.first_sample,
+                })?;
+            }
+            self.matrix.process(block)
+        }
+
+        fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
+            if core::mem::take(&mut self.pending) {
+                self.fader
+                    .process(block)
+                    .expect("the test fader cannot fail");
+            }
+        }
+    }
+
+    /// `Input -> <stage> (one builtin bank per cohort of width) -> Route -> Output`, per track,
+    /// with issue #886's optional elided boundary, bound fader and bound matrix between the member
+    /// and the route.
+    ///
+    /// Every route has its own non-trivial 2x2, so the master's association order is visible in
+    /// its bits. Cohorts are the tracks in order, so the chains' render order is the reduction's
+    /// edge order and the fold is admissible.
+    fn fold_fixture(
+        fixture: FoldFixture,
+        published: &Published,
+    ) -> (
+        engine::realtime::PreparedRenderPlan,
+        Option<crate::GraphObservationController>,
+    ) {
+        let id = |text: String| crate::StableGraphId::parse(&text).expect("stable id");
+        let stage_node = |track: usize, stage| GraphNodeId::TrackStage {
+            track_id: id(format!("track{track:02}")),
+            stage,
+        };
+        let tracks = fixture.tracks;
+        let inputs: Vec<_> = (0..tracks)
+            .map(|track| stage_node(track, TrackStage::Input))
+            .collect();
+        let members: Vec<_> = (0..tracks)
+            .map(|track| stage_node(track, fixture.stage))
+            .collect();
+        let aliases: Vec<_> = (0..tracks)
+            .filter(|_| fixture.alias)
+            .map(|track| stage_node(track, TrackStage::PostSimd1))
+            .collect();
+        let faders: Vec<_> = (0..tracks)
+            .filter(|_| fixture.fader)
+            .map(|track| stage_node(track, TrackStage::PostFader))
+            .collect();
+        let matrices: Vec<_> = (0..tracks)
+            .filter(|_| fixture.split_pair)
+            .map(|track| stage_node(track, TrackStage::PostMatrix))
+            .collect();
+        let routes: Vec<_> = (0..tracks)
+            .map(|track| GraphNodeId::Route {
+                route_id: id(format!("route{track:02}")),
+            })
+            .collect();
+        let output = GraphNodeId::Output {
+            output_id: id("main".to_owned()),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue885".to_owned(),
+        };
+        let mut edges = Vec::new();
+        for track in 0..tracks {
+            let route_id = id(format!("route{track:02}"));
+            edges.push(edge(
+                GraphEdgeId::TrackMain {
+                    target: members[track].clone(),
+                },
+                &inputs[track],
+                &members[track],
+            ));
+            let mut upstream = &members[track];
+            for boundary in [aliases.get(track), faders.get(track), matrices.get(track)]
+                .into_iter()
+                .flatten()
+            {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: boundary.clone(),
+                    },
+                    upstream,
+                    boundary,
+                ));
+                upstream = boundary;
+            }
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                upstream,
+                &routes[track],
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination { route_id },
+                &routes[track],
+                &output,
+            ));
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let outputs = vec![output.clone()];
+        let levels: Vec<&Vec<GraphNodeId>> = [
+            &inputs, &members, &aliases, &faders, &matrices, &routes, &outputs,
+        ]
+        .into_iter()
+        .filter(|level| !level.is_empty())
+        .collect();
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.iter().cloned())
+            .collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(fixture.frames),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let backend = match fixture.width {
+            BankWidth::Four => lane::Backend::Simd4,
+            BankWidth::Eight => lane::Backend::Simd8,
+        };
+        let builtin_banks = members
+            .chunks(fixture.width.lanes() as usize)
+            .map(|cohort| GraphPreparedBuiltinBank {
+                backend,
+                members: cohort.to_vec().into_boxed_slice(),
+                processor: Box::new(CrossTilt),
+                scratch: AoSoaScratch::new(fixture.width, fixture.frames).expect("scratch"),
+            })
+            .collect();
+        let mut required_bindings = inputs.clone();
+        required_bindings.extend(members.iter().cloned());
+        required_bindings.extend(faders.iter().cloned());
+        required_bindings.extend(matrices.iter().cloned());
+        required_bindings.push(output.clone());
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 885,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: (*nodes).clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: routes
+                .iter()
+                .enumerate()
+                .map(|(track, node)| crate::PreparedRoute {
+                    node: node.clone(),
+                    transform: RouteTransform {
+                        gain: 0.5 + 0.0625 * track as f32,
+                        ll: 0.875,
+                        lr: -0.25 + 0.03125 * track as f32,
+                        rl: 0.3,
+                        rr: 1.125 - 0.046875 * track as f32,
+                    },
+                })
+                .collect(),
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks,
+            observers: Vec::new(),
+        });
+        let mut nodes: Vec<GraphNodeBinding> = inputs
+            .iter()
+            .enumerate()
+            .map(|(track, node)| {
+                GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(track as u32)))
+            })
+            .collect();
+        nodes.extend(faders.iter().map(|node| {
+            let fader: Box<dyn GraphRuntimeProcessor> = if fixture.split_pair {
+                Box::new(SplitFader)
+            } else {
+                Box::new(ScalarTilt)
+            };
+            GraphNodeBinding::new(node.clone(), fader)
+        }));
+        nodes.extend(
+            matrices
+                .iter()
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(MatrixTilt))),
+        );
+        nodes.push(GraphNodeBinding::identity(output));
+        let meter_at = if fixture.meter_at.is_empty() {
+            &[fixture.stage][..]
+        } else {
+            fixture.meter_at
+        };
+        let mut observed: Vec<(GraphNodeId, u64)> = Vec::new();
+        for track in (0..tracks).filter(|_| fixture.metered) {
+            for (meter, stage) in meter_at.iter().enumerate() {
+                let handle = (track * meter_at.len() + meter) as u64 + 1;
+                observed.push((stage_node(track, *stage), handle));
+            }
+        }
+        let observers = observed
+            .iter()
+            .map(|(node, handle)| {
+                let meter = Box::new(WordMeter {
+                    handle: *handle,
+                    accepts_resident: fixture.accepts_resident,
+                    published: Arc::clone(published),
+                });
+                if fixture.controlled {
+                    GraphNodeObserverBinding::controlled(node.clone(), *handle, meter)
+                } else {
+                    GraphNodeObserverBinding::new(node.clone(), *handle, meter)
+                }
+            })
+            .collect();
+        let bindings = crate::GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers,
+        };
+        test_only_set_route_fold_declined(fixture.fold_declined);
+        test_only_set_scatter_redirect_declined(fixture.scatter_declined);
+        let bound = if fixture.controlled {
+            let (plan, mut controller) = plan
+                .bind_with_observation_activation(
+                    bindings,
+                    crate::GraphObservationActivationConfig {
+                        maximum_active_observers: observed.len(),
+                        maximum_retained_bytes: u64::MAX,
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("controlled bind: {}", failure.code));
+            let handles: Vec<u64> = observed.iter().map(|(_, handle)| *handle).collect();
+            controller.replace(&handles).expect("activate every meter");
+            (plan, Some(controller))
+        } else {
+            (
+                plan.bind(bindings)
+                    .unwrap_or_else(|failure| panic!("bind: {}", failure.code)),
+                None,
+            )
+        };
+        test_only_set_route_fold_declined(false);
+        test_only_set_scatter_redirect_declined(false);
+        bound
+    }
+
+    /// Render `blocks` blocks and return the master output's bits, block after block.
+    fn render_fold_fixture(
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        frames: usize,
+        blocks: u64,
+    ) -> Vec<u32> {
+        let mut bits = Vec::new();
+        for block in 0..blocks {
+            let mut pcm = vec![f32::from_bits(0x7fc0_0885); frames * 2];
+            plan.render(
+                engine::realtime::RenderIo {
+                    input: None,
+                    output: engine::realtime::PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                        .expect("stereo output"),
+                },
+                engine::realtime::RenderTime {
+                    absolute_sample: block * frames as u64,
+                },
+            )
+            .expect("render");
+            bits.extend(pcm.iter().map(|sample| sample.to_bits()));
+        }
+        bits
+    }
+
+    /// Gate 1 of issue #885: a post-matrix meter on every track of a full bank no longer declines
+    /// the fold -- every track's route folds, through both observer dispatchers.
+    ///
+    /// The controls pin which clause each decline belongs to. An unmetered strip at another stage
+    /// folds, so the decline with a meter there is the observer's and not the stage's; and the
+    /// test-only switch the next gate's control arm uses really does decline. (A route observer is
+    /// not constructible: bind admits observers on track stages and the output only, so the
+    /// route clause of `foldable_lane` is unchanged and unexercised here.)
+    ///
+    /// Red mutation: `served_by_the_resident_lane` answering `false` -- the metered arms report
+    /// zero folds. Answering `true` for every node -- the post-fader arm folds.
+    #[test]
+    fn a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed() {
+        for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
+            let published = Published::default();
+            let folds = |fixture| fold_fixture(fixture, &published).0.bank_route_folds();
+            let metered = FoldFixture::metered(width, tracks, 13);
+            assert_eq!(
+                folds(metered),
+                tracks as u64,
+                "{width:?}: a post-matrix meter on every track must keep every route folded"
+            );
+            assert_eq!(
+                folds(FoldFixture {
+                    controlled: true,
+                    ..metered
+                }),
+                tracks as u64,
+                "{width:?}: the controlled catalog binds the same fold"
+            );
+            assert_eq!(
+                folds(FoldFixture {
+                    accepts_resident: false,
+                    ..metered
+                }),
+                tracks as u64,
+                "{width:?}: a declining observer is served by the written member buffer"
+            );
+            assert_eq!(
+                folds(FoldFixture {
+                    stage: TrackStage::PostFader,
+                    metered: false,
+                    ..metered
+                }),
+                tracks as u64,
+                "{width:?}: the unmetered post-fader strip folds"
+            );
+            assert_eq!(
+                folds(FoldFixture {
+                    stage: TrackStage::PostFader,
+                    ..metered
+                }),
+                0,
+                "{width:?}: a meter at any other tap keeps declining the fold"
+            );
+            assert_eq!(
+                folds(FoldFixture {
+                    fold_declined: true,
+                    ..metered
+                }),
+                0,
+                "{width:?}: the control arm's switch declines the fold"
+            );
+            assert!(published.lock().unwrap().is_empty(), "nothing rendered");
+        }
+    }
+
+    /// Gate 2 of issue #885: the folded, metered plan renders the master and publishes every meter
+    /// frame bit for bit as the same plan with the fold declined -- the path it took before.
+    ///
+    /// The control arm is that plan: meters bound, fold declined, and every meter declining the
+    /// resident view, so each frame is the words the unfolded chain really scattered into the
+    /// member buffer. (The same unfolded plan with resident-reading meters -- its production shape
+    /// before #885 -- is checked equal to it first.) Every candidate folds every route and differs
+    /// from the control in the observer path only:
+    ///
+    /// * meters reading the resident view (the production shape; no planar acquisition at all);
+    /// * observers that decline the resident view, which are served by the member buffer
+    ///   `write_resident_lane` fills -- the buffer the fold otherwise leaves holding last block's
+    ///   words;
+    /// * the test-only switch that withdraws the resident offer, the same fallback reached the
+    ///   way the builtins compiler's own resident-meter gate reaches it;
+    /// * both of the above through the controlled-activation dispatcher (`observe_one`).
+    ///
+    /// Shapes: a full W4 bank, a full W8 bank, two full W4 cohorts (so a continuation cohort
+    /// accumulates rather than stores), and a W4 strip of six whose second cohort is partial and
+    /// takes the per-lane scatter. Frame counts that are not a multiple of the lane width are
+    /// included so the transposes' tails are exercised.
+    ///
+    /// Red mutations: drop the `write_resident_lane` call from either dispatcher -- the declining
+    /// arms publish the member buffer's stale words; offer no resident view to a folded lane
+    /// (restore the `fold.is_empty()` eligibility clause) -- the resident arms read stale words.
+    #[test]
+    fn a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit() {
+        const BLOCKS: u64 = 6;
+        for (width, tracks, frames) in [
+            (BankWidth::Four, 4, 13),
+            (BankWidth::Eight, 8, 13),
+            (BankWidth::Four, 8, 16),
+            (BankWidth::Four, 6, 5),
+        ] {
+            let metered = FoldFixture::metered(width, tracks, frames);
+            let run = |fixture: FoldFixture, resident_disabled: bool| {
+                let published = Published::default();
+                let (mut plan, _controller) = fold_fixture(fixture, &published);
+                let folds = plan.bank_route_folds();
+                test_only_meter_input_reset(resident_disabled);
+                let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
+                let counts = test_only_meter_input_counts();
+                test_only_meter_input_reset(false);
+                let frames = published.lock().unwrap().clone();
+                (folds, master, frames, counts)
+            };
+            // The oracle is anchored to the buffer the unfolded chain really scatters: its observers
+            // decline the resident view, so every frame is the member buffer's own words.
+            let (control_folds, control_master, control_frames, control_counts) = run(
+                FoldFixture {
+                    fold_declined: true,
+                    accepts_resident: false,
+                    ..metered
+                },
+                false,
+            );
+            assert_eq!(control_folds, 0, "the control arm is the unfolded plan");
+            let observations = (tracks as u64) * BLOCKS;
+            assert_eq!(control_counts, [observations, observations, 0]);
+            assert_eq!(
+                control_frames.len(),
+                tracks * BLOCKS as usize,
+                "one frame per track per block"
+            );
+            assert!(
+                control_frames.iter().all(|frame| frame
+                    .left
+                    .iter()
+                    .chain(&frame.right)
+                    .any(|word| *word != 0)),
+                "every meter frame carries audio"
+            );
+            assert!(control_master.iter().any(|word| *word != 0));
+            // The same unfolded plan with meters that read the resident view -- the production
+            // shape before #885 -- publishes the same frames: the view is the scattered words.
+            let (_, resident_master, resident_frames, resident_counts) = run(
+                FoldFixture {
+                    fold_declined: true,
+                    ..metered
+                },
+                false,
+            );
+            assert_eq!(resident_counts, [0, observations, observations]);
+            assert_eq!(resident_master, control_master);
+            assert_eq!(resident_frames, control_frames);
+            for (name, fixture, resident_disabled, expected_counts) in [
+                (
+                    "resident meters",
+                    metered,
+                    false,
+                    [0, observations, observations],
+                ),
+                (
+                    "declining observers",
+                    FoldFixture {
+                        accepts_resident: false,
+                        ..metered
+                    },
+                    false,
+                    [observations, observations, 0],
+                ),
+                (
+                    "resident offer withdrawn",
+                    metered,
+                    true,
+                    [observations, 0, 0],
+                ),
+                (
+                    "controlled resident meters",
+                    FoldFixture {
+                        controlled: true,
+                        ..metered
+                    },
+                    false,
+                    [0, observations, observations],
+                ),
+                (
+                    "controlled declining observers",
+                    FoldFixture {
+                        controlled: true,
+                        accepts_resident: false,
+                        ..metered
+                    },
+                    false,
+                    [observations, observations, 0],
+                ),
+            ] {
+                let (folds, master, frames, counts) = run(fixture, resident_disabled);
+                assert_eq!(folds, tracks as u64, "{width:?}/{tracks}/{name}: folded");
+                assert_eq!(
+                    counts, expected_counts,
+                    "{width:?}/{tracks}/{name}: [planar, offered, accepted]"
+                );
+                assert_eq!(
+                    master, control_master,
+                    "{width:?}/{tracks}/{name}: the folded master is the unfolded master's bits"
+                );
+                assert_eq!(
+                    frames, control_frames,
+                    "{width:?}/{tracks}/{name}: every meter frame is the unfolded plan's"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A scatter redirect in a chain rendered after a folded one (found under issue #886).
+    // -----------------------------------------------------------------------------------------
+
+    /// A bound scalar fader that is not an identity and mixes its planes: its buffer changes the
+    /// moment it runs, so anything that read that buffer after the fader ran would see other words.
+    struct ScalarTilt;
+
+    impl GraphRuntimeProcessor for ScalarTilt {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                let (a, b) = (*left, *right);
+                *left = a * 0.625 + b * 0.0625;
+                *right = b * 0.875 - a * 0.1875;
+            }
+            Ok(())
+        }
+    }
+
+    /// Four tracks `Input -> PostMatrix (one W4 builtin bank) -> Route -> bus`, then the bus
+    /// `Input (the four routes' reduction) -> PostInputBuiltins (a one-lane builtin bank) ->
+    /// PostFader (bound) -> Route -> Output`.
+    ///
+    /// The tracks' routes fold into the bus input, which retires four route runs; the bus's bank
+    /// renders after them, and its dedicated last slot redirects its scatter into the fader. Three
+    /// dangling pad strips (`Input -> PostFader`, bound, read by nothing) take the three lowest
+    /// arena slots and free them before the bus allocates, so the bus -- and the session output in
+    /// place on it -- lands on slots no track uses: `foldable_lane` declines a lane that shares the
+    /// session output's slot, and without the pads the colouring hands the output a track's.
+    fn folded_bus_plan(fold_declined: bool) -> engine::realtime::PreparedRenderPlan {
+        const FRAMES: u32 = 13;
+        let id = |text: &str| crate::StableGraphId::parse(text).expect("stable id");
+        let stage = |track: &str, stage| GraphNodeId::TrackStage {
+            track_id: id(track),
+            stage,
+        };
+        let tracks: Vec<String> = (0..4).map(|track| format!("track{track:02}")).collect();
+        let inputs: Vec<_> = tracks
+            .iter()
+            .map(|track| stage(track, TrackStage::Input))
+            .collect();
+        let members: Vec<_> = tracks
+            .iter()
+            .map(|track| stage(track, TrackStage::PostMatrix))
+            .collect();
+        let route_ids: Vec<_> = (0..4)
+            .map(|track| id(&format!("route{track:02}")))
+            .collect();
+        let routes: Vec<_> = route_ids
+            .iter()
+            .map(|route_id| GraphNodeId::Route {
+                route_id: route_id.clone(),
+            })
+            .collect();
+        let pads: Vec<_> = (0..3)
+            .map(|pad| stage(&format!("pad{pad}"), TrackStage::Input))
+            .collect();
+        let pad_ends: Vec<_> = (0..3)
+            .map(|pad| stage(&format!("pad{pad}"), TrackStage::PostFader))
+            .collect();
+        let bus_input = stage("bus", TrackStage::Input);
+        let bus_member = stage("bus", TrackStage::PostInputBuiltins);
+        let bus_fader = stage("bus", TrackStage::PostFader);
+        let bus_route_id = id("routebus");
+        let bus_route = GraphNodeId::Route {
+            route_id: bus_route_id.clone(),
+        };
+        let output = GraphNodeId::Output {
+            output_id: id("main"),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue886".to_owned(),
+        };
+        let main = |target: &GraphNodeId| GraphEdgeId::TrackMain {
+            target: target.clone(),
+        };
+        let mut edges = Vec::new();
+        for track in 0..4 {
+            edges.push(edge(main(&members[track]), &inputs[track], &members[track]));
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_ids[track].clone(),
+                },
+                &members[track],
+                &routes[track],
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: route_ids[track].clone(),
+                },
+                &routes[track],
+                &bus_input,
+            ));
+        }
+        for (pad, end) in pads.iter().zip(&pad_ends) {
+            edges.push(edge(main(end), pad, end));
+        }
+        edges.push(edge(main(&bus_member), &bus_input, &bus_member));
+        edges.push(edge(main(&bus_fader), &bus_member, &bus_fader));
+        edges.push(edge(
+            GraphEdgeId::RouteSource {
+                route_id: bus_route_id.clone(),
+            },
+            &bus_fader,
+            &bus_route,
+        ));
+        edges.push(edge(
+            GraphEdgeId::RouteDestination {
+                route_id: bus_route_id,
+            },
+            &bus_route,
+            &output,
+        ));
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let levels: Vec<Vec<GraphNodeId>> = vec![
+            pads.iter().chain(&inputs).cloned().collect(),
+            pad_ends.iter().chain(&members).cloned().collect(),
+            routes.clone(),
+            vec![bus_input.clone()],
+            vec![bus_member.clone()],
+            vec![bus_fader.clone()],
+            vec![bus_route.clone()],
+            vec![output.clone()],
+        ];
+        let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(FRAMES),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let bank = |members: Vec<GraphNodeId>| GraphPreparedBuiltinBank {
+            backend: lane::Backend::Simd4,
+            members: members.into_boxed_slice(),
+            processor: Box::new(CrossTilt),
+            scratch: AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
+        };
+        let transform = |index: usize| RouteTransform {
+            gain: 0.5 + 0.0625 * index as f32,
+            ll: 0.875,
+            lr: -0.25 + 0.03125 * index as f32,
+            rl: 0.3,
+            rr: 1.125 - 0.046875 * index as f32,
+        };
+        let required_bindings: Vec<_> = inputs
+            .iter()
+            .chain(&members)
+            .chain(&pads)
+            .chain(&pad_ends)
+            .chain([&bus_input, &bus_member, &bus_fader, &output])
+            .cloned()
+            .collect();
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 886,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: nodes.clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: routes
+                .iter()
+                .chain([&bus_route])
+                .enumerate()
+                .map(|(index, node)| crate::PreparedRoute {
+                    node: node.clone(),
+                    transform: transform(index),
+                })
+                .collect(),
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: vec![bank(members.clone()), bank(vec![bus_member])],
+            observers: Vec::new(),
+        });
+        let mut bindings: Vec<GraphNodeBinding> = inputs
+            .iter()
+            .chain(&pads)
+            .enumerate()
+            .map(|(seed, node)| {
+                GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(seed as u32)))
+            })
+            .collect();
+        bindings.extend(
+            pad_ends
+                .iter()
+                .chain([&bus_fader])
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(ScalarTilt))),
+        );
+        bindings.push(GraphNodeBinding::identity(bus_input));
+        bindings.push(GraphNodeBinding::identity(output));
+        test_only_set_route_fold_declined(fold_declined);
+        let bound = plan
+            .bind(crate::GraphRuntimeBindings {
+                envelope,
+                nodes: bindings,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        test_only_set_route_fold_declined(false);
+        bound
+    }
+
+    /// A chain that redirects its scatter after a folded chain binds, and redirects its own lane.
+    ///
+    /// `apply_scatter_redirects` indexed `units` by run, and the fold retires route runs without
+    /// emitting units for them; in this plan the bus's run is 16 and `units` has 16 entries, so the
+    /// folded bind panicked (index out of bounds). Where more units follow, the same index lands on
+    /// another unit instead. The oracle is the same plan with the fold declined: the redirect is
+    /// then the only index in play and both arms must render the master bit for bit.
+    ///
+    /// Red mutation: index `units[run]` again -- the folded arm panics at bind.
+    #[test]
+    fn a_redirect_after_a_retired_route_lands_on_its_own_chain() {
+        const BLOCKS: u64 = 6;
+        let mut unfolded = folded_bus_plan(true);
+        assert_eq!(
+            [
+                unfolded.bank_scatter_redirects(),
+                unfolded.bank_route_folds()
+            ],
+            [1, 0],
+            "the oracle redirects the bus's lane and folds nothing"
+        );
+        let mut folded = folded_bus_plan(false);
+        assert_eq!(
+            [folded.bank_scatter_redirects(), folded.bank_route_folds()],
+            [1, 4],
+            "the tracks' routes fold into the bus, and the bus still redirects"
+        );
+        let oracle = render_fold_fixture(&mut unfolded, 13, BLOCKS);
+        assert!(
+            oracle.iter().any(|word| *word != 0),
+            "the plan renders audio"
+        );
+        assert_eq!(
+            render_fold_fixture(&mut folded, 13, BLOCKS),
+            oracle,
+            "the folded plan's master is the unfolded plan's bits"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #886: the direct scatter stays armed when the chain's final output is observed.
+    // -----------------------------------------------------------------------------------------
+
+    /// `[scatter redirects, route folds]` of `fixture`'s bound plan.
+    fn scatter_shape(fixture: FoldFixture) -> [u64; 2] {
+        let published = Published::default();
+        let (plan, _controller) = fold_fixture(fixture, &published);
+        assert!(
+            published.lock().unwrap().is_empty(),
+            "binding renders nothing"
+        );
+        [plan.bank_scatter_redirects(), plan.bank_route_folds()]
+    }
+
+    /// Gate 1 of issue #886: a full bank metered at its last slot's own node and at that slot's
+    /// later tap binds with every lane's scatter pointed at its consumer's buffer.
+    ///
+    /// The shape is the one the direct scatter exists for: a dedicated last slot
+    /// (`PostInputBuiltins`) whose sole reader is a plain op that cannot run in place on it -- a
+    /// bound fader, so the route fold is not possible either. A post-matrix meter cannot be this
+    /// test's subject: a `PostMatrix` last slot is never dedicated storage and feeds only routes,
+    /// which are not dedicated either, so its sole reader already runs in place on its buffer and
+    /// `scatter_target` has nothing to redirect, metered or not (the last arm below).
+    ///
+    /// Arms: both meters, each alone, the controlled catalog, observers that decline the resident
+    /// view, and a meter on the consumer's own node (never a clause) all keep every lane
+    /// redirected; the test-only switch gate 2's oracle uses declines every lane. The last two
+    /// arms are how the direct scatter composes with issue #885's fold on the route-consumer
+    /// shape: unmetered, the fold takes every lane and leaves no scatter to redirect; metered at a
+    /// boundary the fold does not excuse, the fold declines and the direct scatter takes every lane
+    /// instead. No lane is ever both.
+    ///
+    /// Red mutations: restore the producer-node clause in `scatter_target` -- the arms metered at
+    /// the last slot's own node report zero redirects; restore the alias clause -- the arms metered
+    /// at the later tap do. Neither declines the consumer's-node arm.
+    #[test]
+    fn an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed() {
+        for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
+            let lanes = tracks as u64;
+            let metered = FoldFixture::scattered(width, tracks, 13);
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    metered: false,
+                    ..metered
+                }),
+                [lanes, 0],
+                "{width:?}: unmetered, every lane's scatter lands in its fader"
+            );
+            for (name, fixture) in [
+                ("the last slot and its later tap", metered),
+                (
+                    "the last slot's own node",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostInputBuiltins],
+                        ..metered
+                    },
+                ),
+                (
+                    "the later tap alone",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostSimd1],
+                        ..metered
+                    },
+                ),
+                (
+                    "the controlled catalog",
+                    FoldFixture {
+                        controlled: true,
+                        ..metered
+                    },
+                ),
+                (
+                    "observers declining the resident view",
+                    FoldFixture {
+                        accepts_resident: false,
+                        ..metered
+                    },
+                ),
+                (
+                    "the consumer's own node",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostFader],
+                        ..metered
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    scatter_shape(fixture),
+                    [lanes, 0],
+                    "{width:?}: a meter at {name} keeps every lane redirected"
+                );
+            }
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    scatter_declined: true,
+                    ..metered
+                }),
+                [0, 0],
+                "{width:?}: the oracle's switch declines every redirect"
+            );
+            let routed = FoldFixture {
+                fader: false,
+                ..metered
+            };
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    metered: false,
+                    ..routed
+                }),
+                [0, lanes],
+                "{width:?}: unmetered, the fold takes every lane and no scatter is left to redirect"
+            );
+            assert_eq!(
+                scatter_shape(routed),
+                [lanes, 0],
+                "{width:?}: a meter the fold does not excuse declines it, and the direct scatter \
+                 takes every lane instead"
+            );
+            // Issue #885's shape, for the record: a post-matrix last slot's route runs in place
+            // on its buffer, so there is no scatter to redirect with or without the fold.
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    fold_declined: true,
+                    ..FoldFixture::metered(width, tracks, 13)
+                }),
+                [0, 0],
+                "{width:?}: a post-matrix last slot has no redirect to keep"
+            );
+        }
+    }
+
+    /// Gate 2 of issue #886: the redirected, metered plan renders the master and publishes every
+    /// meter frame bit for bit as the same plan with the direct scatter declined -- the path a
+    /// metered last slot took before.
+    ///
+    /// The control arm is that plan with every observer declining the resident view, so each frame
+    /// is the words the unredirected chain really scattered into the last slot's own buffer. (The
+    /// same unredirected plan with resident-reading meters is checked equal to it first.) Every
+    /// candidate redirects exactly the lanes the unmetered plan does, and differs from the control
+    /// in where the scatter lands and in the observer path only:
+    ///
+    /// * meters reading the resident view (the production shape; no planar acquisition at all);
+    /// * observers that decline the resident view and read the member's output -- after the
+    ///   redirect, the consumer's buffer, read after the chain's unit and before the fader's;
+    /// * the test-only switch that withdraws the resident offer;
+    /// * both of the above through the controlled-activation dispatcher (`observe_one`).
+    ///
+    /// Each track carries two meters: one on the last slot's own node and one on its later tap
+    /// (the elided `PostSimd1`), so both kinds of producer observer the two removed clauses
+    /// declined are read in every block. Consumers: the bound fader (no fold is possible) and the
+    /// route (the fold declines for the non-post-matrix meters, and the oracle for "the lanes the
+    /// unmetered plan redirects" is then the unmetered plan with the fold declined). Shapes: a full
+    /// W4 bank, a full W8 bank, two full W4 cohorts, and a W4 strip of six whose second cohort is
+    /// partial -- frame counts off the lane width, so the transposes' tails are exercised.
+    ///
+    /// Red mutations: scatter into the consumer but leave the member's `output` on the last slot's
+    /// own buffer -- the declining arms publish other words and the master is unchanged; move the
+    /// redirected member's observers onto the consumer's op, so they run after it -- every arm's
+    /// frames change (its counts first); hand the resident view the wrong lane -- the resident
+    /// arms (and the unredirected resident control) publish other words.
+    #[test]
+    fn a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit() {
+        for (width, tracks, frames) in [
+            (BankWidth::Four, 4, 13),
+            (BankWidth::Eight, 8, 13),
+            (BankWidth::Four, 8, 16),
+            (BankWidth::Four, 6, 5),
+        ] {
+            let scattered = FoldFixture::scattered(width, tracks, frames);
+            for (consumer, metered) in [
+                ("fader", scattered),
+                (
+                    "route",
+                    FoldFixture {
+                        fader: false,
+                        ..scattered
+                    },
+                ),
+            ] {
+                let shape = format!("{width:?}/{tracks}/{consumer}");
+                assert_redirected_meters_are_the_declined_plans(metered, None, &shape);
+            }
+        }
+    }
+
+    /// The fader node `test_only_selected_split_fader` reports for the bind just made, if any.
+    fn selected_split_fader() -> Option<GraphNodeId> {
+        test_only_selected_split_fader().map(|selected| selected.node)
+    }
+
+    /// Gate 2's comparison for one metered shape: the declined oracle, then the five redirected
+    /// arms, each against it bit for bit. `control_split` is the fader the oracle's bind hands the
+    /// scalar split pair; every redirected arm must hand it none.
+    fn assert_redirected_meters_are_the_declined_plans(
+        metered: FoldFixture,
+        control_split: Option<GraphNodeId>,
+        shape: &str,
+    ) {
+        const BLOCKS: u64 = 6;
+        let (tracks, frames) = (metered.tracks, metered.frames);
+        let run = |fixture: FoldFixture, resident_disabled: bool| {
+            let published = Published::default();
+            let (mut plan, _controller) = fold_fixture(fixture, &published);
+            let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
+            let split = selected_split_fader();
+            test_only_meter_input_reset(resident_disabled);
+            let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
+            let counts = test_only_meter_input_counts();
+            test_only_meter_input_reset(false);
+            let frames = published.lock().unwrap().clone();
+            (bound, split, master, frames, counts)
+        };
+        let redirected = scatter_shape(FoldFixture {
+            metered: false,
+            fold_declined: true,
+            ..metered
+        })[0];
+        assert!(redirected > 0, "{shape}: the shape must redirect something");
+        let meters = (tracks * metered.meter_at.len()) as u64;
+        let offers = meters * BLOCKS;
+        let planar = tracks as u64 * BLOCKS;
+        let (control_bound, split, control_master, control_frames, control_counts) = run(
+            FoldFixture {
+                scatter_declined: true,
+                accepts_resident: false,
+                ..metered
+            },
+            false,
+        );
+        assert_eq!(
+            control_bound,
+            [0, 0],
+            "{shape}: the control neither redirects nor folds"
+        );
+        assert_eq!(split, control_split, "{shape}: the control's split pair");
+        assert_eq!(
+            control_counts,
+            [planar, offers, 0],
+            "{shape}: control counts"
+        );
+        assert_eq!(
+            control_frames.len(),
+            offers as usize,
+            "{shape}: one frame per meter per block"
+        );
+        assert!(
+            control_frames.iter().all(|frame| frame
+                .left
+                .iter()
+                .chain(&frame.right)
+                .any(|word| *word != 0)),
+            "{shape}: every meter frame carries audio"
+        );
+        assert!(control_master.iter().any(|word| *word != 0));
+        let (_, _, resident_master, resident_frames, resident_counts) = run(
+            FoldFixture {
+                scatter_declined: true,
+                ..metered
+            },
+            false,
+        );
+        assert_eq!(resident_counts, [0, offers, offers]);
+        assert_eq!(resident_master, control_master);
+        assert_eq!(resident_frames, control_frames);
+        for (name, fixture, resident_disabled, expected_counts) in [
+            ("resident meters", metered, false, [0, offers, offers]),
+            (
+                "declining observers",
+                FoldFixture {
+                    accepts_resident: false,
+                    ..metered
+                },
+                false,
+                [planar, offers, 0],
+            ),
+            ("resident offer withdrawn", metered, true, [planar, 0, 0]),
+            (
+                "controlled resident meters",
+                FoldFixture {
+                    controlled: true,
+                    ..metered
+                },
+                false,
+                [0, offers, offers],
+            ),
+            (
+                "controlled declining observers",
+                FoldFixture {
+                    controlled: true,
+                    accepts_resident: false,
+                    ..metered
+                },
+                false,
+                [planar, offers, 0],
+            ),
+        ] {
+            let (bound, split, master, frames, counts) = run(fixture, resident_disabled);
+            assert_eq!(
+                bound,
+                [redirected, 0],
+                "{shape}/{name}: the unmetered plan's redirects, and no fold"
+            );
+            assert_eq!(split, None, "{shape}/{name}: no split pair");
+            assert_eq!(
+                counts, expected_counts,
+                "{shape}/{name}: [planar, offered, accepted]"
+            );
+            assert_eq!(
+                master, control_master,
+                "{shape}/{name}: the redirected master is the unredirected master's bits"
+            );
+            assert_eq!(
+                frames, control_frames,
+                "{shape}/{name}: every meter frame is the unredirected plan's"
+            );
+        }
+    }
+
+    /// A fader that is a redirect consumer is kept out of the scalar split fader/matrix pair
+    /// (`build_sequential` skips a pair whose fader or matrix consumes a redirect). Before issue
+    /// #886 a meter on the last slot declined the redirect and so freed the fader for the pair: a
+    /// metered plan took the split pair where the same plan unmetered took the redirect. Now both
+    /// take the redirect, and the metered plan has the unmetered plan's shape.
+    ///
+    /// The shape adds a bound scalar `PostMatrix` after each fader, and a fader owner that offers
+    /// the split pair (a deferring owner: the fader's arithmetic runs at the matrix slot). Faders
+    /// are consecutive in the schedule, so track 0's fader and matrix are not adjacent, which is
+    /// the only interval the split pair admits. Asserted on the bound plan:
+    ///
+    /// * unmetered: every lane redirected, no split pair;
+    /// * metered at the last slot and its later tap: the same -- the redirect, not the split pair;
+    /// * the declined oracle (the path a fully metered plan took before #886): no redirect, and
+    ///   track 0's fader is the selected split fader.
+    ///
+    /// Then gate 2's comparison: every redirected, metered arm renders the master and every meter
+    /// frame bit for bit as the declined oracle, which renders through the split pair.
+    ///
+    /// Red mutation: drop the redirect-consumer exclusion from the split pass -- the metered and
+    /// unmetered arms select a split fader.
+    #[test]
+    fn a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits() {
+        for (width, tracks, frames) in [(BankWidth::Four, 4, 13), (BankWidth::Eight, 8, 13)] {
+            let shape = format!("{width:?}/{tracks}/split pair");
+            let metered = FoldFixture {
+                split_pair: true,
+                ..FoldFixture::scattered(width, tracks, frames)
+            };
+            let track_zero_fader = GraphNodeId::TrackStage {
+                track_id: crate::StableGraphId::parse("track00").expect("stable id"),
+                stage: TrackStage::PostFader,
+            };
+            let lanes = tracks as u64;
+            let path = |fixture: FoldFixture| (scatter_shape(fixture), selected_split_fader());
+            assert_eq!(
+                path(FoldFixture {
+                    metered: false,
+                    ..metered
+                }),
+                ([lanes, 0], None),
+                "{shape}: unmetered, every lane redirects and no fader is split"
+            );
+            assert_eq!(
+                path(metered),
+                ([lanes, 0], None),
+                "{shape}: metered, the same shape as unmetered -- the redirect, not the split pair"
+            );
+            assert_eq!(
+                path(FoldFixture {
+                    scatter_declined: true,
+                    ..metered
+                }),
+                ([0, 0], Some(track_zero_fader.clone())),
+                "{shape}: with the redirect declined, track 0's fader takes the split pair"
+            );
+            assert_redirected_meters_are_the_declined_plans(
+                metered,
+                Some(track_zero_fader),
+                &shape,
+            );
+        }
     }
 }
