@@ -158,9 +158,126 @@ master write sites; this issue rebases and routes the fused kernel's master thro
 ## Attempt 1 evidence
 
 Implementer: Terra (attempt 1). Branch `codex/916-master-into-host-planes`, from `e178a379`
-(#915's verified tip). Implementation checkpoint: `608f0379`. A comment-only follow-up is
-`10de67c9`. Every gate below ran on that code. The evidence commit changes only
-`crates/graph/tests/MUTATIONS.md` and this section.
+(#915's verified tip). The commits:
+
+- `608f0379`: the implementation checkpoint.
+- `10de67c9`: a comment-only follow-up.
+- `47a11617`: the first evidence commit.
+- `9c762d7c`: the scope-amendment code.
+- One more evidence commit carrying this amendment and MUTATIONS rows 916-16 and 916-17.
+
+Unless a row says otherwise, the gates and mutations below ran on `608f0379`. The amendment's gates
+ran on `9c762d7c`.
+
+### Scope amendment (Sol)
+
+**The ruling.** Option (a): update the builtins-compiler harness whose premise dedication removed,
+and add no compat clause to `chains_into`. The authorized paths gain test code only in
+`crates/builtins-compiler/src/lib.rs` (the `mod tests` region) and
+`crates/builtins-compiler/tests/allocation_tracker.rs`. No production line in builtins-compiler
+changed.
+
+**The removed premise.** The harness comment in `track_graph_variant_with_route_transform` read:
+"Track 0 is already ineligible because its post-matrix buffer is the graph output." The rule now is
+that **track 0 pairs, because its post-matrix buffer is no longer the graph output.** The Output is
+dedicated storage whose block is the host's planes, and it never folds in place onto the post-matrix
+buffer. The comment now says this, and it keeps the alias on the trailing track, so toggling its
+observer still discriminates the observer barrier there.
+
+**What applying it found, and the decision.** The harness did not simply gain track 0's pair; it
+swapped pairs.
+
+- **The mechanism.** The dedicated Output takes a free slot at its op. In the two-track harness,
+  that is the slot the trailing track's fader and matrix retire from just before. A probe of the
+  harness program shows `program.output` = slot 3 = t01's `PostFader`/`PostMatrix` slot.
+- **The consequence.** `chains_into` declined `producer.output == program.output`, and
+  `scalar_split_interval_is_clear` declined `program.output == buffer`. Both are buffer-index
+  identities, the same kind as the brief's rule that mutation 916-5 refutes. With them in place,
+  t01 stopped pairing: #916 would have cost the harness a fused pass for no reason.
+- **The fix.** Both comparisons are removed (`runtime.rs`, in #916's original paths), together with
+  the model's copy in `program/tests.rs` `chains_into_model`. This is the opposite of a compat
+  clause: the removed comparisons declined sound pairs.
+- **Why it is sound.** The host reads no arena buffer. The Output op reads its producer, and the
+  readership clause counts that read. A slot match after the producer retired is colouring
+  coincidence.
+- **Evidence.**
+  - `cohort_chain_merging_preserves_dataflow_on_random_graphs` interprets 110 more merged chains
+    with no dataflow divergence, so its pin moves 3752 → 3862. Putting the model's clause back
+    restores 3752.
+  - Every pair-versus-separate PCM, host-plane and owner-state equality in builtins-compiler holds.
+  - graph-compiler and console-workload are unchanged. The standing workloads' fold counts and
+    `bank_shape` are pinned there.
+  - Mutations 916-16 and 916-17 are red.
+- **Left for a follow-up.** The same slot comparison remains in `scatter_target` and
+  `foldable_lane`. Each has a program-level model that the corpus compares against the runtime.
+  They only decline, and no standing workload or test reaches them. I recommend one bounded
+  follow-up to restate both, with their models, by node. Their docs now say they fire only by slot
+  coincidence; this corrects my earlier "cannot fire".
+
+**The tests, and the new expected values.** There are 14 at `608f0379`, plus 3 that went red only
+once the slot comparisons were removed.
+
+| test | before | now |
+|---|---|---|
+| `actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners` | `factory (1,1)`; one pair per block: `(fused,fallback)` `(1,0)` settled, `(0,1)` ramping; post-fader-metered mutation `(process,factory) (0,0)` | `(2,2)`; two pairs per block, track 0's settled pair adding one fused call: `(2,0)` settled, immediate, settled-again, retarget-settled, muted, unmuted, and `(1,1)` ramping, long ramp, mid-ramp retarget; mutation `(1,1)` (t01 declines, t00 still pairs) |
+| `actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail` (red after the clause removal) | retry `(1,0)`, one pair | retry `(2,0)`, two pairs |
+| `actual_scalar_nonadjacent_schedule_selects_the_split_owner` | one split pair (t01's, not pinned) | one split pair, now pinned to **t00**: `F0` is offered first and t00 is eligible. Gated on `test-support`. |
+| `actual_scalar_nonadjacent_physical_output_conflict_declines_before_owner_transfer`, **renamed** `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated` | output track declined: `factory (0,0)`, render `(0,0)` | output track t01 selected: `factory (1,1)`, render `(process,factory) (1,0)`. Host planes, captured PCM and per-owner states equal the concurrent twin's, which selects no pair: `(0,0)`. Gated on `test-support`. The old name described a conflict that no longer exists. |
+| `actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries` | t01's split pair; failing observer on t00 `PostMatrix`; controls on t01 | t00's split pair (asserted). The failing observer moves (harness) to t01's `PostFader`, between `F0` and `M0`. Controls drive track 0. Fader state is compared per owner; t00's matrix stays at its initial state, and the twin never reached `M0`. The retry adds the twin's drain assertion and per-owner states. Gated on `test-support`. |
+| `actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm` | `factory (0,0)`, render `(0,0)` | `factory (1,1)`, render `(process_calls, process_members, factory) (1,1,0)`. The extra reader still declines t01; t00 pairs. Host planes equal the twin's. |
+| `staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs` (red after the clause removal) | `(1,1)` prepared and rendered | `(2,2)` prepared and rendered: t02 and t00 pair, metered t01 stays separate. Host planes equal the twin's. |
+| `actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input` | `(fused,fallback) (1,0)`, `process_members 1`; hostile and clean `(1,1)` | `(2,0)`, `9`; hostile and clean `(2,9)`. The eight-lane first cohort pairs beside the one-lane tail. Host planes equal the twin's on two blocks. |
+| `serialized_alias_observer_is_the_decline_boundary` | eligible `factory_calls 1`, `members 1`; observed `0` | eligible `2`, `9`; observed `1`, and a new `members 8` (only the tail declines) |
+| `serialized_live_fader_matrix_is_selected_by_the_bound_render_path` | `offers 1`, `executed 1`, `members tracks - width`; `process_members == fused × factory_members` | `offers 2`, `executed 2`, `members tracks` (5 and 9); `process_members == HARNESS_BLOCKS × tracks` (the one-pair identity restated as the exact total) |
+| allocation_tracker `actual_queued_graph_phases_allocate_and_free_nothing` | `factory (1,1)`; settled `(1,0)`, `members 1`; ramp `(0,1)`, `(1,0)`; retarget `(0,1)`, resettled `(1,0)` | `(2,9)`; `(2,0)`, `9`; `(1,1)`, `(2,0)`; `(1,1)`, `(2,0)`. The metered arm is unchanged, because the meter declines the first cohort. |
+| allocation_tracker `actual_queued_scalar_graph_allocates_and_frees_nothing` | `factory (1,1)`; `(1,0)`; ramps `(0,1)`, `(0,1)`, `(1,0)`, `members 1`; observed `(process,factory) (0,0)` | `(2,2)`; `(2,0)`; `(1,1)`, `(1,1)`, `(2,0)`, `members 2`; observed `(1,0)`: t01 is metered, t00 pairs |
+| allocation_tracker `actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts` (red after the clause removal) | outer lifetime `[1,1,0]`; one bound outer; spare `2·split_outer − outer + entry`; drops `[2,2,1]`, lifetime `[1,0,1]` | `[2,2,0]`; two bound outers; spare `2·split_outer − 2·outer + entry`; drops `[2,2,2]`, lifetime `[2,0,2]`. The allowance already reserved two possible split owners for this two-track plan. |
+| `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`, `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`, `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`, allocation_tracker `actual_scalar_split_table_and_failed_render_fit_the_resource_gate` | red at `608f0379` | green unchanged once the slot comparisons are removed: their t00 selection holds again |
+
+Every one of them runs to green, and every PCM and allocation assertion it carries is reached. No
+equality was loosened to an inequality. Where an identity assumed one pair, it was restated as the
+exact multi-pair value.
+
+**The bit-identity check (rule 3).** `render_scalar_pair_and_compare` is the existing
+pair-versus-separate equality. Its separate twin uses concurrent delivery, which both pair
+factories refuse, so it is the pair-decline seam. It now also asserts:
+
+- the host planes, which are track 0's post-matrix output, equal the twin's;
+- every owner's last recorded fader and matrix state equals the twin's.
+
+`actual_scalar_nonadjacent_schedule_selects_the_split_owner` drives it with **t00 taking the scalar
+split pair**, and pins that selection. That is the requested check. The adjacent pairs (queues,
+prefix error) and the extra-reader, staggered, mono-collapse and output-track tests compare host
+planes the same way.
+
+**Design notes the ruling asked for.**
+
+- **A new correctness rule.** A scatter redirect whose consumer is the Output op is withheld in
+  `build_sequential`. It would scatter into the Output's arena slot and neutralise its reduction,
+  so the host planes would never receive the lane. Declined, the chain scatters into its own slot,
+  and the Output op copies it into the host: one copy. The proof is mutation 916-6: without the
+  withholding, gate 1's `BankIntoOutput` shape goes red.
+- **A deviation from the brief.** The Output op is identified by node (`output_op`,
+  `Runtime::output_unit`, `FoldTarget::Output`), not by `op.output == self.output`. Mutation 916-5
+  applies the brief's rule. It is red on gate 1 and on five pre-existing graph tests, including
+  `fifty_random_dag_sessions_render_deterministic_nonsilent_pcm` ("the corpus must not be
+  silent"). That is the evidence the brief's rule was wrong: the dedicated Output takes retired
+  slots. The amendment's slot comparisons were the same defect in two planning predicates.
+
+**Gates on `9c762d7c`.**
+
+| command | result |
+|---|---|
+| `cargo test -p builtins-compiler --features test-support` | lib 58, `allocation_tracker` 9, `builtin_automation_targets` 3, `input_drain` 6, `scale` 1, `track_delay_domain` 2; 0 failed |
+| `cargo test -p builtins-compiler` (no features) | **does not compile, before or after.** 22 × E0425 at base `e178a379` and 21 now. The unit tests call `test-support`-gated helpers ungated, and CI always passes the feature. The three rewritten nonadjacent tests are gated like their siblings, so this build is no worse. |
+| `cargo test -p graph` / `--features test-support` | lib 98, rt1 1, rt9 1 / lib 98, rt1 1, rt9 8; 0 failed |
+| `cargo test -p host-core --all-features` | lib 86 and every integration suite, 0 failed (2 pre-existing ignores) |
+| `cargo test -p console-workload` | `automation` 4, `chain_shape` 22, `placement` 3; 0 failed |
+| `cargo test -p graph-compiler` | 73 + 1 + 3 + 1 + 8 + 6; 0 failed |
+| CI's "Workspace debug tests" step, verbatim, with `--no-fail-fast` | exit 0, 107 suites, 0 failed |
+| `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | clean; exit 0 |
+| `bash scripts/check-graph-determinism.sh` | PASS (100/100); evidence JSON byte-identical to the pre-change run |
+| `check-graph-policy.sh` / `check-realtime-policy.sh` | PASS / ok (50 regions in 14 files) |
 
 ### Design
 
@@ -438,53 +555,16 @@ Beyond the brief, these are also red:
 9. **`preflight_sequential` can refuse with `graph.scheduler.layout`** if the Output op is missing
    or is not a plain unit. That is unreachable, and it replaces what would otherwise be a bind-time
    panic.
+10. **Two planning predicates lose their slot comparison with `program.output`** (scope amendment):
+    `chains_into` and `scalar_split_interval_is_clear`, and the model `chains_into_model`. One
+    graph test pin moved: the corpus's merged chains, 3752 → 3862.
 
-### Out-of-path finding (not edited; needs a decision)
+### Out-of-path finding (resolved by the scope amendment)
 
-Dedicating the Output changes one bind decision the brief did not anticipate: scalar fader/matrix
-pair admission. `chains_into` declines a pair whose fader buffer is `program.output`
-(`producer.output == program.output`). Before, a single-input Output folded in place onto the last
-fader/matrix buffer, and that pair declined. Now the Output owns its buffer, and the pair is
-admitted.
-
-The builtins-compiler harness depends on the old decline. Its comment at
-`crates/builtins-compiler/src/lib.rs:6126` reads: "Track 0 is already ineligible because its
-post-matrix buffer is the graph output". With `--features test-support`, 14 tests are red at
-`608f0379` and green at `e178a379`. In the lib (11):
-
-- `actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input`
-- `actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm`
-- `actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners`
-- `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`
-- `actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries`
-- `actual_scalar_nonadjacent_physical_output_conflict_declines_before_owner_transfer`
-- `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`
-- `actual_scalar_nonadjacent_schedule_selects_the_split_owner`
-- `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`
-- `serialized_alias_observer_is_the_decline_boundary`
-- `serialized_live_fader_matrix_is_selected_by_the_bound_render_path`
-
-In `tests/allocation_tracker.rs` (3):
-
-- `actual_queued_graph_phases_allocate_and_free_nothing`
-- `actual_queued_scalar_graph_allocates_and_frees_nothing`
-- `actual_scalar_split_table_and_failed_render_fit_the_resource_gate`
-
-In every one, the first failing assertion is a pairing witness: factory, fused or fallback counts,
-the selected split fader's identity, the offer count, or the witness's fader-state words. None is a
-PCM or allocation assertion. Where `render_scalar_pair_and_compare`'s PCM equality runs first
-(`actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners`,
-`actual_scalar_nonadjacent_schedule_selects_the_split_owner`), it passes. Because each test stops at
-its first failure, the later PCM and allocation gates in these 14 were not reached on this tree.
-
-The newly admitted pair looks sound. Its fader/matrix buffer is read only by the Output op, after
-the matrix slot, exactly like any other admitted pair's consumer. Two ways forward, which are the
-owner's call:
-
-- **(a)** Update the harness in builtins-compiler, outside this issue's paths.
-- **(b)** Add a clause that keeps the old decline. It would emulate the old in-place colouring
-  ("the Output would have folded onto this buffer"). A cruder form, "the matrix's sole reader is
-  the Output op", was tried as a diagnostic, turned 13 tests red, and was reverted.
+At `608f0379`, 14 builtins-compiler tests were red because their harness assumed track 0 could not
+pair. The ruling was option (a), and "Scope amendment (Sol)" at the top of this section records it:
+the tests, the removed premise, the new expected values, and the two slot comparisons removed while
+applying it.
 
 ### Anchor drift and notes
 

@@ -226,3 +226,24 @@ been reported rather than silently skipped. Host: `x86_64`, workspace `.cargo/co
 | 916-11 | the session output is not dedicated storage (`is_dedicated` loses its `Output` arm) | `graph/src/program.rs` `is_dedicated` | gate 1, gate 3, `chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers`, and 6 other lib tests | RED on all of them. An in-place Output op's single input is its own slot, so its reduction is neutralised and the host planes are never written. Gate 1 fails at `Submix ... the host planes are the oracle's`, whose planes hold the pad. |
 | 916-12 | `HostMaster::new` checks no length | `graph/src/runtime.rs` `HostMaster::new` | gate 3 | RED. The rejection arm's short planes reach the fold epilogue and panic (`runtime.rs` `fold_resident_tiles`, an index past the plane) instead of returning `InvalidEnvelope`. |
 | 916-15 | the Output op's observers read its arena buffer, not the host planes (the `observe_unit` host arm never taken) | `graph/src/runtime.rs` `Runtime::observe_unit` | gate 1 | RED (`Folded(13, false), stride 13: every observer window is the oracle's`) |
+
+### Issue #916 scope amendment (Sol): the slot comparisons with `program.output`
+
+Rows 916-16 and 916-17 were applied to the working tree after the scope amendment. One mutation at a
+time, the suites below were run and the tree was restored:
+
+- `cargo test -p builtins-compiler --features test-support --lib`
+- builtins-compiler `tests/allocation_tracker.rs`, with `graph/test-support` and
+  `engine/realtime-audit`
+- `cargo test -p graph --lib`
+
+Each row puts back a clause that #916 removed. Neither clause identified the Output: each compared a
+producer's physical slot with `program.output`. After #916 the dedicated Output takes a retired
+slot. So such a clause fires by colouring coincidence, and declines a pair or a merge that is sound.
+Rows 916-1 to 916-15 were recorded at `608f0379`, before this change. They mutate code this change
+does not touch.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 916-16 | `chains_into` again declines `producer.output == program.output` | `graph/src/runtime.rs` `chains_into` | builtins-compiler lib: `actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners`, `actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail`, `staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs`, `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated`, `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`, `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`, `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`; allocation_tracker: `actual_queued_scalar_graph_allocates_and_frees_nothing`, `actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts`, `actual_scalar_split_table_and_failed_render_fit_the_resource_gate` | RED on all ten. The two-track harness's Output takes the slot the trailing track's fader and matrix retire from. So the trailing track stops pairing, and the counts of 2 fall to 1. **GREEN on the graph corpus**: `cohort_chain_merging_preserves_dataflow_on_random_graphs` interprets through `chains_into_model`, not the runtime predicate. Its merge pin (3862) guards the model's copy of the clause. Putting the model's clause back gives the pre-amendment 3752. |
+| 916-17 | `scalar_split_interval_is_clear` again declines `program.output == buffer` | `graph/src/runtime.rs` `scalar_split_interval_is_clear` | builtins-compiler lib: `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated`, `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`, `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`, `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`; allocation_tracker: `actual_scalar_split_table_and_failed_render_fit_the_resource_gate` | RED on all five. The split pair whose fader slot the Output later takes is declined again. |
