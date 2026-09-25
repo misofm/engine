@@ -24,8 +24,8 @@ disallowed-methods = [
     #
     # Issue #144 item 5 ("Condition H"), enforced structurally instead of by
     # `scripts/check-fast-db-seal.sh` (retired). The fast dB tier is admitted only inside
-    # `crates/math/src/fast_db.rs` itself, the bound gate that proves its error, and six named
-    # crossings (`FAST-DB-CROSSING X1`-`X6`, one `#[expect]` per crossing site, comments left in
+    # `crates/math/src/fast_db.rs` itself, the bound gate that proves its error, and eight named
+    # crossings (`FAST-DB-CROSSING X1`-`X8`, one `#[expect]` per crossing site, comments left in
     # place at each call). Mutation-proven: see the git history of this file.
     #
     # `scripts/check-unfused-seal.sh` was evaluated for the same migration and KEPT as a script --

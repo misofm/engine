@@ -659,7 +659,7 @@ fn shaper_shape_f64(contrast_db: f64, attack: f64, sustain: f64) -> f64 {
 }
 
 #[test]
-fn f1_prospective_shaper_r2_domains_are_covered() {
+fn f1_shaper_x7_x8_domains_are_covered() {
     assert_eq!(SHAPER_FLOOR.to_bits(), F1_SHAPER_LEVEL_MIN.to_bits());
 
     // If the ±24 dB contrast clamp does not saturate, the amplitude ratio is within these bounds.
@@ -713,7 +713,7 @@ fn prospective_high_ratio_rail(x: f32) -> Measurement {
 
 #[test]
 #[ignore = "full positive f32 range proof: run with --release -- --ignored"]
-fn f1_prospective_shaper_outside_level_domain_lands_on_clamp_rails_exhaustive() {
+fn f1_exhaustive_shaper_x7_outside_level_domain_lands_on_clamp_rails() {
     let floor_bits = SHAPER_FLOOR.to_bits();
     let below = sweep(0, floor_bits - 1, 1, prospective_low_ratio_rail);
     assert_eq!(below.checked, u64::from(floor_bits));
@@ -899,7 +899,7 @@ fn shaper_pipeline_sweep() -> ShaperPipelineSweep {
 
 #[test]
 #[ignore = "full shaper-pipeline sweep: run with --release -- --ignored"]
-fn f1_prospective_shaper_pipeline_error_and_oracle_are_exhaustive() {
+fn f1_exhaustive_shaper_x7_x8_pipeline_error_and_oracle() {
     let measured = shaper_pipeline_sweep();
     assert_eq!(measured.checked, 257_176_458);
     println!(
@@ -926,7 +926,7 @@ fn f1_prospective_shaper_pipeline_error_and_oracle_are_exhaustive() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The six named crossings, each pinned by an independent restatement.
+// The eight named crossings, each pinned by an independent restatement.
 //
 // The sweeps above bound the tier over the union of the domains. These bound it over *each
 // crossing's own* domain, named, so that the container's claim -- "exactly six crossings, and this
@@ -1094,15 +1094,84 @@ fn f1_crossing_x6_multiband_applied_gain() {
     println!("crossing X6 (multiband applied gain): {worst:.6e} dB");
 }
 
-/// The container's arithmetic: six crossings, and no seventh hiding in this file.
+/// Crossing X7 — the transient shaper's fast/slow detector contrast.
+///
+/// Domain: both envelopes are floored to `1e-8`, their ratio stays within `[1e-8, 16]` whenever
+/// contrast is not already clamped, and the result is clamped to ±24 dB.
 #[test]
-fn f1_the_container_pins_exactly_six_crossings() {
+fn f1_crossing_x7_transient_shaper_detector_contrast() {
+    let worst = crossing_worst_db(1.0e-8, 16.0, true);
+    assert!(
+        worst <= LEVEL_MAX_DB,
+        "crossing X7: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X7 (transient-shaper detector contrast): {worst:.6e} dB");
+}
+
+/// Crossing X8 — the transient shaper's applied gain.
+///
+/// Domain: the shape law's output is clamped to `[-18, 18]` dB before conversion.
+#[test]
+fn f1_crossing_x8_transient_shaper_applied_gain() {
+    let worst = crossing_worst_db(-18.0, 18.0, false);
+    assert!(
+        worst <= GAIN_MAX_DB,
+        "crossing X8: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X8 (transient-shaper applied gain): {worst:.6e} dB");
+}
+
+/// Full-domain site-specific proof for X7, separate from the shared F1 tier sweep.
+#[test]
+#[ignore = "full X7 crossing sweep: run with --release -- --ignored"]
+fn f1_exhaustive_x7_transient_shaper_detector_contrast() {
+    let (lo, hi) = level_domain();
+    let measured = sweep(lo, hi, 1, level_error_db);
+    assert_sweep(
+        "crossing X7 transient-shaper detector contrast",
+        measured,
+        LEVEL_MAX_DB,
+        257_176_458,
+    );
+}
+
+/// Full-domain site-specific proof for X8, split at zero because signed `f32` bit patterns are
+/// monotone in magnitude on each side and not across zero.
+#[test]
+#[ignore = "full X8 crossing sweep: run with --release -- --ignored"]
+fn f1_exhaustive_x8_transient_shaper_applied_gain() {
+    let negative = sweep(
+        (-0.0_f32).to_bits(),
+        (-18.0_f32).to_bits(),
+        1,
+        gain_error_db,
+    );
+    let positive = sweep(0.0_f32.to_bits(), 18.0_f32.to_bits(), 1, gain_error_db);
+    let negative_count = u64::from((-18.0_f32).to_bits() - (-0.0_f32).to_bits()) + 1;
+    let positive_count = u64::from(18.0_f32.to_bits()) + 1;
+    assert_sweep(
+        "crossing X8 negative transient-shaper applied gain",
+        negative,
+        GAIN_MAX_DB,
+        negative_count,
+    );
+    assert_sweep(
+        "crossing X8 positive transient-shaper applied gain",
+        positive,
+        GAIN_MAX_DB,
+        positive_count,
+    );
+}
+
+/// The container's arithmetic: eight crossings, and no ninth hiding in this file.
+#[test]
+fn f1_the_container_pins_exactly_eight_crossings() {
     let source = include_str!("f1_fast_db_bounds.rs");
     // Built in two pieces so this test does not match its own needle.
     let needle = concat!("fn ", "f1_crossing_x");
     let pinned = source.matches(needle).count();
     assert_eq!(
-        pinned, 6,
-        "the seal admits exactly six named crossings; this file pins {pinned}"
+        pinned, 8,
+        "the seal admits exactly eight named crossings; this file pins {pinned}"
     );
 }
