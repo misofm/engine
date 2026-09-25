@@ -6389,7 +6389,9 @@ struct OutputRouteFold {
 ///   bound processor, no effect, no route. A processor would run after the reduction on the host
 ///   planes and is untouched by this change, but the issue admits the identity output only.
 /// * **No sidechain, no delayed input, fan-in two or more.** A delayed input is staged through a
-///   line and the staging buffer is what the op reads, not the route's buffer. Fan-in one is the
+///   compensation line, and the op reads the staging buffer. Fused, the line would carry the
+///   route's input rather than its output, and the kernel would mix the line's initial `+0.0`
+///   words, which no route op ever mixed: a negative 2x2 turns them into `-0.0`. Fan-in one is the
 ///   Output's copy, which is not a reduction. A split pair never binds the Output node: only a
 ///   `PostFader`/`PostMatrix` pair does.
 ///
@@ -6397,13 +6399,16 @@ struct OutputRouteFold {
 ///
 /// * **`R` is a plain route** ([`plain_route_gains`]): the table entry is the 2x2 `node_kind`
 ///   would have built, from the same [`folded_route`]. It has one undelayed input and no
-///   sidechain, so it is exactly `mix2x2_block` over one buffer.
+///   sidechain, so it is exactly `mix2x2_block` over one buffer. Any other producer declines the
+///   whole fold, a pass-through (a submix) included: mixing it through an identity 2x2 is not a
+///   no-op, because `0 * r` is `+0.0` and turns a `-0.0` into `+0.0`.
 /// * **`R` ran in place** (`in_place`, and its output is its input's buffer). The buffer's colour
 ///   is then owned from `R`'s producer through the Output op, its last reader, so the Output
 ///   reads the words the producer wrote. A route that copied would have let its input's colour
 ///   die at `R`.
 /// * **The Output op is `R`'s only reader** (`readers[R] == [master_op]`, sidechains counted).
-///   Any other reader would read the route's output, which no longer exists.
+///   Any other reader, before the Output op or after it, would read the unmixed words where it
+///   read the route's output.
 /// * **Nothing observes `R`** (`observed`, `served_by_nothing`): neither an observer on the route
 ///   node nor one on an elided stage whose `program::Tap` aliases `R`'s buffer after `R`. Either
 ///   fires after `R` and would read the unmixed words. An observer on `R`'s *producer* fires
@@ -6412,11 +6417,12 @@ struct OutputRouteFold {
 ///   `R` used to mix the buffer at its own position, which is earlier than the Output op; every
 ///   unit between the two now sees the unmixed words where it would have seen the mixed ones. So
 ///   every op of every unit strictly between them is checked with [`op_names_buffer`] -- as an
-///   output, an input, a sidechain or a staging slot -- and any mention declines. The colouring
-///   already rules a mention out, because the buffer is live and owned through the Output op; this
-///   is the belt to that brace, as [`route_fold`]'s in-between scan is. The other retired routes
-///   are scanned too: each names only its own buffer, which is live at the same time and so is a
-///   different slot.
+///   output, an input, a sidechain or a staging slot -- and any mention declines. The clauses
+///   above already rule a mention out: a write would need the live buffer's slot, which the
+///   colouring owns through the Output op, and a read is a second reader. So no test can make
+///   this scan fire (`crates/graph/tests/MUTATIONS.md` row 920-11); it is the belt to that brace,
+///   as [`route_fold`]'s in-between scan is. The other retired routes are scanned too: each names
+///   only its own buffer, which is live at the same time and so is a different slot.
 /// * **Each `R` feeds exactly one input position.** A route read twice has two readers.
 fn output_route_fold(
     program: &ExecutionProgram,
@@ -13291,10 +13297,16 @@ mod tests {
     ///
     /// Shapes: every [`RoutedShape`], `frames` in `{1, 3, 7, 13, 16, 64, 128}`, fan-in sixty-four
     /// (eight full groups), and also two and nine (a lone second group) for the admitted shapes.
-    /// Hostile words and a hostile 2x2 per route; [`RoutedShape::NegativeZero`] must keep `-0.0`.
+    /// Hostile words and a hostile 2x2 per route, except on the signed-zero shapes, whose data is
+    /// chosen so that the declined clause's hazard reaches the master's sign bit;
+    /// [`RoutedShape::NegativeZero`] must keep `-0.0`. Each declining shape declines on its own
+    /// clause of `output_route_fold` and no other: the alias meter on `observed`, the delayed edge
+    /// on the master's delayed input, both submix shapes on the plain-route clause, the shared
+    /// input on the in-place clause and the late reader on sole readership.
     ///
     /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #920): the five kernel rows, each
-    /// red here as well as in the kernel test.
+    /// red here as well as in the kernel test, and one row per declining clause, each red here on
+    /// the host planes or an observer window with the fold-count assertions removed.
     #[test]
     fn an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit() {
         const BLOCKS: u64 = 8;
