@@ -136,7 +136,7 @@ Per `docs/rulings/fast-db-tier-boundaries.md` (boundary 4), an isolated loop und
 
 ## Owner rulings required
 
-The owner has **not** ruled on any of these. The tasks they gate are marked BLOCKED-ON-RULING and must not start until the ruling is recorded on this issue.
+The owner approved R1 (L3), R2, and R3 (coefficient-domain ramps), and declined R4 on 2026-09-25. The explicit ruling and implementation constraints are recorded in the final decision record below. Earlier audit recommendations remain provenance; the recorded rulings govern execution.
 
 - **R1 — `log2_lane` algorithm.** Replace the Cephes degree-9 form (40 lane ops, 1.4667 ulp) with the atanh form **L3**: 27 lane ops including one `div`, 1.2983 ulp. The alternative is the division-free **L1**: 33 lane ops, 1.3595 ulp. Either one moves the exact tier's pins.
   - [isolated] `Simd8` throughput 0.948 → 0.657 ns/element (L3) or 0.831 (L1); latency 23.8 → 18.0 ns (L3) or 21.6 (L1).
@@ -390,7 +390,7 @@ let f = f.sub(r);                                    // f − 1 is exact by Ster
 
 ---
 
-### MB-1 — `log2_lane` → L3 (or L1) (class B) — **BLOCKED-ON-RULING R1** — tier X
+### MB-1 — `log2_lane` → L3 (or L1) (class B) — **APPROVED R1** — tier X
 
 **Files.** `crates/math/src/lane_math.rs` (`log2_lane`, constants, module docs), `crates/math/tests/m1_exhaustive.rs` (header table, red mutations, the "Cephes polynomials under test" sentences, `m1_measured_worst_points`), `crates/math/tests/m2_lane_identity.rs`, `crates/effect-runtime/src/corpus.rs` (`D1_DIGESTS`), `tools/wasm-gate-corpus/src/lane_digests.in`, `crates/math/tests/f1_fast_db_bounds.rs` (exact-tier reference column only), and `crates/math/src/fast_db.rs` (module doc only: its opening sentence calls the exact tier "Cephes polynomials"). Also `crates/transient-shaper/src/corpus.rs` and `tests/oracle.rs` **only if R2 is declined**.
 - `docs/rulings/*.md` are historical records ("already ran … Cephes polynomials", "replacing Cephes degree 6 and 9"). They described the tree at the time: **do not rewrite them**. At most, append a dated one-line note pointing to this issue.
@@ -446,7 +446,7 @@ Constants (f32 bits):
 
 ---
 
-### MB-2 — Transient shaper → fast dB tier (class B) — **BLOCKED-ON-RULING R2** — tier X — depends on MQ-1 and MA-5
+### MB-2 — Transient shaper → fast dB tier (class B) — **APPROVED R2** — tier X — depends on MQ-1 and MA-5
 
 **Files.** `crates/transient-shaper/src/lib.rs` (`frame`, imports, module docs), `clippy.toml` (crossing reasons), `crates/math/tests/f1_fast_db_bounds.rs` (new `f1_crossing_x7_*`/`f1_crossing_x8_*`, and `f1_the_container_pins_exactly_six_crossings` becomes eight), `crates/transient-shaper/src/corpus.rs` (`CROSS_TARGET_DIGESTS`), `crates/transient-shaper/tests/oracle.rs`, `contract.rs` and `boundary.rs` (docs that cite `exp2_lane`/`log2_lane`), `docs/rulings/fast-db-tier-boundaries.md` (the transient-shaper boundary becomes adopted).
 
@@ -480,7 +480,7 @@ let gain = fast_gain_from_db(shape);        // was: exp2_lane(shape.mul(L::splat
 
 ---
 
-### MB-3 (optional) — `exp2_lane` refit E3 (class B) — **BLOCKED-ON-RULING R4** — tier M — depends on MA-3 and MB-1
+### MB-3 (optional) — `exp2_lane` refit E3 (class B) — **DECLINED R4** — tier M — depends on MA-3 and MB-1
 
 **Operation order.**
 ```rust
@@ -523,7 +523,7 @@ For each option state: rendered-bit impact, accuracy, worst-case block cost, and
 
 ---
 
-### MC-2 — Implement the ruled compressor ramp design (class B) — **BLOCKED-ON-RULING R3** — tier X — depends on MC-1
+### MC-2 — Implement the ruled compressor ramp design (class B) — **APPROVED R3** — tier X — depends on MC-1
 
 **Files.**
 - `crates/compressor/src/kernel.rs` (`advance_ramps`, `frames_loop`, `frames_loop_mono`) and `crates/compressor/src/design.rs` (`rate_coefficient`, `design_lane`).
