@@ -36,3 +36,20 @@ type == "object" and
 (.rust_version | type == "string" and length > 0) and
 (.llvm_version | type == "string" and length > 0) and
 (.target_triple | type == "string" and length > 0)
+and
+(if has("recovery") then
+    (.recovery | type == "object" and
+        .schema_version == 1 and
+        .method == "offline_mq1_result_extraction" and
+        .recovered_from_status == "postprocess_failed_unaccepted" and
+        (.source_failure_record | type == "string" and length > 0) and
+        (.source_failure_record_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.source_raw_log | type == "string" and length > 0) and
+        (.source_raw_log_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.source_failure_reason | type == "string" and length > 0) and
+        (.source_runner_report | type == "object" and
+            .kind == "transient_shaper_benchmark_failure" and
+            .reason == "result_line_count" and .exit_status == 1) and
+        (.extracted_result_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        .workload_invocations_during_recovery == 0)
+else true end)

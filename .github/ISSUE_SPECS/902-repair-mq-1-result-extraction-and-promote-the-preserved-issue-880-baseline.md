@@ -22,3 +22,12 @@ Repair MQ-1's result extraction and promote the existing raw record with an expl
 ## Delivery and bounded attempts
 
 Two attempts maximum: one implementation and one correction, each followed by independent review. Preserve a failing result rather than loosening gates. Implement separately from #880; the parent retains its raw descriptive numbers and candid failure record. Synchronize local spec/GitHub evidence and close only after reviewed delivery.
+
+## Attempt 1 implementation evidence
+
+- The result extractor recognizes one `MQ1_RESULT` marker at line start or after libtest's whitespace-delimited test prefix. It requires one complete JSON object with the exact result keys, two positive finite observations per arm, and a valid fixture digest; zero, duplicate, malformed, and nonfinite records fail.
+- `--recover-preserved` runs the same extractor and promotion validator against the committed raw log and failed-disposition JSON. Recovery checks the archived SHA-256, confirms the extracted numbers match the failed disposition, and writes only a separately named recovered record. It records the original failure, candidate and runner identity, both source paths and hashes, and zero recovery workload invocations.
+- The recovered MQ-1 observation remains tied to candidate `2a8977f5f0fb9b3384e2d71632f21c7f9896dce4` and E1 commit `6f662fee7b47a5eb38b67e0ddc6d007edd438cfa`: bank `[6.281854, 6.281717]`, scalar `[40.841292, 40.803620]` ns per lane sample. These are the original one-warmup/two-round measurements, not new timing evidence.
+- Existing artifacts were preserved: raw log SHA-256 `f77b1db698c8248d82cf73a433032c8cb1482bff98886a7eeca9c5c3e9adb565`, failed disposition SHA-256 `725b7aaff22970a96771023aa4fa4b86ac5685b53d1551bb59e3a164dd67a3cf`, and runner failure report SHA-256 `1c88fb8cfb1b0bbf6caa765eaba4883c15b566eaa2757f676cb8de1d110fd3d4`.
+- Validation: `bash -n` passed for the runner, helper, and self-test; `bash scripts/test-issue880-mq1-benchmark.sh` passed, including prefixed/unprefixed extraction, invalid-result rejection, full fixture promotion, existing preflight/schema/exit/overwrite checks, and source-artifact hash preservation. Its cargo step was `--no-run`; timed workload launches: 0. The committed recovered record passed the MQ-1 record validator.
+- Attempt 1 is ready for independent adversarial review. MB2 candidate-specific preflight remains outside this bounded MQ-1 repair; its existing E1 source pin will need the separately approved minimal adaptation before any MB2 post-change benchmark.
