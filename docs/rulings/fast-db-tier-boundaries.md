@@ -6,11 +6,12 @@ restatement, token-scan seal refusing fast vocabulary elsewhere. v1 ran full dyn
 cycles/ch-sample vs our ~120 cycles/lane-sample compressor; the scalar dB path is our recorded
 #88/#89 cost center."
 
-**Status.** Adopted, at eight named crossings, measuring 22.64% on the standing sixty-four-track
-console fixture. Three boundaries are recorded here: one effect where the predicted win did not
-exist at all, one design choice that was deliberately *not* taken, and one measuring instrument
-that was wrong by a factor of seventeen and would have killed the optimisation if it had been
-trusted.
+**Status.** Adopted at eight named crossings. The historical 22.64% result on the standing
+sixty-four-track console fixture belongs to the earlier six-crossing experiment (X1–X6); it did
+not measure the transient-shaper additions X7/X8. Three boundaries are recorded here: one effect
+where the predicted win did not exist at all, one design choice that was deliberately *not* taken,
+and one measuring instrument that was wrong by a factor of seventeen and would have killed the
+optimisation if it had been trusted.
 
 ## Boundary 1 — the premise was already half-spent, and the recorded cost centre had moved
 
@@ -77,7 +78,7 @@ the 16,384 lane-samples in a sixty-four-track block projects to 3.6 µs against 
 a permanent accuracy trade) that is a clear reject, and the honest next step looked like writing a
 null ruling.
 
-The in-situ measurement is **22.64%**.
+The in-situ measurement for the earlier six-crossing experiment was **22.64%**.
 
 The microbenchmark was not noisy or badly written; it was measuring a different thing. Its loop
 body was `load`, one polynomial, one accumulate, over independent chunks, so the out-of-order
@@ -95,8 +96,10 @@ would have been written up as a null and closed.
 ## What was adopted, and what it measures
 
 Eight named crossings — compressor (X1, X2), gate/expander (X3, X4), multiband compressor (X5, X6),
-and transient shaper (X7, X8) — onto `math::fast_db`, whose two polynomials are fresh minimax fits of degree 4 (`exp2`)
-and 5 (`log2`) with no range-reduction fold, replacing Cephes degree 6 and 9 with folds.
+and transient shaper (X7, X8) — are now adopted onto `math::fast_db`. The performance table below
+records the earlier six-crossing experiment (X1–X6), before transient-shaper crossings X7/X8 were
+added. The fast tier's two polynomials are fresh minimax fits of degree 4 (`exp2`) and 5 (`log2`)
+with no range-reduction fold, replacing Cephes degree 6 and 9 with folds.
 
 | workload | exact tier | fast tier | delta |
 |---|---|---|---|

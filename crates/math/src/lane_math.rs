@@ -30,9 +30,10 @@
 //!
 //! `log2_lane` now uses the owner-approved L3 form. After `frexp` and the `sqrt(2)` fold, let
 //! `t = m - 1` and `s = t / (t + 2)`. Since `1 + t = (1 + s) / (1 - s)`,
-//! `ln(1 + t) = 2 atanh(s) = 2s + 2s^3/3 + 2s^5/5 + …`. The committed degree-3 polynomial
-//! `P3(z)`, where `z = s²`, approximates the residual
-//! `2 atanh(s) - 2s = s · z · P3(z)`. With `r = z · P3(z)` and `u = s · (t - r)`, this gives
+//! `ln(1 + t) = 2 atanh(s) = 2s + 2s^3/3 + 2s^5/5 + …`. The committed three-coefficient,
+//! degree-2 polynomial `P3(z)`, where `z = s²`, approximates the residual
+//! `2 atanh(s) - 2s = s · z · P3(z)`. The residual polynomial `r = z · P3(z)` has degree 3.
+//! With `u = s · (t - r)`, this gives
 //! `ln(1 + t) = t - u`. The return is evaluated in the frozen unfused order
 //! `t·(log2(e)-1) - u·log2(e) + t + e` so exact powers of two keep exact results.
 //!
