@@ -789,3 +789,26 @@ arm) measured mean microseconds/block: release `87.583/87.501`; attack+release
 coefficient-design counts are 128/256/0. Original baseline records remain unchanged.
 These are descriptive same-workload observations, not a release budget or permission
 to retune. Independent Astra review and final combined delivery are still pending.
+
+### Amended R2 — delegated owner judgment, 2026-09-25
+
+The owner explicitly delegated the audibility decision to root: “I'll leave it to your
+judgement to determine if that kind of difference is audible.” Root accepts the fast-tier
+shaper and permits `< 2.5e-5` **absolute PCM amplitude error only** in
+`scalar_matches_the_independent_f64_oracle`. All other oracle, F1, M1, identity, realtime
+and portability gates remain unchanged. This supersedes the pending stop condition above.
+
+The decision uses the measured full-render evidence rather than treating MA-5's four
+parameter corners as a uniform bound: the 96-sample row peaks at `2.098083496e-5`
+against its independent f64 oracle, while the old/new MQ-1 programme PCM null peaks
+at `7.629394531e-6` (-102.350199 dBFS) across 3,072,000 samples. Its maximum relative
+output-magnitude change is `0.000013073` dB. Root judges this difference unlikely to
+be audible in normal playback. This is a bounded engineering acceptance, not a claim
+of universal inaudibility or a completed blinded listening test.
+[ITU-R BS.1116-3](https://www.itu.int/rec/R-REC-BS.1116-3-201502-I) supplies a controlled
+listening methodology, not a numeric audibility threshold for these results.
+
+Luna resumes MB-2 attempt 1 with the single authorized tolerance change and all other
+gates retained. MB-1's focused checkpoint `374bd874` remains isolated until MB-2 is
+integrated, so the shaper's three corpus pins move once in the final batch. Astra xhigh
+will review the combined implementation, numerical evidence and this decision.
