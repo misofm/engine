@@ -769,3 +769,23 @@ this one row with other gates unchanged, or retain the exact-tier shaper. No ame
 ruling has yet been received. Failed-but-buildable MB-2 work is isolated pending that
 ruling; independent R1 and R3 work continues. Shaper pins for R1 are deferred until
 this decision so the final batch makes only the required source choice.
+
+### MC-2 implementation checkpoint and measurement
+
+Luna xhigh implemented the approved coefficient-domain ramps at `c57deffd`, with
+reset/mono seam tests and frozen measurement support at `ffe9d233`; measurement
+evidence is `5f2498cd`. The 22-word V1 payload is unchanged. Active restores explicitly
+reconstruct coefficient ramps from serialized current/target/remaining, consistent
+with the existing reconstructive active-ramp contract. Cancellation to current
+milliseconds retains a zero-step parameter ramp when needed to reach the exact
+coefficient endpoint. Only compressor `dual_mono_ramping` C1 pin moves; static rows
+are unchanged. Debug/release compressor suites, clippy/fmt, no-timing preflight, and
+native/wasm scalar/wasm SIMD corpus gates pass.
+
+Exactly one post-change MQ-2 invocation (one 32-block warmup, two 32-block rounds per
+arm) measured mean microseconds/block: release `87.583/87.501`; attack+release
+`94.228/94.609`; no automation `39.697/39.630`. Per-round maxima were
+`91.013/92.035`, `100.481/113.656`, `43.583/44.475`, respectively. State-derived
+coefficient-design counts are 128/256/0. Original baseline records remain unchanged.
+These are descriptive same-workload observations, not a release budget or permission
+to retune. Independent Astra review and final combined delivery are still pending.
