@@ -273,3 +273,34 @@ No benchmark row is listed; none was run and no saving is claimed.
 4. The production change moves the web AudioWorklet binary, so
    `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` will need the batch-boundary
    repin; untouched here, as directed.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `e8cab034`, `7239d052`, `174d609f`,
+`b0b85957` and `966d0a7b` on base `a90106e4` (the verified #885 tip). No blocking findings.
+Independently verified: every observer that can attach to a chain's last slot (direct, alias tap
+for the three elidable stages, spectrum capture, controlled entries) reads either
+`final_output_lane` or the op's `output`, which `apply_scatter_redirects` repoints, and observers
+bind only to track stages so submix nodes and routes are never observed; the render loop runs
+`execute(unit)` then the unit's observation with nothing between, a redirect consumer is never a
+bank member, never in the same unit, and always later, and folded, PDC-staged, sidechained,
+split-pair and fan-in consumers are all excluded before the question arises; the split-pair
+exclusion is pre-existing and taking the redirect selects the unpaired fader-then-matrix path the
+production split owner is itself held bit-equal to; the `apply_scatter_redirects` fix is the
+identity mapping whenever no run is retired, so it cannot change a plan that previously bound, and
+no Session V1 fixture reaching the defect could be constructed either way (routes go only to
+submix or output inputs, and submixes have no strip). Five mutations re-applied and reverted, two
+of the reviewer's own (observe a unit only after the next unit executes; drop the folded-run
+filter), each red on the named tests.
+
+Recorded, no code change: the split-pair interaction test drives settled coefficients only, and
+no ramping test is owed by this issue because the redirect selects the reference path. Mutation
+log row 218-3 is renamed in this commit to the test's new name. The pre-existing bind-time defect
+in `apply_scatter_redirects` gets its own tracking issue from the coordinator so its fix commit
+is not only a paragraph here.
+
+Reviewer-run gates, all green: `cargo fmt --all --check`; `cargo test -p graph` (87/1/1 and, with
+`test-support`, 87/1/8); `-p rack`; `-p graph-compiler`; `-p console-workload`;
+`check-realtime-policy.sh`; `check-graph-policy.sh`; `check-rack-policy.sh`;
+`check-lane-policy.sh`; `check-graph-determinism.sh` (100/100). Workspace clippy not re-run; the
+evidence's run at `b0b85957` covers every code line.
