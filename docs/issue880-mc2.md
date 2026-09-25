@@ -38,7 +38,24 @@ copies and symmetry checks include the auxiliary ramps.
   their original 1,024 / 8,192 / 16,384 counts. The validator accepts that preserved baseline and
   the new schema-2 profile separately.
 
+The post-change MQ-2 workload ran exactly once, with one 32-block warmup and two 32-block measured
+rounds per arm, at frozen candidate commit `ffe9d233ea16105a1d985665d53997ec1b2e585a` (tree
+`4243eafea57778a3c2e16a3a1c61adb74bfb37cd`). It used the same AMD EPYC 7313P, x86-64 Linux
+machine, `rustc 1.97.1` / LLVM 22.1.6, eight Simd8 banks, 64 tracks, 48 kHz, and 128-frame blocks
+as the baseline. The unchanged baseline artifact remains in `record.json` / `raw.log`; the MC-2
+record and raw output are preserved separately. There was no retry.
+
+| Arm | Coefficient calls/block | Baseline round means (µs/block) | MC-2 round means (µs/block) | MC-2 round max (µs/block) |
+|---|---:|---:|---:|---:|
+| Release only | 128 | 169.448 / 169.313 | 87.583 / 87.501 | 91.013 / 92.035 |
+| Attack and release | 256 | 215.761 / 216.534 | 94.228 / 94.609 | 100.481 / 113.656 |
+| No automation | 0 | 40.739 / 40.833 | 39.697 / 39.630 | 43.583 / 44.475 |
+
+The automated arms include coefficient design, event handling, and coefficient interpolation; their
+timings do not isolate `exp`. These descriptive results are not an acceptance threshold. Full
+per-block measurements and provenance are in [`mc2-record.json`](../artifacts/issue880-mq2/mc2-record.json)
+and [`mc2-raw.txt`](../artifacts/issue880-mq2/mc2-raw.txt).
+
 Validation: debug and release `cargo test --locked -p compressor`, package clippy with warnings
-denied, format check, and `bash scripts/test-issue880-mq2-benchmark.sh` all pass. The MQ-2 runner
-preflight passed with zero timed workload launches. No post-change timing has been run; it waits
-for the frozen checkpoint and timing authorization.
+denied, format check, the MQ-2 preflight/self-test, and `scripts/run-wasm-gates.sh` all pass. The
+preflight launched zero timed workloads; the separate authorized run above launched exactly one.
