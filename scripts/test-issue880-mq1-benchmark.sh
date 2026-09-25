@@ -6,6 +6,42 @@ cd "$root"
 # shellcheck source=scripts/issue880-mq1-benchmark-lib.sh
 source scripts/issue880-mq1-benchmark-lib.sh
 
+usage() {
+    printf 'usage: %s [--effect-source-commit COMMIT --effect-revision e1|mb2-fast-db]\n' "$0" >&2
+}
+
+effect_source_commit=
+effect_revision=
+while (($#)); do
+    case "$1" in
+        --effect-source-commit)
+            [[ -z "$effect_source_commit" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            effect_source_commit=$2
+            shift 2
+            ;;
+        --effect-revision)
+            [[ -z "$effect_revision" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            effect_revision=$2
+            shift 2
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+done
+if [[ -n "$effect_source_commit" || -n "$effect_revision" ]]; then
+    [[ "$effect_source_commit" =~ ^[0-9a-f]{40}$ &&
+        ( "$effect_revision" == e1 || "$effect_revision" == mb2-fast-db ) ]] || {
+        usage
+        exit 2
+    }
+fi
+effect_selection_args=()
+if [[ -n "$effect_source_commit" ]]; then
+    effect_selection_args=(--effect-source-commit "$effect_source_commit" --effect-revision "$effect_revision")
+fi
+
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 runner=scripts/run-issue880-mq1-benchmark.sh
@@ -156,14 +192,14 @@ else
 fi
 [[ "$status" == 37 && "$(<"$scratch/exit-status")" == captured ]]
 
-bash "$runner" --preflight --output "$scratch/record.json" >"$scratch/preflight.out"
+bash "$runner" --preflight "${effect_selection_args[@]}" --output "$scratch/record.json" >"$scratch/preflight.out"
 rg -q 'workload launches 0' "$scratch/preflight.out"
 [[ ! -e "$scratch/record.json" && ! -e "$scratch/record.json.raw.log" ]]
 
 for suffix in '' '.raw.log' '.failure.json'; do
     target="$scratch/no-clobber.json$suffix"
     printf 'existing\n' >"$target"
-    if bash "$runner" --preflight --output "$scratch/no-clobber.json" >/dev/null 2>&1; then
+    if bash "$runner" --preflight "${effect_selection_args[@]}" --output "$scratch/no-clobber.json" >/dev/null 2>&1; then
         printf 'MQ-1 runner accepted existing output path %s\n' "$target" >&2
         exit 1
     else

@@ -23,3 +23,10 @@ requires the current tracked render sources to match that commit. MB-2 source
 also has to include both approved X7/X8 crossing markers and the fast level and
 gain calls. The record validator accepts only the matching E1 or MB-2 revision
 and commit shape. No benchmark timing was run while adding this selection path.
+
+The MQ-1 self-test accepts an optional paired `--effect-source-commit` and
+`--effect-revision` selection and forwards it to its final live preflight;
+without those options it retains the frozen E1 default. The MB-2-selected
+self-test passed for source `e00d4c2dbef1af166bedeb28fdc103d62a4de269` with
+revision `mb2-fast-db`, including source provenance rejection and all existing
+overwrite and recovery checks. Workload launches: 0.
