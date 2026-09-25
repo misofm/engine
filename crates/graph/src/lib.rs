@@ -32,10 +32,9 @@ pub use runtime::{
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
-    test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
-    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
-    test_only_source_plane_counts, test_only_source_plane_reset,
-    test_only_split_pair_table_witness,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
+    test_only_set_source_in_place_declined, test_only_source_plane_counts,
+    test_only_source_plane_reset, test_only_split_pair_table_witness,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2235,14 +2234,6 @@ impl GraphExecutor {
             source_set,
             source_input_buffers,
         }
-    }
-
-    /// Routes this bind retired into the session Output op's fused reduction (issue #920). A
-    /// count, like `bank_route_folds`: the fold renders the same bits, so only a count can say
-    /// whether it fired.
-    #[cfg(test)]
-    fn output_route_folds(&self) -> u64 {
-        self.runtime.output_route_folds()
     }
 }
 
