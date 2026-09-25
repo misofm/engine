@@ -12824,17 +12824,18 @@ mod tests {
         assert_route_reduce_is_the_route_ops_and_the_reduction::<lane::Simd8>();
     }
 
-    /// Per track and per block: hostile words ([`hostile_sample`]), or `-0.0` throughout.
+    /// Per track and per block: hostile words ([`hostile_sample`]), or one signed zero per plane
+    /// throughout.
     struct HostileInput {
         seed: u64,
-        negative_zero: bool,
+        zeros: Option<[f32; 2]>,
     }
 
     impl GraphRuntimeProcessor for HostileInput {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            if self.negative_zero {
-                block.left.fill(-0.0);
-                block.right.fill(-0.0);
+            if let Some([left, right]) = self.zeros {
+                block.left.fill(left);
+                block.right.fill(right);
                 return Ok(());
             }
             let mut state = self.seed ^ block.first_sample.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -12871,9 +12872,16 @@ mod tests {
         DelayedEdge,
         /// One more Output contributor: a submix (an identity op) fed straight by an extra track's
         /// `Input`. Declined: that input's producer is not a route.
+        ///
+        /// Over signed-zero data, with the submix's input `(-0.0, +0.0)`. Mixing a pass-through
+        /// through an identity 2x2 is not a no-op: `0 * r` is `+0.0`, so its left plane would
+        /// become `+0.0` and so would the master's.
         SubmixContributor,
         /// The last track's route feeds a submix that feeds the Output. Declined: the Output's
         /// producer is the submix.
+        ///
+        /// Over signed-zero data, with that route's 2x2 mixing `-0.0` to `(-0.0, +0.0)`, for the
+        /// reason [`RoutedShape::SubmixContributor`] gives.
         RouteIntoSubmix,
         /// One more route, from track 0's `Input` to the Output. Track 0's input has two readers,
         /// so neither of its routes runs in place. Declined: a route that copies lets its input's
@@ -12891,9 +12899,15 @@ mod tests {
             matches!(self, Self::Plain | Self::NegativeZero | Self::Metered(_))
         }
 
-        /// Whether every input word is `-0.0` rather than hostile.
+        /// Whether every input word is a signed zero rather than hostile.
         const fn negative_zero(self) -> bool {
-            matches!(self, Self::NegativeZero | Self::DelayedEdge)
+            matches!(
+                self,
+                Self::NegativeZero
+                    | Self::DelayedEdge
+                    | Self::SubmixContributor
+                    | Self::RouteIntoSubmix
+            )
         }
     }
 
@@ -13076,19 +13090,25 @@ mod tests {
         } else {
             Vec::new()
         };
-        // Hostile constants, except over the signed-zero data: there every route's 2x2 is
-        // positive, so its mix of `-0.0` is `-0.0`, and on the delayed shape the delayed route's
-        // 2x2 is negative, so its mix of the delay line's initial `+0.0` is `-0.0` too.
+        // Hostile constants, except over the signed-zero data. There every route's 2x2 is
+        // positive, so its mix of `-0.0` is `-0.0`, with two exceptions. On the delayed shape the
+        // delayed route's 2x2 is negative, so its mix of the delay line's initial `+0.0` is
+        // `-0.0`. On the route-into-submix shape that route's right row is negative, so it mixes
+        // `-0.0` to `(-0.0, +0.0)`.
         let mut state = 0x0920_0000_u64 ^ fan_in as u64;
-        let mut constant = |track: usize, gain: bool| {
+        let mut constant = |negative: bool| {
             let value = hostile_constant(&mut state);
             if !shape.negative_zero() {
                 value
-            } else if shape == RoutedShape::DelayedEdge && track == 1 && !gain {
+            } else if negative {
                 -(value.abs() + 0.5)
             } else {
                 value.abs() + 0.5
             }
+        };
+        let delayed = |track: usize| shape == RoutedShape::DelayedEdge && track == 1;
+        let right_row = |track: usize| {
+            delayed(track) || (shape == RoutedShape::RouteIntoSubmix && track + 1 == fan_in)
         };
         let prepared_routes = routes
             .iter()
@@ -13096,11 +13116,11 @@ mod tests {
             .map(|(track, node)| crate::PreparedRoute {
                 node: node.clone(),
                 transform: RouteTransform {
-                    gain: constant(track, true),
-                    ll: constant(track, false),
-                    lr: constant(track, false),
-                    rl: constant(track, false),
-                    rr: constant(track, false),
+                    gain: constant(false),
+                    ll: constant(delayed(track)),
+                    lr: constant(delayed(track)),
+                    rl: constant(right_row(track)),
+                    rr: constant(right_row(track)),
                 },
             })
             .collect();
@@ -13176,7 +13196,16 @@ mod tests {
                     node.clone(),
                     Box::new(HostileInput {
                         seed: 0x0920 + track as u64,
-                        negative_zero: shape.negative_zero(),
+                        // The submix contributor's input is `(-0.0, +0.0)`: an identity 2x2 would
+                        // mix its left plane to `+0.0` (`0 * r` is `+0.0`), which a pass-through
+                        // does not.
+                        zeros: shape.negative_zero().then_some(
+                            if shape == RoutedShape::SubmixContributor && track == fan_in {
+                                [-0.0, 0.0]
+                            } else {
+                                [-0.0, -0.0]
+                            },
+                        ),
                     }),
                 )
             })
