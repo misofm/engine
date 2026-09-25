@@ -246,3 +246,36 @@ Sol approved two more edits: `tools/console-workload/Cargo.toml` and `crates/gra
 | `cargo clippy --locked -p console-workload -p graph -p graph-compiler --all-targets --all-features -- -D warnings` | exit 0, no warnings |
 
 The web artifact pin is untouched, as directed; the coordinator repins at the batch boundary.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `79ef3fd9`, `8b7d0790`, `caa0191f` and
+`4be672d3` on base `6b150fba`, including both coordinator scope amendments. No blocking or
+should-fix findings. Traced in code, not only in tests: the fold consumes the transposed staging
+tile and never writes the resident AoSoA words, so `final_output_lane` is the post-matrix output
+the unfolded scatter would have written; `write_resident_lane` copies `source[lane + f * W]` into
+`plane[f]` for both planes over the arena's fixed frame count, which is `scatter_lane`'s and the
+tiled tail's exact placement; the member slot stays coloured until the retired route's original
+position because colouring is a lowering-time function of the spec and `preflight_sequential`
+only filters the fold afterwards; route observers are not constructible, split-pair last slots
+fail `plain_route_gains`, and both production observers (`MeterObserver`,
+`SpectrumCaptureObserver`) accept the resident view. Five mutations re-applied on a scratch copy
+(skip the resident write, restore the `fold_lanes().is_empty()` clause, excuse every observer,
+swap planes, read lane 0), each red on the named graph tests. `Cargo.lock` unchanged;
+`graph/test-support` is enabled by no shipped package.
+
+Two clarifications the reviewer asked to have on record, neither changing code: a `PostMatrix`
+node is never elided into an alias by construction (`program::is_alias_candidate` elides only
+`PostSimd1`, `PostDynamic` and `PostSimd2PreFader`), so the alias branch of
+`served_by_the_resident_lane` is conservative dead code rather than a practical case; and the
+slot-safety argument for `write_resident_lane` rests on lowering-time colouring, not on
+`program::is_dedicated`, which does not cover a `PostMatrix` last slot. A possible symmetry
+improvement, not required: the graph-compiler strip test could assert `bank_shape()` equality
+between its folded and declined arms as the console-workload test does.
+
+Reviewer-run gates, all green: `cargo fmt --all --check`; `cargo test -p graph` (83/1/1 and, with
+`test-support`, 83/1/8); `-p rack`; `-p graph-compiler`; `-p console-workload`;
+`check-realtime-policy.sh`; `check-graph-policy.sh`; `check-graph-determinism.sh` (100/100).
+Workspace clippy was not re-run; the evidence's run at `caa0191f` covers every code line, since
+`4be672d3` changes only a doc comment in `runtime.rs` plus tests, a manifest and the mutation log.
+The web AudioWorklet artifact pin is repinned once at the batch boundary, outside this issue.
