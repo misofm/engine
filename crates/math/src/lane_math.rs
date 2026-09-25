@@ -2,30 +2,20 @@
 //!
 //! Per-sample dB↔gain conversion inside a SIMD bank cannot call the scalar layer: that would be a
 //! branchy, table-driven, per-lane function call in the middle of a vector kernel. These two are
-//! polynomial evaluations in `Lane` basic operations only — multiply, add, subtract, compare,
-//! select, floor, `exp2_int`, `frexp` — so they run at full width, on every backend, with the same
-//! operation sequence, and are bit-identical across Scalar/Simd4/Simd8 (gate M2) and across
-//! targets (D5).
+//! polynomial evaluations in `Lane` basic operations only — multiply, add, subtract, divide,
+//! compare, select, floor, `exp2_int`, `frexp` — so they run at full width, on every backend,
+//! with the same operation sequence, and are bit-identical across Scalar/Simd4/Simd8 (gate M2)
+//! and across targets (D5).
 //!
-//! **No fused multiply-add.** The Horner chains are written `p.mul(f).add(c)`, not `p.fma(f, c)`.
-//! This crate reached that conclusion before the workspace did, and for the same reason: when
-//! `Lane::fma` was still fused, it was an exact software emulation on wasm costing far more than
-//! the accuracy it bought here — measured, an `fma` Horner improved `exp2_lane` from 1.462 to
-//! 1.191 ulp, left `log2_lane` unchanged, and was weighed against a gate of 2 ulp. Mul/add was the
-//! cheaper way to stay inside the gate.
+//! **No fused multiply-add.** Polynomial stages stay explicit as `p.mul(f).add(c)` and never call
+//! `Lane::fma`. Issue #163 phase 2 made `Lane::fma` two roundings on every backend, but retaining
+//! the direct multiply/add spelling keeps each algorithm's frozen operation sequence visible.
 //!
-//! Since issue #163 phase 2 the two spellings compute the same thing — `Lane::fma` is `(a * b) + c`
-//! on every backend — so this note is now a record of precedent rather than a live distinction.
-//! The Horner chains keep their explicit `mul`/`add` spelling because it says what happens, and
-//! because these bits are pinned by gate M2 and by the M3 corpus digests: they did **not** move
-//! when the contract changed, which is one of the phase's control groups.
+//! **Coefficients.** `exp2_lane` uses Moshier's published Cephes single-precision set
+//! (`cephes/single/exp2f.c`):
 //!
-//! **Coefficients.** Both sets are Moshier's published Cephes single-precision sets
-//! (`cephes/single/exp2f.c` and `cephes/single/logf.c`), used rather than newly fitted ones so the
-//! provenance is a citable reference rather than this crate's own optimiser run:
-//!
-//! > Stephen L. Moshier, *Cephes Mathematical Library*, single-precision routines `exp2f.c` and
-//! > `logf.c`. Moshier, *Methods and Programs for Mathematical Functions*, Ellis Horwood, 1989.
+//! > Stephen L. Moshier, *Cephes Mathematical Library*, single-precision routine `exp2f.c`.
+//! > Moshier, *Methods and Programs for Mathematical Functions*, Ellis Horwood, 1989.
 //!
 //! Cephes' `exp2f` set is fitted on `[-0.5, 0.5]`, so the argument reduction is Cephes' (floor,
 //! then move the rounded fraction to the nearest integer) rather than a reduction to `[0, 1)`.
@@ -35,13 +25,34 @@
 //! `x - floor(x)` can round for negative non-integers in `(-0.5, 0)`, producing exactly `1.0` for
 //! some inputs; the rounded fraction remains in `[0, 1]`. The magic-constant round maps it to the
 //! nearest integer, with ties-to-even matching the old strict `f > 0.5` fold. When that result is
-//! one, `f - 1` is exact by Sterbenz's lemma. The `0.5 * m - 1` reduction in `log2_lane` is also
-//! exact by Sterbenz's lemma.
+//! one, `f - 1` is exact by Sterbenz's lemma. The former `0.5 * m - 1` reduction in `log2_lane`
+//! was also exact by Sterbenz's lemma.
+//!
+//! `log2_lane` now uses the owner-approved L3 form. After `frexp` and the `sqrt(2)` fold, let
+//! `t = m - 1` and `s = t / (t + 2)`. Since `1 + t = (1 + s) / (1 - s)`,
+//! `ln(1 + t) = 2 atanh(s) = 2s + 2s^3/3 + 2s^5/5 + …`. The committed degree-3 polynomial
+//! `P3(z)`, where `z = s²`, approximates the residual
+//! `2 atanh(s) - 2s = s · z · P3(z)`. With `r = z · P3(z)` and `u = s · (t - r)`, this gives
+//! `ln(1 + t) = t - u`. The return is evaluated in the frozen unfused order
+//! `t·(log2(e)-1) - u·log2(e) + t + e` so exact powers of two keep exact results.
+//!
+//! L3's f32 coefficients were derived by an LP minimax fit on that residual, rounded and refit in
+//! sequential f32 arithmetic, then coordinate-searched by the full two-rounding evaluator. The
+//! committed words and fit method are recorded in `docs/issue880-mb1.md`; the fit is provenance,
+//! while the exhaustive M1 sweep is the accuracy proof. Its reduced `t` interval is
+//! `[-0.292893…, 0.414214…]`, keeping `s` bounded away from the `atanh` singularity at ±1.
+//!
+//! **Division audit.** L3 adds one `Lane::div` per `log2_lane` call for `t / (t + 2)`; the
+//! denominator lies in `[1.7071…, 2.4143…]`. A source census of production lane divisions at
+//! this checkpoint found this call, true-peak limiter required-gain and box-mean divisions,
+//! soft-clip's cubic `/ 3`, and the transient-shaper fast/slow envelope ratio. The gate-expander
+//! corpus also calls `div`, but only while constructing test inputs. No other production lane
+//! division was found; each render-path use should be audited before adding another.
 //!
 //! **Accuracy (gate M1).** Exhaustively measured against the vendored `f64` `exp2`/`log2` oracle
 //! over every `f32` input: `exp2_lane` at most **1.4615 ulp** (at `x = -0.4910151`, over all
-//! 2,247,753,730 inputs in `[-126, 127]`), `log2_lane` at most **1.4667 ulp** (at
-//! `x = 1.4082463`, over all 2,130,706,432 positive normals). Both are monotone, and
+//! 2,247,753,730 inputs in `[-126, 127]`), `log2_lane` at most **1.2983 ulp** (at
+//! `x = 0.7106287`, over all 2,130,706,432 positive normals). Both are monotone, and
 //! `exp2_lane(0) == 1.0`, `exp2_lane(1) == 2.0`, `log2_lane(1) == 0.0`, `log2_lane(2) == 1.0`,
 //! `log2_lane(0.5) == -1.0` exactly. `tests/m1_exhaustive.rs` is the gate.
 //!
@@ -66,25 +77,24 @@ const EXP2_P: [f32; 6] = [
     6.931472028550421E-1,
 ];
 
-/// Cephes `logf.c` polynomial, highest order first. Transcribed verbatim; see [`EXP2_P`].
-#[allow(clippy::excessive_precision)]
-const LOG2_P: [f32; 9] = [
-    7.0376836292E-2,
-    -1.1514610310E-1,
-    1.1676998740E-1,
-    -1.2420140846E-1,
-    1.4249322787E-1,
-    -1.6668057665E-1,
-    2.0000714765E-1,
-    -2.4999993993E-1,
-    3.3333331174E-1,
+/// L3's f32 minimax fit for the atanh residual, highest order first.
+///
+/// `log2_lane`'s fold and transform are derived in the module documentation. These exact f32
+/// words are the committed LP-minimax/refit/coordinate-search result recorded in
+/// `docs/issue880-mb1.md`.
+const LOG2_L3_P: [f32; 3] = [
+    f32::from_bits(0x3e99_004a),
+    f32::from_bits(0x3ecc_aefc),
+    f32::from_bits(0x3f2a_aab1),
 ];
 
-/// `log2(e) - 1`, Cephes' `LOG2EA`.
-#[allow(clippy::excessive_precision)]
-const LOG2EA: f32 = 0.44269504088896340735992;
+/// `log2(e) - 1`, rounded to its committed f32 word.
+const LOG2_E_MINUS_ONE: f32 = f32::from_bits(0x3ee2_a8ed);
 
-/// `sqrt(2)`, the fold point of Cephes' `logf` range reduction.
+/// `log2(e)`, rounded to its committed f32 word.
+const LOG2_E: f32 = f32::from_bits(0x3fb8_aa3b);
+
+/// `sqrt(2)`, the fold point of L3's mantissa range reduction.
 const SQRT2: f32 = core::f32::consts::SQRT_2;
 
 /// `2^x`, lane-wide.
@@ -127,38 +137,35 @@ pub fn exp2_lane<L: Lane>(x: L) -> L {
 /// positive detectors; the clamp is the guard, not the contract.
 ///
 /// Operation order, frozen (any change re-opens gate M1):
-/// clamp; `(m, e) = frexp(x)` with `m` in `[1, 2)`; fold `m > sqrt(2)` into `e + 1` and
-/// `0.5 * m - 1`, otherwise `m - 1`; `z = x * x`; nine-term Horner in `x` with mul/add;
-/// `y = x * (z * p)`; `y = y - 0.5 * z`; then the Cephes summation
-/// `((y * LOG2EA + x * LOG2EA) + y + x) + e`, whose order is load-bearing.
+/// clamp; `(m, e) = frexp(x)` with `m` in `[1, 2)`; when `m > sqrt(2)`, fold with `0.5 * m` and
+/// add one to `e`; `t = m - 1`; `s = t / (t + 2)`; `z = s * s`; degree-2 Horner over `z` with
+/// `LOG2_L3_P`; `r = z * p`; `u = s * (t - r)`; then
+/// `((t * LOG2_E_MINUS_ONE - u * LOG2_E) + t) + e`, whose order is load-bearing.
 #[inline(always)]
 pub fn log2_lane<L: Lane>(x: L) -> L {
     let x = x.max(L::splat(f32::MIN_POSITIVE));
     let (m, e) = x.frexp();
 
-    // Cephes folds the mantissa about sqrt(2) so the polynomial argument stays near zero.
+    // Fold the mantissa about sqrt(2) so the atanh argument stays in a compact interval.
     let fold = m.gt(L::splat(SQRT2));
-    let e = L::select(fold, e.add(L::splat(1.0)), e);
-    let x = L::select(
-        fold,
-        L::splat(0.5).mul(m).sub(L::splat(1.0)),
-        m.sub(L::splat(1.0)),
-    );
+    let t = m
+        .mul(L::select(fold, L::splat(0.5), L::splat(1.0)))
+        .sub(L::splat(1.0));
+    let e = e.add(L::select(fold, L::splat(1.0), L::splat(0.0)));
 
-    let z = x.mul(x);
-    let mut p = L::splat(LOG2_P[0]);
+    let s = t.div(t.add(L::splat(2.0)));
+    let z = s.mul(s);
+    let mut p = L::splat(LOG2_L3_P[0]);
     let mut index = 1;
-    while index < LOG2_P.len() {
-        p = p.mul(x).add(L::splat(LOG2_P[index]));
+    while index < LOG2_L3_P.len() {
+        p = p.mul(z).add(L::splat(LOG2_L3_P[index]));
         index += 1;
     }
 
-    let y = x.mul(z.mul(p));
-    let y = y.sub(L::splat(0.5).mul(z));
-
-    let r = y.mul(L::splat(LOG2EA));
-    let r = r.add(x.mul(L::splat(LOG2EA)));
-    let r = r.add(y);
-    let r = r.add(x);
-    r.add(e)
+    let r = z.mul(p);
+    let u = s.mul(t.sub(r));
+    let result = t
+        .mul(L::splat(LOG2_E_MINUS_ONE))
+        .sub(u.mul(L::splat(LOG2_E)));
+    result.add(t).add(e)
 }
