@@ -1180,8 +1180,12 @@ struct MonoMeasurement {
     transposes_per_block: [u64; 2],
     /// Tracks whose structural (`SOURCE`) witness holds, per arm.
     mono_source_tracks: [u64; 2],
-    /// `[collapse-eligible lanes, lanes]` the built runtime realises, per arm.
-    symmetry_counters: [[u64; 2]; 2],
+    /// `[collapse-eligible lanes, lanes]` over the track lanes of the built runtime's bank chains,
+    /// per arm: the prepared half of the premise, counted over exactly the lanes it is about
+    /// (`SessionRuntime::bank_symmetry_counters`, issue #911).
+    bank_symmetry: [[u64; 2]; 2],
+    /// Lanes the built runtime's whole channel-symmetry census counts, per arm.
+    census_lanes: [u64; 2],
     audit: audit::AuditSnapshot,
     render_errors: u64,
 }
@@ -1199,7 +1203,20 @@ impl MonoMeasurement {
             .iter()
             .map(SessionRuntime::structural_mono_tracks)
             .collect();
-        let symmetry: Vec<[u64; 2]> = arms.iter().map(SessionRuntime::symmetry_counters).collect();
+        // The prepared half of that evidence, counted over the lanes the premise is about: the
+        // track lanes of the bank chains, the only units the collapse acts on. The whole census
+        // (`symmetry_counters`) also counts every single op -- on this fixture the 64 track
+        // `Input` ops (a host processor, so declined) and the `main-out` identity (symmetric,
+        // naming no track, nothing upstream of the seam). The premise used to read the census's
+        // eligible half, which equalled this count only while that output declined too; issue
+        // #221 rebound it as the engine's identity and the premise failed at `65 != 64` (issue
+        // #911). `bank_symmetry_counters` names what it excludes, and `chain_shape.rs` pins every
+        // row of both arms, so the next change to the unit inventory fails at `cargo test`.
+        let bank_symmetry: Vec<[u64; 2]> = arms
+            .iter()
+            .map(SessionRuntime::bank_symmetry_counters)
+            .collect();
+        let census: Vec<[u64; 2]> = arms.iter().map(SessionRuntime::symmetry_counters).collect();
         for arm in &mut arms {
             for observation in 0..64 {
                 let _ = arm.render(observation);
@@ -1247,10 +1264,14 @@ impl MonoMeasurement {
                 "{}: every track of the mono fixture must carry a mono source mapping",
                 MONO_ARMS[index].kind()
             );
+            // Both halves of the pair: one bank lane per track, and every one of them eligible. A
+            // track that stopped banking would lower the lane count, not only the eligible one.
+            let tracks = u64::from(MONO_ARMS[index].tracks());
             assert_eq!(
-                symmetry[index][0],
-                u64::from(MONO_ARMS[index].tracks()),
-                "{}: every track of the mono fixture must carry a symmetric prepared witness",
+                bank_symmetry[index],
+                [tracks, tracks],
+                "{}: every track of the mono fixture must carry a symmetric prepared witness on \
+                 its bank-chain lane ([eligible, lanes] over the chains' track lanes)",
                 MONO_ARMS[index].kind()
             );
         }
@@ -1266,7 +1287,8 @@ impl MonoMeasurement {
             digests: [digests[0].clone(), digests[1].clone()],
             transposes_per_block: [transposes[0], transposes[1]],
             mono_source_tracks: [mono_source_tracks[0], mono_source_tracks[1]],
-            symmetry_counters: [symmetry[0], symmetry[1]],
+            bank_symmetry: [bank_symmetry[0], bank_symmetry[1]],
+            census_lanes: [census[0][1], census[1][1]],
             audit: snapshot,
             render_errors,
         }
@@ -1328,8 +1350,13 @@ impl MonoMeasurement {
             // One number, not two: the run asserts the arms agree before it emits, so a pair of
             // columns here could only ever restate the assertion.
             mono_tracks = self.mono_source_tracks[0],
-            symmetric_lanes = self.symmetry_counters[0][0],
-            lanes = self.symmetry_counters[0][1],
+            // The premise's count beside the whole census it is a subset of. On every record
+            // sealed before issue #221 the census's eligible half *was* the bank-lane count,
+            // because every other unit of this fixture declined, so the column keeps its meaning;
+            // `lanes > symmetric_lanes` in the validator still says the census holds lanes that
+            // are not eligible track lanes.
+            symmetric_lanes = self.bank_symmetry[0][0],
+            lanes = self.census_lanes[0],
             eligible_digest = self.digests[0],
             forced_digest = self.digests[1],
             difference = MONO_ARM_DIFFERENCE,
