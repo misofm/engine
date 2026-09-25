@@ -11,6 +11,10 @@ trap 'rm -rf -- "$scratch"' EXIT
 runner=scripts/run-issue880-mq1-benchmark.sh
 fixture=scripts/fixtures/issue880-mq1-record.json
 validator=scripts/issue880-mq1-record-validator.jq
+raw_fixture=artifacts/issue880/mq1-baseline/mq1-baseline.raw.log
+failure_fixture=artifacts/issue880/mq1-baseline/mq1-baseline.failure.json
+runner_failure_fixture=artifacts/issue880/mq1-baseline/mq1-baseline.runner-failure.json
+sha256sum "$raw_fixture" "$failure_fixture" "$runner_failure_fixture" >"$scratch/original-artifacts.sha256"
 
 if output=$(bash "$runner" --bad --output "$scratch/bad.json" 2>&1); then
     printf 'MQ-1 runner accepted an unknown option\n' >&2
@@ -20,11 +24,59 @@ else
 fi
 [[ "$status" == 2 && "$output" == *usage:* ]]
 
+extract_mq1_result "$raw_fixture" "$scratch/prefixed-result.json"
+cmp -s "$scratch/prefixed-result.json" <(sed -n 's/.*MQ1_RESULT //p' "$raw_fixture")
+printf 'MQ1_RESULT {"fixture_sha256":"%064d","bank_ns_per_lane_sample":[1.0,2.0],"scalar_ns_per_lane_sample":[3.0,4.0]}\n' 0 \
+    >"$scratch/unprefixed.log"
+extract_mq1_result "$scratch/unprefixed.log" "$scratch/unprefixed-result.json"
+jq -e '.bank_ns_per_lane_sample == [1, 2] and .scalar_ns_per_lane_sample == [3, 4]' \
+    "$scratch/unprefixed-result.json" >/dev/null
+
+: >"$scratch/empty.log"
+if extract_mq1_result "$scratch/empty.log" "$scratch/rejected-result.json"; then
+    printf 'MQ-1 result extractor accepted zero records\n' >&2
+    exit 1
+fi
+printf 'MQ1_RESULT {"fixture_sha256":"%064d","bank_ns_per_lane_sample":[1,2],"scalar_ns_per_lane_sample":[3,4]}\nMQ1_RESULT {"fixture_sha256":"%064d","bank_ns_per_lane_sample":[1,2],"scalar_ns_per_lane_sample":[3,4]}\n' 0 0 \
+    >"$scratch/duplicate.log"
+if extract_mq1_result "$scratch/duplicate.log" "$scratch/rejected-result.json"; then
+    printf 'MQ-1 result extractor accepted duplicate records\n' >&2
+    exit 1
+fi
+printf 'test mq1_transient_shaper_ns_per_lane_sample ... MQ1_RESULT {broken json}\n' >"$scratch/malformed.log"
+if extract_mq1_result "$scratch/malformed.log" "$scratch/rejected-result.json" 2>/dev/null; then
+    printf 'MQ-1 result extractor accepted malformed JSON\n' >&2
+    exit 1
+fi
+printf 'MQ1_RESULT {"fixture_sha256":"%064d","bank_ns_per_lane_sample":[NaN,2],"scalar_ns_per_lane_sample":[3,4]}\n' 0 \
+    >"$scratch/nonfinite.log"
+if extract_mq1_result "$scratch/nonfinite.log" "$scratch/rejected-result.json"; then
+    printf 'MQ-1 result extractor accepted a nonfinite measurement\n' >&2
+    exit 1
+fi
+
 jq -e -L scripts -f "$validator" "$fixture" >/dev/null
 if jq '.measured_rounds_per_arm = 3' "$fixture" | jq -e -L scripts -f "$validator" >/dev/null; then
     printf 'MQ-1 record validator accepted a wrong round count\n' >&2
     exit 1
 fi
+
+bash "$runner" --recover-preserved \
+    --raw-input "$raw_fixture" \
+    --failure-input "$failure_fixture" \
+    --output "$scratch/recovered.json" >"$scratch/recovery.out"
+jq -e -L scripts -f "$validator" "$scratch/recovered.json" >/dev/null
+jq -e '
+    .status == "measured" and
+    .candidate_commit == "2a8977f5f0fb9b3384e2d71632f21c7f9896dce4" and
+    .engine_effect_commit == "6f662fee7b47a5eb38b67e0ddc6d007edd438cfa" and
+    .bank_ns_per_lane_sample == [6.281854, 6.281717] and
+    .scalar_ns_per_lane_sample == [40.841292, 40.803620] and
+    .recovery.workload_invocations_during_recovery == 0 and
+    .recovery.source_failure_record_sha256 == "725b7aaff22970a96771023aa4fa4b86ac5685b53d1551bb59e3a164dd67a3cf" and
+    .recovery.source_raw_log_sha256 == "f77b1db698c8248d82cf73a433032c8cb1482bff98886a7eeca9c5c3e9adb565"
+' "$scratch/recovered.json" >/dev/null
+sha256sum --check "$scratch/original-artifacts.sha256" >/dev/null
 
 printf 'persist probe\n' >"$scratch/source"
 persist_no_clobber "$scratch/source" "$scratch/persisted"
@@ -61,4 +113,4 @@ for suffix in '' '.raw.log' '.failure.json'; do
     rm -- "$target"
 done
 
-printf 'Issue-880 MQ-1 preflight self-test: PASS (timed workload launches 0)\n'
+printf 'Issue-880 MQ-1 parser and promotion self-test: PASS (timed workload launches 0)\n'

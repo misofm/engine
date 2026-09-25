@@ -12,6 +12,7 @@ mode=
 output_arg=
 usage() {
     printf 'usage: %s (--preflight|--run) --output RECORD.json\n' "$0" >&2
+    printf '       %s --recover-preserved --raw-input RAW.log --failure-input FAILURE.json --output RECOVERED.json\n' "$0" >&2
 }
 
 while (($#)); do
@@ -21,9 +22,24 @@ while (($#)); do
             mode=${1#--}
             shift
             ;;
+        --recover-preserved)
+            [[ -z "$mode" ]] || { usage; exit 2; }
+            mode=recover-preserved
+            shift
+            ;;
         --output)
             [[ -z "$output_arg" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
             output_arg=$2
+            shift 2
+            ;;
+        --raw-input)
+            [[ -z "${raw_input_arg:-}" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            raw_input_arg=$2
+            shift 2
+            ;;
+        --failure-input)
+            [[ -z "${failure_input_arg:-}" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            failure_input_arg=$2
             shift 2
             ;;
         --help)
@@ -111,6 +127,106 @@ preflight() {
     cargo test --locked --release --quiet -p transient-shaper --test bench --no-run
 }
 
+recover_preserved() (
+    set -euo pipefail
+    local raw_input failure_input raw_sha256 failure_sha256 scratch result_stage record_stage
+
+    [[ -n "${raw_input_arg:-}" && -n "${failure_input_arg:-}" ]] || { usage; exit 2; }
+    if [[ "$raw_input_arg" == /* ]]; then
+        raw_input=$(realpath -e -- "$raw_input_arg")
+    else
+        raw_input=$(realpath -e -- "$root/$raw_input_arg")
+    fi
+    if [[ "$failure_input_arg" == /* ]]; then
+        failure_input=$(realpath -e -- "$failure_input_arg")
+    else
+        failure_input=$(realpath -e -- "$root/$failure_input_arg")
+    fi
+    [[ -f "$raw_input" && -f "$failure_input" ]] || {
+        printf 'MQ-1 recovery inputs must be regular files\n' >&2
+        exit 1
+    }
+    [[ "$output" != "$raw_input" && "$output" != "$failure_input" ]] || {
+        printf 'MQ-1 recovery output must be separate from its source files\n' >&2
+        exit 1
+    }
+    refuse_existing_outputs
+
+    raw_sha256=$(sha256sum "$raw_input" | awk '{print $1}')
+    failure_sha256=$(sha256sum "$failure_input" | awk '{print $1}')
+    jq -e --arg raw_sha256 "$raw_sha256" '
+        type == "object" and
+        .schema_version == 1 and .issue == 880 and .task == "MQ-1" and
+        .kind == "transient_shaper_benchmark" and
+        .status == "postprocess_failed_unaccepted" and
+        (.candidate_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+        (.runner_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.raw_sha256 == $raw_sha256) and
+        (.runner_report.kind == "transient_shaper_benchmark_failure") and
+        (.runner_report.reason == "result_line_count") and
+        (.runner_report.exit_status == 1)
+    ' "$failure_input" >/dev/null || {
+        printf 'MQ-1 recovery failure record does not match the preserved parser-failure disposition\n' >&2
+        exit 1
+    }
+
+    scratch=$(mktemp -d "$output_dir/.mq1-recover.XXXXXXXX")
+    trap 'rm -rf -- "$scratch"' EXIT
+    result_stage="$scratch/result.json"
+    record_stage="$scratch/record.json"
+    if ! extract_mq1_result "$raw_input" "$result_stage"; then
+        printf 'MQ-1 recovery found zero, duplicate, or invalid result records\n' >&2
+        exit 1
+    fi
+
+    jq -e --slurpfile result "$result_stage" '
+        .fixture_sha256 == $result[0].fixture_sha256 and
+        .bank_ns_per_lane_sample == $result[0].bank_ns_per_lane_sample and
+        .scalar_ns_per_lane_sample == $result[0].scalar_ns_per_lane_sample
+    ' "$failure_input" >/dev/null || {
+        printf 'MQ-1 extracted values disagree with the preserved failed disposition\n' >&2
+        exit 1
+    }
+
+    jq --slurpfile result "$result_stage" \
+        --arg failure_input "$failure_input_arg" \
+        --arg failure_sha256 "$failure_sha256" \
+        --arg raw_input "$raw_input_arg" \
+        --arg raw_sha256 "$raw_sha256" \
+        --arg extracted_result_sha256 "$(sha256sum "$result_stage" | awk '{print $1}')" '
+        .status = "measured" |
+        .fixture_sha256 = $result[0].fixture_sha256 |
+        .bank_ns_per_lane_sample = $result[0].bank_ns_per_lane_sample |
+        .scalar_ns_per_lane_sample = $result[0].scalar_ns_per_lane_sample |
+        .recovery = {
+            schema_version: 1,
+            method: "offline_mq1_result_extraction",
+            recovered_from_status: "postprocess_failed_unaccepted",
+            source_failure_record: $failure_input,
+            source_failure_record_sha256: $failure_sha256,
+            source_raw_log: $raw_input,
+            source_raw_log_sha256: $raw_sha256,
+            source_failure_reason: .failure_reason,
+            source_runner_report: .runner_report,
+            extracted_result_sha256: $extracted_result_sha256,
+            workload_invocations_during_recovery: 0
+        } |
+        del(.failure_reason, .runner_report)
+    ' "$failure_input" >"$record_stage"
+
+    jq -e -L scripts -f scripts/issue880-mq1-record-validator.jq "$record_stage" >/dev/null || {
+        printf 'MQ-1 recovered record failed schema validation\n' >&2
+        exit 1
+    }
+    persist_no_clobber "$record_stage" "$output"
+    printf 'MQ-1 recovered record: %s\n' "$output"
+)
+
+if [[ "$mode" == recover-preserved ]]; then
+    recover_preserved
+    exit 0
+fi
+[[ -z "${raw_input_arg:-}" && -z "${failure_input_arg:-}" ]] || { usage; exit 2; }
 preflight
 if [[ "$mode" == preflight ]]; then
     printf 'Issue-880 MQ-1 preflight: PASS (workload launches 0)\n'
