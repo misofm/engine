@@ -17,10 +17,10 @@ scalar/Simd4/Simd8 width identity check:
 | maximum link | `ef30e6868ab30fc310ab2724376c305b8a37c437757c3130601f9139bd0bb9a4` | `cd131473b7ddc02f12a48344da7849294c3dd0944b55a42e93be95631c2e07d1` |
 | average link | `5b43b7abe28bef85860b3a18aa0cf5ffab214e89c3a300f2b6a896f790ca1751` | `edbf3cb956228b38db2378b9e6d6356a7bc6e409801d644268e48bb97afc0c9f` |
 
-## Frozen oracle row failure
+## Original oracle gate and accepted R2 amendment
 
-The complete existing 96-sample scalar oracle row was measured before and after the change. The
-unchanged gate is strict `max_abs_error < 2.0e-5`:
+The complete existing 96-sample scalar oracle row was measured before and after the change. Attempt
+1 tested the original strict `max_abs_error < 2.0e-5` gate:
 
 | source | max absolute error | dBFS | sample | input | production | f64 oracle |
 |---|---:|---:|---:|---:|---:|---:|
@@ -32,11 +32,20 @@ The row is 48 kHz, 96 samples of `max(sin(i * 0.071) * 0.7, -0.7)`, attack `0.75
 The measurements used a temporary diagnostic that traversed all 96 samples, recorded the maximum,
 then applied the original unchanged threshold; that diagnostic is not a tolerance change.
 
+Under the owner's explicit delegation, root accepted an amended R2 bound of strict `< 2.5e-5`
+absolute sample error **only** in `scalar_matches_the_independent_f64_oracle`. The measured
+candidate maximum is `2.098083496e-5`, leaving `4.01916504e-6` headroom. Root's engineering
+judgment is that this residual is unlikely audible in normal playback; this is not a universal
+inaudibility claim and there is no completed blinded listening test. ITU
+[BS.1116-3](https://www.itu.int/rec/R-REC-BS.1116-3-201502-I) informs listening-test methodology,
+not this numeric threshold. The `0.01` dB impulse/step/decay limits and every F1/M1 gate remain
+unchanged.
+
 MA-5's `1.287460e-5` absolute gain error and `1.654115e-5` dB fast-versus-exact gain delta came
 from exhaustive ratios at the four `attack/sustain ∈ {-1, +1}` corners. They do not by themselves
-bound the row's interior values `attack=0.75`, `sustain=-0.5`. The existing `0.01` dB impulse,
-step and decay oracle rows passed on the candidate; only the 96-sample absolute row failed in the
-focused transient-shaper test.
+bound the row's interior values `attack=0.75`, `sustain=-0.5`. The initial attempt exceeded the
+original 96-sample absolute limit; with the accepted row-specific amendment, the full
+transient-shaper package passes, including its unchanged `0.01` dB impulse, step and decay rows.
 
 ## MQ-1 same-programme PCM null
 
@@ -60,11 +69,12 @@ one-sided-zero samples. The largest absolute residual occurred at right channel,
 channel, frame 999, track 2 (`baseline=-0.5148412585`, `candidate=-0.5148420334`). The renderer
 reported Simd8 on x86_64 Linux with rustc 1.97.1 / LLVM 22.1.6. No timed measurement was taken.
 
-Attempt 1 is blocked on the frozen oracle gate and owner direction for R2. No tolerance was widened.
-The math F1 default run passed 14 active tests, including X7/X8 subsampled domains and the eight-
-crossing seal; math and transient-shaper package clippy, `cargo fmt --all -- --check`, and
-`git diff --check` passed. The full ignored math sweep and wasm gates remain outstanding. The full
-transient-shaper package run fails only at the recorded 96-sample oracle row; its impulse, step,
-decay, width identity, bank, allocation, boundary and contract tests passed. The MQ-1 PCM null
-comparison is complete as recorded above. The post-change timed measurement remains held until
-#902's corrected runner is integrated and root clears the shared CPU.
+The R2 amendment resolves the only observed threshold failure; no other tolerance was changed.
+`cargo test --locked --release -p transient-shaper` passed all active package tests. The math F1
+default run passed 14 active tests, including X7/X8 subsampled domains and the eight-crossing seal;
+all eight ignored full-domain math sweeps also passed in 73.33 seconds with four workers maximum.
+Math and transient-shaper package clippy, `cargo fmt --all -- --check`, and `git diff --check`
+passed. The MQ-1 PCM null comparison is complete as recorded above. Standalone wasm qualification
+is deferred to root's combined gate after MB-1. The post-change timed measurement remains held
+until #902's corrected runner is integrated and root clears the shared CPU. No blinded listening
+test was performed.

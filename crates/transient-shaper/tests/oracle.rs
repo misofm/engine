@@ -22,10 +22,13 @@
 //! | fast applied gain vs independent f64 `20 log10`/`10^(dB/20)` oracle, unit input | same ratios × four corners | `1.287460e-5` absolute gain |
 //! | exact-tier applied gain vs that oracle, unit input | same ratios × four corners | `2.199415e-6` absolute gain |
 //!
-//! The existing 96-sample oracle row uses interior amounts `attack=0.75`, `sustain=-0.5`. The
-//! complete production-path measurement for this row is in `docs/issue880-mb2.md`; its maximum
-//! exceeds the frozen `2.0e-5` absolute sample tolerance. That gate remains unchanged pending an
-//! owner ruling. The impulse, step and decay rows remain within their existing `0.01` dB gates.
+//! The existing 96-sample oracle row uses interior amounts `attack=0.75`, `sustain=-0.5`. Its
+//! initial `2.0e-5` absolute sample limit was exceeded by `9.8083496e-7`. The accepted R2 amendment
+//! raises only this row's limit to `2.5e-5`; the complete row maximum is `2.098083496e-5`. Under
+//! the owner's explicit delegation, root judged the measured MQ-1 null likely inaudible in normal
+//! playback, while recording that this is neither a universal inaudibility claim nor a completed
+//! blinded listening test. See `docs/issue880-mb2.md`. The impulse, step and decay rows retain
+//! their `0.01` dB gates.
 
 mod common;
 
@@ -33,7 +36,11 @@ use common::*;
 use dsp_reference::{ReferenceTransientShaper, ReferenceTransientShaperParameters};
 use effect_contract::EffectProcessBlock;
 
-/// Red mutation: substituting a `20 dB/octave` scale for the fast tier's `20 log10(2)` scale.
+/// Red mutation: `DB_PER_OCTAVE = 20.0` (the `log10`/`log2` confusion) — the error leaves 0.5 dB.
+///
+/// Under the owner's explicit delegation, root amended this row's limit to `< 2.5e-5`; the
+/// measured MQ-1 null is `-102.350199 dBFS`. This is a scoped engineering judgment, not universal
+/// inaudibility or listening evidence. The `0.01` dB impulse/step/decay gates remain unchanged.
 #[test]
 fn scalar_matches_the_independent_f64_oracle() {
     let mut effect = prepare(&values_of(0.75, -0.5, 1.0));
@@ -59,7 +66,7 @@ fn scalar_matches_the_independent_f64_oracle() {
             reference.process_sample(f64::from(original), f64::from(original.abs())) as f32;
         let error = (sample - expected).abs();
         worst = worst.max(error);
-        assert!(error < 2.0e-5, "sample={sample} expected={expected}");
+        assert!(error < 2.5e-5, "sample={sample} expected={expected}");
     }
     println!("worst |production - oracle| on the 96-sample sine row: {worst:e}");
 }
@@ -70,8 +77,8 @@ fn scalar_matches_the_independent_f64_oracle() {
 /// This row is follower-dominated — the followers are class A, unchanged — so the transcendental
 /// swap moves it by the `1.5e-5` dB of the header table, four orders of magnitude inside the gate.
 ///
-/// Red mutation: applying the wrong dB-to-gain scale before the fast gain conversion leaves rows
-/// outside the existing `0.01` dB gate.
+/// Red mutation: `OCTAVES_PER_DB = 0.05` (the `exp2`/`pow10` confusion) — the gain law is wrong by
+/// a factor of `log2(10)` in the exponent and every row leaves the gate.
 #[test]
 fn impulse_step_and_decay_cover_both_attack_and_sustain_signs() {
     let mut impulse = vec![0.0_f32; 32];
