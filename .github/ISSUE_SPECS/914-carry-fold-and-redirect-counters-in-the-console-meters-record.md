@@ -183,3 +183,24 @@ validator agree.
 ```json
 {"schema_version":1,"issue":149,"record":"console_meters","workload_kind":"sixty_four_track_console","tracks":64,"round":1,"backend":"Simd8","observations":8,"pairing":"alternating_per_observation","arms":["meters_off","meters_on"],"meter_streams":64,"meter_tap":"post_matrix","meter_window_blocks":4,"meter_frames_drained":128,"units":"ns_per_block","percentile_method":"nearest_rank","meters_off_p50_ns":23685797,"meters_off_p95_ns":24056402,"meters_off_p99_ns":24056402,"meters_on_p50_ns":24465401,"meters_on_p95_ns":24523560,"meters_on_p99_ns":24523560,"paired_delta_median_ns":761620,"meters_off_output_sha256":"d1971a3639cc2e9400c372e6f750b85307874fde2182d7d86963762658d47e9f","meters_on_output_sha256":"d1971a3639cc2e9400c372e6f750b85307874fde2182d7d86963762658d47e9f","bit_identity":"meters_off == meters_on, asserted in-run","meters_off_bank_route_folds":64,"meters_on_bank_route_folds":64,"meters_off_bank_scatter_redirects":0,"meters_on_bank_scatter_redirects":0,"render_errors":0,"render_total_forbidden_operations":0,"cpu_model":null,"os":"linux","governor_or_power_mode":null,"rust_version":null,"llvm_version":null,"target_triple":null,"target_features":null,"profile":null,"background_load_note":null,"measurement_control":null,"cpu_affinity":null,"candidate_commit":null,"missing_metadata":["background_load_note","candidate_commit","cpu_affinity","cpu_model","governor_or_power_mode","llvm_version","measurement_control","profile","rust_version","target_features","target_triple"],"descriptive_only":true,"statistical_method":"two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is meters_on minus meters_off per observation; descriptive only; no threshold"}
 ```
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `569ba338` and `afbcc58a` on base `12b621f2`.
+No blocking or should-fix findings. Verified: both counters are read once per arm from that arm's
+own plan, after the warm-up renders and before the audit and the timed loop; `METER_CONFIGS`
+index 0 is `BASELINE` and index 1 is `meters: true`, matching the record's `off`/`on` mapping;
+a folded lane never counts as a redirect (`runtime.rs` filters `scatter_redirects` by
+`!folded_runs.contains`); production still runs exactly 1000 observations and `common_shape`
+refuses any other count, so the `run_for` seam cannot admit a shortened record; the validator
+rules (non-negative integers, `off` folds equal to `tracks`, `on == off` for folds and for
+redirects) match the spec; the other two validators and the runner need no change. Five
+mutations re-applied and reverted, each red on the named case. The reviewer reproduced the
+record: 64/64 folds, 0/0 redirects on the standing 64-track console, which also settles the
+question the pure-path measurement left open: #885's fold does fire under post-matrix meters.
+Reviewer-run gates, all green: `test-console-benchmark.sh`, `check-bench-policy.sh`,
+`test-bench-policy.sh`, `check-console-benchmark-fixture.sh`, `check-realtime-policy.sh`,
+`cargo fmt --all --check`, the two-crate clippy, `cargo test -p bench -p console-workload`.
+No script re-validates sealed `artifacts/` records against the live key set, so earlier
+`console_meters` records stay valid as captured. Root-evidence line numbers in this spec predate
+the diff by a few dozen lines; harmless.
