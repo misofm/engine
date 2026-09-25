@@ -133,8 +133,10 @@ Terra, branch `codex/919-decode-into-recycled-block` on `12b621f2`. Commits: `c0
 oracle recorded against the pre-change worker, before any production edit), `92905c91`
 (implementation), `22126bdc` (block-conservation check in the harness), `18eca7a8` (rejected
 block stays with the caller; see deviation 1), `7d498ed3` (evidence), `bbee135b` (block count
-from the prepared ring), `672a70fa` (the amendment's repin), `54ab2cf9` (gate 1 made
-regenerable for #917's ring), and this evidence update. Paths touched:
+from the prepared ring), `672a70fa` (the amendment's repin), `54ab2cf9` (fixture and
+constants independent of the circulating block count), `8e27b804` (amendment evidence),
+`f4b8317b` (Sol's should-fixes: capacity-aware injector, N1 and N2 docs), and this evidence
+update. Paths touched:
 `crates/source/src/lib.rs`, `crates/source/src/native_source.rs`, this spec, and the two
 amendment files. No performance claim.
 
@@ -230,10 +232,21 @@ amendment files. No performance claim.
     `recycle_empty_count`, which the test pins to exactly +1 from step 10 (deviation 3).
   - `a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead`
     (deviation 2).
-  - `worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication`. One
-    injected extra block makes a commit meet a full data queue. Nothing is acked (cumulative =
-    4 × prepared blocks, `data_full_count > 0`), the retry publishes it once, and the six published blocks equal the
-    old worker's no-stall stream word for word.
+  - `worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication`. The
+    `OverfillDataQueue` step (injector rule below) lets the worker fill the data queue to its
+    logical capacity and then meet it full at a commit. Nothing past the full queue is acked
+    (cumulative = 4 × data-queue capacity, `data_full_count > 0`), the retry publishes the block
+    once, and the six published blocks equal the old worker's no-stall stream word for word.
+- Injector rule (both levels). A prepared ring never overfills its data queue, so the
+  `Full`-path tests inject blocks past the ring. The count is (free data-queue slots + 1 −
+  blocks already on the recycle queue), read from the live queues at injection time with
+  `data_producer.available_capacity()` and `recycle_consumer.available_at_entry()`, never from
+  the configured block count. The fillers are then committed until the data queue is at its
+  logical capacity, and the last injected block is the one that meets it full. This holds for
+  main's ring (queues = circulating blocks) and #917's (queues = circulating + 1).
+  - Harness: `ScriptStep::OverfillDataQueue`.
+  - `lib.rs`: `inject_blocks_to_overfill_the_data_queue`, `fill_the_data_queue`,
+    `commit_until_reservation_is_full`.
 - Producer, `lib.rs`:
   - `native_commit_publishes_the_decoded_block_without_a_copy` (gate 2 sibling): no
     `copy_from_slice`, one `validate_submission_metadata`, one `publish_block`; order is
@@ -290,7 +303,8 @@ Brief gate 4 wording: M1 is red on the stale-generation case at the producer. Th
 gate-1 tests stay green under M1 because the worker cannot commit stale metadata: an admitted
 seek clears `pending` before any commit. Validation is the producer's defence for every caller.
 With a prepared ring the `Full` commit is unreachable, since the reservation absorbs the full
-ring. So M3 is red only where one test-injected extra block makes it reachable.
+ring. So M3, M6 and M7 are red only through the capacity-aware injector. They were re-run red on
+this branch and on a scratch merge with #917 (see "Review should-fixes (Sol)").
 
 ### Deviations and findings
 
@@ -310,15 +324,32 @@ ring. So M3 is red only where one test-injected extra block makes it reachable.
    No PCM word changes. Pinned by
    `a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead` (old = new + 1
    on every post-seek block).
+
+   The watermark is host-visible only through worker events (`SourceReady`,
+   `SanitationSnapshot`, `Terminal`) and this crate's own `SourceConsumerTelemetry`. It has no
+   current reader: the only mention outside the crate, `crates/capi/tests/resource_lifecycle.rs:783`,
+   is a layout mirror for a size pin and reads no value. No pinned fixture, digest, browser
+   `expected.json` or SDK test observes it.
+
+   Reviewer's ruling (Sol): class A. No rendered bit moves, and the new count is the more
+   accurate one, because it counts replacements only in quanta the worker actually delivers or
+   decodes.
 3. **`recycle_empty_count` counts one more failed poll** after a seek admitted on a full ring.
    On that call the old worker decoded, while the new one polls for a block first. It is a
-   producer telemetry poll counter, and nothing in the workspace reads it.
+   producer telemetry poll counter. For a native source it is not even host-visible through
+   worker events, because the producer lives inside the worker job. It has no current reader,
+   and no pinned fixture, digest, browser `expected.json` or SDK test observes it.
+
+   Reviewer's ruling (Sol): class A. No rendered bit moves, and the new count is the more
+   accurate one: it records the poll the worker really made.
 4. **A failing read is discovered when a block is free.**
    `decoder_failure_after_accepted_seek_keeps_typed_terminal` never rendered, so it relied on
    decode-ahead; unchanged, it waits forever for its terminal. It now takes one render boundary
    (`read_one`) after the seek, which recycles the stale blocks, and then gets the same typed
    `DecodeFailed(Io(Other))`. In a running render the terminal comes one boundary later. With
-   the render stopped it waits until rendering resumes.
+   the render stopped it waits until rendering resumes. This is documented on
+   `NativeSourceController::wait_for_event` (N1). No current host surface waits for that event
+   without rendering; `tools/audit/src/source.rs` is the only caller outside the crate.
 5. **Published-sequence identity is per schedule.** Script steps land where both workers are
    in the same phase: after a `Run`, or single-stepped from a drained ring. After a stall is
    released, the old worker is one service call ahead (it had decoded ahead). A seek injected
@@ -327,41 +358,28 @@ ring. So M3 is red only where one test-injected extra block makes it reachable.
    deterministic.
 6. **Allocation-layout pins.** These were out of scope and are repinned under the scope
    amendment above.
-7. **Merge with #917 (`count + 1` blocks, queues `count + 1`).** A full data queue still
-   implies an empty recycle queue, so the reservation stays the backpressure point. The
-   conservation check and the cumulative-frame assertions derive from the prepared block count.
-   Only the two recorded constants depend on the ring shape. `prepared_contiguous_native_submission_matches_planar_ring_shape`
-   is edited on both branches (its submit call here, its pins there): a textual conflict only.
+7. **Merge with #917.** The reviewer's scratch merge of `2016de49` into this branch was clean,
+   and so was mine (below). #917 sizes both queues at `count + 1` but pushes only the
+   configured `count` blocks onto the recycle queue. Its extra block stays with the consumer,
+   so the worker still circulates exactly `count` blocks, the reservation stays the
+   backpressure point, and gate 1's recorded constants do not change. The one piece of test
+   code that assumed a shape was the `Full`-path injector: it assumed the data queue's capacity
+   equals the blocks on the recycle queue. It is now capacity-aware (injector rule above).
 
-### Regenerating gate 1 after #917
+### Gate 1 after #917
 
-#917 makes the fixture's three-block ring (`published_sequence_request`, `frame_capacity = 12`)
-prepare four blocks, so `native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks`
-fails on its two recorded constants and nothing else. To regenerate on the merged tree:
+The merge is clean and gate 1 needs no regeneration. With #917, the printer
+`print_published_sequence_constants_from_the_pre_change_worker` still reports
+`prepared transfer blocks: 3`, and its output equals the committed constants byte for byte.
+`native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks` and
+`native_worker_matches_the_pre_change_worker_block_for_block` pass unchanged. The only
+shape-dependent code was the `Full`-path injector, now fixed.
 
-1. Run `cargo test -p source --all-features --lib -- --ignored print_published_sequence_constants_from_the_pre_change_worker --nocapture`.
-   It first prints `prepared transfer blocks: 4`. It then prints both constants as Rust source,
-   computed by the verbatim pre-change worker (`pre_change_service_job`) on the prepared ring.
-2. Replace the whole adjacent `const PUBLISHED_SEQUENCE_ORACLE` … `const
-   PUBLISHED_SEQUENCE_IDLE_RUNS` block in `native_source.rs`'s tests with that output. Keep its
-   doc comment and change "three-block ring" to "three-plus-one ring (#917)". Nothing else
-   changes: not the fixture, the script, `seek_on_a_full_ring = 10`, or any other test.
-3. Run `cargo test -p source --all-features`.
-
-Expected output, dry-run on this tree with an equivalent four-block ring (`frame_capacity = 16`
-here prepares the same four blocks with four-slot queues as #917's 3 + 1):
-
-- **Rows:** the printer's rows equal the genuine pre-change production worker's record on that
-  ring. Relative to the current constant there is exactly one change: a generation-1 row
-  `(1, 21, 4, false, 4, 0x69a2_2fbf_be64_3585)` is inserted after `(1, 17, …)`, for 24 rows.
-- **Idle runs:** they become `(WaitingForRender, 17), (WaitingForCommand, 5), (Progress, 1),
-  (WaitingForRender, 6), (WaitingForCommand, 7)`.
-- **Tests:** with the output pasted, all four gate-1 tests pass.
-
-If the printer shows anything else, #917 changed more than the block count and queue depth,
-and the difference needs review rather than a paste. The fixture already keeps both shapes'
-decode-ahead quanta (21..=24 and 25..=28, plus 30..=33) free of replacement samples, so the
-live comparison holds on either ring.
+The printer (`#[ignore]`) stays for a deliberate re-record. Use it only if the fixture, the
+script, or the number of blocks a prepared ring circulates ever changes: run it with
+`--ignored --nocapture` and paste its output over the two adjacent constants. The fixture keeps
+every quantum a stalled old worker could decode ahead and drop free of replacement samples:
+21..=24 with three circulating blocks, 25..=28 with four, and 30..=33.
 
 ### Amendment gates
 
@@ -377,3 +395,15 @@ These results are for `54ab2cf9`, on top of `672a70fa`.
 | `bash scripts/check-realtime-policy.sh` | ok (50 regions, 14 files) |
 | mutations M1-M8 re-run after the fixture move | all red, same tests as the table above |
 | live `audit source-duration` | 16 rows, 5 896 bytes, layout equal across durations |
+
+### Review should-fixes (Sol)
+
+These results are for `f4b8317b`.
+
+| gate | result |
+|---|---|
+| `cargo test -p source --all-features` | 68 passed, 1 ignored (the printer), doc 1 |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --locked -p source --all-targets --all-features -- -D warnings` | exit 0 |
+| mutations M1-M8 on this branch | all red, same tests as the table above |
+| trial merge of `origin/codex/917-retain-played-transfer-block` (`2016de49`) into a throwaway copy of `f4b8317b` | clean merge; `cargo test -p source --all-features`: 72 passed, 1 ignored, doc 1; `cargo clippy -p source` clean; printer `prepared transfer blocks: 3`, output equal to the committed constants; M1-M8 all red with the same tests (the M3/M6/M7 `Full` path included). The scratch worktree was then removed; no merge is on this branch. |
