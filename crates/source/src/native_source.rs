@@ -221,7 +221,12 @@ pub fn native_source_allocation_layout(
         Ok(())
     }
 
-    let block_count = report.ring.transfer_block_count;
+    // Every allocated block: the configured count plus the consumer's retained block (#917).
+    let block_count = report
+        .ring
+        .transfer_block_count
+        .checked_add(report.ring.retained_block_count)
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let samples_per_block = u64::from(ring_config.channel_count)
         .checked_mul(u64::from(ring_config.quantum_frames.0))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;

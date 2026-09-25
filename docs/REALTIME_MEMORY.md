@@ -62,6 +62,21 @@ The only production unsafe code is slot initialization/read/drop inside `realtim
 final Arc owner drops any still-initialized slots only after both endpoints have ceased access.
 Endpoint drop order is safe and covered by a move-only drop test.
 
+The PCM source ring (`crates/source`) moves `Box<TransferBlock>`s over a data and a recycle queue
+and adds one hold rule on top of this protocol (#917): the render consumer keeps the played block
+from `begin_block` until the next `begin_block`, `prepare_seek`, `end_block`, or drop, so a render
+can read its planes in place (`played_plane`, a short block's tail zeroed in place once). The ring
+allocates `transfer_block_count + 1` blocks and sizes both queues at that count, so no push can be
+refused. At every block boundary the consumer retains exactly one block outside the queues -- the
+played block, or the same storage idle after an underrun, the end of the region or `end_block` --
+in addition to the pre-fetched `current` block it already held before #917 at boundaries where
+that block starts ahead of the next frame; it hands the idle block to the recycle queue only when
+a newer block becomes the played block.
+The producer therefore admits the configured `transfer_block_count` at every boundary, the same
+admission sequence as before the hold, and can never reach a block the render still reads; an
+admission is still acked only after its push into the data queue. The extra block's PCM, metadata
+and queue slots are source overhead, not the session's PCM charge.
+
 Browser launch uses `LocalRing`: the same bounded semantics with `MaybeUninit<T>` slots (for
 `T: Copy`) and plain cursors. #84 phase B replaced the `Option<T>` slots: the discriminant
 duplicated occupancy the head/tail cursors already carry, and `Option::take().expect(..)` put a
