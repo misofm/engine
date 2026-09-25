@@ -896,9 +896,10 @@ impl PcmSourceProducer {
     /// Take a recycled block for the native decode worker to decode straight into.
     ///
     /// This is [`Self::take_recycled_block`]: a deferred block is pushed first, and `Full` is
-    /// the backpressure a submission reports. With the data and recycle queues both sized to
-    /// the prepared block count, a full data queue implies an empty recycle queue, so this is
-    /// where the native worker meets a full ring -- before it decodes, never after.
+    /// the backpressure a submission reports. Each queue can hold every block the ring
+    /// allocates, so the data queue is never full while the producer holds a block: a full ring
+    /// shows here, as an empty recycle queue, and the native worker meets it before it decodes,
+    /// never after.
     #[cfg(not(target_arch = "wasm32"))]
     fn reserve_block(&mut self) -> Result<ReservedBlock, HostChunkError> {
         self.take_recycled_block()
@@ -911,7 +912,8 @@ impl PcmSourceProducer {
     /// once the metadata validates: a failed validation publishes nothing and leaves the
     /// unstamped block with the caller, as a seek does. A full data queue takes the stamped
     /// block into `deferred_block` exactly as a submission does, and [`Self::commit_deferred`]
-    /// is the retry. The block is never copied or dropped.
+    /// is the retry; with a prepared ring that arm is defensive (see [`Self::reserve_block`]).
+    /// The block is never copied or dropped.
     #[cfg(not(target_arch = "wasm32"))]
     fn commit_block(
         &mut self,
@@ -946,9 +948,12 @@ impl PcmSourceProducer {
 
     /// Retry the block a `Full` commit deferred: push that stamped block, then ack.
     ///
-    /// Its stamp is checked against the producer again, so a seek admitted since the commit
-    /// can never be acked with it: it then stays deferred, and the next reservation publishes
-    /// it unacked for the consumer to discard as stale, as a deferred submission always was.
+    /// Defensive: a prepared ring never fills its data queue while the producer holds a block
+    /// (see [`Self::reserve_block`]), so the native worker cannot reach a `Full` commit and
+    /// this retry, or its revalidation, runs only when a test injects blocks beyond the ring.
+    /// The stamp is revalidated so a seek admitted since the commit can never be acked with
+    /// the block: it then stays deferred, and the next reservation publishes it unacked for the
+    /// consumer to discard as stale, as a deferred submission always was.
     #[cfg(not(target_arch = "wasm32"))]
     fn commit_deferred(&mut self) -> Result<SubmitReport, HostChunkError> {
         let Some(block) = self.deferred_block.take() else {
@@ -2743,12 +2748,90 @@ mod tests {
         assert_eq!(consumer.telemetry().stale_generation_discard_count, 0);
     }
 
-    /// Give the ring one block more than its queues' capacity, which a prepared ring never has,
-    /// so a reserved block can meet a full data queue at its commit.
+    /// Hand the producer enough blocks beyond the prepared ring -- which a prepared ring never
+    /// has -- that it can fill the data queue to its logical capacity and still hold one more
+    /// block: one per free data slot, plus the one that meets the full queue, less any block
+    /// already waiting on the recycle queue. Derived from the live queues, not from the
+    /// configured block count, so it holds however many blocks the ring allocates or retains.
+    /// Returns how many blocks it added.
     #[cfg(not(target_arch = "wasm32"))]
-    fn inject_extra_block(consumer: &mut PcmSourceConsumer, samples: usize) {
-        let extra = Box::new(TransferBlock::try_new(samples).expect("extra block"));
-        assert!(consumer.recycle_producer.try_push(extra).is_ok());
+    fn inject_blocks_to_overfill_the_data_queue(
+        provider: &HostChunkProvider,
+        consumer: &mut PcmSourceConsumer,
+        samples: usize,
+    ) -> usize {
+        let needed = provider.producer.data_producer.available_capacity() + 1;
+        let waiting = provider.producer.recycle_consumer.available_at_entry();
+        assert!(
+            waiting < needed,
+            "a prepared ring already overfills its data queue"
+        );
+        for _ in waiting..needed {
+            let extra = Box::new(TransferBlock::try_new(samples).expect("extra block"));
+            assert!(consumer.recycle_producer.try_push(extra).is_ok());
+        }
+        needed - waiting
+    }
+
+    /// Commit one contiguous one-channel quantum at `frame`; its words are its frame numbers.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_counting_quantum(
+        provider: &mut HostChunkProvider,
+        generation: SourceGeneration,
+        frame: u64,
+    ) {
+        let mut reserved = provider.reserve_block().expect("reservable block");
+        let words = [0, 1, 2, 3].map(|offset| (frame + offset) as f32);
+        reserved.planes_mut().copy_from_slice(&words);
+        provider
+            .commit_block(
+                &mut Some(reserved),
+                generation,
+                SourceFrame(frame),
+                4,
+                false,
+                0,
+            )
+            .expect("a free data slot");
+    }
+
+    /// Commit counting quanta from `next_frame` until the reservation reports `Full`, which
+    /// for a prepared ring happens with a free data slot to spare. Returns the frames written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_until_reservation_is_full(
+        provider: &mut HostChunkProvider,
+        generation: SourceGeneration,
+        next_frame: u64,
+    ) -> u64 {
+        let mut frame = next_frame;
+        while provider.producer.recycle_consumer.available_at_entry() > 0 {
+            commit_counting_quantum(provider, generation, frame);
+            frame += 4;
+        }
+        assert!(matches!(
+            provider.reserve_block(),
+            Err(HostChunkError::Full { .. })
+        ));
+        frame - next_frame
+    }
+
+    /// Fill every free data slot with counting quanta from `next_frame` (the blocks
+    /// [`inject_blocks_to_overfill_the_data_queue`] added), leaving exactly one reservable block
+    /// and a full data queue. Returns the frames written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fill_the_data_queue(
+        provider: &mut HostChunkProvider,
+        generation: SourceGeneration,
+        next_frame: u64,
+    ) -> u64 {
+        let mut frame = next_frame;
+        for _ in 0..provider.producer.data_producer.available_capacity() {
+            commit_counting_quantum(provider, generation, frame);
+            frame += 4;
+        }
+        assert_eq!(provider.producer.data_producer.available_capacity(), 0);
+        assert_eq!(provider.producer.recycle_consumer.available_at_entry(), 1);
+        frame - next_frame
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2756,34 +2839,34 @@ mod tests {
     fn native_full_commit_defers_the_block_and_its_retry_acks_it_exactly_once() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
         let mut provider = producer.into_host_chunk_provider(RATE);
-        for (start, words) in [(0, [1.0, 2.0, 3.0, 4.0]), (4, [5.0, 6.0, 7.0, 8.0])] {
-            commit_native(
-                &mut provider,
-                SourceGeneration(1),
-                SourceFrame(start),
-                &words,
-                4,
-                false,
-                0,
-            )
-            .expect("fill the ring");
-        }
-        // Both queues hold every prepared block, so a full data queue is an empty recycle
-        // queue: the ring's own blocks meet backpressure at the reservation, before a decode.
-        assert!(matches!(
-            provider.reserve_block(),
-            Err(HostChunkError::Full { .. })
-        ));
-        inject_extra_block(&mut consumer, 4);
-        let mut extra = provider.reserve_block().expect("extra block");
-        extra.planes_mut().copy_from_slice(&[9.0, 10.0, 11.0, 12.0]);
-        let mut extra = Some(extra);
+        // The ring's own blocks meet backpressure at the reservation, before a decode: each
+        // queue holds every block the ring allocates, so the data queue is never full while
+        // the producer holds a block.
+        let own = commit_until_reservation_is_full(&mut provider, SourceGeneration(1), 0);
+        assert!(own > 0);
+        // Past the prepared ring: fill every free data slot, then hold one block more.
+        let injected = inject_blocks_to_overfill_the_data_queue(&provider, &mut consumer, 4);
+        let filled = fill_the_data_queue(&mut provider, SourceGeneration(1), own);
+        assert_eq!(filled, 4 * u64::try_from(injected - 1).expect("fits u64"));
+        let last_frame = own + filled;
+        let mut overflow = provider.reserve_block().expect("overflow block");
+        overflow
+            .planes_mut()
+            .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0]);
+        let mut overflow = Some(overflow);
         let before = provider.telemetry();
         assert!(matches!(
-            provider.commit_block(&mut extra, SourceGeneration(1), SourceFrame(8), 4, true, 3),
+            provider.commit_block(
+                &mut overflow,
+                SourceGeneration(1),
+                SourceFrame(last_frame),
+                4,
+                true,
+                3
+            ),
             Err(HostChunkError::Full { .. })
         ));
-        assert!(extra.is_none());
+        assert!(overflow.is_none());
         // No ack: only the full count moved, and the stamped block waits in the producer.
         let deferred = provider.telemetry();
         assert_eq!(
@@ -2801,25 +2884,33 @@ mod tests {
 
         let mut output = [0.0_f32; 4];
         consumer.read_block(&mut [&mut output]).expect("first");
-        assert_eq!(output, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(output, [0.0, 1.0, 2.0, 3.0]);
         let report = provider
             .commit_deferred()
             .expect("deferred block published");
         assert_eq!(report.accepted_frames, 4);
-        assert_eq!(report.cumulative_written_frames, 12);
+        assert_eq!(report.cumulative_written_frames, last_frame + 4);
         assert!(provider.telemetry().end_of_region_submitted);
         // Exactly once: nothing is left to retry.
         assert_eq!(
             provider.commit_deferred(),
             Err(HostChunkError::InternalInvariant)
         );
-        consumer.read_block(&mut [&mut output]).expect("second");
-        assert_eq!(output, [5.0, 6.0, 7.0, 8.0]);
+        // Every committed quantum, then the deferred one, in order and exactly once.
+        let mut frame = 4;
+        while frame < last_frame {
+            consumer
+                .read_block(&mut [&mut output])
+                .expect("filled block");
+            assert_eq!(output, [0, 1, 2, 3].map(|offset| (frame + offset) as f32));
+            frame += 4;
+        }
         let last = consumer.read_block(&mut [&mut output]).expect("deferred");
-        assert_eq!(output, [9.0, 10.0, 11.0, 12.0]);
+        assert_eq!(output, [-1.0, -2.0, -3.0, -4.0]);
         assert!(last.end_of_region);
         assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 3);
         assert_eq!(consumer.telemetry().underrun_frames, 0);
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 0);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2827,24 +2918,17 @@ mod tests {
     fn native_deferred_retry_never_acks_a_block_a_seek_made_stale() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
         let mut provider = producer.into_host_chunk_provider(RATE);
-        commit_native(
-            &mut provider,
-            SourceGeneration(1),
-            SourceFrame(0),
-            &[1.0; 4],
-            4,
-            false,
-            0,
-        )
-        .expect("fill the ring");
-        inject_extra_block(&mut consumer, 4);
-        let mut extra = provider.reserve_block().expect("extra block");
-        extra.planes_mut().copy_from_slice(&[2.0; 4]);
+        let own = commit_until_reservation_is_full(&mut provider, SourceGeneration(1), 0);
+        inject_blocks_to_overfill_the_data_queue(&provider, &mut consumer, 4);
+        let filled = fill_the_data_queue(&mut provider, SourceGeneration(1), own);
+        let written = own + filled;
+        let mut overflow = provider.reserve_block().expect("overflow block");
+        overflow.planes_mut().copy_from_slice(&[2.0; 4]);
         assert!(matches!(
             provider.commit_block(
-                &mut Some(extra),
+                &mut Some(overflow),
                 SourceGeneration(1),
-                SourceFrame(4),
+                SourceFrame(written),
                 4,
                 false,
                 0
@@ -2854,7 +2938,7 @@ mod tests {
         provider
             .try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
-                frame: SourceFrame(40),
+                frame: SourceFrame(400),
             })
             .expect("seek");
         let before = provider.telemetry();
@@ -2867,21 +2951,33 @@ mod tests {
         );
         assert_eq!(provider.telemetry(), before);
         assert!(provider.producer.deferred_block.is_some());
-        // The render observes the seek and discards the old block; the next reservation then
-        // publishes the stale deferred block unacked, and the render discards it too.
+        // The render observes the seek and discards an old block; the next reservation then
+        // publishes the stale deferred block unacked.
         let mut output = [7.0_f32; 4];
-        consumer
+        let boundary = consumer
             .read_block(&mut [&mut output])
             .expect("seek boundary");
+        assert_eq!(boundary.copied_frames, 0);
         let mut fresh = provider
             .reserve_block()
             .expect("reservation after the seek");
         assert!(provider.producer.deferred_block.is_none());
-        assert_eq!(provider.telemetry().cumulative_written_frames, 4);
-        consumer
-            .read_block(&mut [&mut output])
-            .expect("stale deferred block");
-        assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+        assert_eq!(provider.telemetry().cumulative_written_frames, written);
+        // The render discards every generation-1 block, the unacked deferred one included, and
+        // plays none of them.
+        let blocks_written = written / 4;
+        for _ in 0..=blocks_written + 1 {
+            if consumer.telemetry().stale_generation_discard_count == blocks_written + 1 {
+                break;
+            }
+            let report = consumer.read_block(&mut [&mut output]).expect("discard");
+            assert_eq!(report.copied_frames, 0);
+        }
+        assert_eq!(
+            consumer.telemetry().stale_generation_discard_count,
+            blocks_written + 1
+        );
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 0);
         // The seek frame is still the write cursor, which an ack of the stale block would
         // have moved past: the post-seek commit is contiguous at exactly the seek frame.
         fresh.planes_mut().copy_from_slice(&[3.0; 4]);
@@ -2889,13 +2985,13 @@ mod tests {
             .commit_block(
                 &mut Some(fresh),
                 SourceGeneration(2),
-                SourceFrame(40),
+                SourceFrame(400),
                 4,
                 true,
                 0,
             )
             .expect("post-seek commit");
-        assert_eq!(report.cumulative_written_frames, 8);
+        assert_eq!(report.cumulative_written_frames, written + 4);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

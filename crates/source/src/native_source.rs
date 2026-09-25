@@ -738,6 +738,14 @@ impl NativeSourceController {
     }
 
     /// Wait outside render for the initial prepared source data event.
+    ///
+    /// The worker decodes only into a transfer block it has reserved, so after an admitted
+    /// seek on a full ring its next decode -- and a `Terminal` event for a decode failure at the
+    /// new position -- follows the render boundary that frees a block. The pre-#919 worker
+    /// decoded ahead into a private staging block and reported such a failure immediately. A
+    /// caller that waits for that event without rendering waits until rendering resumes. No
+    /// current host surface does; `tools/audit/src/source.rs` is the only caller outside this
+    /// crate.
     pub fn wait_for_event(
         &mut self,
     ) -> Result<NativeSourceWorkerEvent, NativeSourceWorkerControlError> {
@@ -4145,13 +4153,17 @@ mod tests {
         Render,
         /// The controller queues a seek for the worker.
         Seek { generation: u64, frame: u64 },
-        /// Hand the producer one block more than a prepared ring has (a test-only fault).
-        InjectExtraBlock,
+        /// A test-only fault a prepared ring never has: hand the producer one block per free
+        /// data-queue slot, plus one, less any block already waiting on the recycle queue, so a
+        /// reserved block meets a full data queue whatever the ring's shape.
+        OverfillDataQueue,
     }
 
     struct WorkerTrace {
-        /// Transfer blocks the prepared ring allocated (before any injected block).
+        /// Transfer blocks the prepared ring put in circulation (before any injected block).
         blocks: usize,
+        /// Logical capacity of the ring's data queue.
+        data_queue_capacity: usize,
         published: Vec<PublishedBlock>,
         idles: Vec<Idle>,
         telemetry: Vec<SourceProducerTelemetry>,
@@ -4191,6 +4203,7 @@ mod tests {
         let mut telemetry = Vec::new();
         // Every prepared block starts on the recycle queue, however many the ring allocates.
         let prepared_blocks = job.provider.producer.recycle_consumer.available_at_entry();
+        let data_queue_capacity = job.provider.producer.data_producer.capacity();
         assert!(prepared_blocks > 0);
         let mut blocks = prepared_blocks;
         for step in script {
@@ -4216,14 +4229,20 @@ mod tests {
                         frame: SourceFrame(frame),
                     })
                     .expect("bounded worker command slot"),
-                ScriptStep::InjectExtraBlock => {
+                ScriptStep::OverfillDataQueue => {
                     let samples =
                         render.quantum * usize::from(job.decoder.metadata().channel_count);
-                    let extra = Box::new(
-                        crate::TransferBlock::try_new(samples).expect("extra transfer block"),
-                    );
-                    assert!(render.consumer.recycle_producer.try_push(extra).is_ok());
-                    blocks += 1;
+                    let producer = &job.provider.producer;
+                    let needed = producer.data_producer.available_capacity() + 1;
+                    let waiting = producer.recycle_consumer.available_at_entry();
+                    assert!(waiting < needed, "a prepared ring already overfills");
+                    for _ in waiting..needed {
+                        let extra = Box::new(
+                            crate::TransferBlock::try_new(samples).expect("extra transfer block"),
+                        );
+                        assert!(render.consumer.recycle_producer.try_push(extra).is_ok());
+                    }
+                    blocks += needed - waiting;
                 }
             }
             // No block ever leaves circulation: each is queued, played, reserved by the job, or
@@ -4242,6 +4261,7 @@ mod tests {
         }
         WorkerTrace {
             blocks: prepared_blocks,
+            data_queue_capacity,
             published: render.published,
             idles,
             telemetry,
@@ -4255,9 +4275,9 @@ mod tests {
             .map(|index| f32::from(index) * 0.375 - 7.0)
             .collect();
         // Interleaved index = frame * 2 + channel. Frames 21..=28 and 30..=33 stay plain: while
-        // stalled, the pre-change worker decoded 21..=24 (three-block ring) or 25..=28 (#917's
-        // three-plus-one ring) ahead of the generation-2 seek, then 30..=33 ahead of the
-        // generation-3 admission, and dropped both.
+        // stalled, the pre-change worker decoded 21..=24 (three circulating blocks) or 25..=28
+        // (four) ahead of the generation-2 seek, then 30..=33 ahead of the generation-3
+        // admission, and dropped both.
         samples[2 * 2 + 1] = f32::from_bits(1);
         samples[7 * 2] = -0.0;
         samples[10 * 2] = f32::NAN;
@@ -4401,9 +4421,10 @@ mod tests {
         text
     }
 
-    /// Regenerates the recorded constants from the verbatim pre-change worker on the ring this
-    /// tree prepares (issue #919 evidence, "Regenerating gate 1"). Run with `--ignored
-    /// --nocapture` and paste its output over the two constants.
+    /// Prints the recorded constants from the verbatim pre-change worker on the ring this tree
+    /// prepares, for a deliberate re-record if the fixture, script or circulating block count
+    /// ever changes (issue #919 evidence, "Gate 1 after #917"). Run with `--ignored
+    /// --nocapture`; its output replaces the two constants in one paste.
     #[test]
     #[ignore = "prints the gate-1 constants for a deliberate re-record; asserts nothing"]
     fn print_published_sequence_constants_from_the_pre_change_worker() {
@@ -4689,11 +4710,11 @@ mod tests {
     #[test]
     fn a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead() {
         // The pre-change worker decoded one quantum into its staging block while the ring was
-        // full and dropped it at the generation-2 seek: frames 21..=24 on a three-block ring,
-        // 25..=28 on #917's three-plus-one ring. The current worker, holding no block, never
-        // decodes it there. One NaN in each candidate makes exactly one replacement counted once
-        // more by the old worker on either shape; the other NaN lies in a quantum both workers
-        // publish or both decode later, for generations 3 and 5.
+        // full and dropped it at the generation-2 seek: frames 21..=24 with three circulating
+        // blocks, 25..=28 with four. The current worker, holding no block, never decodes it
+        // there. One NaN in each candidate makes exactly one replacement counted once more by
+        // the old worker either way; the other NaN lies in a quantum both workers publish or
+        // both decode later, for generations 3 and 5.
         let mut samples = published_sequence_fixture();
         samples[22 * 2] = f32::NAN;
         samples[26 * 2] = f32::NAN;
@@ -4726,10 +4747,10 @@ mod tests {
 
     #[test]
     fn worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication() {
-        use ScriptStep::{InjectExtraBlock, Render, Run};
-        // A prepared ring never lets a reserved block meet a full data queue; one extra block
-        // does, so the worker's commit takes its `Full` arm and its retry path.
-        let mut script = vec![Run, InjectExtraBlock, Run];
+        use ScriptStep::{OverfillDataQueue, Render, Run};
+        // A prepared ring never lets a reserved block meet a full data queue; blocks injected
+        // past its capacity do, so the worker's commit takes its `Full` arm and its retry path.
+        let mut script = vec![Run, OverfillDataQueue, Run];
         script.extend([Render, Run].repeat(6));
         let current = run_worker_script(
             &published_sequence_fixture(),
@@ -4737,14 +4758,14 @@ mod tests {
             &script,
             service_job,
         );
-        // The commit of the quantum after the ring's own blocks met the full data queue: nothing
-        // was acked (only the ring's own blocks are counted as written), and the
-        // worker waited for the render with the stamped block deferred in the provider.
+        // The worker filled the data queue to its capacity, then the commit of one quantum more
+        // met the full queue: nothing past the full queue was acked, and the worker waited for
+        // the render with the stamped block deferred in the provider.
         assert_eq!(current.idles[1], Idle::WaitingForRender);
         assert!(current.telemetry[2].data_full_count > 0);
         assert_eq!(
             current.telemetry[2].cumulative_written_frames,
-            4 * u64::try_from(current.blocks).expect("block count fits u64")
+            4 * u64::try_from(current.data_queue_capacity).expect("capacity fits u64")
         );
         // The retry published that block once, and the stream continued contiguously: the same
         // blocks, word for word, as the pre-change worker streaming the region with no stall.
