@@ -862,3 +862,15 @@ and explicitly credits no blinded listening result. All non-optional source task
 are now complete, while optional MA-1b is omitted and R4/MB-3 is explicitly declined.
 AudioWorklet qualification, exact-head CI, merged delivery and remote synchronization
 remain required before closure.
+
+### Class-B browser artifact qualification
+
+Successor #905 qualified accepted source `bb9efd095bd8d70be8b8503cba6c3617fd51b74e`
+with live AudioWorklet SHA-256
+`25e75763f1e6ea815a938de60367549c973cf3c5dc551a3a3af5d5ac5b79e20a`. Luna ran
+the existing artifact/resource/SDK/receiver and three-browser gates, all PASS; Astra
+independently recorded attempt-1 PASS. The six non-Wasm authorities and all numerical/
+resource expectations remain unchanged. Browser records change only source/hash
+lineage, and historical published-SDK identity remains fixed. Source implementation
+and required local qualification are complete. The coherent batch is ready for
+required GitHub CI and merged delivery; MZ-1 remains until remote synchronization.
