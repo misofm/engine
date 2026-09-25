@@ -80,3 +80,36 @@ Red mutations, run and reverted:
 - Opaque output binding: the pin fails at unit 72 (`lane_eligible [false]`).
 - `banked` filter dropped from the accessor: every row still matches, and the premise count fails
   at `[64, 128]`.
+
+## Attempt 1 gate evidence (Terra)
+
+Code under test: `39c727a2`.
+
+1. `cargo test -p bench -p console-workload` passed:
+   - bench: 61
+   - console-workload `automation`: 4
+   - console-workload `chain_shape`: 22, including the new pin
+   - console-workload `placement`: 3
+
+   The following also passed:
+   - `cargo clippy -p bench -p console-workload --all-targets --all-features -- -D warnings`
+   - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+   - `cargo fmt --all --check`
+2. Both scripts passed:
+   - `bash scripts/test-console-benchmark.sh`: `PASS (real runner/workload/timing invocations: 0/0/0)`
+   - `bash scripts/check-bench-policy.sh`: `ok`
+3. On `main`, every runner arm's artifact directory already holds runner output, so every arm
+   refuses to overwrite, and the runner has no preflight. The proof therefore ran on a throwaway
+   local branch. Its one extra commit, `fd636608`, added the arm `--issue911-warmup-proof` to
+   `scripts/run-console-benchmark.sh` and nothing else. It ran with
+   `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`.
+   - The warmup got past the mono premise (`warmup_launches: 1`).
+   - The whole invocation then finished in about 90 seconds, before it could be stopped after the
+     warmup. The disposition reads `PASS complete`, `measured_rounds_completed: 2`,
+     `measurement_control: uncontrolled`. The aggregate validator accepted all 46 records.
+   - Both `console_mono` records carry `mono_source_tracks 64`, `symmetric_lanes 64` and
+     `lanes 129`, with equal arm digests, and the record validator accepted each one.
+   - This is an uncontrolled run on a throwaway candidate, so no number from it is claimed or
+     recorded.
+   - The artifact directory and the throwaway branch were deleted afterwards. The worktree is
+     clean.
