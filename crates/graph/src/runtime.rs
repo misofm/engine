@@ -3676,7 +3676,7 @@ pub fn test_only_set_route_fold_declined(declined: bool) {
     ROUTE_FOLD_DECLINED.with(|slot| slot.set(declined));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Issue #886's unredirected oracle: the same plan bound with every scatter redirect declined,
     /// which is the path an observer of a chain's last slot forced before that issue. Bind-time
@@ -3689,11 +3689,11 @@ thread_local! {
 ///
 /// The unredirected oracle for a direct-scatter test (issue #886), on the pattern of
 /// [`test_only_set_route_fold_declined`]: read once per bind, in `build_sequential`, where the
-/// redirects are decided and before any unit is built; render never reads it. Callers restore
-/// `false` after the bind they meant to decline. Test-only in this crate: exporting it for another
-/// crate's tests would take a `test-support` re-export from `lib.rs`.
-#[cfg(test)]
-fn test_only_set_scatter_redirect_declined(declined: bool) {
+/// redirects are decided and before any unit is built; render never reads it, and it does not exist
+/// without `test-support`. Callers restore `false` after the bind they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_scatter_redirect_declined(declined: bool) {
     SCATTER_REDIRECT_DECLINED.with(|slot| slot.set(declined));
 }
 
@@ -3963,7 +3963,7 @@ pub(crate) fn build_sequential(
         .into_iter()
         .filter(|(run, _, _)| !folded_runs.contains(run))
         .collect();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
         Vec::new()
     } else {
@@ -4585,23 +4585,28 @@ fn scatter_redirects(
 /// about what the consumer's buffer holds by the time its observers run, so there is nothing there
 /// for one to see.
 ///
-/// Nor, since issue #886, are the **producer's** observers -- bound to the last slot's own node, or
-/// through a `program::Tap` to a stage boundary elided onto its buffer. Both used to decline, on the
-/// reasoning that the last slot's own buffer goes unwritten after the redirect; but no observer
-/// reads that buffer. Every one of them reads the chain's final output, and is dispatched from the
-/// last slot's own `RuntimeOp`, whose `output` [`apply_scatter_redirects`] repoints at the
-/// consumer's buffer. Both dispatchers (`Runtime::observe_unit`, `observe_active_entry`) run them
-/// straight after the chain's unit: after its scatter wrote that buffer, and before the consumer's
-/// unit -- later by construction -- rewrites it in place. Each is first offered the chain's resident
-/// final lane (`BankChain::final_output_lane`, the words the scatter transposed), and one that
-/// declines it reads the member's output, which is the consumer's buffer holding those same words;
-/// [`scatter_redirects`]' in-between clause keeps that slot the scatter's alone until the consumer
-/// runs. So an observer of the chain's final output publishes the same bits whether the lane
-/// redirects or not -- `a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_\
-/// for_bit` holds it to that, and restoring either clause reddens
-/// `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A stage boundary *inside* a
-/// chain is not this function's question: `chains_into` still declines the merge across an
-/// observed one, unchanged.
+/// Nor, since issue #886, are the **producer's** observers -- bound to the last slot's own node,
+/// or through a `program::Tap` to a stage boundary elided onto its buffer. Both used to decline,
+/// on the reasoning that the last slot's own buffer goes unwritten after the redirect; but no
+/// observer reads that buffer. Every one of them reads the chain's final output, and is dispatched
+/// from the last slot's own `RuntimeOp`, whose `output` [`apply_scatter_redirects`] repoints at
+/// the consumer's buffer. Both dispatchers (`Runtime::observe_unit`, `observe_active_entry`) run
+/// them straight after the chain's unit: after its scatter wrote that buffer, and before the
+/// consumer's unit -- later by construction -- rewrites it in place. Each is first offered the
+/// chain's resident final lane (`BankChain::final_output_lane`, the words the scatter
+/// transposed), and one that declines it reads the member's output, which is the consumer's buffer
+/// holding those same words; [`scatter_redirects`]' in-between clause keeps that slot the
+/// scatter's alone until the consumer runs. So an observer of the chain's final output publishes
+/// the same bits whether the lane redirects or not --
+/// `a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit` holds it to
+/// that (and, with the production meter, graph-compiler's
+/// `a_meter_on_a_bank_member_keeps_that_lanes_scatter_redirect`), and restoring either clause
+/// reddens `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A redirect consumer
+/// stays out of the scalar split fader/matrix pair, so a metered plan now takes the redirect where
+/// it took the split pair before -- the unmetered plan's shape, with the same bits
+/// (`a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits`). A stage boundary
+/// *inside* a chain is not this function's question: `chains_into` still declines the merge across
+/// an observed one, unchanged.
 ///
 /// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
 /// for what each clause is defending.
@@ -5033,9 +5038,10 @@ fn foldable_lane(
 ///
 /// * **the association order** -> `route_ids_ordered_against_the_cohorts_decline_the_route_fold`,
 ///   plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and
-///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`. Keeping the length
-///   check and dropping the element-wise comparison is the unsound direction, and it is the one
-///   measured.
+///   `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter` (named
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect` until issue #886,
+///   the name `crates/graph/tests/MUTATIONS.md` row 218-3 still records). Keeping the length check
+///   and dropping the element-wise comparison is the unsound direction, and it is the one measured.
 /// * **no observer on the route/output path other than post-matrix** (issue #885) ->
 ///   `a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed`, both ways:
 ///   excusing no observer leaves the metered arms unfolded, and excusing every observer folds the
@@ -8180,6 +8186,9 @@ mod tests {
         /// Bind with every scatter redirect declined: the path a metered last slot took before
         /// issue #886.
         scatter_declined: bool,
+        /// Issue #886: a bound scalar `PostMatrix` after each fader, and a fader owner that offers
+        /// the scalar split fader/matrix pair. Needs `fader`.
+        split_pair: bool,
     }
 
     impl FoldFixture {
@@ -8197,6 +8206,7 @@ mod tests {
                 fader: false,
                 meter_at: &[],
                 scatter_declined: false,
+                split_pair: false,
             }
         }
 
@@ -8216,8 +8226,78 @@ mod tests {
         }
     }
 
+    /// [`ScalarTilt`]'s arithmetic, from an owner that also offers the scalar split fader/matrix
+    /// pair (issue #886's split-pair arm).
+    struct SplitFader;
+
+    impl GraphRuntimeProcessor for SplitFader {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            ScalarTilt.process(block)
+        }
+
+        fn scalar_split_pair_factory(&self) -> Option<crate::ScalarSplitPairFactory> {
+            Some(|fader, matrix| {
+                Ok(Box::new(DeferredSplit {
+                    fader,
+                    matrix,
+                    pending: false,
+                }))
+            })
+        }
+    }
+
+    /// A bound scalar matrix that is not an identity and mixes its planes.
+    struct MatrixTilt;
+
+    impl GraphRuntimeProcessor for MatrixTilt {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                let (a, b) = (*left, *right);
+                *left = a * 1.125 - b * 0.25;
+                *right = b * 0.75 + a * 0.3125;
+            }
+            Ok(())
+        }
+    }
+
+    /// A split pair that defers the fader's in-place arithmetic to the matrix slot, as the
+    /// production owner may: the fader's buffer holds the fader's *input* in between, which the
+    /// split pair's admission proves nothing reads.
+    struct DeferredSplit {
+        fader: Box<dyn GraphRuntimeProcessor>,
+        matrix: Box<dyn GraphRuntimeProcessor>,
+        pending: bool,
+    }
+
+    impl GraphRuntimeSplitPairProcessor for DeferredSplit {
+        fn begin_fader(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            self.pending = true;
+            Ok(())
+        }
+
+        fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            if core::mem::take(&mut self.pending) {
+                self.fader.process(GraphBindingBlock {
+                    left: &mut *block.left,
+                    right: &mut *block.right,
+                    first_sample: block.first_sample,
+                })?;
+            }
+            self.matrix.process(block)
+        }
+
+        fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
+            if core::mem::take(&mut self.pending) {
+                self.fader
+                    .process(block)
+                    .expect("the test fader cannot fail");
+            }
+        }
+    }
+
     /// `Input -> <stage> (one builtin bank per cohort of width) -> Route -> Output`, per track,
-    /// with issue #886's optional elided boundary and bound fader between the member and the route.
+    /// with issue #886's optional elided boundary, bound fader and bound matrix between the member
+    /// and the route.
     ///
     /// Every route has its own non-trivial 2x2, so the master's association order is visible in
     /// its bits. Cohorts are the tracks in order, so the chains' render order is the reduction's
@@ -8249,6 +8329,10 @@ mod tests {
             .filter(|_| fixture.fader)
             .map(|track| stage_node(track, TrackStage::PostFader))
             .collect();
+        let matrices: Vec<_> = (0..tracks)
+            .filter(|_| fixture.split_pair)
+            .map(|track| stage_node(track, TrackStage::PostMatrix))
+            .collect();
         let routes: Vec<_> = (0..tracks)
             .map(|track| GraphNodeId::Route {
                 route_id: id(format!("route{track:02}")),
@@ -8279,7 +8363,7 @@ mod tests {
                 &members[track],
             ));
             let mut upstream = &members[track];
-            for boundary in [aliases.get(track), faders.get(track)]
+            for boundary in [aliases.get(track), faders.get(track), matrices.get(track)]
                 .into_iter()
                 .flatten()
             {
@@ -8307,11 +8391,12 @@ mod tests {
         }
         edges.sort_by(|left, right| left.id.cmp(&right.id));
         let outputs = vec![output.clone()];
-        let levels: Vec<&Vec<GraphNodeId>> =
-            [&inputs, &members, &aliases, &faders, &routes, &outputs]
-                .into_iter()
-                .filter(|level| !level.is_empty())
-                .collect();
+        let levels: Vec<&Vec<GraphNodeId>> = [
+            &inputs, &members, &aliases, &faders, &matrices, &routes, &outputs,
+        ]
+        .into_iter()
+        .filter(|level| !level.is_empty())
+        .collect();
         let schedule: Vec<_> = levels
             .iter()
             .flat_map(|level| level.iter().cloned())
@@ -8348,6 +8433,7 @@ mod tests {
         let mut required_bindings = inputs.clone();
         required_bindings.extend(members.iter().cloned());
         required_bindings.extend(faders.iter().cloned());
+        required_bindings.extend(matrices.iter().cloned());
         required_bindings.push(output.clone());
         let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
             plan_id: 885,
@@ -8424,10 +8510,18 @@ mod tests {
                 GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(track as u32)))
             })
             .collect();
+        nodes.extend(faders.iter().map(|node| {
+            let fader: Box<dyn GraphRuntimeProcessor> = if fixture.split_pair {
+                Box::new(SplitFader)
+            } else {
+                Box::new(ScalarTilt)
+            };
+            GraphNodeBinding::new(node.clone(), fader)
+        }));
         nodes.extend(
-            faders
+            matrices
                 .iter()
-                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(ScalarTilt))),
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(MatrixTilt))),
         );
         nodes.push(GraphNodeBinding::identity(output));
         let meter_at = if fixture.meter_at.is_empty() {
@@ -9189,7 +9283,6 @@ mod tests {
     /// arms (and the unredirected resident control) publish other words.
     #[test]
     fn a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit() {
-        const BLOCKS: u64 = 6;
         for (width, tracks, frames) in [
             (BankWidth::Four, 4, 13),
             (BankWidth::Eight, 8, 13),
@@ -9208,120 +9301,205 @@ mod tests {
                 ),
             ] {
                 let shape = format!("{width:?}/{tracks}/{consumer}");
-                let run = |fixture: FoldFixture, resident_disabled: bool| {
-                    let published = Published::default();
-                    let (mut plan, _controller) = fold_fixture(fixture, &published);
-                    let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
-                    test_only_meter_input_reset(resident_disabled);
-                    let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
-                    let counts = test_only_meter_input_counts();
-                    test_only_meter_input_reset(false);
-                    let frames = published.lock().unwrap().clone();
-                    (bound, master, frames, counts)
-                };
-                let redirected = scatter_shape(FoldFixture {
-                    metered: false,
-                    fold_declined: true,
-                    ..metered
-                })[0];
-                assert!(redirected > 0, "{shape}: the shape must redirect something");
-                let meters = (tracks * metered.meter_at.len()) as u64;
-                let offers = meters * BLOCKS;
-                let planar = tracks as u64 * BLOCKS;
-                let (control_bound, control_master, control_frames, control_counts) = run(
-                    FoldFixture {
-                        scatter_declined: true,
-                        accepts_resident: false,
-                        ..metered
-                    },
-                    false,
-                );
-                assert_eq!(
-                    control_bound,
-                    [0, 0],
-                    "{shape}: the control neither redirects nor folds"
-                );
-                assert_eq!(
-                    control_counts,
-                    [planar, offers, 0],
-                    "{shape}: control counts"
-                );
-                assert_eq!(
-                    control_frames.len(),
-                    offers as usize,
-                    "{shape}: one frame per meter per block"
-                );
-                assert!(
-                    control_frames.iter().all(|frame| frame
-                        .left
-                        .iter()
-                        .chain(&frame.right)
-                        .any(|word| *word != 0)),
-                    "{shape}: every meter frame carries audio"
-                );
-                assert!(control_master.iter().any(|word| *word != 0));
-                let (_, resident_master, resident_frames, resident_counts) = run(
-                    FoldFixture {
-                        scatter_declined: true,
-                        ..metered
-                    },
-                    false,
-                );
-                assert_eq!(resident_counts, [0, offers, offers]);
-                assert_eq!(resident_master, control_master);
-                assert_eq!(resident_frames, control_frames);
-                for (name, fixture, resident_disabled, expected_counts) in [
-                    ("resident meters", metered, false, [0, offers, offers]),
-                    (
-                        "declining observers",
-                        FoldFixture {
-                            accepts_resident: false,
-                            ..metered
-                        },
-                        false,
-                        [planar, offers, 0],
-                    ),
-                    ("resident offer withdrawn", metered, true, [planar, 0, 0]),
-                    (
-                        "controlled resident meters",
-                        FoldFixture {
-                            controlled: true,
-                            ..metered
-                        },
-                        false,
-                        [0, offers, offers],
-                    ),
-                    (
-                        "controlled declining observers",
-                        FoldFixture {
-                            controlled: true,
-                            accepts_resident: false,
-                            ..metered
-                        },
-                        false,
-                        [planar, offers, 0],
-                    ),
-                ] {
-                    let (bound, master, frames, counts) = run(fixture, resident_disabled);
-                    assert_eq!(
-                        bound,
-                        [redirected, 0],
-                        "{shape}/{name}: the unmetered plan's redirects, and no fold"
-                    );
-                    assert_eq!(
-                        counts, expected_counts,
-                        "{shape}/{name}: [planar, offered, accepted]"
-                    );
-                    assert_eq!(
-                        master, control_master,
-                        "{shape}/{name}: the redirected master is the unredirected master's bits"
-                    );
-                    assert_eq!(
-                        frames, control_frames,
-                        "{shape}/{name}: every meter frame is the unredirected plan's"
-                    );
-                }
+                assert_redirected_meters_are_the_declined_plans(metered, None, &shape);
             }
+        }
+    }
+
+    /// The fader node `test_only_selected_split_fader` reports for the bind just made, if any.
+    fn selected_split_fader() -> Option<GraphNodeId> {
+        test_only_selected_split_fader().map(|selected| selected.node)
+    }
+
+    /// Gate 2's comparison for one metered shape: the declined oracle, then the five redirected
+    /// arms, each against it bit for bit. `control_split` is the fader the oracle's bind hands the
+    /// scalar split pair; every redirected arm must hand it none.
+    fn assert_redirected_meters_are_the_declined_plans(
+        metered: FoldFixture,
+        control_split: Option<GraphNodeId>,
+        shape: &str,
+    ) {
+        const BLOCKS: u64 = 6;
+        let (tracks, frames) = (metered.tracks, metered.frames);
+        let run = |fixture: FoldFixture, resident_disabled: bool| {
+            let published = Published::default();
+            let (mut plan, _controller) = fold_fixture(fixture, &published);
+            let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
+            let split = selected_split_fader();
+            test_only_meter_input_reset(resident_disabled);
+            let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
+            let counts = test_only_meter_input_counts();
+            test_only_meter_input_reset(false);
+            let frames = published.lock().unwrap().clone();
+            (bound, split, master, frames, counts)
+        };
+        let redirected = scatter_shape(FoldFixture {
+            metered: false,
+            fold_declined: true,
+            ..metered
+        })[0];
+        assert!(redirected > 0, "{shape}: the shape must redirect something");
+        let meters = (tracks * metered.meter_at.len()) as u64;
+        let offers = meters * BLOCKS;
+        let planar = tracks as u64 * BLOCKS;
+        let (control_bound, split, control_master, control_frames, control_counts) = run(
+            FoldFixture {
+                scatter_declined: true,
+                accepts_resident: false,
+                ..metered
+            },
+            false,
+        );
+        assert_eq!(
+            control_bound,
+            [0, 0],
+            "{shape}: the control neither redirects nor folds"
+        );
+        assert_eq!(split, control_split, "{shape}: the control's split pair");
+        assert_eq!(
+            control_counts,
+            [planar, offers, 0],
+            "{shape}: control counts"
+        );
+        assert_eq!(
+            control_frames.len(),
+            offers as usize,
+            "{shape}: one frame per meter per block"
+        );
+        assert!(
+            control_frames.iter().all(|frame| frame
+                .left
+                .iter()
+                .chain(&frame.right)
+                .any(|word| *word != 0)),
+            "{shape}: every meter frame carries audio"
+        );
+        assert!(control_master.iter().any(|word| *word != 0));
+        let (_, _, resident_master, resident_frames, resident_counts) = run(
+            FoldFixture {
+                scatter_declined: true,
+                ..metered
+            },
+            false,
+        );
+        assert_eq!(resident_counts, [0, offers, offers]);
+        assert_eq!(resident_master, control_master);
+        assert_eq!(resident_frames, control_frames);
+        for (name, fixture, resident_disabled, expected_counts) in [
+            ("resident meters", metered, false, [0, offers, offers]),
+            (
+                "declining observers",
+                FoldFixture {
+                    accepts_resident: false,
+                    ..metered
+                },
+                false,
+                [planar, offers, 0],
+            ),
+            ("resident offer withdrawn", metered, true, [planar, 0, 0]),
+            (
+                "controlled resident meters",
+                FoldFixture {
+                    controlled: true,
+                    ..metered
+                },
+                false,
+                [0, offers, offers],
+            ),
+            (
+                "controlled declining observers",
+                FoldFixture {
+                    controlled: true,
+                    accepts_resident: false,
+                    ..metered
+                },
+                false,
+                [planar, offers, 0],
+            ),
+        ] {
+            let (bound, split, master, frames, counts) = run(fixture, resident_disabled);
+            assert_eq!(
+                bound,
+                [redirected, 0],
+                "{shape}/{name}: the unmetered plan's redirects, and no fold"
+            );
+            assert_eq!(split, None, "{shape}/{name}: no split pair");
+            assert_eq!(
+                counts, expected_counts,
+                "{shape}/{name}: [planar, offered, accepted]"
+            );
+            assert_eq!(
+                master, control_master,
+                "{shape}/{name}: the redirected master is the unredirected master's bits"
+            );
+            assert_eq!(
+                frames, control_frames,
+                "{shape}/{name}: every meter frame is the unredirected plan's"
+            );
+        }
+    }
+
+    /// A fader that is a redirect consumer is kept out of the scalar split fader/matrix pair
+    /// (`build_sequential` skips a pair whose fader or matrix consumes a redirect). Before issue
+    /// #886 a meter on the last slot declined the redirect and so freed the fader for the pair: a
+    /// metered plan took the split pair where the same plan unmetered took the redirect. Now both
+    /// take the redirect, and the metered plan has the unmetered plan's shape.
+    ///
+    /// The shape adds a bound scalar `PostMatrix` after each fader, and a fader owner that offers
+    /// the split pair (a deferring owner: the fader's arithmetic runs at the matrix slot). Faders
+    /// are consecutive in the schedule, so track 0's fader and matrix are not adjacent, which is
+    /// the only interval the split pair admits. Asserted on the bound plan:
+    ///
+    /// * unmetered: every lane redirected, no split pair;
+    /// * metered at the last slot and its later tap: the same -- the redirect, not the split pair;
+    /// * the declined oracle (the path a fully metered plan took before #886): no redirect, and
+    ///   track 0's fader is the selected split fader.
+    ///
+    /// Then gate 2's comparison: every redirected, metered arm renders the master and every meter
+    /// frame bit for bit as the declined oracle, which renders through the split pair.
+    ///
+    /// Red mutation: drop the redirect-consumer exclusion from the split pass -- the metered and
+    /// unmetered arms select a split fader.
+    #[test]
+    fn a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits() {
+        for (width, tracks, frames) in [(BankWidth::Four, 4, 13), (BankWidth::Eight, 8, 13)] {
+            let shape = format!("{width:?}/{tracks}/split pair");
+            let metered = FoldFixture {
+                split_pair: true,
+                ..FoldFixture::scattered(width, tracks, frames)
+            };
+            let track_zero_fader = GraphNodeId::TrackStage {
+                track_id: crate::StableGraphId::parse("track00").expect("stable id"),
+                stage: TrackStage::PostFader,
+            };
+            let lanes = tracks as u64;
+            let path = |fixture: FoldFixture| (scatter_shape(fixture), selected_split_fader());
+            assert_eq!(
+                path(FoldFixture {
+                    metered: false,
+                    ..metered
+                }),
+                ([lanes, 0], None),
+                "{shape}: unmetered, every lane redirects and no fader is split"
+            );
+            assert_eq!(
+                path(metered),
+                ([lanes, 0], None),
+                "{shape}: metered, the same shape as unmetered -- the redirect, not the split pair"
+            );
+            assert_eq!(
+                path(FoldFixture {
+                    scatter_declined: true,
+                    ..metered
+                }),
+                ([0, 0], Some(track_zero_fader.clone())),
+                "{shape}: with the redirect declined, track 0's fader takes the split pair"
+            );
+            assert_redirected_meters_are_the_declined_plans(
+                metered,
+                Some(track_zero_fader),
+                &shape,
+            );
         }
     }
 }

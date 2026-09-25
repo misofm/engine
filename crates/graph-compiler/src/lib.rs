@@ -8272,19 +8272,26 @@ mod tests {
         );
     }
 
-    /// An observer bound to the last slot's **own node** declines that lane's scatter redirect.
+    /// An observer bound to the last slot's **own node** keeps that lane's scatter redirect
+    /// (issue #886), and still reads the chain's output.
     ///
-    /// The producer-observer clause, reached the only way a session can reach it. A graph observer
-    /// may only be bound to a `TrackStage` node, so the last slot has to *be* one -- which it is on
-    /// the bank-free arm, where the post-input builtin bank is a one-slot chain whose consumer is a
-    /// per-node EQ. A meter leased at `PostInputBuiltins` on that arm observes the bank member
-    /// itself, and after a redirect that member's buffer is never written.
+    /// The shape: a graph observer may only be bound to a `TrackStage` node, so the last slot has
+    /// to *be* one -- which it is on the bank-free arm, where the post-input builtin bank is a
+    /// one-slot chain whose consumer is a per-node EQ. A meter leased at `PostInputBuiltins` there
+    /// observes the bank member itself. Until issue #886 that declined the lane's redirect, on the
+    /// reasoning that the member's own buffer goes unwritten after it. The meter never reads that
+    /// buffer: it is dispatched from the member, whose output the redirect repoints at the EQ's
+    /// buffer, straight after the chain's unit and before the EQ runs, and it is offered the
+    /// chain's resident final lane first.
     ///
-    /// Redirecting anyway would hand the meter the previous block's words, and the session output
-    /// would be untouched: no digest comparison could see it, which is why the clause has a test of
-    /// its own rather than resting on the strip's bits.
+    /// This is the one place the production `MeterObserver` runs on a redirected lane, so the
+    /// windows are compared whole against the same session bound with every redirect declined
+    /// (`graph::test_only_set_scatter_redirect_declined`), on both of the meter's input paths: the
+    /// resident view it takes by default, and -- with the offer withdrawn -- the planar read of the
+    /// member's output, which after the redirect is the EQ's buffer. A meter reading last block's
+    /// words would leave the session output untouched, so no digest comparison could see it.
     #[test]
-    fn a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect() {
+    fn a_meter_on_a_bank_member_keeps_that_lanes_scatter_redirect() {
         const BLOCKS: u64 = 12;
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
@@ -8293,8 +8300,8 @@ mod tests {
             .expect("intended fixture");
         // A late track on purpose: the *first* cohort's chain has every other cohort's ops between
         // its scatter and its consumer, so the in-between clause already declines all eight of its
-        // lanes and a meter there would change nothing. Metering a lane that is admitted is what
-        // makes this a test of the observer clause.
+        // lanes and a meter there would decide nothing. Metering a lane that is admitted is what
+        // makes this a test of the observer.
         let meter = |handle: u64, tap| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(handle).expect("constant")),
             track_id: "ch63".to_owned(),
@@ -8317,19 +8324,35 @@ mod tests {
             quiet_redirects > 0,
             "the bank-free arm must redirect its builtin banks' scatters, or this test is vacuous"
         );
+        let meters = [meter(1, MeterTap::PostInputBuiltins)];
+        // One arm: `declined` binds with every redirect declined, `withdrawn` withdraws the
+        // resident offer for the render.
+        let arm = |plan_id: u64, declined: bool, withdrawn: bool| {
+            let artifact = compile_console_model_with_builtins(
+                &intended,
+                plan_id,
+                &meters,
+                &scalar_console_registry(),
+            );
+            graph::test_only_set_scatter_redirect_declined(declined);
+            graph::test_only_meter_input_reset(withdrawn);
+            let (pcm, _, _, _, frames, redirects, _) =
+                render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+            let counts = graph::test_only_meter_input_counts();
+            graph::test_only_meter_input_reset(false);
+            graph::test_only_set_scatter_redirect_declined(false);
+            (pcm, frames, redirects, counts)
+        };
 
-        let metered = compile_console_model_with_builtins(
-            &intended,
-            2_081,
-            &[meter(1, MeterTap::PostInputBuiltins)],
-            &scalar_console_registry(),
-        );
-        let (metered_pcm, _, _, _, frames, metered_redirects, _) =
-            render_console_builtins_blocks(metered, BLOCKS, Vec::new());
+        let (metered_pcm, frames, metered_redirects, counts) = arm(2_081, false, false);
         assert_eq!(
-            metered_redirects,
-            quiet_redirects - 1,
-            "exactly ch63's lane declines when its bank member is observed"
+            metered_redirects, quiet_redirects,
+            "ch63's lane keeps its redirect when its bank member is observed"
+        );
+        assert_eq!(
+            counts,
+            [0, BLOCKS, BLOCKS],
+            "the meter reads the chain's resident final lane on every block"
         );
         assert_pcm_bits_equal(
             &metered_pcm,
@@ -8346,21 +8369,70 @@ mod tests {
                 .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
             "the metered windows must carry signal"
         );
+
+        // The oracle: the same session and meter, every redirect declined, and the meter reading
+        // the member buffer the unredirected chain scattered into.
+        let (declined_pcm, declined_frames, declined_redirects, declined_counts) =
+            arm(2_082, true, true);
+        assert_eq!(declined_redirects, 0, "the oracle arm redirects nothing");
+        assert_eq!(
+            declined_counts,
+            [BLOCKS, 0, 0],
+            "the oracle's meter reads the last slot's own buffer on every block"
+        );
+        assert_pcm_bits_equal(
+            &metered_pcm,
+            &declined_pcm,
+            "the redirected master against the unredirected one",
+        );
+        assert_eq!(
+            frames, declined_frames,
+            "every meter window of the redirected plan is the unredirected plan's"
+        );
+        // The same oracle with the meter on its resident view: the view is the scattered words.
+        let (resident_pcm, resident_frames, _, _) = arm(2_083, true, false);
+        assert_pcm_bits_equal(&declined_pcm, &resident_pcm, "the unredirected master");
+        assert_eq!(resident_frames, declined_frames);
+
+        // The planar path on the redirected lane, with the real meter: withdraw the resident offer.
+        let (withdrawn_pcm, withdrawn_frames, withdrawn_redirects, withdrawn_counts) =
+            arm(2_084, false, true);
+        assert_eq!(
+            withdrawn_redirects, quiet_redirects,
+            "withdrawing the offer does not decline the redirect"
+        );
+        assert_eq!(
+            withdrawn_counts,
+            [BLOCKS, 0, 0],
+            "the meter reads the redirected member output on every block"
+        );
+        assert_pcm_bits_equal(
+            &metered_pcm,
+            &withdrawn_pcm,
+            "the redirected master, planar meter",
+        );
+        assert_eq!(
+            withdrawn_frames, declined_frames,
+            "a planar read of a redirected lane is the unredirected plan's window"
+        );
     }
 
-    /// Issue #202 rec 3: an observer on the last slot's own alias declines that lane's scatter
-    /// redirect -- and the observer still reads what it is supposed to read.
+    /// A meter on the pre-fader alias splits its cohort's chain there, redirects nothing, and reads
+    /// the limiter's output.
     ///
     /// `PostSimd2PreFader` is elided into a `program::Tap` on the limiter's op, so a meter leased
-    /// there reads the limiter's own buffer. The redirect leaves that buffer unwritten -- the chain
-    /// scatters into the fader instead -- so the meter would read the previous block's words. The
-    /// clause is keyed on the **alias node**, exactly as `chains_into`'s is, and keying it on the
+    /// there reads the limiter's own buffer. This test was written (issue #202 rec 3) for a
+    /// `scatter_target` clause that declined a redirect when the last slot's alias was observed,
+    /// back when the limiter *was* the last slot. Issue #212 made the fader and matrix slots of the
+    /// same chain, so the alias now sits *inside* it, and the clause that answers is
+    /// `chains_into`'s observed-alias clause, keyed on the **alias node** -- keying it on the
     /// producing node would miss it: nobody observes the limiter, the observer is bound to
-    /// `ch00/PostSimd2PreFader`.
-    ///
-    /// The cost is one lane, not one chain: 63 of the 64 tracks still redirect.
+    /// `ch00/PostSimd2PreFader`. Issue #886 then removed the redirect's observer clauses outright
+    /// (an observer of a redirected last slot reads the redirected buffer), so no redirect is
+    /// declined here at all: the split chain's consumer is the fader bank, which the gather-side
+    /// redirect serves, and every other chain still ends in a buffer its consumer reads in place.
     #[test]
-    fn an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect() {
+    fn a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter() {
         const BLOCKS: u64 = 12;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
@@ -8409,7 +8481,8 @@ mod tests {
         assert_eq!(transposes, BLOCKS * chains);
         assert_eq!(
             redirects, 0,
-            "the strip's chains still end in buffers their consumers read in place, metered or not"
+            "the split chain feeds a banked fader and every other chain ends in a buffer its \
+             consumer reads in place, so nothing redirects, metered or not"
         );
 
         // And the meter reads the limiter's output. The oracle is the same session with every
@@ -8477,8 +8550,8 @@ mod tests {
             "the send changes no bank's membership"
         );
         // The same boundary move as
-        // `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`, through the
-        // other clause. A send taken from `PostSimd2PreFader` gives ch00's limiter output a second
+        // `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter`, through the other
+        // clause. A send taken from `PostSimd2PreFader` gives ch00's limiter output a second
         // reader, and since #212 that alias sits *inside* the chain rather than at its end -- so
         // `chains_into`'s sole-readership clause declines the limiter -> fader merge and ch00's
         // cohort splits there. A send from a stage the chain does not span still costs nothing.

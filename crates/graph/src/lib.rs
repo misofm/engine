@@ -32,7 +32,8 @@ pub use runtime::{
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
-    test_only_set_route_fold_declined, test_only_split_pair_table_witness,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
+    test_only_split_pair_table_witness,
 };
 
 #[cfg(any(test, feature = "test-support"))]
