@@ -741,4 +741,51 @@ mod coefficient_ramp_tests {
         );
         assert_eq!(restored.ramps[4][0].remaining, 0);
     }
+
+    #[test]
+    fn both_resets_reseed_attack_and_release_coefficient_ramps() {
+        let mut channel = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        channel.set_parameter_target(3, 0, 180.0, SAMPLE_RATE);
+        channel.set_parameter_target(4, 0, 3_200.0, SAMPLE_RATE);
+        for _ in 0..19 {
+            channel.advance_ramps(SAMPLE_RATE);
+        }
+
+        channel.discontinuity_reset(SAMPLE_RATE);
+        assert_reset_rate_state(&channel);
+        assert_eq!(channel.ramps[3][0].current.to_bits(), 180.0_f32.to_bits());
+        assert_eq!(channel.ramps[4][0].current.to_bits(), 3_200.0_f32.to_bits());
+
+        channel.set_parameter_target(3, 0, 100.0, SAMPLE_RATE);
+        channel.set_parameter_target(4, 0, 900.0, SAMPLE_RATE);
+        for _ in 0..11 {
+            channel.advance_ramps(SAMPLE_RATE);
+        }
+        channel.full_reset(SAMPLE_RATE);
+        assert_reset_rate_state(&channel);
+        assert_eq!(
+            channel.ramps[3][0].current.to_bits(),
+            PARAMETER_SPECS[3].default.to_bits()
+        );
+        assert_eq!(
+            channel.ramps[4][0].current.to_bits(),
+            PARAMETER_SPECS[4].default.to_bits()
+        );
+    }
+
+    fn assert_reset_rate_state(channel: &Channel<f32>) {
+        for (slot, parameter, coefficient) in [(0, 3, COEF_ATTACK), (1, 4, COEF_RELEASE)] {
+            let rate_ramp = channel.rate_ramps[slot][0];
+            assert_eq!(rate_ramp.remaining, 0);
+            assert_eq!(rate_ramp.current.to_bits(), rate_ramp.target.to_bits());
+            assert_eq!(
+                rate_ramp.current.to_bits(),
+                channel.words[coefficient][0].to_bits()
+            );
+            assert_eq!(
+                rate_ramp.current.to_bits(),
+                rate_coefficient(channel.ramps[parameter][0].current, SAMPLE_RATE).to_bits()
+            );
+        }
+    }
 }

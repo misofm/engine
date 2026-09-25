@@ -88,6 +88,25 @@ preflight() {
         printf 'MQ-2 record validator accepted a deliberately wrong call count\n' >&2
         return 1
     fi
+    if ! jq '.schema_version = 2 |
+        .rate_coefficient_calls_per_bank_per_parameter = 16 |
+        .arms |= map(.rate_coefficient_calls_per_bank_per_parameter = 16 |
+            .rate_coefficient_calls_per_block = (8 * 8 * 2 * .ramping_parameters))' \
+        scripts/fixtures/issue880-mq2-record.json |
+        jq -e -f scripts/issue880-mq2-record-validator.jq >/dev/null; then
+        printf 'MQ-2 record validator rejected the MC-2 event-rate call-count profile\n' >&2
+        return 1
+    fi
+    if jq '.schema_version = 2 |
+        .rate_coefficient_calls_per_bank_per_parameter = 16 |
+        .arms |= map(.rate_coefficient_calls_per_bank_per_parameter = 16 |
+            .rate_coefficient_calls_per_block = (8 * 8 * 2 * .ramping_parameters)) |
+        .arms[1].rate_coefficient_calls_per_block = 1' \
+        scripts/fixtures/issue880-mq2-record.json |
+        jq -e -f scripts/issue880-mq2-record-validator.jq >/dev/null; then
+        printf 'MQ-2 record validator accepted a wrong MC-2 event-rate call count\n' >&2
+        return 1
+    fi
 
     scratch=$(mktemp -d "$output_dir/.mq2-preflight.XXXXXXXX")
     printf 'persist-probe\n' >"$scratch/source"
@@ -215,7 +234,7 @@ jq -n \
     --arg rust_version "$rust_version" \
     --arg llvm_version "$llvm_version" \
     --arg target_triple "$target_triple" \
-    '{schema_version:1,issue:880,task:"MQ-2",kind:"compressor_ramp_benchmark",status:"measured",candidate_commit:$candidate_commit,candidate_tree:$candidate_tree,benchmark_source_sha256:$benchmark_source_sha256,runner_sha256:$runner_sha256,sample_rate_hz:48000,quantum_frames:128,bank_width:8,bank_count:8,track_count:64,warmup_blocks_per_arm:32,measured_blocks_per_round:32,measured_rounds_per_arm:2,workload_invocations:1,ramp_frames:64,coefficient_channels:2,rate_coefficient_calls_per_bank_per_parameter:1024,programme_seeds:{left:"0x88000001",right:"0x88000002"},cpu_model:$cpu_model,architecture:$architecture,os:$os,kernel:$kernel,rust_version:$rust_version,llvm_version:$llvm_version,target_triple:$target_triple,arms:$measurement[0].arms}' \
+    '{schema_version:2,issue:880,task:"MQ-2",kind:"compressor_ramp_benchmark",status:"measured",candidate_commit:$candidate_commit,candidate_tree:$candidate_tree,benchmark_source_sha256:$benchmark_source_sha256,runner_sha256:$runner_sha256,sample_rate_hz:48000,quantum_frames:128,bank_width:8,bank_count:8,track_count:64,warmup_blocks_per_arm:32,measured_blocks_per_round:32,measured_rounds_per_arm:2,workload_invocations:1,ramp_frames:64,coefficient_channels:2,rate_coefficient_calls_per_bank_per_parameter:16,programme_seeds:{left:"0x88000001",right:"0x88000002"},cpu_model:$cpu_model,architecture:$architecture,os:$os,kernel:$kernel,rust_version:$rust_version,llvm_version:$llvm_version,target_triple:$target_triple,arms:$measurement[0].arms}' \
     >"$record_stage"
 if ! jq -e -f scripts/issue880-mq2-record-validator.jq "$record_stage" >/dev/null; then
     persist_no_clobber "$raw_stage" "$raw_output"

@@ -1,5 +1,6 @@
+.schema_version as $schema |
 type == "object" and
-.schema_version == 1 and
+($schema == 1 or $schema == 2) and
 .issue == 880 and
 .task == "MQ-2" and
 .kind == "compressor_ramp_benchmark" and
@@ -19,7 +20,8 @@ type == "object" and
 .workload_invocations == 1 and
 .ramp_frames == 64 and
 .coefficient_channels == 2 and
-.rate_coefficient_calls_per_bank_per_parameter == 1024 and
+((if $schema == 1 then .rate_coefficient_calls_per_bank_per_parameter == 1024
+  else .rate_coefficient_calls_per_bank_per_parameter == 16 end)) and
 .programme_seeds.left == "0x88000001" and
 .programme_seeds.right == "0x88000002" and
 (.cpu_model | type == "string" and length > 0) and
@@ -34,8 +36,10 @@ type == "object" and
 .arms[1].name == "attack_and_release" and
 .arms[2].name == "no_automation" and
 all(.arms[]; . as $arm | $arm.ramping_parameters as $parameters |
-    .rate_coefficient_calls_per_bank_per_parameter == 1024 and
-    .rate_coefficient_calls_per_block == (8 * 8 * 2 * 64 * $parameters) and
+    ((if $schema == 1 then $arm.rate_coefficient_calls_per_bank_per_parameter == 1024
+      else $arm.rate_coefficient_calls_per_bank_per_parameter == 16 end)) and
+    $arm.rate_coefficient_calls_per_block ==
+      (8 * 8 * 2 * (if $schema == 1 then 64 else 1 end) * $parameters) and
     (.round_block_ns | type == "array" and length == 2 and
       all(.[]; type == "array" and length == 32 and all(.[]; type == "number" and . > 0))) and
     (.round_mean_us | type == "array" and length == 2 and all(.[]; type == "number" and . > 0)) and
@@ -44,8 +48,8 @@ all(.arms[]; . as $arm | $arm.ramping_parameters as $parameters |
       (([$arm.round_block_ns[$round][]] | add / length / 1000) - $arm.round_mean_us[$round] | fabs) < 0.0006 and
       (([$arm.round_block_ns[$round][]] | max / 1000) - $arm.round_max_us[$round] | fabs) < 0.0006)) and
 .arms[0].ramping_parameters == 1 and
-.arms[0].rate_coefficient_calls_per_block == 8192 and
+.arms[0].rate_coefficient_calls_per_block == (8 * 8 * 2 * (if $schema == 1 then 64 else 1 end)) and
 .arms[1].ramping_parameters == 2 and
-.arms[1].rate_coefficient_calls_per_block == 16384 and
+.arms[1].rate_coefficient_calls_per_block == (8 * 8 * 2 * (if $schema == 1 then 64 else 1 end) * 2) and
 .arms[2].ramping_parameters == 0 and
 .arms[2].rate_coefficient_calls_per_block == 0
