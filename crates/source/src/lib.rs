@@ -2,8 +2,8 @@
 //!
 //! A source ring splits ownership between one non-render producer and one exclusive render
 //! consumer. Transfer blocks, queues, and their PCM storage are all created by [`PcmSourceRing`]
-//! before rendering starts. The consumer only moves prepared blocks, copies samples, and updates
-//! local saturating counters.
+//! before rendering starts. The consumer only moves prepared blocks, copies or lends their samples
+//! in place (zeroing a short block's tail once), and updates local saturating counters.
 
 #![allow(missing_docs)]
 
@@ -213,22 +213,33 @@ pub struct PcmSourceShape {
 /// `pcm_payload_already_charged_bytes` is the exact session-owned source-ring PCM charge. It is
 /// repeated as transfer-block samples and is intentionally excluded from `overhead_bytes`, so a
 /// later graph/source preparation cannot charge it twice.
+///
+/// The ring allocates `transfer_block_count + retained_block_count` blocks and sizes both queues
+/// at that count (#917). The retained block is the one the render consumer holds outside both
+/// queues at every block boundary (see [`PcmSourceConsumer`]); the session did not charge it, so
+/// its PCM (`retained_block_pcm_bytes`), its metadata and its two queue slots are all overhead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceResourceReport {
-    /// Number of preallocated transfer blocks.
+    /// Configured transfer blocks: `frame_capacity / quantum_frames`, the producer's admission
+    /// depth.
     pub transfer_block_count: u64,
+    /// Blocks allocated beyond the configured count for the consumer to retain; always 1.
+    pub retained_block_count: u64,
     /// PCM payload already charged by the session source declaration.
     pub pcm_payload_already_charged_bytes: u64,
-    /// Data SPSC header plus slots.
+    /// Data SPSC header plus slots, sized at the allocated block count.
     pub data_queue_bytes: u64,
-    /// Recycle SPSC header plus slots.
+    /// Recycle SPSC header plus slots, sized at the allocated block count.
     pub recycle_queue_bytes: u64,
     /// One-slot seek-command SPSC header plus slots.
     pub command_queue_bytes: u64,
-    /// One `TransferBlock` allocation per prepared block, excluding its PCM allocation.
+    /// One `TransferBlock` allocation per allocated block (configured plus retained), excluding
+    /// its PCM allocation.
     pub transfer_block_metadata_bytes: u64,
-    /// PCM bytes in prepared transfer blocks; exactly equals the session PCM charge.
+    /// PCM bytes in the configured transfer blocks; exactly equals the session PCM charge.
     pub transfer_block_pcm_bytes: u64,
+    /// PCM bytes in the retained block, charged to `overhead_bytes`.
+    pub retained_block_pcm_bytes: u64,
     /// Source allocations not already charged by the session declaration.
     pub overhead_bytes: u64,
     /// Exact source-owned bytes including the already charged PCM payload.
@@ -519,8 +530,8 @@ impl PcmSourceRing {
         config: PcmSourceRingConfig,
     ) -> Result<SourceResourceReport, PcmSourceRingError> {
         let shape = PreparedShape::validate(config)?;
-        let data_queue = queue_bytes::<Box<TransferBlock>>(shape.transfer_block_count)?;
-        let recycle_queue = queue_bytes::<Box<TransferBlock>>(shape.transfer_block_count)?;
+        let data_queue = queue_bytes::<Box<TransferBlock>>(shape.allocated_block_count)?;
+        let recycle_queue = queue_bytes::<Box<TransferBlock>>(shape.allocated_block_count)?;
         let command_capacity = NonZeroUsize::new(1).expect("one command slot");
         let command_queue = queue_bytes::<SourceCommand>(command_capacity)?;
         let pcm = checked_u64_mul(config.frame_capacity, u64::from(config.channel_count))?
@@ -529,21 +540,29 @@ impl PcmSourceRing {
                     .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
             )
             .ok_or(PcmSourceRingError::ArithmeticOverflow)?;
+        // `frame_capacity` is a whole number of quanta, so this division is exact.
+        let block_pcm = pcm / shape.transfer_block_count_u64;
+        let retained_block_count = u64::try_from(RETAINED_TRANSFER_BLOCKS)
+            .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
+        let retained_pcm = checked_u64_mul(block_pcm, retained_block_count)?;
         let metadata = checked_u64_mul(
-            shape.transfer_block_count_u64,
+            shape.allocated_block_count_u64,
             u64::try_from(size_of::<TransferBlock>())
                 .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
         )?;
         let overhead = checked_u64_add(
-            checked_u64_add(data_queue, recycle_queue)?,
-            checked_u64_add(command_queue, metadata)?,
+            checked_u64_add(
+                checked_u64_add(data_queue, recycle_queue)?,
+                checked_u64_add(command_queue, metadata)?,
+            )?,
+            retained_pcm,
         )?;
         let total = checked_u64_add(pcm, overhead)?;
         let largest = [
-            pcm / shape.transfer_block_count_u64,
+            block_pcm,
             u64::try_from(size_of::<TransferBlock>())
                 .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
-            largest_queue_allocation::<Box<TransferBlock>>(shape.transfer_block_count)?,
+            largest_queue_allocation::<Box<TransferBlock>>(shape.allocated_block_count)?,
             largest_queue_allocation::<SourceCommand>(command_capacity)?,
         ]
         .into_iter()
@@ -551,12 +570,14 @@ impl PcmSourceRing {
         .expect("nonempty exact allocation list");
         Ok(SourceResourceReport {
             transfer_block_count: shape.transfer_block_count_u64,
+            retained_block_count,
             pcm_payload_already_charged_bytes: pcm,
             data_queue_bytes: data_queue,
             recycle_queue_bytes: recycle_queue,
             command_queue_bytes: command_queue,
             transfer_block_metadata_bytes: metadata,
             transfer_block_pcm_bytes: pcm,
+            retained_block_pcm_bytes: retained_pcm,
             overhead_bytes: overhead,
             total_engine_owned_bytes: total,
             largest_allocation_bytes: largest,
@@ -591,11 +612,13 @@ impl PcmSourceRing {
         let shape = PreparedShape::validate(config)?;
         let report = Self::resource_report(config)?;
         let queue_generation = QueueGeneration(config.initial_generation.0);
+        // Both queues hold every allocated block, so no push to either can ever be refused: a
+        // block being pushed is not in the queue it is pushed to.
         let (data_producer, data_consumer) =
-            bounded_spsc_move(shape.transfer_block_count, queue_generation)
+            bounded_spsc_move(shape.allocated_block_count, queue_generation)
                 .map_err(map_spsc_error)?;
         let (recycle_producer, recycle_consumer) =
-            bounded_spsc_move(shape.transfer_block_count, queue_generation)
+            bounded_spsc_move(shape.allocated_block_count, queue_generation)
                 .map_err(map_spsc_error)?;
         let (command_producer, command_consumer) = bounded_spsc(
             NonZeroUsize::new(1).expect("one command slot"),
@@ -622,6 +645,7 @@ impl PcmSourceRing {
             current: None,
             played: None,
             played_frames: 0,
+            retained_idle: Some(Box::new(TransferBlock::try_new(shape.samples_per_block)?)),
             deferred_recycle: None,
             cumulative_read_frames: 0,
             stale_generation_discard_count: 0,
@@ -630,6 +654,8 @@ impl PcmSourceRing {
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
         };
+        // The producer starts with exactly the configured blocks; the retained block above never
+        // enters the recycle queue until the consumer has a played block to hold instead.
         for _ in 0..shape.transfer_block_count.get() {
             let block = Box::new(TransferBlock::try_new(shape.samples_per_block)?);
             consumer
@@ -658,9 +684,19 @@ impl PcmSourceRing {
     }
 }
 
+/// Transfer blocks the render consumer *retains* outside both queues at every block boundary:
+/// the played block while one is readable, otherwise the same storage idle (#917). This is in
+/// addition to the pre-fetched `current` block the consumer already held before #917 whenever its
+/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun).
+const RETAINED_TRANSFER_BLOCKS: usize = 1;
+
 struct PreparedShape {
+    /// Configured blocks: the producer's admission depth.
     transfer_block_count: NonZeroUsize,
     transfer_block_count_u64: u64,
+    /// Configured plus retained blocks: what is allocated and what each queue can hold.
+    allocated_block_count: NonZeroUsize,
+    allocated_block_count_u64: u64,
     samples_per_block: usize,
 }
 
@@ -689,6 +725,11 @@ impl PreparedShape {
             .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let transfer_block_count =
             NonZeroUsize::new(transfer_block_count).ok_or(PcmSourceRingError::PlatformSizeLimit)?;
+        let allocated_block_count = transfer_block_count
+            .checked_add(RETAINED_TRANSFER_BLOCKS)
+            .ok_or(PcmSourceRingError::ArithmeticOverflow)?;
+        let allocated_block_count_u64 = u64::try_from(allocated_block_count.get())
+            .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let samples_per_block = usize::try_from(config.channel_count)
             .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?
             .checked_mul(
@@ -699,6 +740,8 @@ impl PreparedShape {
         Ok(Self {
             transfer_block_count,
             transfer_block_count_u64,
+            allocated_block_count,
+            allocated_block_count_u64,
             samples_per_block,
         })
     }
@@ -1020,6 +1063,31 @@ fn validate_submission_metadata(
 }
 
 /// Exclusive render-owner consumer endpoint for one prepared source ring.
+///
+/// # Played-block ownership (#917)
+///
+/// The played block is the consumer's from `begin_block` until the next `begin_block`,
+/// `prepare_seek`, `end_block`, or drop. Until then [`Self::played_plane`] can borrow its planes
+/// in place and [`Self::copy_channel`] can copy them, as often as the render needs.
+///
+/// Its storage stays with the consumer after that point too. The ring allocates one block beyond
+/// the configured `transfer_block_count`, and at every block boundary the consumer retains exactly
+/// one block outside both queues -- the played block while one is readable, otherwise the same
+/// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`) -- in
+/// addition to the pre-fetched `current` block it already held before #917 at the boundaries
+/// where `current.start_frame` is ahead of `next_frame`. The hold is therefore "what it held
+/// before, plus one", which is what keeps the producer's admission sequence unchanged. The
+/// idle storage goes back to the producer's recycle queue only inside `begin_block`, at the moment
+/// a newer block becomes the played block. So:
+///
+/// * a block is never recycled while a `played_plane` borrow is live: the only release point takes
+///   `&mut self`, and a block is only ever reached by the producer through the recycle queue;
+/// * the producer's admission depth is the configured `transfer_block_count` at every block
+///   boundary, exactly as when the consumer recycled the played block at the end of the render;
+///   and the producer is no longer held one block short while a render reads its block;
+/// * the extra block never reaches the data queue except through an ordinary producer
+///   submission, whose ack still follows the data-queue push, and no push to either queue can be
+///   refused because each queue can hold every allocated block.
 pub struct PcmSourceConsumer {
     data_consumer: Consumer<Box<TransferBlock>>,
     recycle_producer: Producer<Box<TransferBlock>>,
@@ -1035,6 +1103,8 @@ pub struct PcmSourceConsumer {
     current: Option<Box<TransferBlock>>,
     played: Option<Box<TransferBlock>>,
     played_frames: u32,
+    /// The retained block while no block is played; `Some` exactly when `played` is `None`.
+    retained_idle: Option<Box<TransferBlock>>,
     deferred_recycle: Option<Box<TransferBlock>>,
     cumulative_read_frames: u64,
     stale_generation_discard_count: u64,
@@ -1120,7 +1190,9 @@ impl PcmSourceConsumer {
         copied.map(|()| report)
     }
 
-    /// Advance the source state machine once and retain this quantum for channel fan-out copies.
+    /// Advance the source state machine once and retain this quantum for channel fan-out reads.
+    /// The previously played block stops being readable here. A short (end-of-region) block has
+    /// its tail zeroed in place, once, so every [`Self::played_plane`] is a whole quantum.
     /// This render-path operation allocates nothing and never blocks.
     pub fn begin_block(&mut self) -> SourceReadReport {
         self.end_block();
@@ -1144,7 +1216,7 @@ impl PcmSourceConsumer {
             if block.end_of_region {
                 self.end_of_region = true;
             }
-            self.played = Some(block);
+            self.play(block);
         } else {
             let available_until_end = self
                 .end_frame
@@ -1227,15 +1299,45 @@ impl PcmSourceConsumer {
         Ok(())
     }
 
-    /// Release the retained played quantum back to the producer recycle queue without blocking.
+    /// End the played quantum without blocking: afterwards [`Self::played_plane`] is `None` and
+    /// [`Self::copy_channel`] writes silence. The block's storage stays with the consumer as its
+    /// idle retained block and returns to the producer when the next block is played.
     pub fn end_block(&mut self) {
         self.played_frames = 0;
         let Some(mut block) = self.played.take() else {
             return;
         };
         block.reset_metadata();
-        self.recycle_block(block);
+        let displaced = self.retained_idle.replace(block);
+        debug_assert!(
+            displaced.is_none(),
+            "a played block and an idle retained block never coexist"
+        );
+        if let Some(displaced) = displaced {
+            // Unreachable by the ownership rule above; recycle rather than free on render.
+            self.recycle_block(displaced);
+        }
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Borrow one channel plane of the played block in place, without copying or consuming it.
+    ///
+    /// The slice is exactly `quantum_frames` long: the played frames, then `+0.0` to the quantum
+    /// on a short block. `None` when no block was played this quantum (underrun, end of region,
+    /// after `end_block` or `prepare_seek`) or when `channel` is out of range. The borrow ends
+    /// before the next `&mut self` call, which is the only place the block can be released.
+    /// This render-path operation allocates nothing and never blocks.
+    #[must_use]
+    pub fn played_plane(&self, channel: u32) -> Option<&[f32]> {
+        if channel >= self.channel_count {
+            return None;
+        }
+        let block = self.played.as_ref()?;
+        let quantum = usize::try_from(self.quantum_frames).ok()?;
+        let offset = usize::try_from(channel).ok()?.checked_mul(quantum)?;
+        block.samples.get(offset..offset.checked_add(quantum)?)
+    }
+    // REALTIME_POLICY_END
 
     /// Exact source channel count.
     #[must_use]
@@ -1344,6 +1446,28 @@ impl PcmSourceConsumer {
         self.stale_generation_discard_count = self.stale_generation_discard_count.saturating_add(1);
         block.reset_metadata();
         self.recycle_block(block);
+    }
+
+    /// Make `block` the played block, then hand the idle retained block back to the producer:
+    /// the consumer keeps exactly one block outside the queues.
+    fn play(&mut self, mut block: Box<TransferBlock>) {
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        let frames = usize::try_from(block.frames).expect("u32 fits usize");
+        if frames < quantum {
+            // A short block is the region's last: zero each plane's tail in place, once, so a
+            // borrowed plane is a whole quantum. `copy_channel` keeps its own tail fill.
+            for plane in block.samples.chunks_exact_mut(quantum) {
+                plane[frames..].fill(0.0);
+            }
+        }
+        debug_assert!(
+            self.played.is_none(),
+            "begin_block ended the previous block"
+        );
+        self.played = Some(block);
+        if let Some(idle) = self.retained_idle.take() {
+            self.recycle_block(idle);
+        }
     }
 
     fn recycle_block(&mut self, block: Box<TransferBlock>) {
@@ -1480,9 +1604,26 @@ struct SourceGraphSourceSetDriver {
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
-    copied_claims: usize,
     block_validity: GraphObservationValidity,
     pending_generation_change: bool,
+}
+
+impl SourceGraphSourceSetDriver {
+    /// Borrow the claim's `(left, right)` channel planes of its source's played block in place.
+    ///
+    /// `None` when the claim index is out of range or its source played no block this quantum
+    /// (underrun, end of region, or no mappings at all, which releases in `begin_block`). The
+    /// planes stay valid until the next `begin_block` or seek preparation (#917). This stays a
+    /// source-crate method until the graph trait carries it.
+    #[cfg_attr(not(test), allow(dead_code))] // Read in place by the banked-source gather.
+    pub(crate) fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
+        let mapping = self.mappings.get(claim_index)?;
+        let consumer = &self.sources.get(mapping.source_index)?.consumer;
+        Some((
+            consumer.played_plane(mapping.left_channel)?,
+            consumer.played_plane(mapping.right_channel)?,
+        ))
+    }
 }
 
 fn allocation_class<T>(
@@ -1597,7 +1738,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;
         }
-        self.copied_claims = 0;
+        // No claim will read this quantum, so nothing needs the played blocks past this point.
         if self.mappings.is_empty() {
             for source in &mut self.sources {
                 source.consumer.end_block();
@@ -1635,17 +1776,12 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             .consumer
             .copy_channel(left_channel, left)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)?;
+        // The played block is not released here: it stays readable in place until the next
+        // `begin_block` or seek preparation, whichever claim copied last (#917).
         source
             .consumer
             .copy_channel(right_channel, right)
-            .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)?;
-        self.copied_claims = self.copied_claims.saturating_add(1);
-        if self.copied_claims == self.mappings.len() {
-            for source in &mut self.sources {
-                source.consumer.end_block();
-            }
-        }
-        Ok(())
+            .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)
     }
 
     fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
@@ -1673,8 +1809,9 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
 ///
 /// The wrapper owns exactly one consumer per source. The graph calls `begin_block` once, then each
-/// mapping copies directly from the retained played block before the final claim recycles all
-/// blocks, without allowing native workers to observe a consumer or ring.
+/// mapping copies directly from the retained played block, which stays the consumer's until the
+/// next `begin_block` or seek preparation (#917), without allowing native workers to observe a
+/// consumer or ring.
 pub fn prepare_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
@@ -1756,7 +1893,6 @@ pub fn prepare_graph_source_set(
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
-            copied_claims: 0,
             block_validity: GraphObservationValidity::CLEAR,
             pending_generation_change: false,
         }),
@@ -1830,14 +1966,47 @@ mod tests {
     fn report_separates_session_pcm_from_source_overhead() {
         let report = PcmSourceRing::resource_report(config(2, 4, 8)).expect("report");
         assert_eq!(report.transfer_block_count, 2);
+        assert_eq!(report.retained_block_count, 1);
         assert_eq!(report.pcm_payload_already_charged_bytes, 64);
         assert_eq!(report.transfer_block_pcm_bytes, 64);
-        assert!(report.overhead_bytes > 0);
+        // #917: the retained block is one more 2 x 4-sample block, charged to overhead only.
+        assert_eq!(report.retained_block_pcm_bytes, 32);
+        let three = NonZeroUsize::new(3).expect("allocated blocks");
+        let queue = queue_bytes::<Box<TransferBlock>>(three).expect("queue");
+        assert_eq!(report.data_queue_bytes, queue);
+        assert_eq!(report.recycle_queue_bytes, queue);
+        let metadata = u64::try_from(size_of::<TransferBlock>()).expect("metadata size");
+        assert_eq!(report.transfer_block_metadata_bytes, 3 * metadata);
+        assert_eq!(
+            report.overhead_bytes,
+            report.data_queue_bytes
+                + report.recycle_queue_bytes
+                + report.command_queue_bytes
+                + report.transfer_block_metadata_bytes
+                + report.retained_block_pcm_bytes
+        );
+        // The memory delta over the pre-#917 two-block ring, which sized both queues and the
+        // metadata at two blocks: one block's PCM, one block's metadata and one pointer slot in
+        // each queue. Nothing moves into the session-charged PCM row.
+        let two = NonZeroUsize::new(2).expect("configured blocks");
+        let pre_change_overhead = 2 * queue_bytes::<Box<TransferBlock>>(two).expect("queue")
+            + report.command_queue_bytes
+            + 2 * metadata;
+        let slot = u64::try_from(size_of::<Box<TransferBlock>>()).expect("slot size");
+        assert_eq!(
+            report.overhead_bytes - pre_change_overhead,
+            32 + metadata + 2 * slot
+        );
         assert_eq!(
             report.total_engine_owned_bytes,
             report.pcm_payload_already_charged_bytes + report.overhead_bytes
         );
-        assert!(report.largest_allocation_bytes >= 32);
+        let largest_queue =
+            largest_queue_allocation::<Box<TransferBlock>>(three).expect("largest queue");
+        assert_eq!(
+            report.largest_allocation_bytes,
+            largest_queue.max(32).max(metadata)
+        );
     }
 
     #[test]
@@ -2197,7 +2366,6 @@ mod tests {
             sources: vec![GraphSourceEntry { consumer }].into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: 4,
-            copied_claims: 0,
             block_validity: GraphObservationValidity::CLEAR,
             pending_generation_change: false,
         }
@@ -2236,9 +2404,14 @@ mod tests {
         );
     }
 
+    /// #917 restates the pre-change `..._last_claim_recycles_in_call_...` test for the hold rule:
+    /// no claim path releases the played block, the next `begin_block` does, and the producer
+    /// keeps its configured one-block depth while the render holds its block. The old incomplete
+    /// leg asserted `Full` here, because the render then held one of the ring's only blocks.
     #[test]
-    fn graph_driver_last_claim_recycles_in_call_and_incomplete_paths_recycle_next_begin() {
+    fn graph_driver_retains_played_blocks_to_next_begin_on_every_claim_path() {
         let samples = [1.0, 2.0, 3.0, 4.0];
+        let later = [5.0, 6.0, 7.0, 8.0];
 
         let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -2253,8 +2426,21 @@ mod tests {
             .expect("last claim");
         assert_eq!(left, samples);
         assert_eq!(right, samples);
-        host.submit(chunk(1, 4, &[&samples], 4, false))
-            .expect("last claim recycled within copy call");
+        assert_eq!(
+            driver.played_planes(0),
+            Some((&samples[..], &samples[..])),
+            "the last claim no longer releases the played block"
+        );
+        host.submit(chunk(1, 4, &[&later], 4, false))
+            .expect("configured depth admitted while the render holds its block");
+        assert!(matches!(
+            host.submit(chunk(1, 8, &[&later], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
+        driver.begin_block(4, 4).expect("next begin");
+        assert_eq!(driver.played_planes(0), Some((&later[..], &later[..])));
+        host.submit(chunk(1, 8, &[&later], 4, false))
+            .expect("next begin recycled the previous played block");
 
         let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -2265,15 +2451,17 @@ mod tests {
         driver
             .copy_track_input(0, &mut left, &mut right)
             .expect("first of two claims");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("configured depth admitted while a claim is still missing");
         assert!(matches!(
-            host.submit(chunk(1, 4, &[&samples], 4, false)),
+            host.submit(chunk(1, 8, &[&samples], 4, false)),
             Err(HostChunkError::Full { .. })
         ));
         driver
             .begin_block(4, 4)
-            .expect("next begin recycles missing claim block");
-        host.submit(chunk(1, 4, &[&samples], 4, false))
-            .expect("missing claim recycled on next begin");
+            .expect("next begin releases the missing claim's block");
+        host.submit(chunk(1, 8, &[&samples], 4, false))
+            .expect("missing claim's block recycled on next begin");
 
         let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -2285,11 +2473,23 @@ mod tests {
             driver.copy_track_input(0, &mut left[..3], &mut right),
             Err(engine::realtime::RenderError::InvalidEnvelope)
         );
+        assert_eq!(
+            driver.played_planes(0),
+            Some((&samples[..], &samples[..])),
+            "a failed claim copy does not release the played block"
+        );
+        host.submit(chunk(1, 4, &[&later], 4, false))
+            .expect("configured depth admitted after a failed claim");
+        assert!(matches!(
+            host.submit(chunk(1, 8, &[&later], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
         driver
             .begin_block(4, 4)
-            .expect("next begin recycles error block");
-        host.submit(chunk(1, 4, &[&samples], 4, false))
-            .expect("errored claim recycled on next begin");
+            .expect("next begin releases the errored claim's block");
+        assert_eq!(driver.played_planes(0), Some((&later[..], &later[..])));
+        host.submit(chunk(1, 8, &[&later], 4, false))
+            .expect("errored claim's block recycled on next begin");
     }
 
     #[test]
@@ -2402,10 +2602,15 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn prepared_contiguous_native_submission_matches_planar_ring_shape() {
-        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
+        let (producer, mut consumer, report) =
+            PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
         assert_eq!(producer.shape(), consumer.shape());
         assert_eq!(producer.shape().frame_capacity, 4);
+        // The shape and the report keep the configured count; the retained block is separate.
         assert_eq!(consumer.shape().transfer_block_count, 1);
+        assert_eq!(consumer.transfer_block_capacity(), 1);
+        assert_eq!(report.transfer_block_count, 1);
+        assert_eq!(report.retained_block_count, 1);
         let mut provider = producer.into_host_chunk_provider(RATE);
         let planar_quantum = [1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
         provider
@@ -2825,5 +3030,660 @@ mod tests {
             )
             .expect("render");
         assert_eq!(sequential_pcm, [10.0, 10.0, 10.0, 10.0]);
+    }
+
+    /// Gate 1's fixed producer/consumer script (#917). Between renders the producer submits
+    /// consecutive blocks until backpressure; a render is one scripted quantum on the consumer
+    /// side. Every admission (`SubmitReport` or `Full`), seek, seek preparation and render report,
+    /// and the planes each render read, are appended as `u64` words, four per record plus a
+    /// render's eight plane words, so two runs compare word for word.
+    ///
+    /// Record tags: 0 accepted `[accepted_frames, cumulative_written_frames, generation]`,
+    /// 1 `Full { full_count }`, 2 seek `[generation, frame]`, 3/4 render report, 5 prepared seek
+    /// result, 6 producer telemetry, 7 consumer telemetry.
+    struct AdmissionScript {
+        host: HostChunkProvider,
+        generation: u64,
+        next_start: u64,
+        region_end: u64,
+        end_submitted: bool,
+        events: Vec<u64>,
+    }
+
+    /// One side of the render thread driven by [`AdmissionScript`].
+    trait ScriptedRender {
+        /// Render one quantum and return its report and the two planes it read.
+        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]);
+        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool;
+        fn telemetry(&self) -> SourceConsumerTelemetry;
+    }
+
+    impl AdmissionScript {
+        const QUANTUM: u32 = 4;
+
+        fn sample(frame: u64, channel: u32) -> f32 {
+            // Distinct per frame and channel, so a stale or repeated block cannot pass.
+            (frame as f32) * 0.5 + (channel as f32) * 1000.0 + 0.25
+        }
+
+        fn fill_until_full(&mut self) {
+            for _ in 0..16 {
+                if self.end_submitted {
+                    return;
+                }
+                let start = self.next_start;
+                let remaining = self.region_end - start;
+                let frames = u32::try_from(remaining.min(u64::from(Self::QUANTUM))).unwrap();
+                let end_of_region = remaining <= u64::from(Self::QUANTUM);
+                let left: Vec<f32> = (0..u64::from(frames))
+                    .map(|index| Self::sample(start + index, 0))
+                    .collect();
+                let right: Vec<f32> = (0..u64::from(frames))
+                    .map(|index| Self::sample(start + index, 1))
+                    .collect();
+                let planes = [&left[..], &right[..]];
+                match self.host.submit(chunk(
+                    self.generation,
+                    start,
+                    &planes,
+                    frames,
+                    end_of_region,
+                )) {
+                    Ok(report) => {
+                        self.events.extend([
+                            0,
+                            u64::from(report.accepted_frames),
+                            report.cumulative_written_frames,
+                            report.active_generation.0,
+                        ]);
+                        self.next_start += u64::from(frames);
+                        self.end_submitted = end_of_region;
+                    }
+                    Err(HostChunkError::Full { full_count }) => {
+                        self.events.extend([1, full_count, 0, 0]);
+                        return;
+                    }
+                    Err(other) => panic!("scripted submit rejected: {other:?}"),
+                }
+            }
+            panic!("the ring must saturate within sixteen submissions");
+        }
+
+        fn seek(&mut self, generation: u64, frame: u64, region_end: u64) {
+            self.host
+                .try_seek(SourceCommand::Seek {
+                    generation: SourceGeneration(generation),
+                    frame: SourceFrame(frame),
+                })
+                .expect("scripted seek");
+            self.generation = generation;
+            self.next_start = frame;
+            self.region_end = region_end;
+            self.end_submitted = false;
+            self.events.extend([2, generation, frame, 0]);
+        }
+
+        fn render(&mut self, side: &mut impl ScriptedRender) {
+            let (report, planes) = side.render();
+            self.events.extend([
+                3,
+                u64::from(report.copied_frames),
+                u64::from(report.underrun_frames),
+                u64::from(report.underrun_event)
+                    | u64::from(report.end_of_region) << 1
+                    | u64::from(report.generation_changed) << 2,
+            ]);
+            self.events.extend([
+                4,
+                report.active_generation.0,
+                report.cumulative_read_frames,
+                report.cumulative_underrun_frames,
+            ]);
+            for plane in planes {
+                self.events
+                    .extend(plane.map(|sample| u64::from(sample.to_bits())));
+            }
+        }
+
+        fn prepare_seek(&mut self, side: &mut impl ScriptedRender, generation: u64, frame: u64) {
+            let prepared = side.prepare_seek(generation, frame);
+            self.events.extend([5, u64::from(prepared), 0, 0]);
+        }
+
+        /// Run the fixed script against a fresh `config(2, 4, 12)` ring (three blocks).
+        fn run(host: HostChunkProvider, side: &mut impl ScriptedRender) -> Vec<u64> {
+            let mut script = Self {
+                host,
+                generation: 1,
+                next_start: 0,
+                region_end: 64,
+                end_submitted: false,
+                events: Vec::new(),
+            };
+            // Prefill from a fresh ring, then steady state: one admission per render.
+            script.fill_until_full();
+            for _ in 0..3 {
+                script.render(side);
+                script.fill_until_full();
+            }
+            // Two renders without refilling, then refill.
+            script.render(side);
+            script.render(side);
+            script.fill_until_full();
+            // Drain the ring into an underrun, then refill after the underrun.
+            for _ in 0..4 {
+                script.render(side);
+            }
+            script.fill_until_full();
+            for _ in 0..2 {
+                script.render(side);
+                script.fill_until_full();
+            }
+            // A mid-stream seek with stale blocks still queued.
+            script.seek(2, 1000, 1022);
+            script.fill_until_full();
+            script.render(side);
+            script.fill_until_full();
+            for _ in 0..2 {
+                script.render(side);
+                script.fill_until_full();
+            }
+            // A paused seek prepared between blocks, then prepared again with a current block.
+            script.seek(3, 2000, 2030);
+            script.prepare_seek(side, 3, 2000);
+            script.fill_until_full();
+            script.prepare_seek(side, 3, 2000);
+            script.fill_until_full();
+            // Play through the short end-of-region block and past the end.
+            for _ in 0..11 {
+                script.render(side);
+                script.fill_until_full();
+            }
+            let telemetry = script.host.telemetry();
+            script.events.extend([
+                6,
+                telemetry.cumulative_written_frames,
+                telemetry.data_full_count,
+                telemetry.recycle_empty_count,
+            ]);
+            let consumer = side.telemetry();
+            script.events.extend([
+                7,
+                consumer.stale_generation_discard_count,
+                consumer.underrun_events,
+                consumer.cumulative_read_frames,
+            ]);
+            script.events
+        }
+    }
+
+    /// The script's words recorded on the pre-#917 ring (`12b621f2`), with the render
+    /// `begin_block; copy_channel(0); copy_channel(1); end_block` -- the release point the
+    /// graph driver's last claim had. Three configured blocks, both queues sized three.
+    #[rustfmt::skip]
+    const PRE_RETENTION_ADMISSION_ORACLE: &[u64] = &[
+        0, 4, 4, 1,
+        0, 4, 8, 1,
+        0, 4, 12, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 4, 0,
+        1048576000, 1061158912, 1067450368, 1071644672, 1148850176, 1148858368, 1148866560, 1148874752,
+        0, 4, 16, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 8, 0,
+        1074790400, 1076887552, 1078984704, 1081081856, 1148882944, 1148891136, 1148899328, 1148907520,
+        0, 4, 20, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 12, 0,
+        1082654720, 1083703296, 1084751872, 1085800448, 1148915712, 1148923904, 1148932096, 1148940288,
+        0, 4, 24, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 16, 0,
+        1086849024, 1087897600, 1088946176, 1089994752, 1148948480, 1148956672, 1148964864, 1148973056,
+        3, 4, 0, 0, 4, 1, 20, 0,
+        1090781184, 1091305472, 1091829760, 1092354048, 1148981248, 1148989440, 1148997632, 1149005824,
+        0, 4, 28, 1,
+        0, 4, 32, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 24, 0,
+        1092878336, 1093402624, 1093926912, 1094451200, 1149014016, 1149022208, 1149030400, 1149038592,
+        3, 4, 0, 0, 4, 1, 28, 0,
+        1094975488, 1095499776, 1096024064, 1096548352, 1149046784, 1149054976, 1149063168, 1149071360,
+        3, 4, 0, 0, 4, 1, 32, 0,
+        1097072640, 1097596928, 1098121216, 1098645504, 1149079552, 1149087744, 1149095936, 1149104128,
+        3, 0, 4, 1, 4, 1, 32, 4,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 4, 36, 1,
+        0, 4, 40, 1,
+        0, 4, 44, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 36, 4,
+        1100087296, 1100349440, 1100611584, 1100873728, 1149145088, 1149153280, 1149161472, 1149169664,
+        0, 4, 48, 1,
+        0, 4, 52, 1,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 1, 40, 4,
+        1101135872, 1101398016, 1101660160, 1101922304, 1149177856, 1149186048, 1149194240, 1149202432,
+        0, 4, 56, 1,
+        1, 0, 0, 0,
+        2, 2, 1000, 0,
+        1, 0, 0, 0,
+        3, 0, 4, 5, 4, 2, 40, 8,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 4, 60, 2,
+        0, 4, 64, 2,
+        0, 4, 68, 2,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 2, 44, 8,
+        1140531200, 1140547584, 1140563968, 1140580352, 1153157120, 1153161216, 1153165312, 1153169408,
+        0, 4, 72, 2,
+        0, 4, 76, 2,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 2, 48, 8,
+        1140596736, 1140613120, 1140629504, 1140645888, 1153173504, 1153177600, 1153181696, 1153185792,
+        0, 2, 78, 2,
+        2, 3, 2000, 0,
+        5, 1, 0, 0,
+        0, 4, 82, 3,
+        0, 4, 86, 3,
+        0, 4, 90, 3,
+        1, 0, 0, 0,
+        5, 1, 0, 0,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 3, 52, 8,
+        1148850176, 1148858368, 1148866560, 1148874752, 1157236736, 1157240832, 1157244928, 1157249024,
+        0, 4, 94, 3,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 3, 56, 8,
+        1148882944, 1148891136, 1148899328, 1148907520, 1157253120, 1157257216, 1157261312, 1157265408,
+        0, 4, 98, 3,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 3, 60, 8,
+        1148915712, 1148923904, 1148932096, 1148940288, 1157269504, 1157273600, 1157277696, 1157281792,
+        0, 4, 102, 3,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 3, 64, 8,
+        1148948480, 1148956672, 1148964864, 1148973056, 1157285888, 1157289984, 1157294080, 1157298176,
+        0, 4, 106, 3,
+        1, 0, 0, 0,
+        3, 4, 0, 0, 4, 3, 68, 8,
+        1148981248, 1148989440, 1148997632, 1149005824, 1157302272, 1157306368, 1157310464, 1157314560,
+        0, 2, 108, 3,
+        3, 4, 0, 0, 4, 3, 72, 8,
+        1149014016, 1149022208, 1149030400, 1149038592, 1157318656, 1157322752, 1157326848, 1157330944,
+        3, 4, 0, 0, 4, 3, 76, 8,
+        1149046784, 1149054976, 1149063168, 1149071360, 1157335040, 1157339136, 1157343232, 1157347328,
+        3, 2, 0, 2, 4, 3, 78, 8,
+        1149079552, 1149087744, 0, 0, 1157351424, 1157355520, 0, 0,
+        3, 0, 0, 2, 4, 3, 78, 8,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        3, 0, 0, 2, 4, 3, 78, 8,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        3, 0, 0, 2, 4, 3, 78, 8,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        6, 108, 0, 17,
+        7, 8, 2, 78,
+    ];
+
+    /// Consumer-level render with the #917 hold rule: `begin_block`, read the planes in place,
+    /// and leave the played block to the next `begin_block`.
+    struct HoldingConsumer(PcmSourceConsumer);
+
+    impl ScriptedRender for HoldingConsumer {
+        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
+            let report = self.0.begin_block();
+            let mut planes = [[0.0_f32; 4]; 2];
+            for (channel, plane) in (0_u32..).zip(planes.iter_mut()) {
+                self.0.copy_channel(channel, plane).expect("copy");
+                // The borrowed plane is exactly what the copy wrote, word for word.
+                match self.0.played_plane(channel) {
+                    Some(borrowed) => {
+                        assert_ne!(report.copied_frames, 0, "a plane without a played block");
+                        assert_eq!(plane_bits(borrowed), plane.map(f32::to_bits));
+                    }
+                    None => assert_eq!(report.copied_frames, 0, "a played block without a plane"),
+                }
+            }
+            (report, planes)
+        }
+
+        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
+            self.0
+                .prepare_seek(SourceGeneration(generation), SourceFrame(frame))
+        }
+
+        fn telemetry(&self) -> SourceConsumerTelemetry {
+            self.0.telemetry()
+        }
+    }
+
+    /// The oracle's own render (copy, then `end_block`) on the #917 ring: a caller that ends the
+    /// block itself, like `read_block`, keeps the same admission depth too.
+    struct EndingConsumer(PcmSourceConsumer);
+
+    impl ScriptedRender for EndingConsumer {
+        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
+            let report = self.0.begin_block();
+            let mut planes = [[0.0_f32; 4]; 2];
+            for (channel, plane) in (0_u32..).zip(planes.iter_mut()) {
+                self.0.copy_channel(channel, plane).expect("copy");
+            }
+            self.0.end_block();
+            assert!(self.0.played_plane(0).is_none());
+            (report, planes)
+        }
+
+        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
+            self.0
+                .prepare_seek(SourceGeneration(generation), SourceFrame(frame))
+        }
+
+        fn telemetry(&self) -> SourceConsumerTelemetry {
+            self.0.telemetry()
+        }
+    }
+
+    /// The graph driver path: `begin_block`, borrow the claim's planes, copy the claim, and hold.
+    /// The report is rebuilt from the driver's consumer exactly as `begin_block` computes it.
+    struct HoldingDriver(SourceGraphSourceSetDriver);
+
+    impl ScriptedRender for HoldingDriver {
+        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
+            let before = self.0.sources[0].consumer.telemetry();
+            self.0.begin_block(0, 4).expect("driver begin");
+            let consumer = &self.0.sources[0].consumer;
+            let after = consumer.telemetry();
+            let underrun_frames = after.underrun_frames - before.underrun_frames;
+            let report = SourceReadReport {
+                copied_frames: u32::try_from(
+                    after.cumulative_read_frames - before.cumulative_read_frames,
+                )
+                .expect("one quantum"),
+                underrun_frames: u32::try_from(underrun_frames).expect("one quantum"),
+                underrun_event: underrun_frames != 0,
+                end_of_region: after.end_of_region,
+                active_generation: after.active_generation,
+                generation_changed: consumer.generation_changed,
+                cumulative_read_frames: after.cumulative_read_frames,
+                cumulative_underrun_frames: after.underrun_frames,
+                cumulative_underrun_events: after.underrun_events,
+            };
+            let borrowed = self
+                .0
+                .played_planes(0)
+                .map(|(left, right)| (left.to_vec(), right.to_vec()));
+            let (mut left, mut right) = ([0.0_f32; 4], [0.0_f32; 4]);
+            self.0
+                .copy_track_input(0, &mut left, &mut right)
+                .expect("claim copy");
+            match borrowed {
+                Some((borrowed_left, borrowed_right)) => {
+                    assert_ne!(report.copied_frames, 0);
+                    assert_eq!(plane_bits(&borrowed_left), left.map(f32::to_bits));
+                    assert_eq!(plane_bits(&borrowed_right), right.map(f32::to_bits));
+                    // Still held after the last (only) claim copied.
+                    assert!(self.0.played_planes(0).is_some());
+                }
+                None => assert_eq!(report.copied_frames, 0),
+            }
+            (report, [left, right])
+        }
+
+        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
+            let prepared = self.0.prepare_source_seek(0, generation, frame);
+            assert!(
+                self.0.played_planes(0).is_none(),
+                "seek preparation releases"
+            );
+            prepared
+        }
+
+        fn telemetry(&self) -> SourceConsumerTelemetry {
+            self.0.sources[0].consumer.telemetry()
+        }
+    }
+
+    fn plane_bits(plane: &[f32]) -> Vec<u32> {
+        plane.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// Gate 1 (#917): with the played block retained through the render and one block more
+    /// allocated, the producer's admission sequence -- every `SubmitReport` and every `Full` --
+    /// and every render report and plane are word for word those of the pre-change ring, on the
+    /// consumer path, on a caller that still ends its blocks, and on the graph driver path.
+    ///
+    /// Red mutations: allocate without the retained block (the producer loses one admission at
+    /// every boundary); start the retained block in the recycle queue (one extra admission on the
+    /// fresh ring and after the underrun); keep the idle block when a new block plays (the
+    /// producer loses one admission after the first render).
+    #[test]
+    fn played_block_retention_keeps_the_pre_change_admission_sequence() {
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
+        let mut holding = HoldingConsumer(consumer);
+        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut holding);
+        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "consumer hold path");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
+        let mut ending = EndingConsumer(consumer);
+        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut ending);
+        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "copy-then-end path");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
+        let mut mapping = test_mapping(0);
+        mapping.right_channel = 1;
+        let mut driver = HoldingDriver(test_driver(consumer, vec![mapping]));
+        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut driver);
+        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "graph driver path");
+    }
+
+    /// Gate 1, "at every point" (#917): while the render borrows the played planes, the producer
+    /// still admits exactly the configured number of blocks, and filling the ring to
+    /// backpressure never touches the borrowed storage. Only the next `begin_block` releases it.
+    ///
+    /// Red mutation: drop the retained block from the allocation -- the producer admits one
+    /// block fewer while the planes are borrowed.
+    #[test]
+    fn played_planes_stay_intact_while_the_producer_fills_its_configured_depth() {
+        for configured in 1_u64..=3 {
+            let (producer, mut consumer, report) =
+                PcmSourceRing::prepare(config(2, 4, 4 * configured)).expect("ring");
+            assert_eq!(report.transfer_block_count, configured);
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let first_left = [1.0, 2.0, 3.0, 4.0];
+            let first_right = [-1.0, -2.0, -3.0, -4.0];
+            host.submit(chunk(1, 0, &[&first_left, &first_right], 4, false))
+                .expect("first block");
+            let played = consumer.begin_block();
+            assert_eq!(played.copied_frames, 4);
+            let left = consumer.played_plane(0).expect("left plane");
+            let right = consumer.played_plane(1).expect("right plane");
+            // Mid-render: the producer admits exactly `configured` further blocks, then `Full`.
+            let poison = [f32::NAN; 4];
+            let mut admitted = 0_u64;
+            let mut start = 4;
+            while host
+                .submit(chunk(1, start, &[&poison, &poison], 4, false))
+                .is_ok()
+            {
+                admitted += 1;
+                start += 4;
+                assert!(admitted <= configured, "admitted past the configured depth");
+            }
+            assert_eq!(
+                admitted, configured,
+                "configured depth while the render holds"
+            );
+            assert_eq!(plane_bits(left), first_left.map(f32::to_bits));
+            assert_eq!(plane_bits(right), first_right.map(f32::to_bits));
+            // The next boundary releases the held block and exactly one admission opens.
+            let next = consumer.begin_block();
+            assert_eq!(next.copied_frames, 4);
+            assert!(
+                consumer
+                    .played_plane(0)
+                    .expect("next plane")
+                    .iter()
+                    .all(|sample| sample.is_nan())
+            );
+            host.submit(chunk(1, start, &[&poison, &poison], 4, false))
+                .expect("one admission after the release");
+            assert!(matches!(
+                host.submit(chunk(1, start + 4, &[&poison, &poison], 4, false)),
+                Err(HostChunkError::Full { .. })
+            ));
+        }
+    }
+
+    /// Gate 2 (#917): `played_plane` on a short block is the played frames followed by exact
+    /// `+0.0` words to the quantum, written in place over storage that held poison; it is `None`
+    /// before any block, on an out-of-range channel, past the end of the region and after
+    /// `end_block`; and `copy_channel` stays bit-identical to the pre-change oracle throughout.
+    ///
+    /// Red mutation: drop the in-place tail fill in `play` -- the borrowed tail keeps the poison.
+    #[test]
+    fn played_plane_is_the_quantum_with_a_zeroed_short_tail_and_none_without_a_block() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        assert!(consumer.played_plane(0).is_none(), "nothing played yet");
+        assert_copy_channel_matches_oracle(&consumer, 0, "before any block");
+
+        // Rotate every allocated block (one configured, one retained) through a poisoned full
+        // quantum, so the short block below lands in storage whose tail is not zero.
+        let poison = [-0.0, f32::NAN, 1.0e30, -7.5];
+        for (index, start) in [0_u64, 4].into_iter().enumerate() {
+            host.submit(chunk(1, start, &[&poison, &poison], 4, false))
+                .expect("poison block");
+            let report = consumer.begin_block();
+            assert_eq!(report.copied_frames, 4, "poison block {index}");
+            assert_eq!(
+                plane_bits(consumer.played_plane(1).expect("poison plane")),
+                poison.map(f32::to_bits)
+            );
+        }
+
+        let left_short = [5.0, -0.0];
+        let right_short = [f32::MIN_POSITIVE, -6.0];
+        host.submit(chunk(1, 8, &[&left_short, &right_short], 2, true))
+            .expect("short EOF block");
+        let short = consumer.begin_block();
+        assert_eq!(short.copied_frames, 2);
+        assert!(short.end_of_region);
+        for (channel, played) in [(0_u32, left_short), (1, right_short)] {
+            let plane = consumer.played_plane(channel).expect("short plane");
+            assert_eq!(plane.len(), 4, "a whole quantum");
+            let bits = plane_bits(plane);
+            assert_eq!(bits[..2], played.map(f32::to_bits));
+            assert_eq!(bits[2..], [0_u32; 2], "exact +0.0 tail words");
+            // Repeat borrows see the same words: nothing was consumed.
+            assert_eq!(
+                plane_bits(consumer.played_plane(channel).expect("repeat plane")),
+                bits
+            );
+            assert_copy_channel_matches_oracle(&consumer, channel, "short block");
+        }
+        assert!(consumer.played_plane(2).is_none(), "out-of-range channel");
+
+        // `end_block` ends the quantum: no plane, and the copy writes the whole-plane silence.
+        consumer.end_block();
+        assert!(consumer.played_plane(0).is_none());
+        assert_copy_channel_matches_oracle(&consumer, 0, "after end_block");
+
+        // Past the end of the region nothing is played.
+        let after = consumer.begin_block();
+        assert!(after.end_of_region);
+        assert_eq!(after.copied_frames, 0);
+        assert!(consumer.played_plane(0).is_none());
+        assert!(consumer.played_plane(1).is_none());
+        assert_copy_channel_matches_oracle(&consumer, 1, "past the end of the region");
+
+        // An underrun (in-region, nothing queued) plays nothing either.
+        let (_producer, mut starved, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
+        let underrun = starved.begin_block();
+        assert!(underrun.underrun_event);
+        assert!(starved.played_plane(0).is_none());
+    }
+
+    /// The driver maps each claim's `(left_channel, right_channel)` onto the played block, holds
+    /// through every claim copy, and releases on the next `begin_block`, on a seek preparation,
+    /// and at once when there are no claims (#917).
+    #[test]
+    fn graph_driver_played_planes_map_claims_until_the_next_begin_or_seek() {
+        let channels: [[f32; 4]; 4] = [
+            [1.0, 2.0, 3.0, 4.0],
+            [10.0, 20.0, 30.0, 40.0],
+            [100.0, 200.0, 300.0, 400.0],
+            [1000.0, 2000.0, 3000.0, 4000.0],
+        ];
+        let planes: Vec<&[f32]> = channels.iter().map(|plane| &plane[..]).collect();
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(4, 4, 8)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &planes, 4, false))
+            .expect("first block");
+        let mut first = test_mapping(0);
+        first.right_channel = 1;
+        let mut second = test_mapping(1);
+        second.left_channel = 3;
+        second.right_channel = 2;
+        let mut driver = test_driver(consumer, vec![first, second]);
+        assert!(driver.played_planes(0).is_none(), "nothing played yet");
+
+        driver.begin_block(0, 4).expect("begin");
+        assert_eq!(
+            driver.played_planes(0),
+            Some((&channels[0][..], &channels[1][..]))
+        );
+        assert_eq!(
+            driver.played_planes(1),
+            Some((&channels[3][..], &channels[2][..]))
+        );
+        assert!(driver.played_planes(2).is_none(), "out-of-range claim");
+        let (mut left, mut right) = ([0.0; 4], [0.0; 4]);
+        for claim in 0..2 {
+            driver
+                .copy_track_input(claim, &mut left, &mut right)
+                .expect("claim copy");
+        }
+        assert_eq!(
+            driver.played_planes(1),
+            Some((&channels[3][..], &channels[2][..])),
+            "held after every claim copied"
+        );
+
+        // Nothing queued: the next begin releases and plays nothing.
+        driver.begin_block(4, 4).expect("underrun begin");
+        assert!(driver.played_planes(0).is_none());
+        assert!(driver.observation_validity().source_underrun);
+
+        // A seek preparation releases a played block.
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .expect("seek");
+        host.submit(chunk(2, 100, &planes, 4, false))
+            .expect("post-seek block");
+        host.submit(chunk(2, 104, &planes, 4, false))
+            .expect("second post-seek block");
+        driver.begin_block(8, 4).expect("post-seek begin");
+        assert!(driver.played_planes(0).is_some());
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(3),
+            frame: SourceFrame(200),
+        })
+        .expect("second seek");
+        assert!(driver.prepare_source_seek(0, 3, 200));
+        assert!(
+            driver.played_planes(0).is_none(),
+            "seek preparation releases"
+        );
+
+        // No claims: `begin_block` releases at once.
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&channels[0]], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, Vec::new());
+        driver.begin_block(0, 4).expect("zero-claim begin");
+        assert!(driver.sources[0].consumer.played_plane(0).is_none());
     }
 }
