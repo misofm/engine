@@ -701,3 +701,15 @@ Both integrated benchmark preflight self-tests passed without timing; integrated
 compressor tests, final workspace clippy/fmt and all policy checks passed. Original
 raw logs retain their trailing blank lines byte-for-byte. R1–R4 remain pending,
 so this PASS authorizes class-A delivery only, not closure of the umbrella issue.
+
+### Required artifact delivery successor
+
+PR #903's first qualification run `36084071070` passed every test job except the
+shipped AudioWorklet artifact check: reviewed code-generation changes moved the
+compiled binary identity. Successor #904 qualified the exact accepted source and
+new artifact `772b65111a22fa07135dd3f90628774a5587ef6891e14da25f28a2989d3d4d56`
+through all existing static/resource/SDK/real-receiver and three-browser gates.
+Luna xhigh implemented and Astra xhigh recorded attempt-1 PASS. Numerical corpus
+pins are unchanged; only the compiled artifact and live test identity changed.
+The qualified delivery is part of the same PR; pending owner rulings still keep
+this umbrella open.

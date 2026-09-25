@@ -53,3 +53,12 @@ Using that same immutable artifact, all existing checks exited 0: `scripts/check
 The separate live real-Wasm receiver gate ran as `node scripts/test-web-audioworklet.mjs --real-wasm-receiver --artifacts /tmp/issue904-attempt1-artifact`, exit 0. Its preflight accepted the exact seven-file artifact and new live hash; ordinary boot/status/dispose/repeated-dispose, corrupted-Wasm refusal before module/node construction, and the named disposal-mutant assertion with fallback cleanup all passed. The `scripts/test-web-audioworklet.sh` invocation without the receiver flag exercises the hermetic fake-Wasm lane and does not call this real receiver branch. Therefore only `REAL_WASM_SHA256` in `scripts/test-web-audioworklet.mjs` was moved to the qualified live candidate hash. The npm published-SDK release pin remains unchanged and its SDK package check passed.
 
 `results.json` was recorded by the browser runner, not hand-edited. Its only changes are the accepted candidate commit and Wasm SHA; the generated matrix changes only those same lineage values. All three browser rows retain `sdkResponse: pass`. The frozen numeric/resource expectations in `hosts/host-web/tests/browser-v1/expected.json` and all native corpus/source fixtures are unchanged from the accepted source; browser native-corpus digests and expected resources passed. No numeric PCM pin, tolerance, browser floor, build flag, tool/dependency lock, or CI file changed. The final allowed implementation paths are the source artifact hash pin, `qualification/results.json`, generated `BROWSER_DEPLOYMENT_MATRIX.md`, this real-Wasm gate's expected hash, and this spec. `git diff --check` passes. Full stdout/stderr/exit/invocation records, the exact artifact hash list and authority comparisons are preserved outside the worktree under `/tmp/issue904-attempt1-logs/`; generated artifacts remain under `/tmp/issue904-attempt1-artifact`, and installed dependencies are ignored `node_modules` directories. No compiled artifact was added to the repository.
+
+## Independent verdict
+
+GPT-6 Astra xhigh recorded attempt-1 **PASS** with no blockers in
+`docs/issue904-astra-review.md`. It independently verified original CI mismatch,
+seven-file identity, six unchanged authorities, source immutability, preserved
+numeric and historical release pins, authentic gate logs and SDK-inclusive browser
+coverage. Exact-head PR qualification and merged-main verification remain required
+before closure.
