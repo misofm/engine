@@ -74,7 +74,32 @@ The R2 amendment resolves the only observed threshold failure; no other toleranc
 default run passed 14 active tests, including X7/X8 subsampled domains and the eight-crossing seal;
 all eight ignored full-domain math sweeps also passed in 73.33 seconds with four workers maximum.
 Math and transient-shaper package clippy, `cargo fmt --all -- --check`, and `git diff --check`
-passed. The MQ-1 PCM null comparison is complete as recorded above. Standalone wasm qualification
-is deferred to root's combined gate after MB-1. The post-change timed measurement remains held
-until #902's corrected runner is integrated and root clears the shared CPU. No blinded listening
-test was performed.
+passed. No blinded listening test was performed.
+
+## Integrated MQ-1 timing evidence
+
+After #902's corrected runner was integrated, root completed the combined #880 gates: native and
+focused tests, workspace clippy and policy checks, all eight F1 sweeps, and native/scalar/SIMD
+Wasm gates passed. The corrected MQ-1 self-test also passed. The untimed programme PCM null
+comparison remains the one recorded above.
+
+One MQ-1 timed invocation completed successfully on the integrated candidate
+`5ce58d6eb0bdbe0cc02e5e7a01d3a9aaca5eb0fc`, with MB-2 effect source
+`e00d4c2dbef1af166bedeb28fdc103d62a4de269` and revision `MB-2 (R2 fast dB tier)`. The frozen
+four-second, 48 kHz, 128-frame, eight-track dual-mono programme used attack `0.75`, sustain `-0.5`,
+mix `1.0`, and the same seeds and fixture hash recorded above. It ran one warmup and two measured
+rounds per arm:
+
+| Arm | Round 1 | Round 2 |
+|---|---:|---:|
+| Simd8 bank | 4.276925 ns/lane-sample | 4.305019 ns/lane-sample |
+| Scalar | 30.301938 ns/lane-sample | 30.328344 ns/lane-sample |
+
+The validated record and exact captured output are preserved in [the MQ-1 MB-2 record](../artifacts/issue880/mq1-mb2/mq1-mb2.json)
+and [raw log](../artifacts/issue880/mq1-mb2/mq1-mb2.json.raw.log). The record identifies the
+benchmark source, runner, fixture, candidate/source commits, and host (AMD EPYC 7313P, x86_64,
+Linux; rustc 1.97.1, LLVM 22.1.6). The runner preflight passed and the timed test passed; no timing
+retry was made. These are descriptive timings, not a release budget or isolated proof of MB-2's
+causal performance effect. The earlier E1 timing observations remain preserved in
+`docs/issue880-mq1.md`; the old run had a postprocessing failure, so this is not presented as a
+validated matched before/after benchmark.

@@ -812,3 +812,40 @@ Luna resumes MB-2 attempt 1 with the single authorized tolerance change and all 
 gates retained. MB-1's focused checkpoint `374bd874` remains isolated until MB-2 is
 integrated, so the shaper's three corpus pins move once in the final batch. Astra xhigh
 will review the combined implementation, numerical evidence and this decision.
+
+### Class-B combined implementation and validation
+
+Luna completed MB-2 with the delegated single-row tolerance amendment at `8c5c0f61`.
+MB-2 then MB-1 were merged into the batch at `e00d4c2d`; the shaper's three corpus
+pins moved once. MB-1's exhaustive M1 reports maximum 1.298297 ulp with zero
+reversals over all positive normals, and all 2^32 input patterns agree across
+f32/Simd4/Simd8. The 2 ulp ceiling is unchanged. Only the expected logarithm M2,
+D1 level and Wasm lane digests moved in MB-1.
+
+Combined default math and focused release suites (lane, math, wasm-gates,
+effect-runtime, transient-shaper and compressor), workspace all-target/all-feature
+Clippy, format, workspace/lane/unfused policies, all eight ignored F1 sweeps, and
+full native/scalar-Wasm/SIMD-Wasm corpus gates pass. Every Wasm leg reports 141
+cases and 355 comparisons with zero mismatches. F1's L3 exact level error is
+1.538161e-5 dB versus fast 2.810286e-5 dB (ratio 1.827). The new L3 comparator
+changes the four-corner fast/exact gain delta to 1.654020e-5 dB; the fast absolute
+f64-oracle error remains 1.287460e-5. Historical MA-5 measurements retain their
+original source attribution. Logs are preserved in `/tmp/issue880-class-b-gates/`.
+
+The final live MQ-1 self-test initially selected its old E1 default and correctly
+rejected the combined fast-tier source. Luna added explicit source/revision argument
+wiring at `5ce58d6e`; the corrected self-test passes without timed workload launches,
+with source-drift, ancestry, recovery and overwrite refusal checks retained. MQ-2's
+preflight self-test also passes. The workload and numeric validators are unchanged
+by this integration correction.
+
+The single post-change MQ-1 invocation at `5ce58d6e`, using effect source `e00d4c2d`,
+measured bank 4.276925/4.305019 and scalar 30.301938/30.328344 ns/lane-sample. The
+preserved baseline is bank 6.281854/6.281717 and scalar 40.841292/40.803620. One
+warmup and two measured rounds were used per arm, without retry or tuning. These
+are descriptive observations, not release thresholds. Evidence and record provenance
+are in `docs/issue880-mb2.md` and `artifacts/issue880/mq1-mb2/`.
+
+Independent Astra class-B/#902 review is next. Successor #905 owns qualification of
+the resulting AudioWorklet binary after accepted source is fixed. This is a local
+batch checkpoint, not an upstream delivery or issue closure.

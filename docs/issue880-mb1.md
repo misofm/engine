@@ -50,7 +50,7 @@ reference for `level_db` was updated from the earlier rounded `1.538e-5` dB to `
 the fresh exhaustive ratio check measured `1.538161e-5` dB exact versus `2.810286e-5` dB fast,
 ratio 1.827, within the unchanged 2x bound.
 
-## Division audit and integration boundary
+## Division audit and MB-1 checkpoint boundary
 
 L3 adds one `Lane::div` for `t / (t + 2)`; its denominator is in `[1.7071…, 2.4143…]`. The
 production-source census found the other current uses in the true-peak limiter (required gain and
@@ -58,13 +58,30 @@ box mean), soft-clip (`u³ / 3`), and the transient shaper's fast/slow envelope 
 gate-expander corpus uses division only to construct test inputs. No other production lane
 division was found.
 
-The transient shaper still calls the exact tier in this worktree, so its stored corpus pin now
-depends on the changed `log2_lane`. MB-2's proposed shaper oracle tolerance of `2.5e-5` absolute
-PCM amplitude error has no amended owner ruling yet. This tranche therefore does not edit or re-pin
-`crates/transient-shaper/src/corpus.rs`, does not claim the shaper integration gate, and does not
-run `scripts/run-wasm-gates.sh`; that gate includes the intentionally deferred shaper corpus row.
-Resolve MB-2's tolerance ruling, then move the shaper and its corpus pin together. No timing was
-run here.
+At the MB-1 checkpoint, the transient shaper still called the exact tier, so its stored corpus pin
+depended on the changed `log2_lane`. MB-2's proposed shaper oracle tolerance of `2.5e-5` absolute
+PCM amplitude error had no amended ruling yet. That tranche therefore did not edit or re-pin
+`crates/transient-shaper/src/corpus.rs`, claim the shaper integration gate, or run
+`scripts/run-wasm-gates.sh`; the gate included the deferred shaper corpus row. No timing was run at
+the MB-1 checkpoint.
+
+## Integrated status after MB-2
+
+Under the owner's explicit delegation, root accepted the amended MB-2 bound of strict `< 2.5e-5`
+absolute PCM amplitude error only for `scalar_matches_the_independent_f64_oracle`. MB-2 applied
+the fast dB tier to the shaper, updated the three scalar-generated shaper pins, and passed its
+focused package and oracle gates; the `0.01` dB limits and other F1/M1 gates were unchanged. In
+the later combined F1 run, all eight full-domain sweeps passed. The exact-versus-fast maximum gain
+difference was `1.654020e-5` dB in that integrated run (the earlier MB-2 corner report was
+`1.654115e-5` dB); the fast and exact absolute gain errors against the oracle remained
+`1.287460e-5` and `2.199415e-6`. Those gain figures are measurements at the four
+`attack/sustain ∈ {-1, +1}` corners, not a uniform bound on arbitrary amount settings.
+
+The integrated release transient-shaper package, workspace native gates, workspace clippy and
+policy checks, combined F1 suite, and native/scalar/SIMD Wasm gates passed. MQ-1 now has one
+post-change timed record on the integrated candidate; see the [MB-2 evidence](issue880-mb2.md#integrated-mq-1-timing-evidence)
+and [preserved record](../artifacts/issue880/mq1-mb2/mq1-mb2.json). That timing is descriptive and
+does not isolate MB-1's contribution from the integrated MB-2 change.
 
 ## Focused checks
 
