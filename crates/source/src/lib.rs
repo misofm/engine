@@ -650,6 +650,8 @@ impl PcmSourceRing {
                 end_of_region_submitted: false,
                 cumulative_written_frames: 0,
                 deferred_block: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                returned_block: None,
                 native_decoder_sanitized_samples: 0,
             },
             consumer,
@@ -717,6 +719,10 @@ pub struct PcmSourceProducer {
     end_of_region_submitted: bool,
     cumulative_written_frames: u64,
     deferred_block: Option<Box<TransferBlock>>,
+    /// A reserved block whose native commit failed validation: never stamped or published,
+    /// and the next block [`Self::reserve_block`] hands out.
+    #[cfg(not(target_arch = "wasm32"))]
+    returned_block: Option<Box<TransferBlock>>,
     native_decoder_sanitized_samples: u64,
 }
 
@@ -892,6 +898,105 @@ impl PcmSourceProducer {
             }
         }
     }
+
+    /// Take a recycled block for the native decode worker to decode straight into.
+    ///
+    /// A block a failed commit returned is handed out first. Otherwise this is
+    /// [`Self::take_recycled_block`]: a deferred block is pushed first, and `Full` is the
+    /// backpressure a submission reports. With the data and recycle queues both sized to the
+    /// prepared block count, a full data queue implies an empty recycle queue, so this is where
+    /// the native worker meets a full ring -- before it decodes, never after.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reserve_block(&mut self) -> Result<ReservedBlock, HostChunkError> {
+        if let Some(block) = self.returned_block.take() {
+            return Ok(ReservedBlock { block });
+        }
+        self.take_recycled_block()
+            .map(|block| ReservedBlock { block })
+    }
+
+    /// Publish a reserved block the native worker decoded into: validate, stamp, publish.
+    ///
+    /// The `Ok` of [`Self::publish_block`] is the only ack. A failed validation publishes
+    /// nothing and returns the unstamped block to the producer for the next reservation; a
+    /// full data queue leaves the stamped block in `deferred_block` exactly as a submission
+    /// does, and [`Self::commit_deferred`] is the retry. The block is never copied or dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_block(
+        &mut self,
+        reserved: ReservedBlock,
+        generation: SourceGeneration,
+        start_frame: SourceFrame,
+        frames: u32,
+        end_of_region: bool,
+        native_decoder_sanitized_samples: u64,
+    ) -> Result<SubmitReport, HostChunkError> {
+        let ReservedBlock { mut block } = reserved;
+        if let Err(error) = validate_submission_metadata(
+            self,
+            generation,
+            start_frame,
+            frames,
+            end_of_region,
+            self.channel_count,
+        ) {
+            self.returned_block = Some(block);
+            return Err(error);
+        }
+        block.generation = generation;
+        block.start_frame = start_frame;
+        block.frames = frames;
+        block.end_of_region = end_of_region;
+        block.native_decoder_sanitized_samples = native_decoder_sanitized_samples;
+        self.native_decoder_sanitized_samples = self
+            .native_decoder_sanitized_samples
+            .max(native_decoder_sanitized_samples);
+        self.publish_block(block, frames, end_of_region)
+    }
+
+    /// Retry the block a `Full` commit deferred: push that stamped block, then ack.
+    ///
+    /// Its stamp is checked against the producer again, so a seek admitted since the commit
+    /// can never be acked with it: it then stays deferred, and the next reservation publishes
+    /// it unacked for the consumer to discard as stale, as a deferred submission always was.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_deferred(&mut self) -> Result<SubmitReport, HostChunkError> {
+        let Some(block) = self.deferred_block.take() else {
+            return Err(HostChunkError::InternalInvariant);
+        };
+        if let Err(error) = validate_submission_metadata(
+            self,
+            block.generation,
+            block.start_frame,
+            block.frames,
+            block.end_of_region,
+            self.channel_count,
+        ) {
+            self.deferred_block = Some(block);
+            return Err(error);
+        }
+        let (frames, end_of_region) = (block.frames, block.end_of_region);
+        self.publish_block(block, frames, end_of_region)
+    }
+}
+
+/// A recycled transfer block reserved for the native decode worker to decode straight into.
+///
+/// It is out of the queues only between its reservation and the commit that hands it back: a
+/// commit publishes it, defers it on a full data queue, or returns it to the producer on a
+/// failed validation, and a worker whose decoded quantum a seek discarded keeps it for its next
+/// decode. No staging buffer is copied into it.
+#[cfg(not(target_arch = "wasm32"))]
+struct ReservedBlock {
+    block: Box<TransferBlock>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ReservedBlock {
+    /// The whole `[channel][quantum]` sample block: the planar layout `decode_planar` writes.
+    fn planes_mut(&mut self) -> &mut [f32] {
+        &mut self.block.samples
+    }
 }
 
 /// Explicit-rate host PCM submission boundary for mobile and browser embedding.
@@ -923,33 +1028,37 @@ impl HostChunkProvider {
         self.producer.telemetry()
     }
 
+    /// Reserve a recycled block for the native decode worker to decode straight into.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn submit_native_planar(
+    pub(crate) fn reserve_block(&mut self) -> Result<ReservedBlock, HostChunkError> {
+        self.producer.reserve_block()
+    }
+
+    /// Validate, stamp, and publish a reserved block the native worker decoded into.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn commit_block(
         &mut self,
+        reserved: ReservedBlock,
         generation: SourceGeneration,
         start_frame: SourceFrame,
-        planar_quantum: &[f32],
         frames: u32,
         end_of_region: bool,
         native_decoder_sanitized_samples: u64,
     ) -> Result<SubmitReport, HostChunkError> {
-        let quantum =
-            usize::try_from(self.producer.quantum_frames).expect("prepared quantum fits usize");
-        let expected_samples = usize::try_from(self.producer.channel_count)
-            .expect("u32 fits usize")
-            .checked_mul(quantum)
-            .expect("prepared planar samples");
-        if planar_quantum.len() != expected_samples {
-            return Err(HostChunkError::InternalInvariant);
-        }
-        self.producer.submit_planes(
+        self.producer.commit_block(
+            reserved,
             generation,
             start_frame,
             frames,
             end_of_region,
             native_decoder_sanitized_samples,
-            planar_quantum.chunks_exact(quantum),
         )
+    }
+
+    /// Retry the publication of the block a `Full` native commit deferred.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn commit_deferred(&mut self) -> Result<SubmitReport, HostChunkError> {
+        self.producer.commit_deferred()
     }
 }
 
@@ -2408,16 +2517,13 @@ mod tests {
         assert_eq!(consumer.shape().transfer_block_count, 1);
         let mut provider = producer.into_host_chunk_provider(RATE);
         let planar_quantum = [1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
+        let mut reserved = provider.reserve_block().expect("native reservation");
+        // The reserved block is the whole `[channel][quantum]` planar quantum the decoder fills.
+        assert_eq!(reserved.planes_mut().len(), planar_quantum.len());
+        reserved.planes_mut().copy_from_slice(&planar_quantum);
         provider
-            .submit_native_planar(
-                SourceGeneration(1),
-                SourceFrame(0),
-                &planar_quantum,
-                4,
-                true,
-                0,
-            )
-            .expect("native planar submit");
+            .commit_block(reserved, SourceGeneration(1), SourceFrame(0), 4, true, 0)
+            .expect("native planar commit");
         let mut left = [0.0; 4];
         let mut right = [0.0; 4];
         let mut output = [&mut left[..], &mut right[..]];
@@ -2445,17 +2551,24 @@ mod tests {
         ));
         assert_eq!(host.telemetry(), host_before);
 
+        // A native quantum cannot have the wrong shape (the planes are the block), so its
+        // rejection is the metadata validation; it too leaves the producer untouched.
         let native_before = native.telemetry();
         assert_eq!(
-            native.submit_native_planar(
+            commit_native(
+                &mut native,
                 SourceGeneration(1),
                 SourceFrame(0),
-                &[1.0, 2.0, 3.0],
-                4,
+                &[9.0; 8],
+                3,
                 false,
                 9,
             ),
-            Err(HostChunkError::InternalInvariant)
+            Err(HostChunkError::FrameCount {
+                quantum_frames: 4,
+                submitted_frames: 3,
+                end_of_region: false,
+            })
         );
         assert_eq!(native.telemetry(), native_before);
 
@@ -2465,16 +2578,16 @@ mod tests {
             .submit(chunk(1, 0, &[&host_left, &host_right], 2, true))
             .expect("host short EOF");
         let native_quantum = [1.0, 2.0, 99.0, 98.0, -1.0, -2.0, -99.0, -98.0];
-        let native_report = native
-            .submit_native_planar(
-                SourceGeneration(1),
-                SourceFrame(0),
-                &native_quantum,
-                2,
-                true,
-                0,
-            )
-            .expect("native short EOF");
+        let native_report = commit_native(
+            &mut native,
+            SourceGeneration(1),
+            SourceFrame(0),
+            &native_quantum,
+            2,
+            true,
+            0,
+        )
+        .expect("native short EOF");
         assert_eq!(native_report, host_report);
         assert_eq!(native.telemetry(), host.telemetry());
 
@@ -2521,15 +2634,246 @@ mod tests {
         assert!(!source.contains(&["submit_contiguous", "_planar"].concat()));
     }
 
+    /// Reserve a block, write one planar quantum into it as the native decoder does, commit it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_native(
+        provider: &mut HostChunkProvider,
+        generation: SourceGeneration,
+        start_frame: SourceFrame,
+        planar_quantum: &[f32],
+        frames: u32,
+        end_of_region: bool,
+        native_decoder_sanitized_samples: u64,
+    ) -> Result<SubmitReport, HostChunkError> {
+        let mut reserved = provider.reserve_block()?;
+        reserved.planes_mut().copy_from_slice(planar_quantum);
+        provider.commit_block(
+            reserved,
+            generation,
+            start_frame,
+            frames,
+            end_of_region,
+            native_decoder_sanitized_samples,
+        )
+    }
+
+    #[test]
+    fn native_commit_publishes_the_decoded_block_without_a_copy() {
+        let source = include_str!("lib.rs");
+        let start = source.find("fn commit_block").expect("native commit");
+        let end = source[start..]
+            .find("fn commit_deferred")
+            .map(|offset| start + offset)
+            .expect("deferred retry boundary");
+        let commit = &source[start..end];
+        assert_eq!(commit.matches("copy_from_slice").count(), 0);
+        assert_eq!(commit.matches("validate_submission_metadata").count(), 1);
+        assert_eq!(commit.matches("self.publish_block(").count(), 1);
+        // Validation, then the stamp, then the only publication.
+        let validate = commit
+            .find("validate_submission_metadata")
+            .expect("validation");
+        let stamp = commit.find("block.generation = generation").expect("stamp");
+        let publish = commit.find("self.publish_block(").expect("publication");
+        assert!(validate < stamp && stamp < publish);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_commit_rejects_a_stale_generation_and_returns_the_block_unpublished() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
+        let mut provider = producer.into_host_chunk_provider(RATE);
+        let mut reserved = provider.reserve_block().expect("reservation");
+        let reserved_address = reserved.planes_mut().as_ptr();
+        reserved.planes_mut().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        // A seek admitted after the quantum was decoded makes its metadata stale.
+        provider
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(100),
+            })
+            .expect("seek");
+        let before = provider.telemetry();
+        assert_eq!(
+            provider.commit_block(reserved, SourceGeneration(1), SourceFrame(0), 4, false, 0),
+            Err(HostChunkError::StaleGeneration {
+                active: SourceGeneration(2),
+                submitted: SourceGeneration(1),
+            })
+        );
+        assert_eq!(provider.telemetry(), before);
+        // The rejected block is the next one reserved, not a fresh one off the recycle queue.
+        let mut again = provider.reserve_block().expect("returned block");
+        assert_eq!(again.planes_mut().as_ptr(), reserved_address);
+        again.planes_mut().copy_from_slice(&[5.0, 6.0, 7.0, 8.0]);
+        provider
+            .commit_block(again, SourceGeneration(2), SourceFrame(100), 4, true, 0)
+            .expect("fresh commit");
+        // The render sees only the fresh block: the rejected quantum was never published, so
+        // there is no stale block to discard ahead of it.
+        let mut output = [7.0_f32; 4];
+        let report = consumer.read_block(&mut [&mut output]).expect("fresh read");
+        assert_eq!(report.active_generation, SourceGeneration(2));
+        assert_eq!(report.copied_frames, 4);
+        assert_eq!(output, [5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 0);
+    }
+
+    /// Give the ring one block more than its queues' capacity, which a prepared ring never has,
+    /// so a reserved block can meet a full data queue at its commit.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn inject_extra_block(consumer: &mut PcmSourceConsumer, samples: usize) {
+        let extra = Box::new(TransferBlock::try_new(samples).expect("extra block"));
+        assert!(consumer.recycle_producer.try_push(extra).is_ok());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_full_commit_defers_the_block_and_its_retry_acks_it_exactly_once() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
+        let mut provider = producer.into_host_chunk_provider(RATE);
+        for (start, words) in [(0, [1.0, 2.0, 3.0, 4.0]), (4, [5.0, 6.0, 7.0, 8.0])] {
+            commit_native(
+                &mut provider,
+                SourceGeneration(1),
+                SourceFrame(start),
+                &words,
+                4,
+                false,
+                0,
+            )
+            .expect("fill the ring");
+        }
+        // Both queues hold every prepared block, so a full data queue is an empty recycle
+        // queue: the ring's own blocks meet backpressure at the reservation, before a decode.
+        assert!(matches!(
+            provider.reserve_block(),
+            Err(HostChunkError::Full { .. })
+        ));
+        inject_extra_block(&mut consumer, 4);
+        let mut extra = provider.reserve_block().expect("extra block");
+        extra.planes_mut().copy_from_slice(&[9.0, 10.0, 11.0, 12.0]);
+        let before = provider.telemetry();
+        assert!(matches!(
+            provider.commit_block(extra, SourceGeneration(1), SourceFrame(8), 4, true, 3),
+            Err(HostChunkError::Full { .. })
+        ));
+        // No ack: only the full count moved, and the stamped block waits in the producer.
+        let deferred = provider.telemetry();
+        assert_eq!(
+            deferred.cumulative_written_frames,
+            before.cumulative_written_frames
+        );
+        assert!(!deferred.end_of_region_submitted);
+        assert_eq!(deferred.data_full_count, before.data_full_count + 1);
+        assert!(provider.producer.deferred_block.is_some());
+        assert!(matches!(
+            provider.commit_deferred(),
+            Err(HostChunkError::Full { .. })
+        ));
+        assert!(provider.producer.deferred_block.is_some());
+
+        let mut output = [0.0_f32; 4];
+        consumer.read_block(&mut [&mut output]).expect("first");
+        assert_eq!(output, [1.0, 2.0, 3.0, 4.0]);
+        let report = provider
+            .commit_deferred()
+            .expect("deferred block published");
+        assert_eq!(report.accepted_frames, 4);
+        assert_eq!(report.cumulative_written_frames, 12);
+        assert!(provider.telemetry().end_of_region_submitted);
+        // Exactly once: nothing is left to retry.
+        assert_eq!(
+            provider.commit_deferred(),
+            Err(HostChunkError::InternalInvariant)
+        );
+        consumer.read_block(&mut [&mut output]).expect("second");
+        assert_eq!(output, [5.0, 6.0, 7.0, 8.0]);
+        let last = consumer.read_block(&mut [&mut output]).expect("deferred");
+        assert_eq!(output, [9.0, 10.0, 11.0, 12.0]);
+        assert!(last.end_of_region);
+        assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 3);
+        assert_eq!(consumer.telemetry().underrun_frames, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_deferred_retry_never_acks_a_block_a_seek_made_stale() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut provider = producer.into_host_chunk_provider(RATE);
+        commit_native(
+            &mut provider,
+            SourceGeneration(1),
+            SourceFrame(0),
+            &[1.0; 4],
+            4,
+            false,
+            0,
+        )
+        .expect("fill the ring");
+        inject_extra_block(&mut consumer, 4);
+        let mut extra = provider.reserve_block().expect("extra block");
+        extra.planes_mut().copy_from_slice(&[2.0; 4]);
+        assert!(matches!(
+            provider.commit_block(extra, SourceGeneration(1), SourceFrame(4), 4, false, 0),
+            Err(HostChunkError::Full { .. })
+        ));
+        provider
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(40),
+            })
+            .expect("seek");
+        let before = provider.telemetry();
+        assert_eq!(
+            provider.commit_deferred(),
+            Err(HostChunkError::StaleGeneration {
+                active: SourceGeneration(2),
+                submitted: SourceGeneration(1),
+            })
+        );
+        assert_eq!(provider.telemetry(), before);
+        assert!(provider.producer.deferred_block.is_some());
+        // The render observes the seek and discards the old block; the next reservation then
+        // publishes the stale deferred block unacked, and the render discards it too.
+        let mut output = [7.0_f32; 4];
+        consumer
+            .read_block(&mut [&mut output])
+            .expect("seek boundary");
+        let mut fresh = provider
+            .reserve_block()
+            .expect("reservation after the seek");
+        assert!(provider.producer.deferred_block.is_none());
+        assert_eq!(provider.telemetry().cumulative_written_frames, 4);
+        consumer
+            .read_block(&mut [&mut output])
+            .expect("stale deferred block");
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+        // The seek frame is still the write cursor, which an ack of the stale block would
+        // have moved past: the post-seek commit is contiguous at exactly the seek frame.
+        fresh.planes_mut().copy_from_slice(&[3.0; 4]);
+        let report = provider
+            .commit_block(fresh, SourceGeneration(2), SourceFrame(40), 4, true, 0)
+            .expect("post-seek commit");
+        assert_eq!(report.cumulative_written_frames, 8);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stamped_native_watermark_survives_seek_stale_discard_and_saturates() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 12)).expect("ring");
         let mut provider = producer.into_host_chunk_provider(RATE);
         let old = [1.0_f32; 4];
-        provider
-            .submit_native_planar(SourceGeneration(1), SourceFrame(0), &old, 4, false, 7)
-            .expect("old native block");
+        commit_native(
+            &mut provider,
+            SourceGeneration(1),
+            SourceFrame(0),
+            &old,
+            4,
+            false,
+            7,
+        )
+        .expect("old native block");
         provider
             .try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -2537,27 +2881,27 @@ mod tests {
             })
             .expect("seek");
         let fresh = [2.0_f32; 4];
-        provider
-            .submit_native_planar(
-                SourceGeneration(2),
-                SourceFrame(100),
-                &fresh,
-                4,
-                false,
-                u64::MAX,
-            )
-            .expect("fresh native block");
+        commit_native(
+            &mut provider,
+            SourceGeneration(2),
+            SourceFrame(100),
+            &fresh,
+            4,
+            false,
+            u64::MAX,
+        )
+        .expect("fresh native block");
         let wrapped = [3.0_f32; 4];
-        provider
-            .submit_native_planar(
-                SourceGeneration(2),
-                SourceFrame(104),
-                &wrapped,
-                4,
-                true,
-                u64::MAX,
-            )
-            .expect("wrapped native block");
+        commit_native(
+            &mut provider,
+            SourceGeneration(2),
+            SourceFrame(104),
+            &wrapped,
+            4,
+            true,
+            u64::MAX,
+        )
+        .expect("wrapped native block");
         let mut output = [0.0_f32; 4];
         consumer
             .read_block(&mut [&mut output])
