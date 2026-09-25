@@ -364,3 +364,36 @@ All anchors were taken on `bda90ca1`:
 - **Not run:** the full CI "Workspace debug tests" step, the AudioWorklet artifact and browser
   qualification (both batch-boundary work), and `-p bench`. The bench graph tests are
   compile-level and bind no render.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `cc89a300` through `54336c9a` on base
+`135df65a` (the verified #916 tip). No blocking or should-fix findings. Per-element order,
+verified by reading: on base the route op runs `mix2x2_block` in place (`lr.fma(r, ll.mul(l))`,
+`rr.fma(r, rl.mul(l))`, tail at `f32`) and the Output's `accumulate_run` seeds group 0 with the
+first input, adds in edge order, and reloads the host plane for later groups; the fused
+`route_run` seeds group 0 with `mix(in0)` (the `-0.0` first-contributor rule kept), later groups
+with `L::load(host)`, then adds `mix(in_i)` in the same order, the two planes sharing only loads,
+tail through the same body at `f32`; `Lane::fma` is unfused on every backend, so `FrameLane`
+width cannot move a bit, and the table holds the route op's own constants. Every eligibility
+clause maps to a shape that goes red on the bits with the count assertions removed; the reviewer
+re-derived each hazard (an observed alias reads unmixed words; a copying route's output is
+never written; a delayed input's staging holds the route's input and the compensation line warms
+up at `+0.0`; an identity 2x2 on a pass-through turns `-0.0` into `+0.0`), confirmed the
+in-between scan is a belt (the route's slot stays owned through the Output, staging comes off
+the free list, a tap is a name, and any op naming the buffer in between is a reader the readers
+clause already refuses), and confirmed the retire path excludes retired routes from unit
+emission, both pairing passes, response bindings, `op_slot`, and that the activation catalogue
+refuses a retired run with observer rows. Deviation 3's "the plan binds no bank" is what the
+brief's "plumbing_only only" authorized; the one class-A shape left on the table is a banked plan
+whose chain fold declines, which the brief freezes (owner ruling if wanted later). Nine mutations
+re-applied and reverted (the brief's five, red on the kernel test and gate 1; three of the
+reviewer's: dropped `f32` tail, retired routes with an empty table, first-reader-only; and one
+that stayed green: dropping the `in_place` clause alone, which is redundant with
+`route_op.output != route_input.buffer` and is a documented belt). Reviewer-run gates, all
+green: `cargo test -p graph` (both configurations), `-p console-workload` (the three frozen tests
+unchanged), `-p graph-compiler`, `-p host-core --all-features`, fmt, graph clippy, graph,
+realtime and lane policy, determinism (100/100). Nits, no change: the `in_place` clause is
+documentation rather than a gate; an unreachable kernel refusal is spelled
+`RenderError::InvalidEnvelope`. Not re-verified by the reviewer: the wasm check, the console-gate
+greens for mutations 920-2/3, that the two host-core tests take the fold, `-p bench`.
