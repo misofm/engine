@@ -611,3 +611,38 @@ applying it.
   - `lease.read` panics on an out-of-range buffer, where `write_read_many` returned `None`. Every
     input of a lowered op is a reserved buffer.
   - A single-input output costs one never-touched arena buffer.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `608f0379`, `10de67c9`, `47a11617`,
+`9c762d7c`, `d586d346` on base `e178a379`, then the should-fix commit `fb28f7cc`. No blocking
+findings. The removed slot comparisons in `chains_into` and `scalar_split_interval_is_clear`
+protected, on base, the host's end-of-block read of a buffer the Output ran in place over; on this
+tree the Output is dedicated storage that is never in place and whose slot is never freed, the host
+reads no arena buffer, the Output op's read of its producer is counted by the readership clause,
+and a redirect into the Output is withheld, so both protections are covered; the reviewer also
+checked the fan-in-one `single != out` arm (slots retire one op late, so the Output is never handed
+a live input's slot), tap aliases (only the three elidable stages), PDC staging (free list only),
+Output observers (dispatched after the Output unit over the host planes) and the two remaining
+decline-only comparisons in `scatter_target` and `foldable_lane` (lost optimisation at most, whole
+fold in the latter case). The one case the implementer had not enumerated, an op that reads the
+Output node, is now refused at bind (`output_value_is_read`, test
+`a_plan_that_reads_the_session_output_is_refused_at_bind`, MUTATIONS row 916-18), narrowed to
+ops scheduled after the Output op because the standing workloads legitimately name the retired
+slot the Output reuses before it runs. `HostMaster` is taken once before observers and units,
+length-checked, by value to `execute` and by shared borrow to both dispatchers; `output_unit` is
+set only in `build_sequential`, which every bind path uses; zero-fill covers all five executor-level
+failure sites, each with its own red mutation, and envelope rejections precede any observer
+boundary; the console arena stays at 193 buffers and the two moved pins moved by exactly one.
+Seven mutations re-applied and reverted (four of the implementer's, three of the reviewer's:
+skipped zero-fill on the unit path, left-plane-only fill, arena view handed to Output observers),
+each red on the named tests. The builtins-compiler harness rewrite loosened no equality; the
+shared helper compares host planes and per-owner state; feature-less `cargo test -p
+builtins-compiler` did not compile on base either. Reviewer-run gates, all green: `cargo test -p
+graph` (both configurations), `-p builtins-compiler --features test-support`, `-p engine -p
+host-core --all-features`, `-p console-workload`, `-p graph-compiler`, fmt, the three-crate
+clippy, determinism (JSON digest equal to the #685 pin), graph and realtime policy.
+Recorded nits: gate 1's oracle is the dedicated arena path rather than base (equivalence rests on
+a copy moving bits unchanged plus the unchanged pre-existing tests; spec wording corrected); the
+corpus pin 3752 to 3862 guards the model only. Not re-verified: absolute PCM digests of the
+standing fixtures across trees, individual sampling of the 110 new corpus merges, the wasm build.
