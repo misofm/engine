@@ -14,7 +14,7 @@ The standing console benchmark (`scripts/run-console-benchmark.sh`, `tools/bench
 
 Authorized paths: `tools/bench/src/console.rs`, `scripts/run-console-benchmark.sh`, `scripts/console-benchmark-validator.jq`, `scripts/console-benchmark-record-validator.jq`, `scripts/console-benchmark-record-lib.jq`, `scripts/check-console-benchmark-fixture.sh`, `scripts/test-console-benchmark.sh`, and this spec.
 
-Add one row, `sixty_four_track_console_metered`: the `sixty_four_track_console` plan with a `SAMPLE_PEAK` meter selected at `PostMatrix` on every track (the same request shape the web host builds, `hosts/host-web/src/lib.rs` near line 7734), bound through the same host-core prepare entry point the web host uses, with the meter lease held and every published snapshot consumed each block so the observer path is exercised. Record `us_per_block` with the same metadata as the other rows. Extend the validators so the new record shape is accepted and any missing field is rejected.
+Add one row, `sixty_four_track_console_metered`: the `sixty_four_track_console` plan with a `SAMPLE_PEAK` meter selected at `PostMatrix` on every track (the same request shape the web host builds, `hosts/host-web/src/lib.rs` near line 7734), bound through the same host-core prepare entry point the web host uses, with the meter lease held and every published snapshot consumed each block so the observer path is exercised. Record `us_per_block` with the same metadata as the other rows. Extend the validators so the new record shape is accepted and any missing field is rejected. The row carries `bank_route_folds` and `bank_scatter_redirects` per arm, as "Carry fold and redirect counters in the console meters record" defines them for `console_meters`.
 
 ## Non-goals
 
