@@ -210,7 +210,11 @@ swapped pairs.
   - Mutations 916-16 and 916-17 are red.
 - **Left for a follow-up.** The same slot comparison remains in `scatter_target` and
   `foldable_lane`. Each has a program-level model that the corpus compares against the runtime.
-  They only decline, and no standing workload or test reaches them. I recommend one bounded
+  They only decline, and no standing workload or test reaches them. When `scatter_target`'s
+  fires, it declines one lane's redirect. When `foldable_lane`'s fires, it declines the **whole
+  fold**, not one lane: the lane's chain drops out, and `route_fold`'s association proof then
+  fails on `producers.len() != ordered.len()`. Either is a lost optimisation only, bit-identical
+  either way. I recommend one bounded
   follow-up to restate both, with their models, by node. Their docs now say they fire only by slot
   coincidence; this corrects my earlier "cannot fire".
 
@@ -263,6 +267,24 @@ planes the same way.
   `fifty_random_dag_sessions_render_deterministic_nonsilent_pcm` ("the corpus must not be
   silent"). That is the evidence the brief's rule was wrong: the dedicated Output takes retired
   slots. The amendment's slot comparisons were the same defect in two planning predicates.
+
+**Sol verdict: PASS, with should-fix S1, applied.** Nothing enforced the invariant "no op reads
+the Output's arena slot", which the new path depends on, for hand-built plans:
+
+- **The gap.** `PreparedGraphPlan::validate` accepts an edge out of the Output node, and the
+  lowering counts it as a read. Such a reader would read a slot no op writes on the new path.
+- **The fix.** `preflight_sequential` now refuses the bind with `graph.scheduler.layout` through
+  `output_value_is_read`. It refuses when the Output op has any reader, or when an op scheduled
+  after the Output op names its slot (input, sidechain, staging or output).
+- **One refinement to the suggested check.** Ops *before* the Output op may name the slot, and on
+  the standing console workloads they do. The Output takes track zero's retired input slot. So the
+  scan starts after the Output op, and the standing workloads bind as before: console-workload,
+  graph-compiler and builtins-compiler are all green.
+- **Test and mutation.** The new test is
+  `runtime::tests::a_plan_that_reads_the_session_output_is_refused_at_bind`. It builds
+  `t00 Input → Output → t01 PostFader` and asserts the refusal, and its control (the same plan
+  without the reader) binds and renders. `HostMaster`'s doc states the precondition. MUTATIONS row
+  916-18 drops the refusal, and the new test goes red.
 
 **Gates on `9c762d7c`.**
 
@@ -421,9 +443,13 @@ Stated in `GraphExecutor::render`'s doc comment:
   is gate 1.
   - **Oracle.** `render_arena_oracle` binds the same plan with the `#[cfg(test)]` switch
     `test_only_set_host_master_declined`: no Output unit, arena fold masters, and redirects into
-    the Output not withheld. That is the pre-issue runtime. It drives the pre-issue render loop,
-    then copies the Output's arena slot into the host layout, which is the deleted end-of-block
-    copy.
+    the Output not withheld. It drives the pre-issue render loop, then copies the Output's arena
+    slot into the host layout, which is the deleted end-of-block copy. **The oracle is not the
+    base runtime.** It binds with `is_dedicated(Output)` on, as the candidate does. So for the
+    fan-in-one shapes, it copies producer → Output slot → host, where the base copied nothing:
+    its Output ran in place over the producer. Its equivalence to the base rests on two things.
+    One is that a copy moves an `f32`'s bits unchanged. The other is the pre-existing bit-identity
+    tests, which pass unchanged.
   - **Candidate.** The real `GraphExecutor::render`, through a directly bound executor, so the
     arena stays inspectable.
   - **Shapes.** Nine, each at `stride == frames` and `stride == frames + 7`, over four blocks of

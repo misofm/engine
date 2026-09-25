@@ -312,6 +312,15 @@ pub(crate) type FrameLane = f32;
 ///
 /// A later parameter of `execute` (a source set's planes, say) goes after this one, so every call
 /// site keeps one shape.
+///
+/// # Precondition: nothing reads the Output's arena slot
+///
+/// On this path the Output's arena slot is never written: the Output op, and any fold into it,
+/// write these planes instead. So a plan in which some op read the Output's value out of the arena
+/// would read stale words. `preflight_sequential` refuses such a plan with
+/// `graph.scheduler.layout`, before any owner moves. The refused shapes are an Output op with a
+/// reader, and an op after the Output op that names its slot (`output_value_is_read`). The graph
+/// compiler never emits either.
 pub(crate) struct HostMaster<'a> {
     left: &'a mut [f32],
     right: &'a mut [f32],
@@ -4458,10 +4467,41 @@ pub(crate) fn preflight_sequential(
     // Issue #916: the one op whose storage is the host's planes, by node. A lowered program always
     // has it, so its absence is a layout fault and fails the bind before any owner moves.
     let output_op = output_op(program, &plan.spec).ok_or("graph.scheduler.layout")?;
+    if output_value_is_read(program, output_op) {
+        return Err("graph.scheduler.layout");
+    }
     let output_op = Some(output_op);
     #[cfg(test)]
     let output_op = output_op.filter(|_| !HOST_MASTER_DECLINED.with(std::cell::Cell::get));
     validate_fold_installation(plan, program, run_units, fold, output_op)
+}
+
+/// Whether anything reads the session Output's value out of the arena (issue #916).
+///
+/// The Output op writes the host's planes, and its arena slot is never written on that path. So a
+/// read of the Output's value through the arena would read words no op wrote this block. The
+/// graph compiler never emits a consumer of the Output, but `crates/graph` binds hand-built plans,
+/// and `PreparedGraphPlan::validate` accepts an edge out of the Output node. Two ways to read it,
+/// and each refuses the bind:
+///
+/// * **The Output op has a reader.** `op_dataflow` counts every main input and sidechain that
+///   names its buffer while it is that buffer's last writer, through elided aliases.
+/// * **An op after the Output op names its slot**: as an input, a sidechain, a staging slot or an
+///   output. The Output is dedicated storage, taken at its op and never freed. So from the
+///   Output op onwards, the slot holds the Output's value and nothing else. This is the belt to the
+///   first clause's braces.
+///
+/// Ops *before* the Output op may name the slot, and on the standing console workloads they do.
+/// The colouring hands the Output the slot of a buffer that retired before it, and those ops use
+/// that earlier buffer.
+fn output_value_is_read(program: &ExecutionProgram, output_op: usize) -> bool {
+    let (readers, _) = op_dataflow(program);
+    !readers.get(output_op).is_none_or(Vec::is_empty)
+        || program
+            .ops
+            .iter()
+            .skip(output_op + 1)
+            .any(|op| op_names_buffer(program, op, program.output))
 }
 
 fn validate_fold_installation(
@@ -11328,6 +11368,169 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `t00 Input -> Output`, and with `read_output` also `Output -> t01 PostFader`: a hand-built
+    /// plan with a consumer of the session output, which the graph compiler never emits.
+    fn output_reader_parts(
+        read_output: bool,
+    ) -> (crate::PreparedGraphPlan, crate::GraphRuntimeBindings) {
+        const FRAMES: u32 = 13;
+        let id = |text: &str| crate::StableGraphId::parse(text).expect("stable id");
+        let input = GraphNodeId::TrackStage {
+            track_id: id("t00"),
+            stage: TrackStage::Input,
+        };
+        let output = GraphNodeId::Output {
+            output_id: id("main"),
+        };
+        let reader = GraphNodeId::TrackStage {
+            track_id: id("t01"),
+            stage: TrackStage::PostFader,
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: destination.clone(),
+            },
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue916.output_reader".to_owned(),
+        };
+        let mut edges = vec![edge(&input, &output)];
+        let mut levels = vec![vec![input.clone()], vec![output.clone()]];
+        if read_output {
+            edges.push(edge(&output, &reader));
+            levels.push(vec![reader.clone()]);
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(FRAMES),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 9_160,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule.clone(),
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: nodes.clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings: schedule,
+            routes: Vec::new(),
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let mut nodes = vec![
+            GraphNodeBinding::new(input, Box::new(NoiseInput(9))),
+            GraphNodeBinding::identity(output),
+        ];
+        if read_output {
+            nodes.push(GraphNodeBinding::identity(reader));
+        }
+        (
+            plan,
+            crate::GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            },
+        )
+    }
+
+    /// Issue #916's precondition, enforced: a plan that reads the session output's value out of
+    /// the arena is refused at bind with `graph.scheduler.layout`.
+    ///
+    /// The Output op writes the host's planes and never its arena slot, so a consumer of the
+    /// Output would read words no op wrote this block. `PreparedGraphPlan::validate` accepts an
+    /// edge out of the Output node, and the lowering counts it as a read like any other. The
+    /// refusal is `preflight_sequential`'s `output_value_is_read`, before any owner moves. The
+    /// control is the same plan without the reader: it binds and renders.
+    ///
+    /// Red mutation (`crates/graph/tests/MUTATIONS.md` row 916-18): drop the refusal. The plan
+    /// then binds, and its reader reads the never-written slot.
+    #[test]
+    fn a_plan_that_reads_the_session_output_is_refused_at_bind() {
+        let (plan, bindings) = output_reader_parts(true);
+        let program = plan.lowered().expect("the plan lowers");
+        let output_op = output_op(&program, &plan.spec).expect("an Output op");
+        let (readers, _) = op_dataflow(&program);
+        assert_eq!(
+            readers[output_op].len(),
+            1,
+            "the lowering counts the edge out of the Output as a read"
+        );
+        let failure = plan
+            .bind(bindings)
+            .err()
+            .expect("a plan that reads the session output must not bind");
+        assert_eq!(failure.code, "graph.scheduler.layout");
+
+        let (plan, bindings) = output_reader_parts(false);
+        let mut bound = plan
+            .bind(bindings)
+            .unwrap_or_else(|failure| panic!("control bind: {}", failure.code));
+        let bits = render_fold_fixture(&mut bound, 13, 2);
+        assert!(bits.iter().any(|word| *word != 0), "the control renders");
     }
 
     /// An observer that accepts every block before `from_sample` and fails every block from it.
