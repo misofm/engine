@@ -720,6 +720,11 @@ mono_mutation '.bit_identity = "collapse_eligible != collapse_forced_off, assert
 mono_mutation '.mono_source_tracks = 0' 'a mono pair whose fixture has no mono-source track'
 mono_mutation '.mono_source_tracks = 32' 'a mono pair measured on a half-mono session'
 mono_mutation '.symmetric_lanes = 0' 'a mono pair whose prepared lanes are not symmetric'
+# Issue #911: `symmetric_lanes` counts the bank chains' track lanes, not the whole census's eligible
+# half. The census also carries the `main-out` identity's vacuous witness, which names no track, so
+# a record that reported the census half (65 on this fixture since #221) is counting a non-track
+# unit as a track lane.
+mono_mutation '.symmetric_lanes = 65' 'a mono pair counting a non-track witness as a track lane'
 mono_mutation '.lanes = 64' 'a lane census that counts only the lanes it calls symmetric'
 # The honesty field. A near-zero delta with this sentence removed reads as a measured saving.
 mono_mutation '.arm_difference = "none: both arms are the mono fixture as written; no collapse exists in this tree"' \
