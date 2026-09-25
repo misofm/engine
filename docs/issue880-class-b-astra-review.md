@@ -167,3 +167,19 @@ comparisons with zero mismatches. Review-only logs are under
 
 Neither note changes an algorithm or numerical gate. There are no blocking
 findings and no second implementation attempt is required by this review.
+
+## Editorial confirmation — 2026-09-25
+
+Astra xhigh inspected Luna's editorial checkpoint
+`bb9efd095bd8d70be8b8503cba6c3617fd51b74e` against its parent `053d427c`.
+Both nonblocking notes above are resolved: the module correctly distinguishes the
+degree-2, three-coefficient `P3` from degree-3 `r`, and the historical console
+performance prose/table explicitly attributes 22.64% to X1–X6 rather than X7/X8.
+The diff touches only those two prose paths. A byte comparison after excluding
+Rust module-documentation lines confirms all remaining Rust content is identical;
+no gates, constants, operation order or numeric pins changed. No tests or timings
+were rerun for this editorial confirmation.
+
+The existing attempt-1 PASS verdicts stand. Exact source
+`bb9efd095bd8d70be8b8503cba6c3617fd51b74e` is accepted for #905 qualification.
+This confirmation is not a new implementation attempt or an artifact PASS.
