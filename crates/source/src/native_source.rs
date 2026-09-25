@@ -4166,6 +4166,10 @@ mod tests {
     ) -> WorkerTrace {
         let quantum =
             usize::try_from(request.ring_config.quantum_frames.0).expect("quantum fits usize");
+        let mut blocks = usize::try_from(
+            request.ring_config.frame_capacity / u64::from(request.ring_config.quantum_frames.0),
+        )
+        .expect("block count fits usize");
         let mut native_resolver = resolver_wave(stereo_float32_wave(samples), b"exact-identity");
         let UnstartedNativeSource {
             mut command_sender,
@@ -4216,8 +4220,22 @@ mod tests {
                         crate::TransferBlock::try_new(samples).expect("extra transfer block"),
                     );
                     assert!(render.consumer.recycle_producer.try_push(extra).is_ok());
+                    blocks += 1;
                 }
             }
+            // No block ever leaves circulation: each is queued, played, reserved by the job, or
+            // held by the producer as deferred (awaiting a data slot) or returned (unpublished).
+            let producer = &job.provider.producer;
+            let circulating = render.consumer.data_consumer.available_at_entry()
+                + producer.recycle_consumer.available_at_entry()
+                + usize::from(render.played.is_some())
+                + usize::from(job.reserved.is_some())
+                + usize::from(producer.deferred_block.is_some())
+                + usize::from(producer.returned_block.is_some());
+            assert_eq!(
+                circulating, blocks,
+                "a transfer block left circulation at {step:?}"
+            );
             telemetry.push(job.provider.telemetry());
         }
         WorkerTrace {
