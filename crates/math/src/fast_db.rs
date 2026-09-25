@@ -110,9 +110,14 @@
 //!   `fast_gain_from_db` a subnormal *result* is possible only below about `-745` dB, far under
 //!   the `-124` dB the dynamics path can request, and the canonical floating-point environment
 //!   installed at every render entry (#146) fixes the flush behaviour in any case.
-//! * The reductions themselves are exact: `x - floor(x)` is exact for `|x| < 2^23` (and the
-//!   clamp holds `|x| <= 127`), `frexp` is exact, and `exp2_int` is an exact power of two. The
-//!   only error in either function is the polynomial's plus the final rounding.
+//! * The `exp2` fraction `x - floor(x)` is rounded for 1,048,576,000 inputs in the clamped domain
+//!   `|x| <= 127`; every such input is a negative non-integer with magnitude below 1/2. The
+//!   rounded fraction remains in `[0, 1]` and can be exactly `1.0`. The exhaustive F1 error bound
+//!   includes this effect. `frexp` and `exp2_int` remain exact; polynomial and other arithmetic
+//!   operations round as specified by `f32`.
+//! * `fast_level_db` has 77 decreasing adjacent steps over its F1 domain `[1e-8, 16]`, each at
+//!   most `1.526e-5` dB. They arise from unfused Horner rounding. This is measured and pinned by
+//!   F1; callers requiring monotonic output need a different contract.
 
 use lane::Lane;
 
