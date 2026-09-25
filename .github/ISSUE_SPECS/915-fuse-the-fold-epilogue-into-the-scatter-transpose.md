@@ -359,3 +359,34 @@ W4 bank at 11 frames, so it has a tail; row 915-5 turns it red. It still measure
   now take the fused path instead.
 - **Codegen.** The hoisted W8 splats (32 vectors) may spill on AVX2. That is a codegen question for
   the batch benchmark, not a bit question.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `62c76b08` and `126ad698` on base `12b621f2`.
+No blocking findings. Traced against the base kernels: `route_word` is character-for-character
+`mix2x2_block`'s two expressions with the same operand positions and the same gain-folded
+coefficients; `fold_words` keeps `ordered_accumulate_block`'s association, left operand and
+first-contributor rule (an all-`-0.0` frame stays `-0.0` on store, `+0.0 + -0.0 = +0.0` on
+continuation); every operation is elementwise with an unfused `fma`, and the only permutation is
+the bit-exact `transpose_tile_{4,8}` rack already uses, so `Simd4`, `Simd8` and `f32` cannot move
+a bit relative to `FrameLane`; the tile rows are built as `tile_scatter` builds them and the tail
+index `f * W + k` matches `scatter_tiled`'s tail copy; the master write is the same buffer and
+words `fold_cohort` wrote. The offer is made only for a fully folded full bank, before any
+staging write, and every graph premise precedes the first write, so a decline leaves nothing
+half-written; `fold_plane`, `fold_cohort`, the transposes, staging allocation and the partial
+`scatter` are unchanged; the mono-collapse seam fills `scratch.right` before the single scatter
+call, so the fused path reads the same two planes. Gate 1 runs both arms through `BankChain::run`
+with counters proving which fold each arm took, and `rt1_direct_bank_alloc`'s folded arm reaches
+the fused path at 0 allocations. Six mutations re-applied and reverted (four of the implementer's,
+two of the reviewer's: reversed tile row order, lane-major tail index), each red on gate 1 and the
+metered plan test. Reviewer-run gates, all green: `cargo test -p graph -p rack` in both feature
+configurations, `-p console-workload`, `cargo fmt --all --check`, the two-crate clippy, and the
+realtime, graph, rack, lane and determinism scripts.
+
+One should-fix applied in this commit: the doc comment of
+`all_active_folded_bank_chain_dispatches_the_real_graph_cohort` now says it pins the staged
+fallback (its probe declines the offer) and points at gate 1 for the fused path. Nits recorded,
+no change: `ResidentFoldCohort::new` sits outside a `REALTIME_POLICY` region like `FoldCohort::new`
+(checked multiply and length compares only); the two `clippy.toml` `fast_db` notices are
+pre-existing. Not re-verified by the reviewer: release-profile and wasm/aarch64 runs, and
+`cargo test -p graph-compiler` (the implementer reports both green).

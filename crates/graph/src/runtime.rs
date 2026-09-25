@@ -7720,6 +7720,12 @@ mod tests {
 
     /// The compatibility callback is deliberately unusable here: a regression to per-lane
     /// dispatch must fail rather than quietly producing the same sum.
+    ///
+    /// Since issue #915 this probe declines the resident-fold offer (its `fold_resident` keeps
+    /// the trait default), so what it pins is the **staged fallback** path through
+    /// `fold_cohort`. The fused production path is pinned by
+    /// `a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit`, whose counters
+    /// assert which fold each arm took.
     #[test]
     fn all_active_folded_bank_chain_dispatches_the_real_graph_cohort() {
         struct Identity;
