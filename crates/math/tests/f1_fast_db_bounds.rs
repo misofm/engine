@@ -9,7 +9,8 @@
 //! Two forms of every bound check, following gate M1:
 //!
 //! * `f1_*_exhaustive` walks **every** `f32` bit pattern in the function's operating domain.
-//!   `#[ignore]`d, because it wants release codegen and all cores; run it with
+//!   `#[ignore]`d, because it wants release codegen; its sweep workers are capped at four to
+//!   leave CPU capacity for parallel qualification work. Run it with
 //!   `cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored`.
 //! * `f1_*_subsample` strides the bit pattern by 4099 (prime, so it walks every exponent and a
 //!   dense spread of significands), adds the anchors and the measured worst points, and runs in
@@ -45,7 +46,9 @@
 //!
 //! Each was run against the same oracle over the same domain, and each must push the measured
 //! error over the gate — a bound with no red mutation is decoration. These are measured, not
-//! predicted:
+//! predicted. The degree-drop mutations below deliberately truncate the shipped polynomial;
+//! they do not establish the bound for a refitted lower-degree polynomial. That comparison is
+//! measured separately by `f1_lower_degree_refits_exhaustive`.
 //!
 //! | mutation | measured | gate |
 //! |---|---|---|
@@ -54,14 +57,18 @@
 //! | drop `EXP2_P[4]` (degree 3, same coefficients) | `fast_gain_from_db` `8.115e-3` dB | `1.0e-5` — red |
 //! | drop `LOG2_Q[5]` (degree 4, same coefficients) | `fast_level_db` `1.593e-1` dB | `4.0e-5` — red |
 //!
-//! The last two are the ones that matter: they are what "just drop a term" looks like, and they
-//! are 200x and 4000x over the gate respectively. The degree is not slack.
+//! The last two show why truncating a minimax polynomial is not a lower-degree fit. The refitted
+//! candidate measurements below are the evidence about whether a lower degree can satisfy F1.
+//!
+//! The monotonicity assertion also has a real red mutation: changing `LOG2_Q[0]` from
+//! `0x3fb8_a595` to `0x3fb8_a8dc` changed the exhaustive count from 77 to 95 and failed the
+//! pinned-count assertion.
 //!
 //! Memory note: the sweeps iterate ranges of `u32`. Never collect the patterns.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
+use lane::Lane;
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// `20 * log10(2)`, the same constant the tier itself uses, recomputed here from `f64`.
@@ -89,35 +96,65 @@ fn oracle_level_db(x: f64) -> f64 {
 }
 
 /// The worst error seen over a sweep, and how many inputs produced it.
+#[derive(Clone, Copy)]
 struct Sweep {
-    /// Worst error, in decibels, scaled by 2^40 so it can live in an `AtomicU64`.
+    /// Worst error, in decibels, scaled by 2^40 for stable integer comparisons.
     worst_scaled: u64,
     /// The input bit pattern that produced it.
     worst_bits: u32,
     /// How many inputs were actually checked.
     checked: u64,
+    /// Number of adjacent input pairs where the output moved opposite to the input.
+    decreasing_steps: u64,
 }
 
 const SCALE: f64 = (1_u64 << 40) as f64;
 
 /// Sweeps `[first_bits, last_bits]` (inclusive, monotone in the `f32` value) with `stride`.
-fn sweep(first_bits: u32, last_bits: u32, stride: u64, error_db: fn(f32) -> Option<f64>) -> Sweep {
-    let threads = thread::available_parallelism().map_or(1, |value| value.get());
+struct Measurement {
+    error_db: Option<f64>,
+    value: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Edge {
+    x: f32,
+    y: f32,
+}
+
+struct ChunkSweep {
+    worst_scaled: u64,
+    worst_bits: u32,
+    checked: u64,
+    decreasing_steps: u64,
+    first: Option<Edge>,
+    last: Option<Edge>,
+}
+
+fn decreases(previous: Edge, current: Edge) -> bool {
+    (previous.x < current.x && previous.y > current.y)
+        || (previous.x > current.x && previous.y < current.y)
+}
+
+fn sweep(first_bits: u32, last_bits: u32, stride: u64, measure: fn(f32) -> Measurement) -> Sweep {
+    // Keep exhaustive CPU work bounded while other qualification agents are active.
+    let threads = thread::available_parallelism().map_or(1, |value| value.get().min(4));
     let total = u64::from(last_bits - first_bits) + 1;
     let span = total.div_ceil(threads as u64);
-    let worst = AtomicU64::new(0);
-    let worst_bits = AtomicU64::new(0);
-    let checked = AtomicU64::new(0);
-
-    thread::scope(|scope| {
+    let chunks = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
         for index in 0..threads {
-            let worst = &worst;
-            let worst_bits = &worst_bits;
-            let checked = &checked;
-            scope.spawn(move || {
+            handles.push(scope.spawn(move || {
                 let start = index as u64 * span;
                 if start >= total {
-                    return;
+                    return ChunkSweep {
+                        worst_scaled: 0,
+                        worst_bits: 0,
+                        checked: 0,
+                        decreasing_steps: 0,
+                        first: None,
+                        last: None,
+                    };
                 }
                 let end = (start + span).min(total);
                 // Align this thread's start to the stride so the union is exactly the strided set.
@@ -125,9 +162,27 @@ fn sweep(first_bits: u32, last_bits: u32, stride: u64, error_db: fn(f32) -> Opti
                 let mut local_worst = 0_u64;
                 let mut local_bits = 0_u32;
                 let mut local_checked = 0_u64;
+                let mut local_decreasing = 0_u64;
+                let mut first = None;
+                let mut previous = None;
+                let mut last = None;
                 while offset < end {
                     let bits = first_bits + offset as u32;
-                    if let Some(error) = error_db(f32::from_bits(bits)) {
+                    let x = f32::from_bits(bits);
+                    let Measurement { error_db, value } = measure(x);
+                    let edge = Edge { x, y: value };
+                    if first.is_none() {
+                        first = Some(edge);
+                    }
+                    if stride == 1 {
+                        if let Some(previous) = previous
+                            && decreases(previous, edge)
+                        {
+                            local_decreasing += 1;
+                        }
+                        previous = Some(edge);
+                    }
+                    if let Some(error) = error_db {
                         local_checked += 1;
                         let scaled = (error * SCALE) as u64;
                         if scaled > local_worst {
@@ -135,53 +190,79 @@ fn sweep(first_bits: u32, last_bits: u32, stride: u64, error_db: fn(f32) -> Opti
                             local_bits = bits;
                         }
                     }
+                    // Decreasing counts are enabled exclusively for stride 1, so every compared
+                    // pair is adjacent in the original domain. `last` also marks strided chunks.
+                    last = Some(edge);
                     offset += stride;
                 }
-                checked.fetch_add(local_checked, Ordering::Relaxed);
-                let mut seen = worst.load(Ordering::Relaxed);
-                while local_worst > seen {
-                    match worst.compare_exchange(
-                        seen,
-                        local_worst,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            worst_bits.store(u64::from(local_bits), Ordering::Relaxed);
-                            break;
-                        }
-                        Err(current) => seen = current,
-                    }
+                ChunkSweep {
+                    worst_scaled: local_worst,
+                    worst_bits: local_bits,
+                    checked: local_checked,
+                    decreasing_steps: local_decreasing,
+                    first,
+                    last,
                 }
-            });
+            }));
         }
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("F1 sweep worker panicked"))
+            .collect::<Vec<_>>()
     });
 
-    Sweep {
-        worst_scaled: worst.load(Ordering::Relaxed),
-        worst_bits: worst_bits.load(Ordering::Relaxed) as u32,
-        checked: checked.load(Ordering::Relaxed),
+    let mut result = Sweep {
+        worst_scaled: 0,
+        worst_bits: 0,
+        checked: 0,
+        decreasing_steps: 0,
+    };
+    let mut previous_edge = None;
+    for chunk in chunks {
+        if chunk.worst_scaled > result.worst_scaled {
+            result.worst_scaled = chunk.worst_scaled;
+            result.worst_bits = chunk.worst_bits;
+        }
+        result.checked += chunk.checked;
+        if stride == 1 {
+            result.decreasing_steps += chunk.decreasing_steps;
+            // Chunks are joined in bit-range order, so this includes every worker-boundary pair.
+            if let (Some(previous), Some(first)) = (previous_edge, chunk.first)
+                && decreases(previous, first)
+            {
+                result.decreasing_steps += 1;
+            }
+        }
+        if chunk.last.is_some() {
+            previous_edge = chunk.last;
+        }
     }
+
+    result
 }
 
 /// Error of `fast_gain_from_db` at one decibel value, in decibels of the returned gain.
-fn gain_error_db(db: f32) -> Option<f64> {
+fn gain_error_db(db: f32) -> Measurement {
     let got = f64::from(fast_gain_from_db::<f32>(db));
     let want = oracle_gain(f64::from(db));
-    if want <= 0.0 || !want.is_finite() || !got.is_finite() {
-        return None;
+    let error_db = (want > 0.0 && want.is_finite() && got.is_finite())
+        .then_some(((got - want) / want).abs() * DB_PER_RELATIVE);
+    Measurement {
+        error_db,
+        value: got as f32,
     }
-    Some(((got - want) / want).abs() * DB_PER_RELATIVE)
 }
 
 /// Error of `fast_level_db` at one amplitude, in decibels.
-fn level_error_db(x: f32) -> Option<f64> {
+fn level_error_db(x: f32) -> Measurement {
     let got = f64::from(fast_level_db::<f32>(x));
     let want = oracle_level_db(f64::from(x));
-    if !want.is_finite() || !got.is_finite() {
-        return None;
+    let error_db = (want.is_finite() && got.is_finite()).then_some((got - want).abs());
+    Measurement {
+        error_db,
+        value: got as f32,
     }
-    Some((got - want).abs())
 }
 
 fn assert_sweep(name: &str, sweep: Sweep, gate_db: f64, minimum_checked: u64) {
@@ -350,31 +431,130 @@ fn f1_level_db_subsample() {
 #[ignore = "full-domain sweep: run with --release -- --ignored"]
 fn f1_gain_from_db_exhaustive() {
     let (lo, hi) = gain_domain();
+    let negative = sweep(lo, hi, 1, gain_error_db);
     assert_sweep(
         "fast_gain_from_db negative exhaustive",
-        sweep(lo, hi, 1, gain_error_db),
+        negative,
         GAIN_MAX_DB,
         1_000_000_000,
     );
+    println!(
+        "fast_gain_from_db negative domain: {} decreasing steps",
+        negative.decreasing_steps
+    );
+    assert_eq!(negative.decreasing_steps, 0);
     let (lo, hi) = gain_domain_positive();
+    let positive = sweep(lo, hi, 1, gain_error_db);
     assert_sweep(
         "fast_gain_from_db positive exhaustive",
-        sweep(lo, hi, 1, gain_error_db),
+        positive,
         GAIN_MAX_DB,
         1_000_000_000,
     );
+    println!(
+        "fast_gain_from_db positive domain: {} decreasing steps",
+        positive.decreasing_steps
+    );
+    assert_eq!(positive.decreasing_steps, 0);
 }
 
 #[test]
 #[ignore = "full-domain sweep: run with --release -- --ignored"]
 fn f1_level_db_exhaustive() {
     let (lo, hi) = level_domain();
-    assert_sweep(
-        "fast_level_db exhaustive",
-        sweep(lo, hi, 1, level_error_db),
-        LEVEL_MAX_DB,
-        250_000_000,
+    let level = sweep(lo, hi, 1, level_error_db);
+    println!(
+        "fast_level_db domain: {} decreasing steps",
+        level.decreasing_steps
     );
+    assert_eq!(level.decreasing_steps, 77);
+    assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 250_000_000);
+}
+
+// Refitted lower-degree rows recorded by issue #880 F-3. Coefficients are in Horner order:
+// highest order first, matching the coefficient words printed in the issue.
+const REFIT_GAIN_DEGREE3: [f32; 4] = [
+    f32::from_bits(0x3c5b_f2e2),
+    f32::from_bits(0x3d55_ffe6),
+    f32::from_bits(0x3e77_11ca),
+    f32::from_bits(0x3f31_6b63),
+];
+const REFIT_LEVEL_DEGREE4: [f32; 5] = [
+    f32::from_bits(0x3d3e_0145),
+    f32::from_bits(0xbe48_fcca),
+    f32::from_bits(0x3ed5_d00c),
+    f32::from_bits(0xbf35_aca2),
+    f32::from_bits(0x3fb8_9252),
+];
+
+const LOG2_PER_DB_F32: f32 = (core::f64::consts::LOG2_10 / 20.0) as f32;
+const DB_PER_LOG2_F32: f32 = (20.0_f64 * core::f64::consts::LOG10_2) as f32;
+
+fn refit_gain_degree3(db: f32) -> f32 {
+    let x = db.mul(f32::splat(LOG2_PER_DB_F32)).clamp(-126.0, 127.0);
+    let xi = x.floor();
+    let f = x.sub(xi);
+    let mut p = REFIT_GAIN_DEGREE3[0];
+    for coefficient in &REFIT_GAIN_DEGREE3[1..] {
+        p = p.mul(f).add(*coefficient);
+    }
+    f32::splat(1.0)
+        .add(f.mul(p))
+        .mul(f32::exp2_int_in_range(xi))
+}
+
+fn refit_level_degree4(x: f32) -> f32 {
+    let (m, e) = x.max(f32::MIN_POSITIVE).frexp();
+    let t = m.sub(1.0);
+    let mut q = REFIT_LEVEL_DEGREE4[0];
+    for coefficient in &REFIT_LEVEL_DEGREE4[1..] {
+        q = q.mul(t).add(*coefficient);
+    }
+    e.add(t.mul(q)).mul(DB_PER_LOG2_F32)
+}
+
+fn refit_gain_error_db(db: f32) -> Measurement {
+    let got = f64::from(refit_gain_degree3(db));
+    let want = oracle_gain(f64::from(db));
+    Measurement {
+        error_db: Some(((got - want) / want).abs() * DB_PER_RELATIVE),
+        value: got as f32,
+    }
+}
+
+fn refit_level_error_db(x: f32) -> Measurement {
+    let got = f64::from(refit_level_degree4(x));
+    let want = oracle_level_db(f64::from(x));
+    Measurement {
+        error_db: Some((got - want).abs()),
+        value: got as f32,
+    }
+}
+
+/// Remeasures the recorded refits over F1's actual domains and rejects both against its gates.
+#[test]
+#[ignore = "full-domain refit measurement: run with --release -- --ignored"]
+fn f1_lower_degree_refits_exhaustive() {
+    let (lo, hi) = gain_domain();
+    let gain_negative = sweep(lo, hi, 1, refit_gain_error_db);
+    let (lo, hi) = gain_domain_positive();
+    let gain_positive = sweep(lo, hi, 1, refit_gain_error_db);
+    let (lo, hi) = level_domain();
+    let level = sweep(lo, hi, 1, refit_level_error_db);
+
+    let gain_negative_db = gain_negative.worst_scaled as f64 / SCALE;
+    let gain_positive_db = gain_positive.worst_scaled as f64 / SCALE;
+    let level_db = level.worst_scaled as f64 / SCALE;
+    assert_eq!(gain_negative.checked, 1_126_170_625);
+    assert_eq!(gain_positive.checked, 1_103_101_953);
+    assert_eq!(level.checked, 257_176_458);
+    println!(
+        "refit P degree 3: negative {gain_negative_db:.6e} dB, positive {gain_positive_db:.6e} dB"
+    );
+    println!("refit Q degree 4: {level_db:.6e} dB");
+    assert!(gain_negative_db > GAIN_MAX_DB);
+    assert!(gain_positive_db > GAIN_MAX_DB);
+    assert!(level_db > LEVEL_MAX_DB);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -391,22 +571,25 @@ fn exact_gain_from_db(db: f32) -> f32 {
     math::exp2_lane::<f32>(db * (core::f64::consts::LOG2_10 / 20.0) as f32)
 }
 
-fn exact_gain_error_db(db: f32) -> Option<f64> {
+fn exact_gain_error_db(db: f32) -> Measurement {
     let got = f64::from(exact_gain_from_db(db));
     let want = oracle_gain(f64::from(db));
-    if want <= 0.0 || !want.is_finite() || !got.is_finite() {
-        return None;
+    let error_db = (want > 0.0 && want.is_finite() && got.is_finite())
+        .then_some(((got - want) / want).abs() * DB_PER_RELATIVE);
+    Measurement {
+        error_db,
+        value: got as f32,
     }
-    Some(((got - want) / want).abs() * DB_PER_RELATIVE)
 }
 
-fn exact_level_error_db(x: f32) -> Option<f64> {
+fn exact_level_error_db(x: f32) -> Measurement {
     let got = f64::from(exact_level_db(x));
     let want = oracle_level_db(f64::from(x));
-    if !want.is_finite() || !got.is_finite() {
-        return None;
+    let error_db = (want.is_finite() && got.is_finite()).then_some((got - want).abs());
+    Measurement {
+        error_db,
+        value: got as f32,
     }
-    Some((got - want).abs())
 }
 
 /// The crossing is safe because the fast tier is *not much worse* than what it replaces.
@@ -425,8 +608,8 @@ fn f1_fast_tier_stays_within_twice_the_exact_tier() {
         (
             "gain_from_db negative",
             gain_domain(),
-            gain_error_db as fn(f32) -> Option<f64>,
-            exact_gain_error_db as fn(f32) -> Option<f64>,
+            gain_error_db as fn(f32) -> Measurement,
+            exact_gain_error_db as fn(f32) -> Measurement,
         ),
         (
             "gain_from_db positive",

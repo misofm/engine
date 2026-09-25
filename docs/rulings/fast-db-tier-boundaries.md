@@ -131,9 +131,16 @@ path can reach.
 * **The shared runtime helpers** (boundary 3): only if a measurement shows a non-dynamics consumer
   of `dynamics::level_db` that is both hot and tolerant of detector-grade accuracy. None exists
   today.
-* **A lower degree still** (`exp2` degree 3, `log2` degree 4): measured and rejected on accuracy, not
-  guessed — F1's red mutations put them at `8.115e-3` dB and `1.593e-1` dB, 200x and 4000x over the
-  gate. The degree is not slack.
+* **A lower degree still** (`exp2` degree 3, `log2` degree 4): F1 exhaustively remeasured the
+  refitted candidates over its operating domains. With P degree 3 coefficients, highest order
+  first, `[0x3c5bf2e2, 0x3d55ffe6, 0x3e7711ca, 0x3f316b63]`, the applied-gain error is
+  `3.210375e-5` dB over `[-160, -0]` and `2.662959e-5` dB over `[0, 24]`, above the `1.0e-5` dB
+  gate. With Q degree 4 coefficients `[0x3d3e0145, 0xbe48fcca, 0x3ed5d00c, 0xbf35aca2,
+  0x3fb89252]`, the level error is `1.005557e-4` dB over `[1e-8, 16]`, above the `4.0e-5` dB
+  gate. These are measurements from the same oracle and full-domain sweep as the shipped rows.
+  Separately, the real-coefficient LP minimax lower bounds, derived by the research harness, are
+  `2.52e-5` dB for P degree 3 and `8.65e-5` dB for Q degree 4. Those derivations show that no f32
+  refit can meet either gate. The degree is not slack.
 
 ## Links
 
