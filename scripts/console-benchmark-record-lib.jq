@@ -21,7 +21,7 @@ def session_keys: ["backend","background_load_note","candidate_commit","cpu_affi
 
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
-def meters_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","meter_frames_drained","meter_streams","meter_tap","meter_window_blocks","meters_off_output_sha256","meters_off_p50_ns","meters_off_p95_ns","meters_off_p99_ns","meters_on_output_sha256","meters_on_p50_ns","meters_on_p95_ns","meters_on_p99_ns","missing_metadata","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
+def meters_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","meter_frames_drained","meter_streams","meter_tap","meter_window_blocks","meters_off_bank_route_folds","meters_off_bank_scatter_redirects","meters_off_output_sha256","meters_off_p50_ns","meters_off_p95_ns","meters_off_p99_ns","meters_on_bank_route_folds","meters_on_bank_scatter_redirects","meters_on_output_sha256","meters_on_p50_ns","meters_on_p95_ns","meters_on_p99_ns","missing_metadata","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
 def placement_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","merged_chain_layout","merged_chain_output_sha256","merged_chain_p50_ns","merged_chain_p95_ns","merged_chain_p99_ns","merged_chain_transposes_per_block","missing_metadata","observations","os","paired_delta_median_ns","paired_delta_median_ns_per_track","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","split_chains_layout","split_chains_output_sha256","split_chains_p50_ns","split_chains_p95_ns","split_chains_p99_ns","split_chains_transposes_per_block","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -429,6 +429,17 @@ def meters_record_valid:
   # rendered bit, and this is where that is stated rather than assumed.
   .meters_off_output_sha256 == .meters_on_output_sha256 and
   .bit_identity == "meters_off == meters_on, asserted in-run" and
+  # Issue #914: each arm's plan-shape counters. The route fold and the scatter redirect both render
+  # the bits of the path they replace, so the digest pair above cannot say whether either fired and
+  # neither can a timing; these counts are the only statement there is. Every route of the console
+  # folds (`every_standing_workload_folds_one_route_per_track` pins it in code), and a post-matrix
+  # meter folds exactly what the unmetered plan folds and moves no redirect (the #885 and #886
+  # contracts). A meters-on arm that stopped folding would still render meters_off's bits and read
+  # as the price of metering, so the record is refused rather than accepted.
+  ([.meters_off_bank_route_folds,.meters_on_bank_route_folds,.meters_off_bank_scatter_redirects,.meters_on_bank_scatter_redirects] | all(nonnegative_integer)) and
+  .meters_off_bank_route_folds == .tracks and
+  .meters_on_bank_route_folds == .meters_off_bank_route_folds and
+  .meters_on_bank_scatter_redirects == .meters_off_bank_scatter_redirects and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
 # The observation arm (#163 item 0d), which is the issue #143 two-level zero measured rather than

@@ -3,10 +3,10 @@
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
 # mutated in turn and asserted red, so the aggregate's guarantees -- forty-six records, both
-# rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, and
-# the class-A statements that neither the stationary smoother nor a meter nor an armed observation
-# tap nor a restated parameter nor the mono collapse changes a rendered bit -- are
-# properties the suite can actually lose.
+# rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, the
+# class-A statements that neither the stationary smoother nor a meter nor an armed observation
+# tap nor a restated parameter nor the mono collapse changes a rendered bit, and the meters pair's
+# equal fold and redirect counters -- are properties the suite can actually lose.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -101,6 +101,8 @@ meters=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   paired_delta_median_ns: 17063,
   meters_off_output_sha256: $a, meters_on_output_sha256: $a,
   bit_identity: "meters_off == meters_on, asserted in-run",
+  meters_off_bank_route_folds: 64, meters_on_bank_route_folds: 64,
+  meters_off_bank_scatter_redirects: 0, meters_on_bank_scatter_redirects: 0,
   render_errors: 0, render_total_forbidden_operations: 0,
   descriptive_only: true,
   statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is meters_on minus meters_off per observation; descriptive only; no threshold"
@@ -571,6 +573,29 @@ meters_mutation '.statistical_method = "paired"' 'a meters record whose method s
 expect_reject "$(printf '%s' "$meters" | jq -c --arg c "$digest_c" '.meters_on_output_sha256 = $c')" \
     'a meter attachment that changed rendered output'
 meters_mutation '.bit_identity = "not checked"' 'a meters record that dropped its identity statement'
+# Issue #914: each arm's fold and redirect counters. Both optimisations render the bits of the path
+# they replace, so only these counts can say the metered arm still folds -- and a metered arm that
+# stopped folding would still pass the digest check above and publish the fold's cost as the meters'.
+meters_mutation 'del(.meters_off_bank_route_folds, .meters_on_bank_route_folds, .meters_off_bank_scatter_redirects, .meters_on_bank_scatter_redirects)' \
+    'a meters record without its fold and redirect counters (the shape before #914)'
+meters_mutation 'del(.meters_on_bank_route_folds)' 'a meters record missing the metered arm fold count'
+meters_mutation '.meters_on_bank_route_folds = 0' 'a metered arm whose route fold declined'
+meters_mutation '.meters_on_bank_route_folds = 65' 'a metered arm folding more routes than the unmetered arm'
+meters_mutation '.meters_on_bank_scatter_redirects = 8' 'a metered arm whose scatter redirects differ from the unmetered arm'
+meters_mutation '.meters_off_bank_route_folds = 32 | .meters_on_bank_route_folds = 32' \
+    'two arms that agree but do not fold every route of the console'
+# The redirect pair is pinned equal but not to a value, so these three are the type rule's alone:
+# both arms agree, and only "a count is a non-negative integer" is left to refuse them.
+meters_mutation '.meters_off_bank_scatter_redirects = -1 | .meters_on_bank_scatter_redirects = -1' \
+    'a negative redirect count'
+meters_mutation '.meters_off_bank_scatter_redirects = 0.5 | .meters_on_bank_scatter_redirects = 0.5' \
+    'a fractional redirect count'
+meters_mutation '.meters_off_bank_scatter_redirects = "0" | .meters_on_bank_scatter_redirects = "0"' \
+    'a redirect count written as a string'
+# The redirect count is pinned equal across the arms, not to a value: a plan that both folds every
+# route and redirects the same lanes in both arms is a different plan shape, not a dishonest record.
+expect_accept "$(printf '%s' "$meters" | jq -c '.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8')" \
+    'a meters pair whose arms redirect the same lanes'
 
 observation_mutation '.pairing = "sequential"' 'observation arms that were not alternated'
 observation_mutation '.arms = ["unarmed","armed"]' 'an observation comparison missing its level-1 zero'
