@@ -407,3 +407,37 @@ These results are for `f4b8317b`.
 | `cargo clippy --locked -p source --all-targets --all-features -- -D warnings` | exit 0 |
 | mutations M1-M8 on this branch | all red, same tests as the table above |
 | trial merge of `origin/codex/917-retain-played-transfer-block` (`2016de49`) into a throwaway copy of `f4b8317b` | clean merge; `cargo test -p source --all-features`: 72 passed, 1 ignored, doc 1; `cargo clippy -p source` clean; printer `prepared transfer blocks: 3`, output equal to the committed constants; M1-M8 all red with the same tests (the M3/M6/M7 `Full` path included). The scratch worktree was then removed; no merge is on this branch. |
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `c03848a3` through `8e27b804` on base
+`12b621f2`, then a focused re-check of the should-fix commits `f4b8317b` and `5f0a715e`.
+No blocking findings. The acked-batch question, traced in code: the only ack is still
+`publish_block`'s `Ok` after the data push; `take_recycled_block`, `submit_planes` and
+`publish_block` are byte-identical to base; `commit_block` validates before taking the block,
+stamps, and calls `publish_block` once; the worker calls `commit_block` only with a reserved block
+and `commit_deferred` otherwise, never twice; `commit_deferred` with nothing deferred is
+unreachable by the state machine; a seek between a `Full` commit and its retry leaves the block
+to be pushed unacked and discarded as stale by the consumer, not leaked (conservation asserted
+after every scripted step); a decode error after reserve returns the block to the job before the
+error propagates. Deviation 1 is correct and the brief was wrong: a validation-rejected block in
+`deferred_block` would be published unacked on the next reservation carrying its previous trip's
+stamp over fresh samples. PCM bytes: the block-for-block test compares against a verbatim copy of
+the old worker whose only diff is the staging parameter and the inlined submit, recorded before
+the production change; the fixture carries subnormal, NaN, ±inf and `-0.0`. Deviations 2 and 3
+(a seek on a full ring no longer counts a quantum the old worker decoded ahead; one more empty
+recycle poll) move no rendered bit, are read by no fixture, digest, browser `expected.json` or SDK
+test, and the new count is the more accurate one: class A, no ruling needed. The repin
+(16 rows, 5,896 bytes, digest `0xafc6_12be_270e_b257`) reproduced by the reviewer's live
+`audit source-duration` run; `qualification.yml` changes one value and both path-routing
+scripts pass. Mutations M1, M2, M3, M6 re-applied and reverted, red as claimed.
+
+Should-fixes found by a trial merge with #917 and applied by the implementer: the merge is clean
+and gate 1's constants do not change (the retained block never enters the recycle queue, so three
+blocks circulate on both shapes); the only shape-dependent code was the `Full`-path test injector,
+now derived from the live queue cursors (free data-queue slots plus one, minus blocks on the
+recycle queue) and red-mutation-proof on both shapes; the stale-retry test was strengthened, not
+weakened (it now also asserts every generation-1 block is discarded and none is played). The
+re-check trial merge: 72 source tests green, constants byte-identical. Not re-verified by the
+reviewer: workspace-wide and wasm clippy, the native-pcm-runner scripts, and the audited-allocator
+`audit source` run (the implementer reports all green).
