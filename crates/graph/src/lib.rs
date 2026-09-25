@@ -33,7 +33,8 @@ pub use runtime::{
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
     test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
-    test_only_split_pair_table_witness,
+    test_only_set_source_in_place_declined, test_only_source_plane_counts,
+    test_only_source_plane_reset, test_only_split_pair_table_witness,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1643,6 +1644,34 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
         0
     }
+    /// Whether [`Self::played_planes`] lends this driver's played block (issue #918).
+    ///
+    /// Read once, at bind. Only a driver that answers `true` has any claim bound in place, so a
+    /// driver that never overrode `played_planes` keeps every claim on the copy: its default
+    /// `None` would otherwise read as an underrun on every block and render silence where its
+    /// `copy_track_input` wrote audio.
+    fn provides_played_planes(&self) -> bool {
+        false
+    }
+    /// Borrow claim `claim_index`'s `(left, right)` planes of the block `begin_block` played, in
+    /// place, or `None` when no block was played this quantum for it (underrun, end of region).
+    ///
+    /// Each plane is exactly one quantum: the played frames, then `+0.0` to the quantum on a short
+    /// block. On `Some` the words are the ones `copy_track_input` would have written for the claim,
+    /// and on `None` it would have written `+0.0` throughout. The planes stay readable until the
+    /// next `&mut self` call; the graph reads them only between `begin_block` and the end of the
+    /// same render. Realtime: no allocation, lock or syscall.
+    fn played_planes(&self, _claim_index: usize) -> Option<(&[f32], &[f32])> {
+        None
+    }
+}
+
+/// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
+/// the planes `begin_block` played, handed to [`runtime::Runtime::execute`] after the copy loop.
+pub(crate) trait GraphSourcePlanes {
+    /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
+    /// checks.
+    fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])>;
 }
 
 /// A graph-owned, coordinator-only source-set capability.
@@ -1729,6 +1758,24 @@ impl GraphPreparedSourceSet {
         self.driver.copy_after_disarm_telemetry(output)
     }
 }
+
+// REALTIME_POLICY_BEGIN
+impl GraphSourcePlanes for GraphPreparedSourceSet {
+    /// The same claim-index check `copy_track_input` makes, then the driver's planes, each held to
+    /// the quantum `copy_track_input` holds its destinations to. A plane of any other length is a
+    /// driver fault; it is refused as `None`, which the gather serves as silence, rather than
+    /// handed to a gather that would index past it.
+    fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
+        if claim_index >= self.claims.len() {
+            return None;
+        }
+        let quantum = self.envelope.quantum.0 as usize;
+        self.driver
+            .played_planes(claim_index)
+            .filter(|(left, right)| left.len() == quantum && right.len() == quantum)
+    }
+}
+// REALTIME_POLICY_END
 
 /// Transactional source-set binding rejection returning every caller-owned input.
 pub struct GraphSourceBindFailure {
@@ -2023,7 +2070,9 @@ struct GraphExecutor {
     runtime: runtime::Runtime,
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
-    /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
+    /// `(claim index, arena buffer)` for every track input the coordinator's source set copies
+    /// into the arena. A claim bound in place (issue #918, `Runtime::source_in_place`) is not
+    /// here: its bank reads the played block instead.
     source_input_buffers: Box<[(usize, u32)]>,
 }
 
@@ -2144,6 +2193,26 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
+        // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
+        // that lends its played planes offers any, and `build_sequential` decides which of them
+        // are bound in place. `test_only_set_source_in_place_declined` offers none, which binds
+        // the path every claim took before the issue.
+        let lent_claims: Vec<GraphNodeId> = source_set
+            .as_ref()
+            .filter(|set| set.driver.provides_played_planes())
+            .map(|set| {
+                set.claims()
+                    .iter()
+                    .map(|claim| claim.node.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        #[cfg(any(test, feature = "test-support"))]
+        let lent_claims = if runtime::test_only_source_in_place_declined() {
+            Vec::new()
+        } else {
+            lent_claims
+        };
         let runtime = runtime::build_sequential(
             program,
             &plan.spec,
@@ -2151,7 +2220,14 @@ impl GraphExecutor {
             frames,
             planning,
             observation_activation,
+            &lent_claims,
         );
+        // The copy loop fills exactly the claims that are not read in place.
+        let source_input_buffers: Box<[(usize, u32)]> = source_input_buffers
+            .iter()
+            .copied()
+            .filter(|&(claim, buffer)| !runtime.source_in_place(claim, buffer))
+            .collect();
         Self {
             runtime,
             sample_rate_hz,
@@ -2240,7 +2316,11 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(error);
             }
+            // A claim bound in place is not in this list: its bank's gather reads the played
+            // block's planes (issue #918).
             for &(claim, buffer) in source_input_buffers.iter() {
+                #[cfg(any(test, feature = "test-support"))]
+                runtime::test_only_count_source_copy();
                 let (left, right) = runtime.buffer_mut(buffer);
                 if let Err(error) = source_set.copy_track_input(claim, left, right) {
                     runtime.invalidate_observers_after_failure(time.absolute_sample);
@@ -2252,8 +2332,15 @@ impl PreparedPlanExecutor for GraphExecutor {
         } else {
             GraphObservationValidity::CLEAR
         };
+        // Issue #918: the played planes, shared for the rest of the block. Every release point of
+        // the played block (`begin_block`, a seek's preparation, `end_block`, drop) takes the set
+        // `&mut`, so none can run while a unit borrows a plane; the next `begin_block` is the
+        // next render's.
+        let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
         for unit in 0..runtime.units.len() {
-            if let Err(error) = runtime.execute(unit, time.absolute_sample, host.reborrow()) {
+            if let Err(error) =
+                runtime.execute(unit, time.absolute_sample, host.reborrow(), sources)
+            {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
                 #[cfg(any(test, feature = "test-support"))]
@@ -7197,5 +7284,78 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #918: a source set lends a driver's planes only for one of its own claims and only
+    /// when both are exactly one quantum, the checks `copy_track_input` makes of its destinations.
+    /// Anything else is refused as `None`, which a gather serves as silence, never handed on.
+    #[test]
+    fn a_source_set_lends_only_quantum_planes_of_its_own_claims() {
+        const FRAMES: usize = 5;
+        struct Lender(Vec<f32>);
+        impl GraphPreparedSourceSetDriver for Lender {
+            fn claim_count(&self) -> usize {
+                2
+            }
+            fn begin_block(&mut self, _: u64, _: u32) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn copy_track_input(
+                &mut self,
+                _: usize,
+                _: &mut [f32],
+                _: &mut [f32],
+            ) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn provides_played_planes(&self) -> bool {
+                true
+            }
+            /// Claim 1's right plane is one word short; every other index lends a quantum,
+            /// including 2, which is not one of the set's claims.
+            fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+                let right = if claim == 1 { FRAMES - 1 } else { FRAMES };
+                Some((&self.0[..FRAMES], &self.0[FRAMES..FRAMES + right]))
+            }
+        }
+        let envelope = RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
+        };
+        let claim = |track: &str| GraphSourceInputClaim {
+            node: GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(track).expect("track id"),
+                stage: TrackStage::Input,
+            },
+        };
+        let words: Vec<f32> = (0..2 * FRAMES).map(|word| word as f32).collect();
+        let set = GraphPreparedSourceSet::new(
+            envelope,
+            vec![claim("a"), claim("b")],
+            GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(Lender(words.clone())),
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 0),
+            Some((&words[..FRAMES], &words[FRAMES..])),
+            "a whole quantum of a claim is lent as is"
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 1),
+            None,
+            "a short plane is refused"
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 2),
+            None,
+            "an index past the set's claims is refused"
+        );
     }
 }

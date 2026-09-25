@@ -1712,24 +1712,6 @@ struct SourceGraphSourceSetDriver {
     pending_generation_change: bool,
 }
 
-impl SourceGraphSourceSetDriver {
-    /// Borrow the claim's `(left, right)` channel planes of its source's played block in place.
-    ///
-    /// `None` when the claim index is out of range or its source played no block this quantum
-    /// (underrun, end of region, or no mappings at all, which releases in `begin_block`). The
-    /// planes stay valid until the next `begin_block` or seek preparation (#917). This stays a
-    /// source-crate method until the graph trait carries it.
-    #[cfg_attr(not(test), allow(dead_code))] // Read in place by the banked-source gather.
-    pub(crate) fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
-        let mapping = self.mappings.get(claim_index)?;
-        let consumer = &self.sources.get(mapping.source_index)?.consumer;
-        Some((
-            consumer.played_plane(mapping.left_channel)?,
-            consumer.played_plane(mapping.right_channel)?,
-        ))
-    }
-}
-
 fn allocation_class<T>(
     count: usize,
 ) -> Result<SourceRetainedAllocation, SourceGraphSourceSetError> {
@@ -1887,6 +1869,30 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             .copy_channel(right_channel, right)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)
     }
+
+    /// Every claim's planes are its source's played block, lent in place (issue #918).
+    fn provides_played_planes(&self) -> bool {
+        true
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Borrow the claim's `(left, right)` channel planes of its source's played block in place.
+    ///
+    /// `None` when the claim index is out of range or its source played no block this quantum
+    /// (underrun, end of region, or no mappings at all, which releases in `begin_block`); on
+    /// `None`, `copy_track_input` writes `+0.0` throughout, and on `Some` it copies these words.
+    /// The planes stay valid until the next `begin_block` or seek preparation (#917): both take
+    /// `&mut self`, so no borrow of a plane outlives them. A banked source gather in the graph
+    /// reads them in place of the copy.
+    fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
+        let mapping = self.mappings.get(claim_index)?;
+        let consumer = &self.sources.get(mapping.source_index)?.consumer;
+        Some((
+            consumer.played_plane(mapping.left_channel)?,
+            consumer.played_plane(mapping.right_channel)?,
+        ))
+    }
+    // REALTIME_POLICY_END
 
     fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
         let mut written = 0;

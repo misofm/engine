@@ -256,3 +256,35 @@ restored.
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 916-18 | `preflight_sequential` no longer refuses a plan that reads the session output (`output_value_is_read` not called) | `graph/src/runtime.rs` `preflight_sequential` | `runtime::tests::a_plan_that_reads_the_session_output_is_refused_at_bind` | RED (`a plan that reads the session output must not bind`): the plan binds, and its `t01 PostFader` reads the Output's never-written arena slot. The other 98 lib tests stay GREEN. |
+
+## Issue #918 — banked source inputs gathered from the played transfer block
+
+Each row was applied alone to a committed tree, the listed suites were run, and the file was
+restored with `git checkout`. Rows 918-1 to 918-9 ran on `3857a7fb`; rows 918-10 to 918-12 ran on
+`7f027946`, which adds gate 1's ninth (compensated) shape and the set's refusal test and changes
+none of the code rows 918-1 to 918-9 mutate. Gate 1 is
+`runtime::tests::a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`; gate 2 is
+host-core `source_in_place::a_ring_fed_banked_session_gathers_in_place_with_the_copy_bits`; gate 3
+is `rt10_source_in_place_alloc::an_in_place_source_gather_renders_the_copy_bits_and_allocates_nothing`.
+Gate 1 poisons every claim's arena slot (`0x7fc1_0918` / `0x7fc2_0918`) before each block, so a
+read of a slot the copy no longer fills shows as those words. Where a row says "mode-table assertion
+removed", the gate's `the mode table` assertion was deleted in the same edit so that the bit
+comparison, not the mode table, is what the row proves red.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 918-1 | the gather returns the played planes swapped, `(right, left)` (brief: "read the wrong channel plane") | `graph/src/runtime.rs` `ArenaMembers::plane` | gate 1, gate 3, gate 2 | RED on all three (`W8 x 8 ... block 0 (Full): the master is the copy arm's`; rt10 `the in-place gather renders the copied plan's bits`; `bank console, block 0`) |
+| 918-2 | an unplayed quantum reads the claim's arena buffer instead of the silence buffer (brief: "skip the silence fallback") | `graph/src/runtime.rs` `ArenaMembers::plane` | gate 1; gate 3; gate 2 | RED on gate 1 at the underrun (`W8 x 8 ... block 3 (Underrun)`, left word `2143422744` = the poison). GREEN on gates 2 and 3: there the claim's slot is never written in place mode, so it still holds the arena's initial `+0.0`, which is why gate 1 poisons the slots. |
+| 918-3 | clause (a) admits a `NodeKind::TrackDelay` input (brief: "mark a TrackDelay claim InPlace") | `graph/src/runtime.rs` `source_plane_table` | gate 1; host-core `track_delay` | RED: gate 1 at the mode table (`[true, true, false, true, false, true]`), and 4 of 8 host-core `track_delay` tests (`a_declared_delay_is_exactly_a_pre_padded_source`, `the_delay_survives_the_banked_path`, `the_pre_delay_region_is_exactly_positive_zero`, `the_two_lanes_carry_independent_delays`: the gather reads the raw block, `-0.4769106 != 0.0` inside the delay). Gate 2 GREEN (no delayed track). |
+| 918-3b | 918-3, mode-table assertion removed | as 918-3 | gate 1 | RED at the bits (`delayed: Some(1) ... block 0 (Full): the master is the copy arm's`): the delay line runs over the poisoned slot and the gather reads the undelayed block |
+| 918-4 | the copy loop keeps every claim, in-place ones included (brief: "keep the copy loop for InPlace claims") | `graph/src/lib.rs` `GraphExecutor::new` | gate 1, gate 3, gate 2 | No bit goes red, as the brief predicts: every master, meter and digest assertion passes. RED only on the mode counters: gate 1 `the in-place arm's [copies, played gathers, silent gathers]` (left `[64, 56, 8]`), rt10 `lent: no claim copied` (`[4000, 4000]`), gate 2 `[claims copied, played gathers, silent gathers] in place` (`[96, 72, 24]`) |
+| 918-5 | the table is consulted by buffer alone, ignoring `UnitIdentity::source_lanes` | `graph/src/runtime.rs` `SourceGather::claim` | gate 1; gate 2 | RED on gate 1 shape 7 (`scalar: Some(PostFader) ... block 0 (Full)`): the `PostMatrix` bank gathers each input's recoloured slot for the fader's value and is served the played block instead. GREEN on gate 2 (no recoloured slot is gathered in those sessions). |
+| 918-6 | clause (c) dropped (an observed input is bound in place), mode-table assertion removed | `graph/src/runtime.rs` `source_plane_table` | gate 1 | RED (`delayed: Some(1), observed: Some(2) ...: every meter window is the copy arm's`): the input meter reads the poisoned slot |
+| 918-7 | clause (b) dropped (a claim is bound in place whatever reads it), mode-table assertion removed | `graph/src/runtime.rs` `source_plane_table` | gate 1; gate 2 | RED on gate 1 (`routed: Some(4) ... block 0 (Full)`, left word `2143422744`): the route reads the poisoned slot in place. GREEN on gate 2 (every reader there is a bank gather). |
+| 918-8 | the production driver lends the claim's channels swapped | `source/src/lib.rs` `SourceGraphSourceSetDriver::played_planes` | gate 2; `cargo test -p source --all-features --lib` | RED: gate 2 (`bank console, block 0`) and the #917 source tests `graph_driver_played_planes_map_claims_until_the_next_begin_or_seek`, `played_block_retention_keeps_the_pre_change_admission_sequence` |
+| 918-9 | `provides_played_planes` defaults to `true` | `graph/src/lib.rs` `GraphPreparedSourceSetDriver` | `cargo test -p graph --lib` | RED: #916's `a_failed_render_silences_the_host_planes_and_a_rejected_one_leaves_them_alone` (`Source(true): the first block wrote a master`). Its `FailingSource` never overrode `played_planes`, so its bound-in-place claim reads the default `None` as an underrun on every block and renders silence: why lending is opt-in |
+| 918-10 | `gathers_only` drops its `staged.is_empty()` clause | `graph/src/runtime.rs` `gathers_only` | gate 1 | **GREEN, equivalent**: a delayed input's effective read (`RuntimeOp::inputs`) is its staging slot, which is taken while the producer's slot is still live, so `inputs == [buffer]` already refuses the compensated claim |
+| 918-10c | `gathers_only`'s `inputs == [buffer]` becomes `inputs.len() == 1` | `graph/src/runtime.rs` `gathers_only` | `cargo test -p graph --lib` | **GREEN, equivalent**: every reader of the input names its buffer (`op_dataflow`), so one undelayed input is the buffer. The two clauses guard the same fact twice. |
+| 918-10b | both of the above: one input that is the buffer or a staged copy of it | `graph/src/runtime.rs` `gathers_only` | gate 1 | RED (`compensated: Some(3) ... block 0 (Full)`): the member stages the poisoned slot through its compensation delay |
+| 918-11 | the set lends any plane of any index (no claim or length check) | `graph/src/lib.rs` `GraphSourcePlanes for GraphPreparedSourceSet` | `tests::a_source_set_lends_only_quantum_planes_of_its_own_claims` | RED (`a short plane is refused`) |
+| 918-12 | the unit loop is handed no source planes (`sources = None`) | `graph/src/lib.rs` `GraphExecutor::render` | gate 1, gate 3, gate 2 | RED on all three: every in-place gather reads its poisoned or zero slot |
