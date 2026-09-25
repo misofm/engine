@@ -353,3 +353,46 @@ independent of stem length, and, like the runtime's other bind-time tables (`ban
 - Anchor drift: every cited anchor had moved with #915/#916 (for example the copy loop is now at
   `lib.rs:2321`, `bank_gather_source` at `runtime.rs:2742`, `ArenaMembers::plane` at `runtime.rs:1526`,
   the rack's `gather` at `rack/src/lib.rs:2630`); each cited function and behaviour was as described.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `b939e27b` through `12fe58c9` on base
+`63eeebf0` (the verified #916 tip with the verified #917 branch merged). No blocking findings.
+Lifetime and aliasing, proved from the code: `render` destructures the executor into disjoint
+fields, every release point of the played block needs `&mut PcmSourceConsumer` reachable only
+through `&mut GraphPreparedSourceSet`, the copy loop is that set's last `&mut` use, and `sources`
+is a shared borrow held across the whole unit loop that `runtime.execute` takes beside `&mut
+runtime`, so the borrow checker is the proof that no release runs before the loop ends and that
+the lent planes cannot alias the arena; every `Err` arm and the controlled-activation dispatcher
+touch only the runtime and the host planes. Readers of the input's value come from `op_dataflow`,
+which attributes a recoloured slot's reads to its new owner; observers bound to alias nodes are
+folded into the producing op's `observers`, so rule (c) covers `Tap` aliases and dormant
+controlled bindings; split-pair, submix, Output, bound and dynamic readers are single ops or
+multi-input and are refused by `first_slot`/`gathers_only`; `arm_resident_inputs` needs a bank
+predecessor, which a `SourceInput` op never is; the mono-collapse witness reads no plane. For
+deviation 2, every gather path (tiled, per-lane, mono) takes each lane's `plane()` borrow and
+finishes transposing into scratch before any processing or scatter, so an in-place member's own
+write can never be read back half-written. Buffer 0 can be written by no lease (the builder
+refuses it), so an underrun reads `+0.0` exactly as `copy_channel` filled; a short block's tail is
+what `play()` zeroed; `-0.0` and the doubled mono slice are pure word moves. Gate 1 poisons every
+claim's slot before every block, which is what makes the silence-fallback mutation red; gate 2
+compares every block word for word through `SourceControlSet::submit` across an underrun, a
+stale chunk, a seek and a short end-of-region chunk; gate 3 arms the audited allocator with a
+positive control. Six mutations re-applied and reverted (four of the implementer's, two of the
+reviewer's: wrong claim index, wrong lane bit), each red on gate 1. `Runtime` grows one boxed
+slice mirrored in both layout witnesses; `UnitIdentity` stays 32 bytes; no pinned resource row
+moves, though the executor's absolute allocation grew. Scope is the seven authorized files.
+Reviewer-run gates, all green: `cargo test -p graph` (both configurations), `-p source`,
+`-p host-core --all-features`, `-p capi`, `-p console-workload`, fmt, the three-crate clippy,
+graph policy, realtime policy (53 regions in 15 files), determinism (100/100), wasm32 check.
+
+Two corrections to the evidence above, recorded here rather than rewritten: (1) the copy-arm
+digests were not compiled against `63eeebf0`'s `lib.rs` and `runtime.rs` unmodified (the fixture
+uses `provides_played_planes`, `source_in_place` and the counters); the reviewer verified by
+inspection that the declined arm's render path is the base path plus dead branches (an empty
+in-place table and the full copy list), and did not re-record on the base tree. (2) "browser
+resource rows are not expected to move" should read: the executor's absolute allocation grew, no
+pinned row takes it, and the batch-boundary repin owns the artifact hash. Nit, no change: a
+non-quantum plane from a faulty driver becomes silence where the copy path returned
+`InvalidEnvelope`; unreachable with the production driver. Not re-verified by the reviewer:
+`cargo test -p graph-compiler` and `-p builtins-compiler` (the implementer reports green).
