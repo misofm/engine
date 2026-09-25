@@ -313,7 +313,7 @@ fn both_resets_have_word_exact_parameter_and_envelope_states() {
 /// Defaults, bypass and `mix = 0` return the input bits exactly, including `-0.0`, while the
 /// followers still warm.
 ///
-/// `exp2_lane(0)` is exactly `1`, so `shape == 0` already gives `gain == 1`; the identity *select*
+/// `fast_gain_from_db(0)` is exactly `1`, so `shape == 0` already gives `gain == 1`; the identity *select*
 /// is what preserves a signed zero, because `fma(mix, x * 1 - x, x)` maps `-0.0` to `+0.0`.
 ///
 /// Red mutation: drop the `shape == 0` term from the identity mask — the `-0.0` rows go red.

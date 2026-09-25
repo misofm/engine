@@ -114,7 +114,7 @@ fn a_nonfinite_bank_block_is_rejected_as_a_unit() {
 ///
 /// The flush band (`|x| < 1e-20`) strictly contains the subnormal range, so a subnormal detector
 /// can never enter the recurrence — and the shaper is still the identity on it, because two floored
-/// envelopes divide to exactly `1` and `log2_lane(1)` is exactly `0`.
+/// envelopes divide to exactly `1` and `fast_level_db(1)` is exactly `0`.
 ///
 /// Red mutation: drop `flush` from `ar_one_pole_step` — the state word becomes subnormal.
 #[test]

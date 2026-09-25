@@ -6,7 +6,7 @@ restatement, token-scan seal refusing fast vocabulary elsewhere. v1 ran full dyn
 cycles/ch-sample vs our ~120 cycles/lane-sample compressor; the scalar dB path is our recorded
 #88/#89 cost center."
 
-**Status.** Adopted, at six named crossings, measuring 22.64% on the standing sixty-four-track
+**Status.** Adopted, at eight named crossings, measuring 22.64% on the standing sixty-four-track
 console fixture. Three boundaries are recorded here: one effect where the predicted win did not
 exist at all, one design choice that was deliberately *not* taken, and one measuring instrument
 that was wrong by a factor of seventeen and would have killed the optimisation if it had been
@@ -43,10 +43,9 @@ This is a null, and it is the useful kind: the limiter was expected to pay and i
 collected. Confirmed in the shipped wasm binary, where its kernel's arithmetic count is unchanged
 at 124 vector / 0 scalar across this whole change.
 
-The transient shaper is a separate case and also takes no crossing, but for a different reason: it
-is outside the brief's named scope. It still runs `exp2_lane`/`log2_lane` per sample and is the
-obvious next candidate. It is left on the exact tier deliberately, and
-`clippy.toml`'s `disallowed-methods` (formerly `scripts/check-fast-db-seal.sh`, retired once the migration was mutation-proven) is what keeps it there until someone decides otherwise.
+The transient shaper is a separate case. Approved R2 admits its detector contrast and applied gain
+as X7 and X8, after MA-5 proved their domains and exhaustive error bounds. Its `fast_level_db` and
+`fast_gain_from_db` call sites now carry the same named-crossing `#[expect]` seal as X1–X6.
 
 ## Boundary 3 — the shared runtime helpers were deliberately not converted
 
@@ -95,8 +94,8 @@ would have been written up as a null and closed.
 
 ## What was adopted, and what it measures
 
-Six named crossings — compressor (X1, X2), gate/expander (X3, X4), multiband compressor (X5, X6) —
-onto `math::fast_db`, whose two polynomials are fresh minimax fits of degree 4 (`exp2`)
+Eight named crossings — compressor (X1, X2), gate/expander (X3, X4), multiband compressor (X5, X6),
+and transient shaper (X7, X8) — onto `math::fast_db`, whose two polynomials are fresh minimax fits of degree 4 (`exp2`)
 and 5 (`log2`) with no range-reduction fold, replacing Cephes degree 6 and 9 with folds.
 
 | workload | exact tier | fast tier | delta |
@@ -126,8 +125,9 @@ path can reach.
 
 * **The limiter** (boundary 2): only if a future limiter topology puts a decibel conversion back on
   its per-sample path. As long as its ramp is linear-domain there is nothing here for it.
-* **The transient shaper**: it is a genuine candidate, ruled out of scope rather than ruled out on
-  evidence. Reopening needs a crossing and a re-pin, not new measurement to justify the tier.
+* **The transient shaper**: R2 approved X7 (detector contrast) and X8 (applied gain) after MA-5
+  established both domains and showed a maximum fast-versus-exact applied-gain change of
+  `1.654115e-5` dB. The source digest pins move once for those crossings.
 * **The shared runtime helpers** (boundary 3): only if a measurement shows a non-dynamics consumer
   of `dynamics::level_db` that is both hot and tolerant of detector-grade accuracy. None exists
   today.
@@ -152,7 +152,7 @@ path can reach.
   (the container; formerly `scripts/check-fast-db-seal.sh` and `scripts/test-fast-db-seal.sh`,
   retired once the migration was mutation-proven).
 * Crossings: `compressor/src/kernel.rs`, `gate-expander/src/kernel.rs`,
-  `multiband-compressor/src/lib.rs`.
+  `multiband-compressor/src/lib.rs`, `transient-shaper/src/lib.rs`.
 * Gates: `scripts/run-wasm-gates.sh` (133 cases, 331 comparisons, 0 mismatches on all three legs).
 * Bench protocol: `AGENTS.md` "Benchmarks are descriptive during feature development"; issue #104;
   `tools/bench/src/console.rs` "Paired alternation".
