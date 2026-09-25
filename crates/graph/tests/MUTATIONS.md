@@ -165,3 +165,32 @@ real twelve-file, forty-two-region layout, column-zero and indented markers incl
 | 371-5 | delete one marked region of a multi-region file, every remaining marker matched | `crates/rack/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-region-count-floor`) | RED (`expected at least forty-two marked realtime regions`) |
 | 371-6 | a newly marked `tools/` file carrying a `vec!` inside its region | `tools/audit/src/marker_probe.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-tools-root-scanned`) | RED (allocation class) — the discovery walk reaches every root, not only `crates/` and `hosts/` |
 | 371-7 | delete the `END` marker of a region outside the old root, keeping its `BEGIN` | `hosts/host-web/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`unmatched-markers-outside-root`) | RED (`unmatched realtime policy markers`) |
+
+## Issue #915 — the fused fold epilogue (`ArenaMembers::fold_resident`)
+
+Every row below was applied to the working tree at `62c76b08`, the named suites were run, the
+failure (or its absence) was recorded, and the tree was restored with `git checkout` before the
+next row. Host: `x86_64`, workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`, debug
+profile. Sweep driver: one mutation at a time over `cargo test -p graph --lib -- resident_fold
+a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, `cargo test -p rack
+--lib -- a_fully_folded_full_bank_offers resident_fold_cohort` and `cargo test -p console-workload
+--test chain_shape -- the_folded_master_is_the_reductions_own_bits`. "Gate 1" is
+`runtime::tests::a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit`; "the `-0.0`
+test" is `runtime::tests::a_resident_fold_stores_its_first_contributor_so_a_negative_zero_master_keeps_its_sign`;
+"metered" is `runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`.
+The rack rows for the same issue (the offer itself) are in `rack/tests/MUTATIONS.md`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 915-1 | the coefficient roles swap on the left output: `lr.fma(right, ll.mul(left))` becomes `ll.fma(right, lr.mul(left))` | `graph/src/runtime.rs` `route_word` | gate 1, metered, console-workload `the_folded_master_is_the_reductions_own_bits` | RED, RED, RED (`Four, 4 frames, 1 cohort(s), store true: left master`; `Four/4/resident meters`; `nine_track_baseline`) |
+| 915-2 | lanes `1..W` accumulate in reverse (`.enumerate().skip(1)` becomes `.enumerate().skip(1).rev()`) | `graph/src/runtime.rs` `fold_words` | gate 1, metered, console-workload | RED, RED, RED (one-ulp differences, e.g. `1258671376` for `1258671375`; console `nine_track_baseline`) |
+| 915-3 | a continuation is seeded from zero instead of from the live master (`L::load(master).add(routed)` becomes `L::zero().add(routed)`, both planes) | `graph/src/runtime.rs` `fold_words` | gate 1, the `-0.0` test, metered, console-workload | RED, RED, RED, RED (`store false: left master`; `store false, start -0: frame 0`; `Four/8`, the two-cohort shape; `sixty_four_track_console`) |
+| 915-3b | the first contributor is seeded from zero and added instead of stored (`(routed_left, routed_right)` becomes `(L::zero().add(routed_left), L::zero().add(routed_right))`) | `graph/src/runtime.rs` `fold_words` | the `-0.0` test | RED (`Four, store true, start 0: frame 0`). **GREEN on gate 1, metered and console-workload**, disclosed: the two forms differ only on a frame whose every contributor is `-0.0`, which no hostile-random corpus produces. That is why the `-0.0` test is an absolute property and not another differential. |
+| 915-4 | the ragged tail is skipped (`for frame in tiled..frames` becomes `for frame in frames..frames`) | `graph/src/runtime.rs` `fold_resident_tiles` | gate 1, the `-0.0` test, metered | RED, RED, RED (`Four, 13 frames`; `frame 12`; `Four/4` at 13 frames). **GREEN on console-workload**, disclosed: every standing console workload renders a 128-frame quantum, a whole number of tiles at both widths, so no console block has a tail. |
+| 915-5 | `fold_resident` returns `true` having written nothing | `graph/src/runtime.rs` `ArenaMembers::fold_resident` | all three new graph tests, metered, console-workload, and `tests/rt1_direct_bank_alloc.rs` `direct_bank_graph_render_is_allocation_free_and_bit_exact` | RED on every one (`the control must write the master`; `left master`; `nine_track_baseline`; rt1's folded PCM check) |
+| 915-6 | the "only lane 0 may store" premise is dropped | `graph/src/runtime.rs` `fold_resident_tiles` | `runtime::tests::a_resident_fold_declines_before_writing_on_a_broken_premise` | RED (`Four: a later lane stores must decline`). GREEN elsewhere: no compiled plan gives a later lane `store`, so the premise defends a lowered shape a session cannot produce. |
+| 915-7 | the fma operand order is swapped on the left output: `lr.fma(right, ll.mul(left))` becomes `ll.fma(left, lr.mul(right))`, i.e. `(ll * l) + (lr * r)` for `(lr * r) + (ll * l)` | `graph/src/runtime.rs` `route_word` | every suite above | **GREEN, and not a catcher** (the brief says so in advance): `Lane::fma` is the unfused `(a * b) + c` on every backend and IEEE addition of two finite values is commutative. The corpus is finite by construction. The two forms can differ only in which NaN payload propagates when both products are NaN, and nothing here claims to test that. |
+
+Rows 915-3b, 915-4 (console only) and 915-6 are the honest half of this ledger. Each mutation is
+caught, but only by the gate built for it and not by the end-to-end digests. The end-to-end
+digests cannot reach an all-`-0.0` frame, a tail, or a later lane that stores.

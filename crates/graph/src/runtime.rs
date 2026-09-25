@@ -248,10 +248,11 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest, ResponseSnapshotSummary,
+    transpose_tile_4, transpose_tile_8,
 };
 use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
-use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
+use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
 
 use crate::observation_activation::{
     ActivationBinding, ActivationEntry, GraphObservationActivationConfig,
@@ -1428,6 +1429,174 @@ impl BankMembers for ArenaMembers<'_> {
         );
         debug_assert!(valid_left && valid_right);
     }
+
+    /// The whole bank's routes and master accumulation, straight from the resident block
+    /// (issue #915).
+    ///
+    /// This is [`Self::fold_cohort`] over the staging block the scatter would have written, fused
+    /// into the transpose that would have written it: each `W`-frame tile of both planes is
+    /// transposed into its `W` lane rows, every lane's row is routed, and the routed rows are
+    /// accumulated into the master's `W` words for that tile. The staging store, the
+    /// `mix2x2_block` pass over it and the `ordered_accumulate_block` pass over it become one
+    /// pass, and the staging block is never written.
+    ///
+    /// # Why this is `fold_cohort`'s arithmetic and not a re-derivation of it
+    ///
+    /// Both kernels it replaces treat frames independently: `mix2x2_block` computes a frame's two
+    /// outputs from that frame's own `l`, `r` and the lane's constants, and
+    /// `ordered_accumulate_block` computes a master word from that frame's contributors alone. So
+    /// each master word is one fixed expression over its frame's words, and the vector width a
+    /// pass happens to run at -- [`FrameLane`] over a `frames`-long staging plane there, `W` frames
+    /// of a tile or one tail frame here -- does not enter it: the lane contract is IEEE per element
+    /// on every backend, and `Lane::fma` is the unfused `(a * b) + c` on every backend. Per frame
+    /// and per plane, that expression is:
+    ///
+    /// * each lane's routed word, `mix2x2_block`'s verbatim ([`route_word`]):
+    ///   `l' = lr.fma(r, ll.mul(l))` and `r' = rr.fma(r, rl.mul(l))`, both from the frame's
+    ///   original `l` and `r`;
+    /// * the lanes in ascending order, `ordered_accumulate_block`'s verbatim ([`fold_words`]):
+    ///   lane 0's routed word **is** the running value when lane 0 stores, and is added to the
+    ///   live master word (master on the left) when it does not; every later lane is added to the
+    ///   running value, running value on the left; the result is stored once.
+    ///
+    /// The staged path carries each routed word through a staging store and a reload, and a store
+    /// and a load move an `f32`'s bits unchanged, so keeping it in a register moves no bit either.
+    ///
+    /// Every premise is checked before the first write. A failed one declines having written
+    /// nothing, and the chain then takes the staged path -- whose `fold_cohort` applies its own
+    /// checks exactly as it always has.
+    fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+        match cohort.width() {
+            BankWidth::Four => self.fold_resident_tiles::<4, lane::Simd4>(cohort, transpose_tile_4),
+            BankWidth::Eight => {
+                self.fold_resident_tiles::<8, lane::Simd8>(cohort, transpose_tile_8)
+            }
+        }
+    }
+}
+
+impl ArenaMembers<'_> {
+    /// [`BankMembers::fold_resident`] at one bank width: `W` lanes, and `L` a `W`-wide lane, so one
+    /// transposed lane row is one `L` value.
+    #[inline(always)]
+    fn fold_resident_tiles<const W: usize, L: Lane>(
+        &mut self,
+        cohort: ResidentFoldCohort<'_>,
+        transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
+    ) -> bool {
+        let frames = cohort.frames();
+        let (resident_left, resident_right) = (cohort.left(), cohort.right());
+        // Every premise, before the first write. `W` is the lane count four ways -- the cohort's,
+        // the tile's, the row lane type's and this chain's fold list's -- and the last is also
+        // "every lane folds": a folded chain is given one `FoldLane` per lane and an unfolded one
+        // none. Only lane 0 may store, which is the D9 association `route_fold` proved.
+        let Some(words) = frames.checked_mul(W) else {
+            return false;
+        };
+        if W > 8
+            || L::WIDTH != W
+            || cohort.lanes() != W
+            || self.fold.len() != W
+            || frames == 0
+            || frames > self.lease.frames()
+            || resident_left.len() != words
+            || resident_right.len() != words
+            || !self.lease.writes(self.master)
+            || self.fold[1..].iter().any(|lane| lane.store)
+        {
+            return false;
+        }
+        // Hoisted once per cohort: every lane's constants, as words for the ragged tail and as
+        // splats for the tiles, and the one store flag that decides how the master starts.
+        let initial_store = self.fold[0].store;
+        let constants: [[f32; 4]; W] = core::array::from_fn(|lane| self.fold[lane].coefficients);
+        let splats: [[L; 4]; W] = core::array::from_fn(|lane| constants[lane].map(L::splat));
+        let (master_left, master_right) = self.lease.write_stereo(self.master);
+        let tiled = frames - frames % W;
+        for (tile, (block_left, block_right)) in resident_left[..tiled * W]
+            .chunks_exact(W * W)
+            .zip(resident_right[..tiled * W].chunks_exact(W * W))
+            .enumerate()
+        {
+            let base = tile * W;
+            // The same tile transpose the scatter runs: row `lane` holds that lane's `W` frames.
+            let rows_left = transpose(tile_rows(block_left));
+            let rows_right = transpose(tile_rows(block_right));
+            fold_words::<L, W>(
+                &splats,
+                initial_store,
+                &mut master_left[base..base + W],
+                &mut master_right[base..base + W],
+                |lane| (L::load(&rows_left[lane]), L::load(&rows_right[lane])),
+            );
+        }
+        // The ragged tail: the same expressions at `L = f32`, one frame at a time, read straight
+        // from the resident words (frame `f`, lane `k` is word `f * W + k`).
+        for frame in tiled..frames {
+            let first = frame * W;
+            fold_words::<f32, W>(
+                &constants,
+                initial_store,
+                &mut master_left[frame..=frame],
+                &mut master_right[frame..=frame],
+                |lane| (resident_left[first + lane], resident_right[first + lane]),
+            );
+        }
+        true
+    }
+}
+
+/// One `W * W` block of AoSoA words as its `W` frame rows, the input of a tile transpose.
+#[inline(always)]
+fn tile_rows<const W: usize>(block: &[f32]) -> [[f32; W]; W] {
+    let mut rows = [[0.0_f32; W]; W];
+    for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+        row.copy_from_slice(chunk);
+    }
+    rows
+}
+
+/// One group of master words -- the `W` frames of a tile at a `W`-wide `L`, or one tail frame at
+/// `L = f32` -- accumulated from every lane of a folded bank in ascending lane order.
+///
+/// `ordered_accumulate_block`'s association verbatim: the first contributor is the running value
+/// when `initial_store`, otherwise the running value starts as the live master plus the first
+/// contributor; each later contributor is added on the right; the sum is stored once. Each
+/// contributor is [`route_word`] of that lane's words. `master_left` and `master_right` are exactly
+/// `L::WIDTH` words.
+#[inline(always)]
+fn fold_words<L: Lane, const W: usize>(
+    constants: &[[L; 4]; W],
+    initial_store: bool,
+    master_left: &mut [f32],
+    master_right: &mut [f32],
+    lane_words: impl Fn(usize) -> (L, L),
+) {
+    let (left, right) = lane_words(0);
+    let (routed_left, routed_right) = route_word(constants[0], left, right);
+    let (mut sum_left, mut sum_right) = if initial_store {
+        (routed_left, routed_right)
+    } else {
+        (
+            L::load(master_left).add(routed_left),
+            L::load(master_right).add(routed_right),
+        )
+    };
+    for (lane, constant) in constants.iter().enumerate().skip(1) {
+        let (left, right) = lane_words(lane);
+        let (routed_left, routed_right) = route_word(*constant, left, right);
+        sum_left = sum_left.add(routed_left);
+        sum_right = sum_right.add(routed_right);
+    }
+    sum_left.store(master_left);
+    sum_right.store(master_right);
+}
+
+/// One lane's routed words: `mix2x2_block`'s frozen per-frame expressions, verbatim and in its
+/// operand order, `[ll, lr, rl, rr]` already carrying the route's gain (D3).
+#[inline(always)]
+fn route_word<L: Lane>([ll, lr, rl, rr]: [L; 4], left: L, right: L) -> (L, L) {
+    (lr.fma(right, ll.mul(left)), rr.fma(right, rl.mul(left)))
 }
 
 // REALTIME_POLICY_END
@@ -7551,6 +7720,12 @@ mod tests {
 
     /// The compatibility callback is deliberately unusable here: a regression to per-lane
     /// dispatch must fail rather than quietly producing the same sum.
+    ///
+    /// Since issue #915 this probe declines the resident-fold offer (its `fold_resident` keeps
+    /// the trait default), so what it pins is the **staged fallback** path through
+    /// `fold_cohort`. The fused production path is pinned by
+    /// `a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit`, whose counters
+    /// assert which fold each arm took.
     #[test]
     fn all_active_folded_bank_chain_dispatches_the_real_graph_cohort() {
         struct Identity;
@@ -7972,6 +8147,354 @@ mod tests {
                 .iter()
                 .all(|x| x.to_bits() == (-31.0_f32).to_bits())
         );
+    }
+
+    /// SplitMix64, frozen here so issue #915's corpora do not depend on host RNG state.
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A hostile finite sample: `+0.0` and `-0.0`, signed subnormals, and signed normals whose
+    /// magnitude spans `2^-24 .. 2^25`, each with a random mantissa. Finite by construction, so
+    /// every sum below stays finite and a mismatch is a rounding or an order, never a NaN payload.
+    fn hostile_sample(state: &mut u64) -> f32 {
+        let bits = splitmix(state);
+        let sign = ((bits >> 63) as u32) << 31;
+        let mantissa = (bits as u32) & 0x007f_ffff;
+        match (bits >> 32) % 8 {
+            0 => f32::from_bits(sign),
+            1 => f32::from_bits(sign | mantissa.max(1)),
+            _ => {
+                // Biased exponents 103..=151 are the unbiased -24..=24.
+                let exponent = 103 + ((bits >> 40) % 49) as u32;
+                f32::from_bits(sign | (exponent << 23) | mantissa)
+            }
+        }
+    }
+
+    /// A hostile route constant: a signed zero one time in eight, otherwise a signed normal whose
+    /// magnitude spans `2^-4 .. 2^2` -- a bind-folded gain times a pan law, with no structure.
+    fn hostile_constant(state: &mut u64) -> f32 {
+        let bits = splitmix(state);
+        let sign = ((bits >> 63) as u32) << 31;
+        if (bits >> 32).is_multiple_of(8) {
+            return f32::from_bits(sign);
+        }
+        // Biased exponents 123..=128 are the unbiased -4..=1.
+        let exponent = 123 + ((bits >> 40) % 6) as u32;
+        f32::from_bits(sign | (exponent << 23) | ((bits as u32) & 0x007f_ffff))
+    }
+
+    /// Gate 1 of issue #915: a fully folded full bank's master is the staged path's master, bit
+    /// for bit, whether the chain folds it from the resident block or through the staging block.
+    ///
+    /// Both arms run the **real** chain -- the same gather, the same stage, the same scatter entry
+    /// -- over one arena layout and identical words. They differ only in whether the members accept
+    /// the resident offer: the fused arm hands it to `ArenaMembers::fold_resident`, the staged arm
+    /// declines it, so the chain takes the transpose into staging and `ArenaMembers::fold_cohort`
+    /// it has always taken. The staged arm is therefore the production path before this issue,
+    /// not a restatement of it.
+    ///
+    /// Shapes: a full W4 bank of four and a full W8 bank of eight; one cohort, and two cohorts into
+    /// one master (the second continues from the first's live master); `frames` of exactly one
+    /// tile, 13 and 16 (ragged tails at both widths, and none), and 128; the first contributor
+    /// storing or the whole bank accumulating onto a live prior master. Samples are hostile --
+    /// signed zeros, subnormals, magnitudes over `2^-24 .. 2^25` -- and every lane gets its own
+    /// random 2x2. The chain's scratch is sized for 128 frames, so on every shorter block the
+    /// staged path's stride is not the block length and the resident view is a strict prefix.
+    ///
+    /// Also pinned: the fused arm really took the offer (counted), the staged arm really took
+    /// `fold_cohort` (counted), no lane's own buffer is written by either, and the master moved.
+    /// That the staging block is left unwritten is observable only inside rack, so it is rack's
+    /// `a_fully_folded_full_bank_offers_its_resident_block_before_writing_staging`.
+    ///
+    /// Red mutations (crates/graph/tests/MUTATIONS.md, issue #915): swap the coefficient roles,
+    /// accumulate the lanes in reverse, seed a continuation from zero, skip the ragged tail, and
+    /// return `true` having written nothing.
+    #[test]
+    fn a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit() {
+        let _canonical = lane::fpenv::CanonicalFpEnv::enter();
+        struct Identity;
+        impl BankStage for Identity {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+        }
+        /// `ArenaMembers`, counting which fold the chain took; `fused == false` declines the offer.
+        struct Arm<'a> {
+            inner: ArenaMembers<'a>,
+            fused: bool,
+            counts: [usize; 3],
+        }
+        impl BankMembers for Arm<'_> {
+            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+                self.inner.plane(lane)
+            }
+            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+                self.inner.plane_mut(lane)
+            }
+            fn fold_plane(&mut self, _lane: usize, _left: &mut [f32], _right: &mut [f32]) {
+                panic!("a fully folded full bank never folds lane by lane")
+            }
+            fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+                self.counts[2] += 1;
+                self.inner.fold_cohort(cohort);
+            }
+            fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+                self.counts[0] += 1;
+                if !self.fused {
+                    return false;
+                }
+                let accepted = self.inner.fold_resident(cohort);
+                self.counts[1] += usize::from(accepted);
+                accepted
+            }
+        }
+
+        const QUANTUM: u32 = 128;
+        const OUTPUT_POISON: u32 = 0x7fc0_3917;
+        let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        let mut state = 0x0915_f05e_d0e1_1095_u64;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for frames in [lanes, 13, 16, 128] {
+                for cohorts in [1_usize, 2] {
+                    for initial_store in [true, false] {
+                        let what = format!(
+                            "{width:?}, {frames} frames, {cohorts} cohort(s), store {initial_store}"
+                        );
+                        let tracks = cohorts * lanes;
+                        let mut plane = || -> Vec<f32> {
+                            (0..frames).map(|_| hostile_sample(&mut state)).collect()
+                        };
+                        let inputs: Vec<(Vec<f32>, Vec<f32>)> =
+                            (0..tracks).map(|_| (plane(), plane())).collect();
+                        let prior = (plane(), plane());
+                        let fold: Vec<FoldLane> = (0..tracks)
+                            .map(|track| FoldLane {
+                                coefficients: core::array::from_fn(|_| {
+                                    hostile_constant(&mut state)
+                                }),
+                                store: initial_store && track == 0,
+                            })
+                            .collect();
+                        let master = ARENA_BASE;
+                        let input_ids: Vec<u32> = (0..tracks)
+                            .map(|track| ARENA_BASE + 1 + track as u32)
+                            .collect();
+                        let output_ids: Vec<u32> = (0..tracks)
+                            .map(|track| ARENA_BASE + 1 + (tracks + track) as u32)
+                            .collect();
+                        let render = |fused: bool| {
+                            let mut lease =
+                                stereo_lease(frames, ARENA_BASE as usize + 1 + 2 * tracks);
+                            for (buffer, (left, right)) in input_ids.iter().zip(&inputs) {
+                                let (to_left, to_right) = lease.write_stereo(*buffer);
+                                to_left.copy_from_slice(left);
+                                to_right.copy_from_slice(right);
+                            }
+                            for buffer in &output_ids {
+                                let (left, right) = lease.write_stereo(*buffer);
+                                left.fill(f32::from_bits(OUTPUT_POISON));
+                                right.fill(f32::from_bits(OUTPUT_POISON));
+                            }
+                            let (master_left, master_right) = lease.write_stereo(master);
+                            master_left.copy_from_slice(&prior.0);
+                            master_right.copy_from_slice(&prior.1);
+                            let mut counts = [0_usize; 3];
+                            for cohort in 0..cohorts {
+                                let members = cohort * lanes..(cohort + 1) * lanes;
+                                let active = vec![true; lanes].into_boxed_slice();
+                                let mut chain = BankChain::new(
+                                    AoSoaScratch::new(width, QUANTUM).expect("scratch"),
+                                    active.clone(),
+                                    vec![BankSlot {
+                                        stage: Box::new(Identity),
+                                        active_lanes: active.clone(),
+                                    }],
+                                )
+                                .expect("chain");
+                                chain.arm_fold(active).expect("fold every lane");
+                                let mut arm = Arm {
+                                    inner: ArenaMembers {
+                                        lease: &mut lease,
+                                        inputs: &input_ids[members.clone()],
+                                        outputs: &output_ids[members.clone()],
+                                        fold: &fold[members],
+                                        master,
+                                    },
+                                    fused,
+                                    counts: [0; 3],
+                                };
+                                chain.run(&mut arm, frames as u32, 0).expect("run");
+                                for (total, count) in counts.iter_mut().zip(arm.counts) {
+                                    *total += count;
+                                }
+                            }
+                            let (master_left, master_right) = lease.read_stereo(master);
+                            let outputs: Vec<u32> = output_ids
+                                .iter()
+                                .flat_map(|buffer| {
+                                    let (left, right) = lease.read_stereo(*buffer);
+                                    bits(left).into_iter().chain(bits(right))
+                                })
+                                .collect();
+                            (bits(master_left), bits(master_right), outputs, counts)
+                        };
+                        let (fused_left, fused_right, fused_outputs, fused_counts) = render(true);
+                        let (staged_left, staged_right, staged_outputs, staged_counts) =
+                            render(false);
+                        assert_eq!(
+                            fused_counts,
+                            [cohorts, cohorts, 0],
+                            "{what}: every cohort must take the resident fold"
+                        );
+                        assert_eq!(
+                            staged_counts,
+                            [cohorts, 0, cohorts],
+                            "{what}: the oracle must take the staged fold_cohort"
+                        );
+                        assert_eq!(fused_left, staged_left, "{what}: left master");
+                        assert_eq!(fused_right, staged_right, "{what}: right master");
+                        assert_ne!(
+                            (&fused_left, &fused_right),
+                            (&bits(&prior.0), &bits(&prior.1)),
+                            "{what}: the master must move, or the comparison is vacuous"
+                        );
+                        for outputs in [&fused_outputs, &staged_outputs] {
+                            assert!(
+                                outputs.iter().all(|word| *word == OUTPUT_POISON),
+                                "{what}: a folded lane's own buffer must not be written"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every premise of `ArenaMembers::fold_resident` is checked before its first write: a broken
+    /// one declines -- so the chain falls back to the staged path -- and leaves the master exactly
+    /// as it was. The first case is the control that accepts, so every other case declines for its
+    /// own premise and not for a shared one.
+    #[test]
+    fn a_resident_fold_declines_before_writing_on_a_broken_premise() {
+        const FRAMES: usize = 13;
+        const POISON: [u32; 2] = [0x7fc0_3918, 0x7fc0_3919];
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let left: Vec<f32> = (0..FRAMES * lanes).map(|word| word as f32 + 0.5).collect();
+            let right: Vec<f32> = left.iter().map(|word| -word).collect();
+            let cohort = ResidentFoldCohort::new(&left, &right, width, FRAMES).expect("cohort");
+            let fold_lane = |store| FoldLane {
+                coefficients: [0.75, -0.25, 0.5, 1.25],
+                store,
+            };
+            let full: Vec<FoldLane> = (0..lanes).map(|lane| fold_lane(lane == 0)).collect();
+            let mut later_store = full.clone();
+            later_store[1].store = true;
+            let cases: [(&str, &[FoldLane], usize, u32); 6] = [
+                ("control", &full, FRAMES, ARENA_BASE),
+                (
+                    "one fold entry short",
+                    &full[..lanes - 1],
+                    FRAMES,
+                    ARENA_BASE,
+                ),
+                ("an unfolded chain", &[], FRAMES, ARENA_BASE),
+                ("a later lane stores", &later_store, FRAMES, ARENA_BASE),
+                (
+                    "a block longer than the lease",
+                    &full,
+                    FRAMES - 1,
+                    ARENA_BASE,
+                ),
+                ("a master outside the write set", &full, FRAMES, 99),
+            ];
+            for (case, fold, lease_frames, master) in cases {
+                let mut lease = stereo_lease(lease_frames, 2);
+                let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+                master_left.fill(f32::from_bits(POISON[0]));
+                master_right.fill(f32::from_bits(POISON[1]));
+                let taken = ArenaMembers {
+                    lease: &mut lease,
+                    inputs: &[],
+                    outputs: &[],
+                    fold,
+                    master,
+                }
+                .fold_resident(cohort);
+                let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+                let untouched = master_left.iter().all(|word| word.to_bits() == POISON[0])
+                    && master_right.iter().all(|word| word.to_bits() == POISON[1]);
+                if case == "control" {
+                    assert!(taken, "{width:?}: the control must accept");
+                    assert!(!untouched, "{width:?}: the control must write the master");
+                } else {
+                    assert!(!taken, "{width:?}: {case} must decline");
+                    assert!(untouched, "{width:?}: {case} wrote before declining");
+                }
+            }
+        }
+    }
+
+    /// The fused fold's first contributor **stores**, exactly as `fold_cohort`'s does: a master
+    /// whose every summand is `-0.0` stays `-0.0`, and a continuation reads the live master.
+    ///
+    /// Identity constants and `-0.0` samples make every routed word `-0.0` (`0 * -0` and `1 * -0`
+    /// are both `-0`, and `-0 + -0` is `-0`), in every tile and in the ragged tail. Seeding the
+    /// running value from `+0.0` instead of storing would give `+0.0`, which is invisible to a
+    /// hostile-random differential and is why this is an absolute property rather than one.
+    ///
+    /// Red mutations: seed the first contributor from zero and add it (the `fold(0.0, +)` shape);
+    /// seed a continuation from zero instead of the live master.
+    #[test]
+    fn a_resident_fold_stores_its_first_contributor_so_a_negative_zero_master_keeps_its_sign() {
+        let _canonical = lane::fpenv::CanonicalFpEnv::enter();
+        const FRAMES: usize = 13;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let zeros = vec![-0.0_f32; FRAMES * lanes];
+            let cohort = ResidentFoldCohort::new(&zeros, &zeros, width, FRAMES).expect("cohort");
+            for (store, start, expected) in [
+                (true, 0.0_f32, 0x8000_0000_u32),
+                (false, -0.0, 0x8000_0000),
+                (false, 0.0, 0x0000_0000),
+            ] {
+                let fold: Vec<FoldLane> = (0..lanes)
+                    .map(|lane| FoldLane {
+                        coefficients: [1.0, 0.0, 0.0, 1.0],
+                        store: store && lane == 0,
+                    })
+                    .collect();
+                let mut lease = stereo_lease(FRAMES, 2);
+                let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+                master_left.fill(start);
+                master_right.fill(start);
+                assert!(
+                    ArenaMembers {
+                        lease: &mut lease,
+                        inputs: &[],
+                        outputs: &[],
+                        fold: &fold,
+                        master: ARENA_BASE,
+                    }
+                    .fold_resident(cohort)
+                );
+                let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+                for frame in 0..FRAMES {
+                    assert_eq!(
+                        (master_left[frame].to_bits(), master_right[frame].to_bits()),
+                        (expected, expected),
+                        "{width:?}, store {store}, start {start}: frame {frame}"
+                    );
+                }
+            }
+        }
     }
 
     /// The first contributor **stores**: a master whose only summand is `-0.0` stays `-0.0`.
