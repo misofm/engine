@@ -133,6 +133,24 @@ block" (consumer side here, producer side there; the second to merge rebases).
 
 ## Attempt 1 evidence
 
+**Scope amendment (Sol).** The `count + 1` hold is the coordinator's ruling, so the two byte pins
+that follow from it belong to this issue. Authorized in addition to the original paths and
+applied in the amendment commit:
+
+- `crates/capi/tests/resource_lifecycle.rs`: `source_owners()` sizes both queue mirrors and the
+  transfer-block metadata row at `blocks + 1`, adds the named row "source retained transfer block
+  PCM" (`128 x 2 x 4 = 1_024`), and `SourceGraphSourceSetDriverMirror` drops `copied_claims`; the
+  mirror stays an exact sum of named rows. `source_overhead_bytes` 2,862 -> 3,950,
+  `source_total_bytes` 11,054 -> 12,142, and the primitive oracle's double-live totals 22,108 ->
+  24,284 and 5,724 -> 7,900 (+1,088 per source: +1,024 PCM, +48 metadata, +2 x 8 queue slots,
+  +8 consumer field, -8 driver field).
+- `hosts/host-web/tests/browser-v1/expected.json`: the two source rows only, measured from the
+  built simd128 module: `sourceOverheadBytes` 1,186 -> 2,262 and `sourceTotalBytes` 2,210 ->
+  3,286. No other row moved.
+
+The batch boundary may repin these same rows once more if #919's removal of the worker staging
+row moves them (that row is native-worker accounting; the browser rows are host-fed).
+
 Implementer: Terra. Branch `codex/917-retain-played-transfer-block`, based on `12b621f2`
 (synchronized `main` plus the cycle's briefs). Commits: `a7f8ce93` (ring shape, hold rule,
 planes, tests), `9cbbc8ad` (`docs/REALTIME_MEMORY.md` paragraph), `5e24b839` (realtime marker on
@@ -287,8 +305,9 @@ test including the `test-support` audit-hold tests.
 | `audit source` (100,000 blocks through the graph source set with the held block, native worker hold/release) | `allocations 0, deallocations 0, locks 0, syscalls 0, total_violations 0` |
 | `audit source-duration` | `layout_equal`, `source_report_equal`, `graph_report_equal` all true, 17 entries |
 | `audit fixture-source` (independent seek/admission model) | ok |
-| `crates/capi/tests/resource_lifecycle.rs` | **red, out of this issue's paths** -- see below |
-| `scripts/check-browser-expected-resources.py` | **red, out of this issue's paths** -- the only stale rows are the two source rows (see below); self-test passed (26 red mutations) |
+| `crates/capi/tests/resource_lifecycle.rs` | red before the scope amendment (see below); after it, `cargo test -p capi` ok: 32 + 4 passed, 0 failed |
+| `scripts/check-browser-expected-resources.py` | red before the scope amendment (only the two source rows were stale); after it, the workflow's form `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts` passes: rows and digests agree with the built simd128 module, the native witness agrees on target-independent rows, self-test passed (26 red mutations). The artifacts directory was built by `scripts/build-web-audioworklet.sh` with only its artifact-pin comparison disabled in a scratch copy (the pin is repinned at the batch boundary, not here; the built module's sha256 is `7e3e24d9...169c` against the pinned `c46721aa...b64f`) |
+| amendment gates | `cargo test -p host-web` ok (204 passed, 2 ignored; 2 passed); `cargo fmt --all --check` clean; `cargo clippy --locked -p capi -p source -p host-web --all-targets --all-features -- -D warnings` clean; `bash scripts/check-realtime-policy.sh` ok (51 regions in 15 files) |
 
 `scripts/check-realtime-policy.sh` does not scan `begin_block` (the source crate had no marked
 region and `begin_block`'s pre-existing `.expect` calls would trip the scan); its
@@ -313,8 +332,8 @@ allocation-freedom is evidenced by the `audit source` run above, which drives it
 - Added `SourceResourceReport::retained_block_pcm_bytes` beside the required
   `retained_block_count`, so `overhead_bytes` stays the exact sum of named rows.
 - `played_plane` is placed under a `REALTIME_POLICY` marker (not required by the body).
-- **Pinned numbers outside the authorized paths move** (the body's "only pinned numbers" list is
-  incomplete). Not edited here; they need an owner-approved amendment:
+- **Pinned numbers outside the original paths move** (the body's "only pinned numbers" list is
+  incomplete). Recorded here as first found; both are now applied under the scope amendment above:
   - `crates/capi/tests/resource_lifecycle.rs` fails `external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps`
     (`primitive source total: left 11062, right 11054` -- the mirror's real `PcmSourceConsumer`
     grew 8 bytes). The re-pin: in `source_owners()` size both queue mirrors and the metadata row at
@@ -329,8 +348,7 @@ allocation-freedom is evidenced by the `audit source` run above, which drives it
     `sourceTotalBytes` 2,210 -> 3,286, measured from the built simd128 module (+1,076; consistent with +1,024 PCM, a 40-byte
     wasm32 `TransferBlock`, 2 x 4-byte slots, +8 consumer after padding and -4 driver, which are
     derived, not measured individually). No other row moved. This belongs with the batch-boundary browser re-pin in `PLAN.md` or an amendment here.
-  - The capi numbers above were confirmed by applying that re-pin as a transient, uncommitted
-    edit (all four `resource_lifecycle` tests green) and reverting it; nothing outside the
-    authorized paths is changed on this branch.
+  - The capi numbers were first confirmed by applying the re-pin as a transient edit (all four
+    `resource_lifecycle` tests green), then committed under the amendment.
 - The `M2` run's hung binary was a native worker test waiting on a ring with no free block; it
   was killed by hand, and the mutation was reverted like the others.

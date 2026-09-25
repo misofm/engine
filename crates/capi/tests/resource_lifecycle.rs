@@ -535,6 +535,10 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         //   `builtin_owners` for the five-term restatement that sums to 173.
         // * The two `graph_*` figures carry the same +1_344 the banks moved by, which is what it
         //   means for the growth to be entirely plan-side.
+        // #917 retains one transfer block beyond the configured eight: `source_overhead_bytes`
+        // 2_862 -> 3_950 and `source_total_bytes` 11_054 -> 12_142, +1_088 = 1_024 retained PCM
+        // + 48 metadata + 2 x 8 queue slots + 8 consumer field - 8 deleted driver field (see
+        // `source_owners`).
         // #241 deletes 64 x 64 = 4_096 control-queue bytes and 1_024 x 2 x 4 = 8_192
         // declarative source-ring bytes from the session compiler's runtime projection. The host
         // still reports the chosen ring exactly in the source rows below.
@@ -573,8 +577,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         builtin_bank_bytes: 14_233,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
-        source_overhead_bytes: 2_862,
-        source_total_bytes: 11_054,
+        source_overhead_bytes: 3_950,
+        source_total_bytes: 12_142,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 17_451,
@@ -800,15 +804,14 @@ struct GraphSourceEntryMirror {
     consumer: source::PcmSourceConsumer,
 }
 
-/// #124: `_retirement_workers` is declared first for drop order; `copied_claims` is the per-block
-/// copied-claim count the fan-out report exposes.
+/// #124: `_retirement_workers` is declared first for drop order. #917 deleted the per-block
+/// `copied_claims` count (-8 bytes): no claim releases the played block any more.
 #[allow(dead_code)]
 struct SourceGraphSourceSetDriverMirror {
     retirement_workers: Box<[NativeSourceWorkerMirror]>,
     sources: Box<[GraphSourceEntryMirror]>,
     mappings: Box<[source::SourceGraphTrackMapping]>,
     quantum_frames: u32,
-    copied_claims: usize,
 }
 
 /// `<f32 as lane::Lane>::Mask`: an all-zero or all-one word.
@@ -2027,8 +2030,11 @@ fn source_owners() -> Vec<PrimitiveOwner> {
     let blocks = 1_024_usize / 128;
     let channels = 2_usize;
     let mappings = 9_usize;
-    let data = spsc::<Box<TransferBlockMirror>>(blocks, "source data queue");
-    let recycle = spsc::<Box<TransferBlockMirror>>(blocks, "source recycle queue");
+    // #917: the ring allocates one block beyond the configured eight for the render consumer to
+    // retain, and sizes both queues at nine. The retained block's PCM (128 x 2 x 4 = 1_024), its
+    // metadata and the two extra queue slots are source overhead; the session PCM row stands.
+    let data = spsc::<Box<TransferBlockMirror>>(blocks + 1, "source data queue");
+    let recycle = spsc::<Box<TransferBlockMirror>>(blocks + 1, "source recycle queue");
     let command = spsc::<source::SourceCommand>(1, "source command queue");
     vec![
         PrimitiveOwner {
@@ -2043,7 +2049,11 @@ fn source_owners() -> Vec<PrimitiveOwner> {
         command[1],
         PrimitiveOwner {
             name: "source transfer-block metadata",
-            bytes: bytes::<TransferBlockMirror>(blocks),
+            bytes: bytes::<TransferBlockMirror>(blocks + 1),
+        },
+        PrimitiveOwner {
+            name: "source retained transfer block PCM",
+            bytes: bytes::<f32>(128 * channels),
         },
         PrimitiveOwner {
             name: "graph source entries",
@@ -2223,17 +2233,17 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
 
     let source = source_owners();
-    assert_eq!(owner_total(&source), 11_054, "primitive source total");
+    assert_eq!(owner_total(&source), 12_142, "primitive source total");
     let source_overhead_rows = source[1..].to_vec();
-    assert_effective_owner_mutations(&source_overhead_rows, 2_862, "source overhead");
+    assert_effective_owner_mutations(&source_overhead_rows, 3_950, "source overhead");
     let mut source_total_rows = source.clone();
     source_total_rows.extend(source.clone());
-    assert_effective_owner_mutations(&source_total_rows, 22_108, "double-live source total");
+    assert_effective_owner_mutations(&source_total_rows, 24_284, "double-live source total");
     let mut double_source_overhead = source_overhead_rows.clone();
     double_source_overhead.extend(source_overhead_rows);
     assert_effective_owner_mutations(
         &double_source_overhead,
-        5_724,
+        7_900,
         "double-live source overhead",
     );
 
@@ -2638,8 +2648,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             + 2 * response_owner_graph_delta
             + 2 * observation_runtime_owner_bytes()
     );
-    assert_eq!(oracle.source_total, 22_108);
-    assert_eq!(oracle.source_overhead, 5_724);
+    assert_eq!(oracle.source_total, 24_284);
+    assert_eq!(oracle.source_overhead, 7_900);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
