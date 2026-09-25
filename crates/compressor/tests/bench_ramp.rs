@@ -532,7 +532,7 @@ fn mq2_compressor_ramp_spike() {
         )
     });
     println!(
-        "MQ2_RESULT {{\"schema_version\":1,\"task\":\"MQ-2\",\"sample_rate_hz\":{SAMPLE_RATE},\"quantum_frames\":{QUANTUM},\"bank_width\":{BANK_WIDTH},\"bank_count\":{BANK_COUNT},\"track_count\":{TRACK_COUNT},\"warmup_blocks_per_arm\":{BLOCKS_PER_ROUND},\"measured_blocks_per_round\":{BLOCKS_PER_ROUND},\"measured_rounds_per_arm\":{MEASURED_ROUNDS},\"ramp_frames\":{RAMP_FRAMES},\"events\":\"frame-zero point events on every lane and both channels\",\"arms\":[{}, {}, {}]}}",
+        "MQ2_RESULT {{\"schema_version\":2,\"task\":\"MQ-2\",\"sample_rate_hz\":{SAMPLE_RATE},\"quantum_frames\":{QUANTUM},\"bank_width\":{BANK_WIDTH},\"bank_count\":{BANK_COUNT},\"track_count\":{TRACK_COUNT},\"warmup_blocks_per_arm\":{BLOCKS_PER_ROUND},\"measured_blocks_per_round\":{BLOCKS_PER_ROUND},\"measured_rounds_per_arm\":{MEASURED_ROUNDS},\"ramp_frames\":{RAMP_FRAMES},\"events\":\"frame-zero point events on every lane and both channels\",\"arms\":[{}, {}, {}]}}",
         arms[0], arms[1], arms[2]
     );
 }

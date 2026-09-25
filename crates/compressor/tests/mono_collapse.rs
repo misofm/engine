@@ -28,8 +28,8 @@ use effect_contract::{
 };
 
 /// Blocks per arm provide repeated causal processing before comparisons.
-const BLOCKS: usize = 24;
-const FRAMES: usize = 64;
+const BLOCKS: usize = 48;
+const FRAMES: usize = 32;
 
 /// A preparation request carrying one link mode. `support::request` pins `DualMono`.
 fn request_linked<'a>(
@@ -94,29 +94,31 @@ fn offsets(lanes: usize) -> Vec<u32> {
     vec![0; lanes + 1]
 }
 
-/// One `Point` retarget of the threshold per channel per lane, at this block's first sample.
+/// Threshold, attack and release `Point`s per channel and lane, at this block's first sample.
 ///
-/// This is what puts a **ramp in flight**, and a ramp is what selects the collapsed kernel's
-/// per-frame body: `process_block_mono` splits the block at `max_remaining`, runs the ramping
-/// prefix through `frames_loop_mono::<_, true>` -- which advances the ramps and reloads the
-/// coefficient words every frame -- and only then considers the idle body. Without it the whole
-/// file would exercise one of the two collapsed loops.
+/// Thirty-two-frame blocks retarget the 64-sample windows halfway through. This exercises the
+/// coefficient-ramp retarget and channel-copy seam while the auxiliary state is still moving, and
+/// selects the collapsed kernel's per-frame body for every block.
 fn automation(step: usize, lanes: usize) -> (Vec<PreparedAutomationSpan>, Vec<u32>) {
     let first = (step * FRAMES) as u64;
     let threshold = -30.0 + (step % 5) as f32 * 3.0;
+    let attack = 20.0 + (step % 5) as f32 * 20.0;
+    let release = 300.0 + (step % 5) as f32 * 100.0;
     let mut spans = Vec::new();
     let mut offsets = vec![0_u32; lanes + 1];
     for lane in 0..lanes {
-        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-            spans.push(PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
-                channel,
-                parameter_index: 0,
-                start_sample: first,
-                end_sample: first,
-                start_value: threshold,
-                end_value: threshold,
-            });
+        for (parameter, value) in [(0, threshold), (3, attack), (4, release)] {
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                spans.push(PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel,
+                    parameter_index: parameter,
+                    start_sample: first,
+                    end_sample: first,
+                    start_value: value,
+                    end_value: value,
+                });
+            }
         }
         offsets[lane + 1] = spans.len() as u32;
     }
@@ -298,17 +300,16 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             never_left.clone()
         };
         let first = (step * FRAMES) as u64;
-        // One retarget, early, and then nothing. That schedule is deliberate and it is what gives
-        // the copy list's *coefficient* entries teeth.
+        // One retarget while collapsed, then another as the bank reopens. That schedule gives the
+        // copy list's *coefficient-ramp* entries teeth: the first transition copies a live state;
+        // the second must start from that copied state without a coefficient jump.
         //
-        // A `Point` span smooths over one block, so the ramp opens on block 2 and closes inside it
-        // -- well before the transition. During the collapsed blocks only the **left** channel's
-        // ramps advance, and advancing a ramp is what rewrites `words` from it. So at the
-        // disengage the right channel's ramps and its coefficient words are *both* stale, and
-        // because no further span ever arrives, nothing re-derives the words from the ramps
-        // afterwards: a copy list that carried `ramps` and not `words` would look correct on a
-        // continuously automated session and render the pre-ramp design forever on this one.
-        let (spans, span_offsets) = if step == 2 {
+        // A `Point` starts a 64-sample ramp; each 32-frame block leaves it halfway through. The
+        // left ramp completes while collapsed, while the right ramp remains stale. At the reopen,
+        // a new target checks that `copy_state_from` carried both the current coefficient word and
+        // its auxiliary ramp state; omitting either makes the right channel jump or follow a
+        // different interpolation from the never-collapsed oracle.
+        let (spans, span_offsets) = if step == 2 || step == BLOCKS / 2 {
             automation(step, lanes)
         } else {
             (Vec::new(), offsets.clone())
