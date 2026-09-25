@@ -38,11 +38,33 @@ bound the row's interior values `attack=0.75`, `sustain=-0.5`. The existing `0.0
 step and decay oracle rows passed on the candidate; only the 96-sample absolute row failed in the
 focused transient-shaper test.
 
+## MQ-1 same-programme PCM null
+
+An untimed temporary dump test rendered the MQ-1 eight-track Simd8 bank on both baseline
+`a5cb5d8e` and candidate `e6989987`. Each run used the same `tests/bench.rs` fixture generator
+(SHA-256 `710e2115e4d46534e22cd4aa3917342f7ecede87c3be6eff7d0812ca41a4c886`), the same temporary
+dump harness (SHA-256 `ec178b32077afeccb972e99176f07bf9fd09518a3441318d9eade6c063bb7d9a`), release
+profile, 48 kHz, 128-frame blocks and one uninterrupted 192,000-frame pass. Both harness copies
+reported fixture SHA-256
+`85645b77376e39c43934476b5e5c5c37f96ae6abff7cc66b2b3d28a827275b6f`. The dump contained 3,072,000
+f32 samples (left then right, with eight interleaved tracks in each channel); raw PCM was removed
+after comparison.
+
+Across all channel/track/frame samples, maximum absolute residual was `7.629394531e-6`, or
+`-102.350199 dBFS` relative to full scale 1.0. Maximum relative output-magnitude delta was
+`0.000013073 dB`, computed as `max(abs(20*log10(abs(candidate)/abs(baseline))))` where both
+magnitudes are nonzero. If both magnitudes are zero the sample is skipped; if exactly one is zero
+the relative delta is defined as infinity. This run had zero joint-zero samples and zero
+one-sided-zero samples. The largest absolute residual occurred at right channel, frame 822, track
+0 (`baseline=-5.969945431`, `candidate=-5.969953060`); the largest relative delta occurred at left
+channel, frame 999, track 2 (`baseline=-0.5148412585`, `candidate=-0.5148420334`). The renderer
+reported Simd8 on x86_64 Linux with rustc 1.97.1 / LLVM 22.1.6. No timed measurement was taken.
+
 Attempt 1 is blocked on the frozen oracle gate and owner direction for R2. No tolerance was widened.
 The math F1 default run passed 14 active tests, including X7/X8 subsampled domains and the eight-
 crossing seal; math and transient-shaper package clippy, `cargo fmt --all -- --check`, and
 `git diff --check` passed. The full ignored math sweep and wasm gates remain outstanding. The full
 transient-shaper package run fails only at the recorded 96-sample oracle row; its impulse, step,
-decay, width identity, bank, allocation, boundary and contract tests passed. MQ-1 null comparison
-and post-change timing remain outstanding. Timing is held until #902's corrected runner is
-integrated and root clears the shared CPU.
+decay, width identity, bank, allocation, boundary and contract tests passed. The MQ-1 PCM null
+comparison is complete as recorded above. The post-change timed measurement remains held until
+#902's corrected runner is integrated and root clears the shared CPU.
