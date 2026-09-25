@@ -51,3 +51,46 @@ Single feature branch `codex/rust-1-98-1`, checkpoint-committed locally, pushed 
 - 1.98.1 host toolchain: `rustc 1.98.1 (48a229cea 2026-09-01)`, LLVM 22.1.8, installed with `clippy`, `rustfmt`, and `wasm32-unknown-unknown`.
 - Under 1.98.1 with only the pin edits: `cargo fmt --all --check` clean; simd128 Wasm build clean; clippy fails in `lane` with 36 `chunks_exact_mut` and 4 `chunks_exact` `chunks_exact_to_as_chunks` diagnostics (`crates/lane/src/kernels.rs`, `crates/lane/src/kernels/builtins.rs`).
 - REPIN digest under 1.98.1: `08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd`.
+
+## Attempt 1 evidence — 2026-09-25
+
+Branch `codex/rust-1-98-1`, PR #878. Checkpoints `a9ee3604` (pins, lint policy, repin), `719acf2c`
+(browser matrix re-recorded at candidate `a9ee3604` with the pre-#868 runner), then a merge of
+`main` `e09302ad` (Engine SDK 0.4.3, #866/#869) resolving the two conflicts in `npm-publish.yml`
+and `scripts/test-npm-publish-modes.py` (0.4.3 literals kept, 1.98.1 pin and digest kept).
+
+Green under 1.98.1: gates 1–5 (fmt, CI-exact clippy, 2292 workspace tests, both Wasm builds, the
+pin-check artifact build, the npm-publish self-test, the hermetic worklet gates, and
+`check-web-audioworklet.sh` on the artifact). The 1.97.1 control artifact rebuilt from `main`
+reproduces the accepted digest `e18acf9c…` exactly, so the repin is the compiler and nothing else.
+`scripts/check-sdk-headless.sh`'s suite (`node --test test/*-evals.mjs`, 284 tests including the
+#863 candidate-Wasm spectrum recovery evals) passes 284/284 against **both** artifacts.
+
+**Gate 6 is blocked by `sdk-spectrum-recovery`, the gate #868 added after this branch was cut.**
+With `main`'s runner and identical SDK, host JS and fixtures — the artifact sets differ only in
+the `.wasm` — the outcome is consistent across seven runs per artifact:
+
+| artifact | Chromium 151 | Firefox 153 | WebKit 26.5 | first ready callback | callback sequence | offline render wall time |
+|---|---|---|---|---|---|---|
+| 1.97.1 (`e18acf9c…`) | pass ×5 | pass | pass | `nativeMissedWindows` 16 (Firefox 4), `skippedPublications` 1 | `[ready]` | 4.3–4.5 ms / 18 ms / 19 ms |
+| 1.98.1 (`08ae541c…`) | fail ×5 | fail | fail | `nativeMissedWindows` 0, `skippedPublications` 0 | `[gap, ready]` | 4.1–4.3 ms / 11 ms / 17 ms |
+
+Identity is preserved in both (`capturedSample` 0, `endSample` 2048 on notification and result);
+only the loss counters on the first ready callback differ, i.e. the 1.98.1 artifact takes the
+SDK's gap-publish fallback (#863's `e52e73ab` narrowing) and the recovered ready then carries no
+loss, which is the pre-#863 sequence #867 describes. Render time rules out a speed effect; the
+headless evals rule out a difference in the deterministic read/recovery state machine as far as
+they cover it. What remains is the browser's interleaving of the 1 ms read messages with the
+offline `process()` calls, which the #867 brief already names as scheduling-specific ("do not
+assert the exact loss value 16"). Whether the 1.98.1 module changes that interleaving for a
+benign reason (code layout, message-loop timing) or the recovery read behaves differently under
+1.98.1 codegen is not established here.
+
+**Decision required before this issue can close.** Either (a) re-brief `sdk-spectrum-recovery`
+so it accepts a gap-then-ready delivery whose gap callback carried the truthful loss, or (b) open
+a bounded successor that drives both artifacts through a hermetic, scripted `process()`/read
+interleaving (the `scripts/test-web-audioworklet.mjs` real-Wasm scaffolding) to prove whether
+the recovery read differs deterministically. Until one of those lands, `main` cannot take the
+1.98.1 pin without breaking its required check. No source outside the authorized paths was
+changed; the qualification runner and fixture were instrumented only in throwaway copies and
+reverted (`git status` clean apart from this record).

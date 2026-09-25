@@ -501,6 +501,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   const automaticNotifications = [];
   let callbackCount = 0;
   let callbackGap = false;
+  let recoveryDelivery: Record<string, unknown> | undefined;
   let callbackResolve: (() => void) | undefined;
   const callbackSeen = new Promise<void>((resolve) => { callbackResolve = resolve; });
   let subscription;
@@ -525,6 +526,19 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
         automaticNotifications.push(notification);
         callbackCount += 1;
         callbackGap ||= notification.nativeMissedWindows > 0n || notification.skippedPublications > 0n;
+        if (recoveryDelivery === undefined && notification.status === "ready" && notification.available) {
+          const result = notification.handle.readLatest();
+          recoveryDelivery = {
+            status: notification.status,
+            available: notification.available,
+            nativeMissedWindows: notification.nativeMissedWindows.toString(),
+            skippedPublications: notification.skippedPublications.toString(),
+            notificationCapturedSample: notification.metadata.capturedSample.toString(),
+            notificationEndSample: notification.metadata.endSample.toString(),
+            resultCapturedSample: result?.capturedSample.toString() ?? null,
+            resultEndSample: result?.endSample.toString() ?? null,
+          };
+        }
         callbackResolve?.();
       },
     });
@@ -545,12 +559,14 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       callbackSeen.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
-    // Both automatic reads and explicit pumps invoke onUpdate. Keep its live list: the first
-    // callback can report a gap while the same poll is still draining its recovery window.
+    // Both automatic reads and explicit pumps invoke onUpdate. Keep its live list while waiting
+    // for a ready/available publication with a result present through readLatest().
     const notifications = automaticNotifications;
     for (let attempt = 0; attempt < CONTINUOUS_BLOCKS; attempt += 1) {
+      if (recoveryDelivery !== undefined && subscription.readLatest() !== undefined) break;
       const notification = await subscription.pump();
-      if (notification?.status === "gap" && subscription.readLatest() !== undefined) break;
+      if (notification?.status === "ready" && notification.available
+        && subscription?.readLatest() !== undefined) break;
     }
     const first = subscription.readLatest();
     if (first === undefined) throw new Error("continuous spectrum did not publish a window");
@@ -597,6 +613,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       publicationHopFrames: notifications.map((notification) => notification.metadata.hopFrames),
       publicationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
       gap,
+      recoveryDelivery,
       ownedArrays,
       sharedAfterFirstClose,
       staleReadRefused,
