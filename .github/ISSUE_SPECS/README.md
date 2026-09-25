@@ -330,3 +330,7 @@ Issue [#822](https://github.com/misofm/engine/issues/822), **Native protected sp
 Issue [#824](https://github.com/misofm/engine/issues/824), **Protected one-shot spectrum delivery through the observation owner**, is deferred until after working browser EQ; exact delivery semantics require a bounded rebrief before implementation.
 
 Issue [#825](https://github.com/misofm/engine/issues/825), **Protected browser EQ native endpoint and additive ABI**, is the active next capability: opt-in one-target prepared browser ownership, bounded ingress/response work and truthful native receipts. Private preparation, operation mediation, ABI and metadata are sequential bounded checkpoints; JavaScript/SDK and packed fixture adoption follow.
+
+## Math audit delivery
+
+Issue [#880](https://github.com/misofm/engine/issues/880), **Math crate audit: land the class-A speedups, correct the evidence, and rule on three class-B changes**, owns the bounded MA/MQ/MB/MC tasks in its spec. The user selected GPT-6 Luna xhigh implementation and GPT-6 Astra xhigh adversarial review. Class-A changes preserve every existing digest; class-B changes require the explicit owner rulings recorded in the issue.

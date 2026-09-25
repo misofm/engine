@@ -41,6 +41,10 @@
 //! `LOG2_P[8]` + 1e-6 reaches only 1.722 ulp and stays inside the gate; that is a property of the
 //! polynomial, not a hole in the sweep, and it is why the gate is a bound rather than a pin.
 //!
+//! MA-3 replaces the `exp2_lane` fold compare/select with an equivalent magic-constant round.
+//! The exhaustive bit-identity proof against the pre-change body, including all non-finite and
+//! out-of-domain inputs, lives in `tests/e1_identity.rs`.
+//!
 //! Memory note: the sweep iterates ranges of `u32`. Never collect the patterns — 2^31 `u32`s is
 //! 8 GB. Each thread starts its monotonicity chain fresh, so one consecutive pair per thread
 //! boundary goes unchecked — a handful out of four billion.

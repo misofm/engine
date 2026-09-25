@@ -4,14 +4,109 @@
 //!
 //! The vendoring edits (VENDORED.md) are mechanical, but "mechanical" is not evidence. These tests
 //! check the vendored functions against the host platform's libm through `std`, which is an
-//! independent implementation of the same specifications, and check the two functions written here
-//! rather than vendored (`floor`, `sqrt`) exhaustively where that is possible.
+//! independent implementation of the same specifications, and check the functions written here
+//! rather than vendored (`floor`, `sqrt`) against independent oracles.
 //!
 //! `std` transcendental calls are legal here: `clippy.toml`'s `disallowed-methods` (formerly
 //! `scripts/check-math-policy.sh`) exempts this file per its top-of-file `#![allow]` -- a test
 //! comparing against the platform libm is the point.
 
 use math as m;
+
+/// Independent correctly-rounded `sqrt` oracle from the previous production implementation.
+///
+/// For finite positive inputs, write `x = g * 2^F` with integer `g` and even `F`. Then
+/// `sqrt(x) = sqrt(g) * 2^(F/2)`. With `N = g << 52`, `isqrt(N) = floor(sqrt(g) * 2^26)`, which has
+/// exactly 53 significant bits because `g` is normalised into `[2^52, 2^54)`. If `q = isqrt(N)`
+/// and `r = N - q*q`, the exact root lies strictly between `q` and `q + 1`, and it exceeds the
+/// midpoint exactly when `r > q`. Equality is impossible, so this is round-to-nearest without a
+/// tie. A finite positive input's result is normal, so no subnormal result rounding is needed.
+fn software_sqrt(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let sign = bits >> 63;
+    let biased_exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+
+    if biased_exp == 0x7ff {
+        // sqrt(NaN) = NaN, sqrt(+inf) = +inf, sqrt(-inf) = NaN.
+        if frac != 0 || sign == 0 {
+            return x + x;
+        }
+        return f64::NAN;
+    }
+
+    if bits << 1 == 0 {
+        // sqrt(+-0) = +-0
+        return x;
+    }
+
+    if sign == 1 {
+        return f64::NAN;
+    }
+
+    // Decompose x = f * 2^e with f an integer in [2^52, 2^53).
+    let (f, e) = if biased_exp == 0 {
+        let shift = frac.leading_zeros() - 11;
+        (frac << shift, -1022 - 52 - (shift as i32))
+    } else {
+        (frac | (1u64 << 52), biased_exp - 1023 - 52)
+    };
+
+    // Force an even exponent: x = g * 2^even.
+    let odd = (e & 1) as u32;
+    let g = (f as u128) << odd;
+    let even = e - (odd as i32);
+
+    let n = g << 52;
+    let mut q = n.isqrt();
+    if n - q * q > q {
+        q += 1;
+    }
+
+    // q is in [2^52, 2^53]; renormalise the carry case.
+    let mut p = even / 2 - 26;
+    if q == 1u128 << 53 {
+        q >>= 1;
+        p += 1;
+    }
+
+    let biased = (p + 52 + 1023) as u64;
+    f64::from_bits((biased << 52) | ((q as u64) & 0x000f_ffff_ffff_ffff))
+}
+
+/// The f32 oracle deliberately rounds the independent software f64 oracle to f32.
+fn software_sqrtf(x: f32) -> f32 {
+    if x.is_nan() {
+        return x + x;
+    }
+    software_sqrt(x as f64) as f32
+}
+
+fn assert_sqrt_matches_software(x: f64) {
+    let got = m::sqrt(x);
+    let want = software_sqrt(x);
+    if got.is_nan() || want.is_nan() {
+        assert!(
+            got.is_nan() && want.is_nan(),
+            "sqrt({x:?}) NaN disagreement"
+        );
+    } else {
+        assert_eq!(got.to_bits(), want.to_bits(), "sqrt({x:?})");
+    }
+}
+
+fn assert_sqrtf_matches_software(x: f32) {
+    let got = m::sqrtf(x);
+    let want = software_sqrtf(x);
+    if got.is_nan() || want.is_nan() {
+        assert!(
+            got.is_nan() && want.is_nan(),
+            "sqrtf({x:?}) NaN disagreement"
+        );
+    } else {
+        assert_eq!(got.to_bits(), want.to_bits(), "sqrtf({x:?})");
+    }
+}
 
 /// Error of `got` against `want`, in units in the last place of `want`.
 fn ulp_error_f64(got: f64, want: f64) -> f64 {
@@ -195,17 +290,36 @@ fn f32_functions_match_platform_libm_in_f64() {
 #[test]
 fn sqrtf_is_correctly_rounded() {
     check_sqrtf(1021);
+    for bits in [0, 1, 0x007f_ffff, 0x0080_0000, 0x3f80_0000, 0x7f7f_ffff] {
+        assert_sqrtf_matches_software(f32::from_bits(bits));
+    }
 }
 
-/// The exhaustive form of [`sqrtf_is_correctly_rounded`]. Run with
-/// `cargo test --release -p math --test scalar_accuracy -- --ignored`.
-///
-/// Measured on the delivery host: all 2,139,095,040 non-negative `f32` bit patterns agree with the
-/// platform `sqrtf`, zero mismatches.
+/// All 2^32 raw patterns are checked against the independent software oracle. Non-NaN results
+/// must match bit-for-bit; NaNs are compared by class because their sign and payload are
+/// target-dependent.
 #[test]
-#[ignore = "2^31 sweep: run with --release -- --ignored"]
+#[ignore = "2^32 sweep: run with --release -- --ignored"]
 fn sqrtf_is_correctly_rounded_exhaustive() {
-    check_sqrtf(1);
+    let mut non_nan = 0_u64;
+    let mut nan = 0_u64;
+    for raw in 0..=u64::from(u32::MAX) {
+        let x = f32::from_bits(raw as u32);
+        let got = m::sqrtf(x);
+        let want = software_sqrtf(x);
+        if got.is_nan() || want.is_nan() {
+            assert!(
+                got.is_nan() && want.is_nan(),
+                "sqrtf({x:?}) NaN disagreement"
+            );
+            nan += 1;
+        } else {
+            assert_eq!(got.to_bits(), want.to_bits(), "sqrtf({x:?})");
+            non_nan += 1;
+        }
+    }
+    assert_eq!(non_nan, 2_139_095_042);
+    assert_eq!(nan, 2_155_872_254);
 }
 
 fn check_sqrtf(stride: u32) {
@@ -228,8 +342,8 @@ fn check_sqrtf(stride: u32) {
     assert!(m::sqrtf(f32::NAN).is_nan());
 }
 
-/// `sqrt` (f64) is correctly rounded over a large deterministic sample, including subnormals and
-/// perfect squares.
+/// `sqrt` (f64) matches the independent integer oracle over raw patterns, subnormals, exact
+/// squares, and inputs adjacent to root-rounding midpoints.
 #[test]
 fn sqrt_is_correctly_rounded() {
     let mut state = 0x243f_6a88_85a3_08d3_u64;
@@ -241,20 +355,20 @@ fn sqrt_is_correctly_rounded() {
     };
 
     for _ in 0..2_000_000 {
-        let bits = next() & !(1u64 << 63);
+        let bits = next();
         let x = f64::from_bits(bits);
-        if !x.is_finite() {
-            continue;
+        assert_sqrt_matches_software(x);
+        if x >= 0.0 {
+            assert_eq!(m::sqrt(x).to_bits(), x.sqrt().to_bits(), "sqrt({x:?})");
         }
-        assert_eq!(
-            m::sqrt(x).to_bits(),
-            x.sqrt().to_bits(),
-            "sqrt({x}) [bits {bits:#018x}]"
-        );
     }
 
     for n in 0..100_000u64 {
         let x = (n * n) as f64;
+        for delta in 0..=4 {
+            assert_sqrt_matches_software(f64::from_bits(x.to_bits().saturating_sub(delta)));
+            assert_sqrt_matches_software(f64::from_bits(x.to_bits().saturating_add(delta)));
+        }
         assert_eq!(m::sqrt(x), n as f64, "sqrt of the perfect square {x}");
     }
 
@@ -264,20 +378,36 @@ fn sqrt_is_correctly_rounded() {
         for delta in [0u64, 1, 2] {
             let bits = (1u64 << shift) + delta;
             let x = f64::from_bits(bits);
-            assert_eq!(
-                m::sqrt(x).to_bits(),
-                x.sqrt().to_bits(),
-                "sqrt(subnormal {bits:#018x})"
-            );
+            assert_sqrt_matches_software(x);
         }
     }
     for n in 1..200_000u64 {
         let x = f64::from_bits(n.wrapping_mul(0x0000_0001_1234_5677) & 0x000f_ffff_ffff_ffff);
-        assert_eq!(
-            m::sqrt(x).to_bits(),
-            x.sqrt().to_bits(),
-            "sqrt(subnormal {x:e})"
-        );
+        assert_sqrt_matches_software(x);
+    }
+
+    // Inputs nearest the squared midpoint between adjacent f64 roots are the hard rounding cases.
+    // `lo * hi` is within substantially less than one input ulp of the exact boundary; neighbours
+    // on both sides exercise the transition without relying on an f64 midpoint representation.
+    for exponent in -511..=511 {
+        let encoded_exponent = ((exponent + 1023) as u64) << 52;
+        for mantissa in [
+            0,
+            1,
+            0x0001_5555_5555_5555,
+            0x0005_5555_5555_5555,
+            0x000a_aaaa_aaaa_aaaa,
+            0x000f_ffff_ffff_ffff,
+        ] {
+            let lo_bits = encoded_exponent | mantissa;
+            let lo = f64::from_bits(lo_bits);
+            let hi = f64::from_bits(lo_bits + 1);
+            let boundary = lo * hi;
+            for delta in -2_i64..=2 {
+                let bits = (boundary.to_bits() as i64 + delta) as u64;
+                assert_sqrt_matches_software(f64::from_bits(bits));
+            }
+        }
     }
 
     for &x in &[
@@ -291,11 +421,28 @@ fn sqrt_is_correctly_rounded() {
         4.0,
         f64::INFINITY,
     ] {
-        assert_eq!(m::sqrt(x).to_bits(), x.sqrt().to_bits(), "sqrt({x})");
+        assert_sqrt_matches_software(x);
+        if x >= 0.0 {
+            assert_eq!(m::sqrt(x).to_bits(), x.sqrt().to_bits(), "sqrt({x:?})");
+        }
     }
-    assert!(m::sqrt(-1.0).is_nan());
-    assert!(m::sqrt(f64::NEG_INFINITY).is_nan());
-    assert!(m::sqrt(f64::NAN).is_nan());
+    assert_sqrt_matches_software(-1.0);
+    assert_sqrt_matches_software(f64::NEG_INFINITY);
+    assert_sqrt_matches_software(f64::NAN);
+}
+
+/// Large deterministic raw-pattern sweep against the independent exact-integer oracle.
+#[test]
+#[ignore = "large deterministic sqrt oracle sweep"]
+fn sqrt_is_correctly_rounded_large_oracle() {
+    let mut state = 0x1319_8a2e_0370_7344_u64;
+    for _ in 0..100_000_000 {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let bits = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        assert_sqrt_matches_software(f64::from_bits(bits));
+    }
 }
 
 /// `floor`/`floorf` agree with the platform on every exponent class, including the signed-zero and

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "issue": 880,
+  "task": "MQ-1",
+  "kind": "transient_shaper_benchmark",
+  "status": "measured",
+  "candidate_commit": "0000000000000000000000000000000000000000",
+  "engine_effect_commit": "6f662fee7b47a5eb38b67e0ddc6d007edd438cfa",
+  "engine_effect_revision": "E1 (MA-3)",
+  "benchmark_source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "runner_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sample_rate_hz": 48000,
+  "duration_seconds": 4,
+  "frames": 192000,
+  "block_frames": 128,
+  "track_count": 8,
+  "link_mode": "dual_mono",
+  "attack": 0.75,
+  "sustain": -0.5,
+  "mix": 1.0,
+  "programme_seeds": {
+    "left": "0x88000001",
+    "right": "0x88000002"
+  },
+  "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "workload_invocations": 1,
+  "warmups_per_arm": 1,
+  "measured_rounds_per_arm": 2,
+  "bank_width": 8,
+  "bank_ns_per_lane_sample": [
+    1.0,
+    1.0
+  ],
+  "scalar_width": 1,
+  "scalar_ns_per_lane_sample": [
+    1.0,
+    1.0
+  ],
+  "cpu_model": "fixture CPU",
+  "architecture": "x86_64",
+  "os": "Linux",
+  "kernel": "fixture kernel",
+  "rust_version": "rustc fixture",
+  "llvm_version": "fixture LLVM",
+  "target_triple": "x86_64-unknown-linux-gnu"
+}
