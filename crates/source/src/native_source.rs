@@ -1780,7 +1780,9 @@ mod tests {
     use super::*;
     use std::io::{self, Cursor, SeekFrom};
 
-    use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
+    use crate::{
+        HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceProducerTelemetry, SourceReadReport,
+    };
     use session::{CompileCaps, StableId, compile_session, parse_session_json};
 
     const SESSION_CONTENT: &[u8] =
@@ -4050,6 +4052,313 @@ mod tests {
             "all inert jobs must reject before the sole worker start"
         );
     }
+
+    /// Issue #919 gate 1: one block exactly as the producer published it on the data queue.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct PublishedBlock {
+        generation: u64,
+        start_frame: u64,
+        frames: u32,
+        end_of_region: bool,
+        sanitized: u64,
+        /// Every published word: the first `frames` words of each `[channel][quantum]` plane.
+        words: Vec<u32>,
+    }
+
+    impl PublishedBlock {
+        fn record(block: &crate::TransferBlock, quantum: usize) -> Self {
+            let frames = usize::try_from(block.frames).expect("u32 fits usize");
+            Self {
+                generation: block.generation.0,
+                start_frame: block.start_frame.0,
+                frames: block.frames,
+                end_of_region: block.end_of_region,
+                sanitized: block.native_decoder_sanitized_samples,
+                words: block
+                    .samples
+                    .chunks_exact(quantum)
+                    .flat_map(|plane| plane[..frames].iter().map(|sample| sample.to_bits()))
+                    .collect(),
+            }
+        }
+
+        /// The recorded oracle row: the block's metadata and an FNV-1a digest of its words.
+        fn oracle_row(&self) -> (u64, u64, u32, bool, u64, u64) {
+            let digest = self
+                .words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            (
+                self.generation,
+                self.start_frame,
+                self.frames,
+                self.end_of_region,
+                self.sanitized,
+                digest,
+            )
+        }
+    }
+
+    /// A render side that takes blocks raw off the data queue, so the record holds every block
+    /// the producer published, including the stale ones a real consumer would discard.
+    struct ScriptedRender {
+        consumer: PcmSourceConsumer,
+        quantum: usize,
+        played: Option<Box<crate::TransferBlock>>,
+        published: Vec<PublishedBlock>,
+    }
+
+    impl ScriptedRender {
+        /// One render block boundary in the real consumer's order: observe an admitted seek
+        /// (freeing the ring's one seek slot), release the block played last, take the next.
+        fn block_boundary(&mut self) {
+            let _ = self.consumer.command_consumer.try_pop();
+            if let Some(mut block) = self.played.take() {
+                block.reset_metadata();
+                assert!(
+                    self.consumer.recycle_producer.try_push(block).is_ok(),
+                    "the recycle queue has a slot for every prepared block"
+                );
+            }
+            if let Ok(block) = self.consumer.data_consumer.try_pop() {
+                self.published
+                    .push(PublishedBlock::record(&block, self.quantum));
+                self.played = Some(block);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ScriptStep {
+        /// Service the worker until it reports no progress.
+        Run,
+        /// Service the worker exactly once.
+        ServiceOnce,
+        /// One render block boundary.
+        Render,
+        /// The controller queues a seek for the worker.
+        Seek { generation: u64, frame: u64 },
+    }
+
+    struct WorkerTrace {
+        published: Vec<PublishedBlock>,
+        idles: Vec<Idle>,
+        telemetry: Vec<SourceProducerTelemetry>,
+    }
+
+    /// Drive one prepared job through `script` on the test thread with `service` as its worker.
+    fn run_worker_script(
+        samples: &[f32],
+        request: NativeSourcePrepareRequest,
+        script: &[ScriptStep],
+        mut service: impl FnMut(
+            &mut SourceJob<Cursor<Vec<u8>>>,
+            &mut Consumer<()>,
+        ) -> Result<Idle, NativeSourceWorkerExit>,
+    ) -> WorkerTrace {
+        let quantum =
+            usize::try_from(request.ring_config.quantum_frames.0).expect("quantum fits usize");
+        let mut native_resolver = resolver_wave(stereo_float32_wave(samples), b"exact-identity");
+        let UnstartedNativeSource {
+            mut command_sender,
+            event_receiver: _events,
+            mut job,
+            consumer,
+            ..
+        } = prepare_native_source_job(&mut native_resolver, request, caps(), None)
+            .expect("prepare scripted job");
+        let (_stop_sender, mut stop) =
+            bounded_spsc::<()>(NonZeroUsize::new(1).expect("one"), QueueGeneration(13))
+                .expect("stop queue");
+        let mut render = ScriptedRender {
+            consumer,
+            quantum,
+            played: None,
+            published: Vec::new(),
+        };
+        let mut idles = Vec::new();
+        let mut telemetry = Vec::new();
+        for step in script {
+            match *step {
+                ScriptStep::Run => {
+                    let mut idle = Idle::Progress;
+                    for _ in 0..64 {
+                        idle = service(&mut job, &mut stop).expect("scripted worker stays live");
+                        if idle != Idle::Progress {
+                            break;
+                        }
+                    }
+                    assert_ne!(idle, Idle::Progress, "scripted worker never went idle");
+                    idles.push(idle);
+                }
+                ScriptStep::ServiceOnce => {
+                    idles.push(service(&mut job, &mut stop).expect("scripted worker stays live"));
+                }
+                ScriptStep::Render => render.block_boundary(),
+                ScriptStep::Seek { generation, frame } => command_sender
+                    .try_push(WorkerCommand::Seek {
+                        generation: SourceGeneration(generation),
+                        frame: SourceFrame(frame),
+                    })
+                    .expect("bounded worker command slot"),
+            }
+            telemetry.push(job.provider.telemetry());
+        }
+        WorkerTrace {
+            published: render.published,
+            idles,
+            telemetry,
+        }
+    }
+
+    /// 48 stereo float32 frames of distinct words plus a negative zero and replacement-bearing
+    /// samples (subnormal, NaN, infinities), placed only in quanta that both workers decode.
+    fn published_sequence_fixture() -> Vec<f32> {
+        let mut samples: Vec<f32> = (0_u16..96)
+            .map(|index| f32::from(index) * 0.375 - 7.0)
+            .collect();
+        // Interleaved index = frame * 2 + channel. Frames 21..=24 and 30..=33 stay plain: the
+        // pre-change worker decoded them ahead of a stall and then dropped them at a seek.
+        samples[2 * 2 + 1] = f32::from_bits(1);
+        samples[7 * 2] = -0.0;
+        samples[10 * 2] = f32::NAN;
+        samples[15 * 2 + 1] = f32::INFINITY;
+        samples[20 * 2 + 1] = f32::INFINITY;
+        samples[27 * 2] = f32::NEG_INFINITY;
+        samples[41 * 2 + 1] = f32::NAN;
+        samples[42 * 2] = f32::from_bits(0x8000_0001);
+        samples
+    }
+
+    /// Region `[1, 43)` of the fixture through a three-block ring of four-frame quanta.
+    fn published_sequence_request() -> NativeSourcePrepareRequest {
+        let mut request = request(NativeWaveRegion {
+            start_frame: SourceFrame(1),
+            length_frames: 42,
+        });
+        request.declared_channel_count = 2;
+        request.ring_config.channel_count = 2;
+        request.ring_config.frame_capacity = 12;
+        request
+    }
+
+    /// Every step lands where both workers are at the same point of their cycle: after a
+    /// `Run` (quiescent) or, for `ServiceOnce`, from a drained ring after the end of region.
+    fn published_sequence_script() -> Vec<ScriptStep> {
+        use ScriptStep::{Render, Run, Seek, ServiceOnce};
+        let mut script = vec![
+            // Fill the ring, then keep it full: two more service rounds with no render boundary,
+            // then a boundary that plays a block but recycles none (the played block is held).
+            Run,
+            Run,
+            Run,
+            Render,
+            Run,
+            // Resume: every later boundary releases one block.
+            Render,
+            Run,
+            Render,
+            Run,
+            // A seek while the worker is stalled on a full ring.
+            Seek {
+                generation: 2,
+                frame: 30,
+            },
+            Run,
+            // A newer seek while the first still occupies the ring's seek slot: backpressure.
+            Seek {
+                generation: 3,
+                frame: 6,
+            },
+            Run,
+        ];
+        // The render observes the first seek; the worker admits the newer one and streams to a
+        // one-frame end-of-region block, then the render drains the ring.
+        script.extend([Render, Run].repeat(14));
+        script.extend([Render].repeat(4));
+        // From a drained ring the seek and the first decode share one call; the next seek is
+        // backpressured until the render observes the first, then drops that decoded quantum.
+        script.extend([
+            Seek {
+                generation: 4,
+                frame: 20,
+            },
+            ServiceOnce,
+            Seek {
+                generation: 5,
+                frame: 12,
+            },
+            Run,
+        ]);
+        script.extend([Render, Run].repeat(12));
+        script.extend([Render].repeat(4));
+        script
+    }
+
+    #[test]
+    fn native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks() {
+        let trace = run_worker_script(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+            service_job,
+        );
+        let rows: Vec<_> = trace
+            .published
+            .iter()
+            .map(PublishedBlock::oracle_row)
+            .collect();
+        assert_eq!(rows, PUBLISHED_SEQUENCE_ORACLE);
+        // Where each `Run` and the one `ServiceOnce` left the worker, as the pre-change worker
+        // recorded it: stalled on the ring, idle after the end of region, or mid-decode.
+        let mut idles = [Idle::WaitingForRender].repeat(17);
+        idles.extend([Idle::WaitingForCommand].repeat(5));
+        idles.push(Idle::Progress);
+        idles.extend([Idle::WaitingForRender].repeat(7));
+        idles.extend([Idle::WaitingForCommand].repeat(6));
+        assert_eq!(trace.idles, idles);
+        // The script really stalled on a full ring and really hit seek backpressure.
+        assert!(
+            trace
+                .telemetry
+                .iter()
+                .all(|telemetry| telemetry.data_full_count == 0)
+        );
+        assert_eq!(trace.telemetry[2].recycle_empty_count, 3);
+        assert_eq!(trace.telemetry[2].cumulative_written_frames, 12);
+    }
+
+    /// Recorded from the pre-change worker (decode into `planar_staging`, then
+    /// `submit_native_planar`) on this fixture and script: `(generation, start frame, frames,
+    /// end of region, sanitized watermark, FNV-1a-64 of the published words)` per block.
+    const PUBLISHED_SEQUENCE_ORACLE: &[(u64, u64, u32, bool, u64, u64)] = &[
+        (1, 1, 4, false, 1, 0x34d9_bb8f_8505_026d),
+        (1, 5, 4, false, 1, 0x0dcf_060d_29cb_76c8),
+        (1, 9, 4, false, 2, 0x8e8a_886e_16e6_cba0),
+        (1, 13, 4, false, 3, 0xda67_f95d_b40f_4e81),
+        (1, 17, 4, false, 4, 0x5e59_9b76_32c7_ff1e),
+        (3, 6, 4, false, 4, 0xa143_3619_35ea_7030),
+        (3, 10, 4, false, 5, 0xaf63_350f_14bd_4e68),
+        (3, 14, 4, false, 6, 0xf699_5fc0_678d_4065),
+        (3, 18, 4, false, 7, 0x31e9_9e34_2233_85d0),
+        (3, 22, 4, false, 7, 0x2913_d5cd_3aa0_e835),
+        (3, 26, 4, false, 8, 0x06d9_d950_4515_21ee),
+        (3, 30, 4, false, 8, 0xcd1f_a272_97b8_0d30),
+        (3, 34, 4, false, 8, 0x4397_75c4_c7f7_a775),
+        (3, 38, 4, false, 9, 0x35b8_5933_efba_884b),
+        (3, 42, 1, true, 10, 0xab4a_0732_2a3b_83fd),
+        (5, 12, 4, false, 12, 0x8cd0_48ba_c309_1175),
+        (5, 16, 4, false, 12, 0xf2b5_fbd5_5306_e945),
+        (5, 20, 4, false, 13, 0x46e9_d3c6_26e9_7094),
+        (5, 24, 4, false, 14, 0xdb1a_4bd6_21f1_9076),
+        (5, 28, 4, false, 14, 0x9732_cdd3_b4e0_cc90),
+        (5, 32, 4, false, 14, 0x2564_c537_778d_ae75),
+        (5, 36, 4, false, 14, 0x2114_7b91_add9_18f5),
+        (5, 40, 3, true, 16, 0xda44_2ca2_da4a_27ab),
+    ];
 
     fn read_one(consumer: &mut PcmSourceConsumer) -> ([f32; 4], SourceReadReport) {
         let mut output = [0.0; 4];
