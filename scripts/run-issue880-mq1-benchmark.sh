@@ -7,11 +7,15 @@ cd "$root"
 # shellcheck source=scripts/issue880-mq1-benchmark-lib.sh
 source scripts/issue880-mq1-benchmark-lib.sh
 
-readonly engine_effect_commit=6f662fee7b47a5eb38b67e0ddc6d007edd438cfa
+readonly baseline_effect_commit=6f662fee7b47a5eb38b67e0ddc6d007edd438cfa
 mode=
 output_arg=
+effect_source_arg=
+effect_revision_arg=
 usage() {
     printf 'usage: %s (--preflight|--run) --output RECORD.json\n' "$0" >&2
+    printf '       %s (--preflight|--run) --effect-source-commit COMMIT --effect-revision e1|mb2-fast-db --output RECORD.json\n' "$0" >&2
+    printf '       %s --recover-preserved --raw-input RAW.log --failure-input FAILURE.json --output RECOVERED.json\n' "$0" >&2
 }
 
 while (($#)); do
@@ -21,9 +25,34 @@ while (($#)); do
             mode=${1#--}
             shift
             ;;
+        --recover-preserved)
+            [[ -z "$mode" ]] || { usage; exit 2; }
+            mode=recover-preserved
+            shift
+            ;;
         --output)
             [[ -z "$output_arg" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
             output_arg=$2
+            shift 2
+            ;;
+        --raw-input)
+            [[ -z "${raw_input_arg:-}" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            raw_input_arg=$2
+            shift 2
+            ;;
+        --failure-input)
+            [[ -z "${failure_input_arg:-}" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            failure_input_arg=$2
+            shift 2
+            ;;
+        --effect-source-commit)
+            [[ -z "$effect_source_arg" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            effect_source_arg=$2
+            shift 2
+            ;;
+        --effect-revision)
+            [[ -z "$effect_revision_arg" && $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+            effect_revision_arg=$2
             shift 2
             ;;
         --help)
@@ -37,6 +66,35 @@ while (($#)); do
     esac
 done
 [[ -n "$mode" && -n "$output_arg" ]] || { usage; exit 2; }
+
+engine_effect_commit=$baseline_effect_commit
+engine_effect_revision='E1 (MA-3)'
+selected_effect_revision=e1
+if [[ -n "$effect_source_arg" || -n "$effect_revision_arg" ]]; then
+    [[ "$mode" != recover-preserved && -n "$effect_source_arg" && -n "$effect_revision_arg" ]] || { usage; exit 2; }
+    [[ "$effect_source_arg" =~ ^[0-9a-f]{40}$ ]] || { usage; exit 2; }
+    case "$effect_revision_arg" in
+        e1)
+            [[ "$effect_source_arg" == "$baseline_effect_commit" ]] || {
+                printf 'MQ-1 E1 provenance requires the frozen baseline effect commit\n' >&2
+                exit 2
+            }
+            ;;
+        mb2-fast-db)
+            [[ "$effect_source_arg" != "$baseline_effect_commit" ]] || {
+                printf 'MQ-1 MB-2 provenance requires a distinct fast-tier source commit\n' >&2
+                exit 2
+            }
+            engine_effect_revision='MB-2 (R2 fast dB tier)'
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+    engine_effect_commit=$effect_source_arg
+    selected_effect_revision=$effect_revision_arg
+fi
 
 if [[ "$output_arg" == /* ]]; then
     output=$(realpath -m -- "$output_arg")
@@ -72,16 +130,11 @@ check_machine() {
 preflight() {
     local scratch failure_status persisted occupied
     refuse_existing_outputs
+    validate_effect_source_selection "$root" "$engine_effect_commit" "$selected_effect_revision" "$baseline_effect_commit" || {
+        printf 'MQ-1 effect source is not an ancestor with matching current source for revision %s\n' "$engine_effect_revision" >&2
+        return 1
+    }
     check_machine
-    git merge-base --is-ancestor "$engine_effect_commit" HEAD || {
-        printf 'MQ-1 candidate is not based on the MA-3 E1 checkpoint\n' >&2
-        return 1
-    }
-    git diff --quiet "$engine_effect_commit" HEAD -- \
-        crates/math/src/lane_math.rs crates/transient-shaper/src || {
-        printf 'MQ-1 baseline effect sources differ from the E1 checkpoint\n' >&2
-        return 1
-    }
     jq -e -L scripts -f scripts/issue880-mq1-record-validator.jq \
         scripts/fixtures/issue880-mq1-record.json >/dev/null
 
@@ -111,6 +164,106 @@ preflight() {
     cargo test --locked --release --quiet -p transient-shaper --test bench --no-run
 }
 
+recover_preserved() (
+    set -euo pipefail
+    local raw_input failure_input raw_sha256 failure_sha256 scratch result_stage record_stage
+
+    [[ -n "${raw_input_arg:-}" && -n "${failure_input_arg:-}" ]] || { usage; exit 2; }
+    if [[ "$raw_input_arg" == /* ]]; then
+        raw_input=$(realpath -e -- "$raw_input_arg")
+    else
+        raw_input=$(realpath -e -- "$root/$raw_input_arg")
+    fi
+    if [[ "$failure_input_arg" == /* ]]; then
+        failure_input=$(realpath -e -- "$failure_input_arg")
+    else
+        failure_input=$(realpath -e -- "$root/$failure_input_arg")
+    fi
+    [[ -f "$raw_input" && -f "$failure_input" ]] || {
+        printf 'MQ-1 recovery inputs must be regular files\n' >&2
+        exit 1
+    }
+    [[ "$output" != "$raw_input" && "$output" != "$failure_input" ]] || {
+        printf 'MQ-1 recovery output must be separate from its source files\n' >&2
+        exit 1
+    }
+    refuse_existing_outputs
+
+    raw_sha256=$(sha256sum "$raw_input" | awk '{print $1}')
+    failure_sha256=$(sha256sum "$failure_input" | awk '{print $1}')
+    jq -e --arg raw_sha256 "$raw_sha256" '
+        type == "object" and
+        .schema_version == 1 and .issue == 880 and .task == "MQ-1" and
+        .kind == "transient_shaper_benchmark" and
+        .status == "postprocess_failed_unaccepted" and
+        (.candidate_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+        (.runner_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.raw_sha256 == $raw_sha256) and
+        (.runner_report.kind == "transient_shaper_benchmark_failure") and
+        (.runner_report.reason == "result_line_count") and
+        (.runner_report.exit_status == 1)
+    ' "$failure_input" >/dev/null || {
+        printf 'MQ-1 recovery failure record does not match the preserved parser-failure disposition\n' >&2
+        exit 1
+    }
+
+    scratch=$(mktemp -d "$output_dir/.mq1-recover.XXXXXXXX")
+    trap 'rm -rf -- "$scratch"' EXIT
+    result_stage="$scratch/result.json"
+    record_stage="$scratch/record.json"
+    if ! extract_mq1_result "$raw_input" "$result_stage"; then
+        printf 'MQ-1 recovery found zero, duplicate, or invalid result records\n' >&2
+        exit 1
+    fi
+
+    jq -e --slurpfile result "$result_stage" '
+        .fixture_sha256 == $result[0].fixture_sha256 and
+        .bank_ns_per_lane_sample == $result[0].bank_ns_per_lane_sample and
+        .scalar_ns_per_lane_sample == $result[0].scalar_ns_per_lane_sample
+    ' "$failure_input" >/dev/null || {
+        printf 'MQ-1 extracted values disagree with the preserved failed disposition\n' >&2
+        exit 1
+    }
+
+    jq --slurpfile result "$result_stage" \
+        --arg failure_input "$failure_input_arg" \
+        --arg failure_sha256 "$failure_sha256" \
+        --arg raw_input "$raw_input_arg" \
+        --arg raw_sha256 "$raw_sha256" \
+        --arg extracted_result_sha256 "$(sha256sum "$result_stage" | awk '{print $1}')" '
+        .status = "measured" |
+        .fixture_sha256 = $result[0].fixture_sha256 |
+        .bank_ns_per_lane_sample = $result[0].bank_ns_per_lane_sample |
+        .scalar_ns_per_lane_sample = $result[0].scalar_ns_per_lane_sample |
+        .recovery = {
+            schema_version: 1,
+            method: "offline_mq1_result_extraction",
+            recovered_from_status: "postprocess_failed_unaccepted",
+            source_failure_record: $failure_input,
+            source_failure_record_sha256: $failure_sha256,
+            source_raw_log: $raw_input,
+            source_raw_log_sha256: $raw_sha256,
+            source_failure_reason: .failure_reason,
+            source_runner_report: .runner_report,
+            extracted_result_sha256: $extracted_result_sha256,
+            workload_invocations_during_recovery: 0
+        } |
+        del(.failure_reason, .runner_report)
+    ' "$failure_input" >"$record_stage"
+
+    jq -e -L scripts -f scripts/issue880-mq1-record-validator.jq "$record_stage" >/dev/null || {
+        printf 'MQ-1 recovered record failed schema validation\n' >&2
+        exit 1
+    }
+    persist_no_clobber "$record_stage" "$output"
+    printf 'MQ-1 recovered record: %s\n' "$output"
+)
+
+if [[ "$mode" == recover-preserved ]]; then
+    recover_preserved
+    exit 0
+fi
+[[ -z "${raw_input_arg:-}" && -z "${failure_input_arg:-}" ]] || { usage; exit 2; }
 preflight
 if [[ "$mode" == preflight ]]; then
     printf 'Issue-880 MQ-1 preflight: PASS (workload launches 0)\n'
@@ -137,7 +290,8 @@ runner_sha256=$(sha256sum "$0" | awk '{print $1}')
 raw_stage=$(mktemp "$output.run.XXXXXXXX")
 record_stage=$(mktemp "$output.record.XXXXXXXX")
 failure_stage=$(mktemp "$output.failure.XXXXXXXX")
-cleanup() { rm -f -- "$raw_stage" "$record_stage" "$failure_stage"; }
+measurement_stage=$(mktemp "$output.measurement.XXXXXXXX")
+cleanup() { rm -f -- "$raw_stage" "$record_stage" "$failure_stage" "$measurement_stage"; }
 trap cleanup EXIT
 
 write_failure() {
@@ -163,30 +317,18 @@ else
     exit "$workload_status"
 fi
 
-mapfile -t result_lines < <(sed -n 's/^MQ1_RESULT //p' "$raw_stage")
-if [[ "${#result_lines[@]}" != 1 ]]; then
+if ! extract_mq1_result "$raw_stage" "$measurement_stage"; then
     persist_no_clobber "$raw_stage" "$raw_output"
-    write_failure result_line_count 1
-    printf 'MQ-1 emitted %s result records; raw output: %s\n' "${#result_lines[@]}" "$raw_output" >&2
+    write_failure result_extraction 1
+    printf 'MQ-1 did not emit exactly one valid result; raw output: %s\n' "$raw_output" >&2
     exit 1
 fi
-measurement=${result_lines[0]}
-if ! jq -e '
-    type == "object" and
-    (keys | sort) == ["bank_ns_per_lane_sample", "fixture_sha256", "scalar_ns_per_lane_sample"] and
-    (.fixture_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-    (.bank_ns_per_lane_sample | type == "array" and length == 2 and all(.[]; type == "number" and . > 0)) and
-    (.scalar_ns_per_lane_sample | type == "array" and length == 2 and all(.[]; type == "number" and . > 0))
-' <<<"$measurement" >/dev/null; then
-    persist_no_clobber "$raw_stage" "$raw_output"
-    write_failure result_schema 1
-    printf 'MQ-1 result failed schema validation; raw output: %s\n' "$raw_output" >&2
-    exit 1
-fi
+measurement=$(<"$measurement_stage")
 
 jq -n \
     --arg candidate_commit "$candidate_commit" \
     --arg engine_effect_commit "$engine_effect_commit" \
+    --arg engine_effect_revision "$engine_effect_revision" \
     --arg benchmark_source_sha256 "$benchmark_source_sha256" \
     --arg runner_sha256 "$runner_sha256" \
     --arg fixture_sha256 "$(jq -r '.fixture_sha256' <<<"$measurement")" \
@@ -199,7 +341,7 @@ jq -n \
     --arg target_triple "$target_triple" \
     --argjson bank_ns_per_lane_sample "$(jq -c '.bank_ns_per_lane_sample' <<<"$measurement")" \
     --argjson scalar_ns_per_lane_sample "$(jq -c '.scalar_ns_per_lane_sample' <<<"$measurement")" \
-    '{schema_version:1,issue:880,task:"MQ-1",kind:"transient_shaper_benchmark",status:"measured",candidate_commit:$candidate_commit,engine_effect_commit:$engine_effect_commit,engine_effect_revision:"E1 (MA-3)",benchmark_source_sha256:$benchmark_source_sha256,runner_sha256:$runner_sha256,sample_rate_hz:48000,duration_seconds:4,frames:192000,block_frames:128,track_count:8,link_mode:"dual_mono",attack:0.75,sustain:-0.5,mix:1.0,programme_seeds:{left:"0x88000001",right:"0x88000002"},fixture_sha256:$fixture_sha256,workload_invocations:1,warmups_per_arm:1,measured_rounds_per_arm:2,bank_width:8,bank_ns_per_lane_sample:$bank_ns_per_lane_sample,scalar_width:1,scalar_ns_per_lane_sample:$scalar_ns_per_lane_sample,cpu_model:$cpu_model,architecture:$architecture,os:$os,kernel:$kernel,rust_version:$rust_version,llvm_version:$llvm_version,target_triple:$target_triple}' \
+    '{schema_version:1,issue:880,task:"MQ-1",kind:"transient_shaper_benchmark",status:"measured",candidate_commit:$candidate_commit,engine_effect_commit:$engine_effect_commit,engine_effect_revision:$engine_effect_revision,benchmark_source_sha256:$benchmark_source_sha256,runner_sha256:$runner_sha256,sample_rate_hz:48000,duration_seconds:4,frames:192000,block_frames:128,track_count:8,link_mode:"dual_mono",attack:0.75,sustain:-0.5,mix:1.0,programme_seeds:{left:"0x88000001",right:"0x88000002"},fixture_sha256:$fixture_sha256,workload_invocations:1,warmups_per_arm:1,measured_rounds_per_arm:2,bank_width:8,bank_ns_per_lane_sample:$bank_ns_per_lane_sample,scalar_width:1,scalar_ns_per_lane_sample:$scalar_ns_per_lane_sample,cpu_model:$cpu_model,architecture:$architecture,os:$os,kernel:$kernel,rust_version:$rust_version,llvm_version:$llvm_version,target_triple:$target_triple}' \
     >"$record_stage"
 if ! jq -e -L scripts -f scripts/issue880-mq1-record-validator.jq "$record_stage" >/dev/null; then
     persist_no_clobber "$raw_stage" "$raw_output"

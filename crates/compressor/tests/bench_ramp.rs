@@ -28,7 +28,9 @@ const BLOCKS_PER_ROUND: usize = 32;
 const MEASURED_ROUNDS: usize = 2;
 const RELEASE_PARAMETER: u32 = 4;
 const ATTACK_PARAMETER: u32 = 3;
-const EXP_CALLS_PER_BANK_PER_PARAMETER: usize = BANK_WIDTH * 2 * RAMP_FRAMES;
+// Each frame-zero event designs one exact target coefficient per lane and channel. The live start
+// coefficient is reused from the current coefficient word; there is no sample-rate exp call.
+const EXP_CALLS_PER_BANK_PER_PARAMETER: usize = BANK_WIDTH * 2;
 const EMPTY_OFFSETS: [u32; BANK_WIDTH + 1] = [0; BANK_WIDTH + 1];
 
 #[derive(Clone, Copy, Debug)]
@@ -304,11 +306,11 @@ fn summarize_arm(arm: Arm, measured: [Vec<u64>; MEASURED_ROUNDS]) -> String {
 fn rate_coefficient_call_counts() -> [usize; 3] {
     let ramping_channels_per_bank = BANK_WIDTH * 2;
     [Arm::ReleaseOnly, Arm::AttackAndRelease, Arm::NoAutomation]
-        .map(|arm| BANK_COUNT * ramping_channels_per_bank * RAMP_FRAMES * arm.ramping_parameters())
+        .map(|arm| BANK_COUNT * ramping_channels_per_bank * arm.ramping_parameters())
 }
 
 fn rate_coefficient_calls_per_block(arm: Arm) -> usize {
-    BANK_COUNT * (BANK_WIDTH * 2) * RAMP_FRAMES * arm.ramping_parameters()
+    BANK_COUNT * (BANK_WIDTH * 2) * arm.ramping_parameters()
 }
 
 fn request_points(arm: Arm, variant: usize, first_sample: u64) -> Vec<PreparedAutomationSpan> {
@@ -375,8 +377,8 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
     if Backend::current() != Backend::Simd8 {
         return;
     }
-    assert_eq!(rate_coefficient_call_counts(), [8_192, 16_384, 0]);
-    assert_eq!(EXP_CALLS_PER_BANK_PER_PARAMETER, 1_024);
+    assert_eq!(rate_coefficient_call_counts(), [128, 256, 0]);
+    assert_eq!(EXP_CALLS_PER_BANK_PER_PARAMETER, 16);
 
     let values = defaults();
     let reference = support::prepare(support::request(&values));
@@ -495,7 +497,7 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
 #[ignore = "descriptive ramp benchmark; run once through scripts/run-issue880-mq2-benchmark.sh"]
 fn mq2_compressor_ramp_spike() {
     assert_eq!(TRACK_COUNT, 64);
-    assert_eq!(EXP_CALLS_PER_BANK_PER_PARAMETER, 1_024);
+    assert_eq!(EXP_CALLS_PER_BANK_PER_PARAMETER, 16);
     let audio = Audio::seeded();
     eprintln!("MISO_ENGINE_BENCH_PHASE workload_started");
     let mut release = BenchArm::prepare(Arm::ReleaseOnly, &audio);
@@ -530,7 +532,7 @@ fn mq2_compressor_ramp_spike() {
         )
     });
     println!(
-        "MQ2_RESULT {{\"schema_version\":1,\"task\":\"MQ-2\",\"sample_rate_hz\":{SAMPLE_RATE},\"quantum_frames\":{QUANTUM},\"bank_width\":{BANK_WIDTH},\"bank_count\":{BANK_COUNT},\"track_count\":{TRACK_COUNT},\"warmup_blocks_per_arm\":{BLOCKS_PER_ROUND},\"measured_blocks_per_round\":{BLOCKS_PER_ROUND},\"measured_rounds_per_arm\":{MEASURED_ROUNDS},\"ramp_frames\":{RAMP_FRAMES},\"events\":\"frame-zero point events on every lane and both channels\",\"arms\":[{}, {}, {}]}}",
+        "MQ2_RESULT {{\"schema_version\":2,\"task\":\"MQ-2\",\"sample_rate_hz\":{SAMPLE_RATE},\"quantum_frames\":{QUANTUM},\"bank_width\":{BANK_WIDTH},\"bank_count\":{BANK_COUNT},\"track_count\":{TRACK_COUNT},\"warmup_blocks_per_arm\":{BLOCKS_PER_ROUND},\"measured_blocks_per_round\":{BLOCKS_PER_ROUND},\"measured_rounds_per_arm\":{MEASURED_ROUNDS},\"ramp_frames\":{RAMP_FRAMES},\"events\":\"frame-zero point events on every lane and both channels\",\"arms\":[{}, {}, {}]}}",
         arms[0], arms[1], arms[2]
     );
 }

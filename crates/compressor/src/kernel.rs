@@ -16,7 +16,7 @@ use math::fast_db::{fast_gain_from_db, fast_level_db};
 use crate::design::{
     ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
     COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH, PARAMETER_COUNT,
-    RAMP_COUNT, design_lane,
+    RAMP_COUNT, SMOOTHING_SAMPLES, design_lane, rate_coefficient,
 };
 
 const LEVEL_FLOOR: f32 = 1.0e-8;
@@ -43,6 +43,12 @@ pub(crate) struct Channel<L: Lane> {
     pub(crate) words: CoefWords,
     /// One smoothing ramp per parameter and lane.
     pub(crate) ramps: [[LinearRamp; MAX_WIDTH]; RAMP_COUNT],
+    /// Attack and release coefficient ramps, indexed attack then release.
+    ///
+    /// Their current values are kept bit-identical to `words[COEF_ATTACK/RELEASE]`. The parameter
+    /// ramps remain the public current/target state; these ramps interpolate the exact coefficient
+    /// endpoints without evaluating an exponential in the sample loop.
+    pub(crate) rate_ramps: [[LinearRamp; MAX_WIDTH]; 2],
     /// The recursive gain-reduction envelope, in dB.
     pub(crate) gain_reduction_db: L,
 }
@@ -54,6 +60,7 @@ impl<L: Lane> Channel<L> {
             defaults: *defaults,
             words: [[0.0; MAX_WIDTH]; crate::design::COEF_COUNT],
             ramps: [[LinearRamp::fixed(0.0); MAX_WIDTH]; RAMP_COUNT],
+            rate_ramps: [[LinearRamp::fixed(0.0); MAX_WIDTH]; 2],
             gain_reduction_db: L::zero(),
         };
         channel.seed_from_defaults(sample_rate);
@@ -64,6 +71,7 @@ impl<L: Lane> Channel<L> {
     pub(crate) fn copy_state_from(&mut self, source: &Self) {
         self.words = source.words;
         self.ramps = source.ramps;
+        self.rate_ramps = source.rate_ramps;
         self.gain_reduction_db = source.gain_reduction_db;
     }
 
@@ -81,6 +89,7 @@ impl<L: Lane> Channel<L> {
                 &mut self.words,
                 lane,
             );
+            self.seed_rate_ramps(lane);
         }
     }
 
@@ -100,6 +109,7 @@ impl<L: Lane> Channel<L> {
                 values[parameter] = ramp[lane].current;
             }
             design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
+            self.seed_rate_ramps(lane);
         }
     }
 
@@ -115,6 +125,66 @@ impl<L: Lane> Channel<L> {
     pub(crate) fn redesign(&mut self, lane: usize, sample_rate: u32) {
         let values = self.current_values(lane);
         design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
+        self.seed_rate_ramps(lane);
+    }
+
+    fn seed_rate_ramps(&mut self, lane: usize) {
+        self.rate_ramps[0][lane] = LinearRamp::fixed(self.words[COEF_ATTACK][lane]);
+        self.rate_ramps[1][lane] = LinearRamp::fixed(self.words[COEF_RELEASE][lane]);
+    }
+
+    /// Reconstructs the active coefficient trajectories after a version-1 payload restore.
+    ///
+    /// The payload intentionally keeps its frozen 22-word shape and does not serialize auxiliary
+    /// coefficient state. As with the parameter ramp step, which is also reconstructed from the
+    /// payload's current/target/remaining triple, the resumed coefficient path starts from the
+    /// exact design of the serialized current time and reaches the exact target design after the
+    /// serialized number of samples.
+    pub(crate) fn restore_rate_ramps(&mut self, lane: usize, sample_rate: u32) {
+        for (slot, (parameter, coefficient)) in [(3, COEF_ATTACK), (4, COEF_RELEASE)]
+            .into_iter()
+            .enumerate()
+        {
+            let parameter_ramp = self.ramps[parameter][lane];
+            let start = self.words[coefficient][lane];
+            let target = rate_coefficient(parameter_ramp.target, sample_rate);
+            let mut ramp = LinearRamp::fixed(start);
+            if parameter_ramp.remaining != 0 {
+                ramp.set_target(target, parameter_ramp.remaining);
+            }
+            self.rate_ramps[slot][lane] = ramp;
+        }
+    }
+
+    /// Retargets a smoothed parameter and, for attack/release, its coefficient ramp.
+    pub(crate) fn set_parameter_target(
+        &mut self,
+        parameter: usize,
+        lane: usize,
+        value: f32,
+        sample_rate: u32,
+    ) {
+        self.ramps[parameter][lane].set_target(value, SMOOTHING_SAMPLES);
+
+        let slot = match parameter {
+            3 => 0,
+            4 => 1,
+            _ => return,
+        };
+        let target = rate_coefficient(value, sample_rate);
+        self.rate_ramps[slot][lane].set_target(target, SMOOTHING_SAMPLES);
+
+        // A Point that cancels a time ramp at its current value still has to return a coefficient
+        // that was mid-interpolation to the exact design for that value. Keep the exposed time
+        // current/target fixed and use its existing remaining field to carry that bounded return.
+        if !self.ramps[parameter][lane].is_ramping() && self.rate_ramps[slot][lane].is_ramping() {
+            self.ramps[parameter][lane] = LinearRamp {
+                current: value,
+                target: value,
+                step: 0.0,
+                remaining: SMOOTHING_SAMPLES,
+            };
+        }
     }
 
     pub(crate) fn recursive_bits(&self) -> [u32; MAX_WIDTH] {
@@ -133,7 +203,7 @@ impl<L: Lane> Channel<L> {
         most
     }
 
-    /// Advances each in-flight ramp and redesigns only coefficients whose parameter moved.
+    /// Advances each in-flight parameter ramp and its dependent coefficient ramp.
     fn advance_ramps(&mut self, sample_rate: u32) {
         for lane in 0..L::WIDTH {
             let mut changed = 0_u8;
@@ -153,7 +223,17 @@ impl<L: Lane> Channel<L> {
                     ramp[lane].current
                 };
             }
-            design_lane(&values, sample_rate, changed, &mut self.words, lane);
+            let rate_bits = (1 << 3) | (1 << 4);
+            let designed = changed & !rate_bits;
+            if designed != 0 {
+                design_lane(&values, sample_rate, designed, &mut self.words, lane);
+            }
+            if changed & (1 << 3) != 0 {
+                self.words[COEF_ATTACK][lane] = self.rate_ramps[0][lane].next_value();
+            }
+            if changed & (1 << 4) != 0 {
+                self.words[COEF_RELEASE][lane] = self.rate_ramps[1][lane].next_value();
+            }
         }
     }
 }
@@ -494,4 +574,218 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
 /// Applies the block-boundary nonfinite policy and clears the envelope on a rejected channel.
 pub(crate) fn finish_channel<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
     bank::finish_channel::<L>(io, || channel.clear_state())
+}
+
+#[cfg(test)]
+mod coefficient_ramp_tests {
+    use super::Channel;
+    use crate::design::{
+        COEF_ATTACK, COEF_RELEASE, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, rate_coefficient,
+    };
+    use crate::state::{STATE_HEADER_WORDS, commit_channel, validate_channel, write_channel};
+    use effect_runtime::ramp::LinearRamp;
+
+    const SAMPLE_RATE: u32 = 48_000;
+
+    fn defaults() -> [[f32; PARAMETER_COUNT]; MAX_WIDTH] {
+        let values = core::array::from_fn(|index| PARAMETER_SPECS[index].default);
+        [values; MAX_WIDTH]
+    }
+
+    fn assert_ramp_matches(channel: &Channel<f32>, slot: usize, coefficient: usize) {
+        let ramp = channel.rate_ramps[slot][0];
+        assert_eq!(
+            ramp.current.to_bits(),
+            channel.words[coefficient][0].to_bits(),
+            "the current coefficient word and its ramp state must agree"
+        );
+    }
+
+    #[test]
+    fn attack_and_release_coefficient_retargets_are_continuous_and_snap_exactly() {
+        let mut channel = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        for (parameter, slot, coefficient, first_target, second_target) in [
+            (3, 0, COEF_ATTACK, 180.0, 100.0),
+            (4, 1, COEF_RELEASE, 800.0, 3_200.0),
+        ] {
+            let initial = channel.words[coefficient][0];
+            channel.set_parameter_target(parameter, 0, first_target, SAMPLE_RATE);
+            let first_coefficient_target = rate_coefficient(first_target, SAMPLE_RATE);
+            let mut expected = LinearRamp::fixed(initial);
+            expected.set_target(first_coefficient_target, 64);
+
+            for _ in 0..17 {
+                let expected_word = expected.next_value();
+                channel.advance_ramps(SAMPLE_RATE);
+                assert_eq!(
+                    channel.words[coefficient][0].to_bits(),
+                    expected_word.to_bits()
+                );
+                assert_ramp_matches(&channel, slot, coefficient);
+            }
+
+            let live = channel.words[coefficient][0];
+            channel.set_parameter_target(parameter, 0, second_target, SAMPLE_RATE);
+            assert_eq!(
+                channel.words[coefficient][0].to_bits(),
+                live.to_bits(),
+                "retargeting must not jump from the live coefficient"
+            );
+            let second_coefficient_target = rate_coefficient(second_target, SAMPLE_RATE);
+            expected = LinearRamp::fixed(live);
+            expected.set_target(second_coefficient_target, 64);
+            for update in 0..64 {
+                let expected_word = expected.next_value();
+                channel.advance_ramps(SAMPLE_RATE);
+                assert_eq!(
+                    channel.words[coefficient][0].to_bits(),
+                    expected_word.to_bits(),
+                    "parameter {parameter}, update {update}"
+                );
+            }
+            assert_eq!(
+                channel.words[coefficient][0].to_bits(),
+                second_coefficient_target.to_bits(),
+                "the 64th sample snaps to the exact f64-designed endpoint"
+            );
+            assert_eq!(channel.rate_ramps[slot][0].remaining, 0);
+        }
+    }
+
+    #[test]
+    fn cancel_to_current_returns_the_live_coefficient_to_its_exact_design() {
+        let mut channel = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        channel.set_parameter_target(3, 0, 180.0, SAMPLE_RATE);
+        for _ in 0..19 {
+            channel.advance_ramps(SAMPLE_RATE);
+        }
+        let current_time = channel.ramps[3][0].current;
+        let live_coefficient = channel.words[COEF_ATTACK][0];
+        let exact_target = rate_coefficient(current_time, SAMPLE_RATE);
+        assert_ne!(
+            live_coefficient.to_bits(),
+            exact_target.to_bits(),
+            "fixture must cancel while the coefficient is between its endpoints"
+        );
+
+        channel.set_parameter_target(3, 0, current_time, SAMPLE_RATE);
+        let parameter_ramp = channel.ramps[3][0];
+        assert_eq!(parameter_ramp.current.to_bits(), current_time.to_bits());
+        assert_eq!(parameter_ramp.target.to_bits(), current_time.to_bits());
+        assert_eq!(parameter_ramp.step.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(parameter_ramp.remaining, 64);
+        assert_eq!(
+            channel.words[COEF_ATTACK][0].to_bits(),
+            live_coefficient.to_bits(),
+            "the cancel event itself must not jump the coefficient"
+        );
+
+        let mut expected = LinearRamp::fixed(live_coefficient);
+        expected.set_target(exact_target, 64);
+        for update in 0..64 {
+            let expected_word = expected.next_value();
+            channel.advance_ramps(SAMPLE_RATE);
+            assert_eq!(
+                channel.words[COEF_ATTACK][0].to_bits(),
+                expected_word.to_bits(),
+                "cancel return update {update}"
+            );
+            assert_eq!(
+                channel.ramps[3][0].current.to_bits(),
+                current_time.to_bits()
+            );
+        }
+        assert_eq!(
+            channel.words[COEF_ATTACK][0].to_bits(),
+            exact_target.to_bits()
+        );
+        assert_eq!(channel.ramps[3][0].remaining, 0);
+    }
+
+    #[test]
+    fn payload_restore_reconstructs_an_active_coefficient_ramp_from_remaining() {
+        let mut source = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        source.set_parameter_target(4, 0, 2_800.0, SAMPLE_RATE);
+        for _ in 0..23 {
+            source.advance_ramps(SAMPLE_RATE);
+        }
+        let mut bytes = vec![0_u8; STATE_HEADER_WORDS * 4];
+        write_channel(&mut bytes, &source, 0);
+        validate_channel(&bytes).expect("valid source payload");
+
+        let mut restored = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        commit_channel(&bytes, &mut restored, 0, SAMPLE_RATE);
+        let parameter = restored.ramps[4][0];
+        let expected_start = rate_coefficient(parameter.current, SAMPLE_RATE);
+        let expected_target = rate_coefficient(parameter.target, SAMPLE_RATE);
+        let mut expected = LinearRamp::fixed(expected_start);
+        expected.set_target(expected_target, parameter.remaining);
+        assert_eq!(
+            restored.words[COEF_RELEASE][0].to_bits(),
+            expected_start.to_bits()
+        );
+        assert_eq!(restored.rate_ramps[1][0].remaining, parameter.remaining);
+
+        for update in 0..parameter.remaining {
+            let expected_word = expected.next_value();
+            restored.advance_ramps(SAMPLE_RATE);
+            assert_eq!(
+                restored.words[COEF_RELEASE][0].to_bits(),
+                expected_word.to_bits(),
+                "restored coefficient update {update}"
+            );
+        }
+        assert_eq!(
+            restored.words[COEF_RELEASE][0].to_bits(),
+            expected_target.to_bits()
+        );
+        assert_eq!(restored.ramps[4][0].remaining, 0);
+    }
+
+    #[test]
+    fn both_resets_reseed_attack_and_release_coefficient_ramps() {
+        let mut channel = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
+        channel.set_parameter_target(3, 0, 180.0, SAMPLE_RATE);
+        channel.set_parameter_target(4, 0, 3_200.0, SAMPLE_RATE);
+        for _ in 0..19 {
+            channel.advance_ramps(SAMPLE_RATE);
+        }
+
+        channel.discontinuity_reset(SAMPLE_RATE);
+        assert_reset_rate_state(&channel);
+        assert_eq!(channel.ramps[3][0].current.to_bits(), 180.0_f32.to_bits());
+        assert_eq!(channel.ramps[4][0].current.to_bits(), 3_200.0_f32.to_bits());
+
+        channel.set_parameter_target(3, 0, 100.0, SAMPLE_RATE);
+        channel.set_parameter_target(4, 0, 900.0, SAMPLE_RATE);
+        for _ in 0..11 {
+            channel.advance_ramps(SAMPLE_RATE);
+        }
+        channel.full_reset(SAMPLE_RATE);
+        assert_reset_rate_state(&channel);
+        assert_eq!(
+            channel.ramps[3][0].current.to_bits(),
+            PARAMETER_SPECS[3].default.to_bits()
+        );
+        assert_eq!(
+            channel.ramps[4][0].current.to_bits(),
+            PARAMETER_SPECS[4].default.to_bits()
+        );
+    }
+
+    fn assert_reset_rate_state(channel: &Channel<f32>) {
+        for (slot, parameter, coefficient) in [(0, 3, COEF_ATTACK), (1, 4, COEF_RELEASE)] {
+            let rate_ramp = channel.rate_ramps[slot][0];
+            assert_eq!(rate_ramp.remaining, 0);
+            assert_eq!(rate_ramp.current.to_bits(), rate_ramp.target.to_bits());
+            assert_eq!(
+                rate_ramp.current.to_bits(),
+                channel.words[coefficient][0].to_bits()
+            );
+            assert_eq!(
+                rate_ramp.current.to_bits(),
+                rate_coefficient(channel.ramps[parameter][0].current, SAMPLE_RATE).to_bits()
+            );
+        }
+    }
 }

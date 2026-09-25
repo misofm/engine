@@ -10,21 +10,21 @@
 //!
 //! Two switched attack/release one-pole followers — fast at 0.5 ms / 20 ms and slow at
 //! 10 ms / 100 ms — track the linked detector magnitude. Their ratio is the *contrast*
-//! `c = DB_PER_OCTAVE * log2(max(fast, FLOOR) / max(slow, FLOOR))` in dB, clamped to ±24 dB; the
+//! `c = fast_level_db(max(fast, FLOOR) / max(slow, FLOOR))` in dB, clamped to ±24 dB; the
 //! shape is `A * max(c, 0) + S * max(-c, 0)` clamped to ±18 dB; the gain is
-//! `exp2(OCTAVES_PER_DB * shape)` — which is `10^(shape / 20)` — and the output is the dry/wet mix
+//! `fast_gain_from_db(shape)` — which is `10^(shape / 20)` — and the output is the dry/wet mix
 //! of `lane::kernels::gain_mix_step`.
 //!
-//! One `log2` of the ratio replaces the `20 log10(fast) - 20 log10(slow)` of the pre-audit crate:
-//! the two are algebraically identical, and the ratio form both halves the transcendental error
-//! and costs one polynomial instead of two.
+//! The ratio form keeps the detector to one level conversion instead of separate conversions of
+//! both envelopes. Approved crossings X7/X8 use the fast dB tier; exhaustive MA-5 evidence records
+//! a maximum applied-gain delta of `1.654115e-5` dB from the exact tier (issue #880).
 //!
 //! # Determinism
 //!
-//! Every render-path operation is an IEEE basic operation or `Lane::fma`, so the rendered block is
+//! Every render-path operation is a `Lane` operation or `Lane::fma`, so the rendered block is
 //! bit-identical across `Scalar`/`Simd4`/`Simd8`, across `x86_64`/`aarch64`/`wasm32` and across
-//! block partitions (D5). The pre-audit crate called `f32::log10` and `f32::powf` three times per
-//! lane-sample, which made its output the platform libm's; those bits were never portable.
+//! block partitions (D5). X7/X8 trade exact-tier accuracy for the measured fast-tier bounds; they
+//! do not change the cross-target identity contract.
 //!
 //! # State
 //!
@@ -53,7 +53,7 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use lane::kernels::gain_mix_step;
 use lane::{Backend, Lane, Simd4, Simd8};
-use math::{exp2_lane, log2_lane};
+use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
 
@@ -203,12 +203,6 @@ pub const TRANSIENT_SHAPER_TIME_CONSTANTS_MS: [f32; 4] = [0.5, 20.0, 10.0, 100.0
 /// which is the contract's "zero audio input produces zero output".
 const FLOOR: f32 = f32::from_bits(0x322b_cc77);
 
-/// `20 * log10(2)`: decibels per octave, the scale from `log2` to the dB contrast.
-const DB_PER_OCTAVE: f32 = f32::from_bits(0x40c0_a8c1);
-
-/// `log2(10) / 20`: octaves per decibel, the scale from the dB shape to the `exp2` argument.
-const OCTAVES_PER_DB: f32 = f32::from_bits(0x3e2a_152d);
-
 /// Contrast is clamped to ±24 dB before the shape law.
 const CONTRAST_LIMIT_DB: f32 = 24.0;
 
@@ -301,9 +295,9 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
 ///
 /// 1. both followers advance (`ar_one_pole_step`: two products, one sum, one D7 flush each)
 /// 2. `ratio = max(fast, FLOOR) / max(slow, FLOOR)` — one IEEE division
-/// 3. `contrast = log2_lane(ratio) * DB_PER_OCTAVE`, clamped `min` then `max` to ±24 dB
+/// 3. `contrast = fast_level_db(ratio)`, clamped `min` then `max` to ±24 dB (X7)
 /// 4. `shape = attack * max(contrast, 0) + sustain * max(-contrast, 0)`, clamped to ±18 dB
-/// 5. `gain = exp2_lane(shape * OCTAVES_PER_DB)` — `exp2_lane(0)` is exactly `1`
+/// 5. `gain = fast_gain_from_db(shape)` — `fast_gain_from_db(+0.0)` is exactly `1` (X8)
 /// 6. `wet = gain_mix_step(x, gain, mix)` = `fma(mix, x * gain - x, x)`
 /// 7. `select(bypass or mix == 0 or shape == 0, x, wet)` — the signed-zero identity contract:
 ///    `fma(mix, +0.0, -0.0)` is `+0.0`, so the dry value has to be selected, not computed
@@ -316,7 +310,12 @@ fn frame<L: Lane>(x: L, u: L, c: &Coef<L>, e: &mut Env<L>, p: &Params<L>, bypass
     e.slow = ar_one_pole_step(e.slow, u, &c.slow);
     let floor = L::splat(FLOOR);
     let ratio = e.fast.max(floor).div(e.slow.max(floor));
-    let contrast = log2_lane(ratio).mul(L::splat(DB_PER_OCTAVE));
+    // FAST-DB-CROSSING X7: detector contrast; MA-5 proves [1e-8, 16] and its clamp.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "FAST-DB-CROSSING X7: transient-shaper detector contrast in [-24, 24] dB"
+    )]
+    let contrast = fast_level_db(ratio);
     let contrast = contrast
         .min(L::splat(CONTRAST_LIMIT_DB))
         .max(L::splat(-CONTRAST_LIMIT_DB));
@@ -328,7 +327,12 @@ fn frame<L: Lane>(x: L, u: L, c: &Coef<L>, e: &mut Env<L>, p: &Params<L>, bypass
     let shape = shape
         .min(L::splat(SHAPE_LIMIT_DB))
         .max(L::splat(-SHAPE_LIMIT_DB));
-    let gain = exp2_lane(shape.mul(L::splat(OCTAVES_PER_DB)));
+    // FAST-DB-CROSSING X8: applied gain; the shaped argument is clamped to [-18, 18] dB.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "FAST-DB-CROSSING X8: transient-shaper applied gain in [-18, 18] dB"
+    )]
+    let gain = fast_gain_from_db(shape);
     let wet = gain_mix_step(x, gain, p.mix);
     let identity = L::mask_or(bypass, L::mask_or(p.mix.eq(zero), shape.eq(zero)));
     L::select(identity, x, wet)

@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running tests/bench.rs (target/release/deps/bench-8cd5e2da91f226e1)
+
+running 1 test
+test mq1_transient_shaper_ns_per_lane_sample ... MQ1_RESULT {"fixture_sha256":"85645b77376e39c43934476b5e5c5c37f96ae6abff7cc66b2b3d28a827275b6f","bank_ns_per_lane_sample":[4.276925,4.305019],"scalar_ns_per_lane_sample":[30.301938,30.328344]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

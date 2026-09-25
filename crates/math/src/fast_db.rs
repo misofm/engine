@@ -2,10 +2,11 @@
 //!
 //! # Why this module exists, and why it is sealed
 //!
-//! [`crate::exp2_lane`] and [`crate::log2_lane`] are the engine's *exact* tier: Cephes
-//! polynomials qualified at 2 ulp over all 2^32 `f32` inputs (gate M1). They are the right
-//! answer for coefficient design, route gains and anything whose result is a pinned
-//! coefficient word.
+//! [`crate::exp2_lane`] and [`crate::log2_lane`] are the engine's *exact* tier: lane polynomials
+//! qualified at 2 ulp over all 2^32 `f32` inputs (gate M1). `exp2_lane` uses the published
+//! Cephes coefficients; `log2_lane` uses the owner-approved L3 atanh fit documented in
+//! `lane_math.rs`. They are the right answer for coefficient design, route gains and anything
+//! whose result is a pinned coefficient word.
 //!
 //! They are the wrong answer for a dynamics detector. A compressor converts an amplitude to
 //! decibels, applies a static curve, smooths the result and converts back — twice per frame per
@@ -57,7 +58,7 @@
 //! |---|---|---|---|---|
 //! | `gain_from_db` | `[-160, -0]` dB, 1,126,170,625 inputs | `7.020e-6` dB | **`7.431e-6` dB** | 1.06x |
 //! | `gain_from_db` | `[0, 24]` dB, 1,103,101,953 inputs | `1.517e-6` dB | **`2.183e-6` dB** | 1.44x |
-//! | `level_db` | `[1e-8, 16]`, 257,176,458 inputs | `1.538e-5` dB | **`2.810e-5` dB** | 1.83x |
+//! | `level_db` | `[1e-8, 16]`, 257,176,458 inputs | `1.5382e-5` dB | **`2.810e-5` dB** | 1.83x |
 //!
 //! So the tier is under a factor of two worse than the exact tier everywhere the dynamics path
 //! can reach, and never worse than `2.9e-5` dB. That is the number the observation taps'

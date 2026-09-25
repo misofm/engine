@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running tests/bench_ramp.rs (target/release/deps/bench_ramp-2fbedce5046b2bf8)
+
+running 1 test
+test mq2_compressor_ramp_spike ... MISO_ENGINE_BENCH_PHASE workload_started
+MISO_ENGINE_BENCH_PHASE warmup_complete
+MISO_ENGINE_BENCH_PHASE timed_started
+MISO_ENGINE_BENCH_PHASE round_1_complete
+MISO_ENGINE_BENCH_PHASE round_2_complete
+MQ2_RESULT {"schema_version":2,"task":"MQ-2","sample_rate_hz":48000,"quantum_frames":128,"bank_width":8,"bank_count":8,"track_count":64,"warmup_blocks_per_arm":32,"measured_blocks_per_round":32,"measured_rounds_per_arm":2,"ramp_frames":64,"events":"frame-zero point events on every lane and both channels","arms":[{"name":"release_only","ramping_parameters":1,"rate_coefficient_calls_per_bank_per_parameter":16,"rate_coefficient_calls_per_block":128,"round_block_ns":[[87978,91013,87186,87156,87216,87146,87106,87116,87988,87166,87416,87496,90662,87506,87326,86835,87256,87156,87266,87416,88097,87276,87035,87326,90582,86805,86926,86976,86815,87226,87165,87016],[87246,86976,87256,87156,87006,87226,87977,87206,87176,86915,87125,91815,86996,87156,87216,87126,87407,87427,87837,87176,87196,87216,92035,86935,86986,87036,87447,87166,87316,87016,87276,86996]],"round_mean_us":[87.583,87.501],"round_max_us":[91.013,92.035]}, {"name":"attack_and_release","ramping_parameters":2,"rate_coefficient_calls_per_bank_per_parameter":16,"rate_coefficient_calls_per_block":256,"round_block_ns":[[94330,94109,93468,97556,93528,93488,93437,93618,93708,94379,93638,93729,93649,100481,93758,93628,93528,93608,93979,93629,94510,93828,93818,93598,97987,93688,93759,93889,93668,93689,93979,93638],[93858,113656,93668,93599,93608,93418,93628,93688,94349,93578,93648,99450,93638,93718,93748,93928,93488,93569,94309,93608,93688,93868,97415,93578,93508,93498,93669,93648,93698,93658,93628,93478]],"round_mean_us":[94.228,94.609],"round_max_us":[100.481,113.656]}, {"name":"no_automation","ramping_parameters":0,"rate_coefficient_calls_per_bank_per_parameter":16,"rate_coefficient_calls_per_block":0,"round_block_ns":[[39606,39445,39435,39375,39415,39355,43583,39445,39455,39475,39395,39475,39575,39425,39446,39395,39395,39285,39395,39475,39485,39425,39475,39465,39385,40226,39485,39355,39355,39294,39465,43042],[39726,39455,44475,39295,39445,39606,39345,39455,39465,39345,39445,39435,39415,39385,39455,40397,39435,39345,39395,39415,39536,39495,39495,39325,39425,39505,39364,39345,39556,39516,39465,39405]],"round_mean_us":[39.697,39.630],"round_max_us":[43.583,44.475]}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.02s
+

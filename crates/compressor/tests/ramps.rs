@@ -151,6 +151,68 @@ fn a_restarting_point_ramps_from_the_current_value() {
     assert_eq!(read_u32(&payload, 3), SMOOTHING - 1);
 }
 
+/// A time Point that returns to the current milliseconds still completes an in-flight
+/// coefficient interpolation without moving the exposed time value.
+#[test]
+fn an_attack_cancel_to_current_keeps_the_64_sample_coefficient_return_live() {
+    let values = initial_values();
+    let mut effect = prepare(request_with_quantum(&values, 128));
+    let target = 180.0_f32;
+    let first = point(3, ParameterChannel::Left, target);
+    let mut left = vec![0.0_f32; 19];
+    let mut right = vec![0.0_f32; 19];
+    render_scalar(
+        effect.as_mut(),
+        &mut left,
+        &mut right,
+        19,
+        128,
+        &[(0, first)],
+    );
+    let before = state(effect.as_ref());
+    let current_word = 1 + 3 * 3;
+    let current = read_f32(&before, current_word);
+
+    let cancel = PreparedAutomationSpan {
+        start_sample: 19,
+        end_sample: 19,
+        ..point(3, ParameterChannel::Left, current)
+    };
+    let mut left = [0.0_f32; 1];
+    let mut right = [0.0_f32; 1];
+    effect.process(
+        effect_contract::EffectProcessBlock::new(&mut left, &mut right, None, 19, &[cancel], 128)
+            .expect("cancel block"),
+    );
+    let after_event = state(effect.as_ref());
+    assert_eq!(
+        read_f32(&after_event, current_word).to_bits(),
+        current.to_bits()
+    );
+    assert_eq!(
+        read_f32(&after_event, current_word + 1).to_bits(),
+        current.to_bits()
+    );
+    assert_eq!(read_u32(&after_event, current_word + 2), 63);
+
+    let mut left = vec![0.0_f32; 63];
+    let mut right = vec![0.0_f32; 63];
+    effect.process(
+        effect_contract::EffectProcessBlock::new(&mut left, &mut right, None, 20, &[], 128)
+            .expect("coefficient return block"),
+    );
+    let settled = state(effect.as_ref());
+    assert_eq!(
+        read_f32(&settled, current_word).to_bits(),
+        current.to_bits()
+    );
+    assert_eq!(
+        read_f32(&settled, current_word + 1).to_bits(),
+        current.to_bits()
+    );
+    assert_eq!(read_u32(&settled, current_word + 2), 0);
+}
+
 /// Automation is per channel and per parameter, and an out-of-order or duplicate span is counted
 /// and ignored rather than partly applied.
 #[test]

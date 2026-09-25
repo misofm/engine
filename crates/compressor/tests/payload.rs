@@ -304,6 +304,78 @@ fn a_mid_ramp_restore_arrives_on_the_same_sample() {
     assert_eq!(read_f32(&state, 1).to_bits(), (-80.0_f32).to_bits());
 }
 
+/// An active attack restore rebuilds its coefficient ramp from current/target/remaining and keeps
+/// the final snap and block partition invariant. The v1 payload stores the parameter triple, not
+/// the auxiliary coefficient ramp; it therefore defines a deterministic reconstructed continuation.
+#[test]
+fn an_active_attack_restore_reconstructs_one_partition_invariant_coefficient_path() {
+    let values = initial_values();
+    let mut source = prepare(request(&values));
+    let mut left = noise(21, 0x88_00_01, 0.8);
+    let mut right = noise(21, 0x88_00_02, 0.8);
+    render_scalar(
+        source.as_mut(),
+        &mut left,
+        &mut right,
+        21,
+        128,
+        &[(0, point(3, ParameterChannel::Left, 180.0))],
+    );
+    let (saved_left, saved_right) = snapshot(source.as_ref());
+    assert_eq!(read_u32(&saved_left, 3 + 3 * 3), 43);
+
+    let mut whole = prepare(request(&values));
+    let mut split = prepare(request(&values));
+    restore(whole.as_mut(), 1, &saved_left, &saved_right).expect("whole restore");
+    restore(split.as_mut(), 1, &saved_left, &saved_right).expect("split restore");
+    let input_left = noise(43, 0x88_00_03, 0.8);
+    let input_right = noise(43, 0x88_00_04, 0.8);
+    let mut whole_left = input_left.clone();
+    let mut whole_right = input_right.clone();
+    let mut split_left = input_left;
+    let mut split_right = input_right;
+    render_scalar(
+        whole.as_mut(),
+        &mut whole_left,
+        &mut whole_right,
+        43,
+        128,
+        &[],
+    );
+    render_scalar(
+        split.as_mut(),
+        &mut split_left,
+        &mut split_right,
+        7,
+        128,
+        &[],
+    );
+    assert_eq!(
+        whole_left
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>(),
+        split_left
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        whole_right
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>(),
+        split_right
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot(whole.as_ref()), snapshot(split.as_ref()));
+    let settled = snapshot(whole.as_ref()).0;
+    assert_eq!(read_u32(&settled, 3 + 3 * 3), 0);
+    assert_eq!(read_f32(&settled, 1 + 3 * 3).to_bits(), 180.0_f32.to_bits());
+}
+
 /// Every preparation-legal parameter value survives a round trip, including a subnormal.
 #[test]
 fn preparation_legal_parameter_states_round_trip() {

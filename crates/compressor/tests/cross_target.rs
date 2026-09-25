@@ -48,7 +48,8 @@ fn shared_hex_adapter_matches_literal_bytes() {
 /// Red mutations (MUTATIONS.md rows 7, 11, 19): the recursive word kept in a local instead of
 /// written back to the channel; the ballistic coefficient designed through an `f32`
 /// `0.001 * ms * fs` product instead of the `f64` one; the corpus rendered in one block instead of
-/// the frozen partition. Each moves the digest at every width.
+/// the frozen partition. Each moves the digest at every width. MC-2 intentionally moves only the
+/// scalar oracle pin for the ramping case after changing its coefficient trajectory.
 /// Set `MISO_ENGINE_REPIN_COMPRESSOR_CORPUS=1` to print the scalar pins in `C1_DIGESTS` form.
 ///
 /// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the

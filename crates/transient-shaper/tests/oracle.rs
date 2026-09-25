@@ -7,27 +7,28 @@
 //! Nothing in `math`, `lane` or `effect-runtime` is reachable
 //! from it, which is what makes it independent of the chain it is checking.
 //!
-//! # Why these tolerances did not move
+//! # Bound after approved crossings X7/X8
 //!
-//! Replacing `20 log10(fast) - 20 log10(slow)` and `10^(shape / 20)` with `log2_lane` of the ratio
-//! and `exp2_lane` is a class-B change (master plan §1.8): the bits move, so the bound has to be
-//! derived rather than measured. With gate M1's `<= 2 ulp` on both lane polynomials:
+//! MA-5 exhaustively checked every ratio in `[1e-8, 16]` and the four `attack/sustain ∈ {-1, +1}`
+//! corners. X7's level conversion is followed by a clamp; X8 converts the clamped shape directly
+//! from dB. These measurements qualify the ratio range and the four corner combinations, but do
+//! not establish a uniform error bound for every interior attack/sustain value. The measured
+//! results are:
 //!
-//! | step | bound |
-//! |---|---|
-//! | `q = max(f, FLOOR) / max(s, FLOOR)` | one rounding, relative `2^-24` |
-//! | `l = log2_lane(q)`, surviving `|l| <= 24 / 6.0206 = 3.99` | `2 * 2^-22 + 2^-24 / ln 2 = 5.6e-7` |
-//! | `c = l * DB_PER_OCTAVE`, clamp is 1-Lipschitz | `5.8e-6` dB |
-//! | `shape = A * max(c, 0) + S * max(-c, 0)`, three roundings | `8.7e-6` dB |
-//! | `a = shape * OCTAVES_PER_DB`, `|a| <= 2.99` | `1.75e-6` |
-//! | `g = exp2_lane(a)` | `1.45e-6` relative = `1.26e-5` dB |
-//! | `y = fma(mix, x * g - x, x)` | three roundings of `|x| * max(1, g)` |
+//! | quantity | exhaustive coverage | maximum |
+//! |---|---|---|
+//! | X7 fast contrast vs exact-tier contrast after the ±24 dB clamp | 257,176,458 ratios | `1.525879e-5` dB |
+//! | X8 fast applied gain vs exact-tier applied gain | same ratios × four amount corners | `1.654115e-5` dB |
+//! | fast applied gain vs independent f64 `20 log10`/`10^(dB/20)` oracle, unit input | same ratios × four corners | `1.287460e-5` absolute gain |
+//! | exact-tier applied gain vs that oracle, unit input | same ratios × four corners | `2.199415e-6` absolute gain |
 //!
-//! so `|y_new - y_exact| <= 1.7e-6 * |x| * max(1, g)`, about `1.5e-5` dB and about 15 ulp of the
-//! output. The pre-audit `log10f`/`powf` path sat inside a similar envelope around the same exact
-//! value, so the old and the new bits differ by at most about `3e-5` dB — measured at `4.7e-6` dB (8 ulp) over a corpus of four launch rates, three link modes, twelve parameter points, impulse, step and decay
-//! on the corpora of these gates. The `2.0e-5` row tolerance and the `0.01` dB gate below are the
-//! pre-audit ones, unchanged.
+//! The existing 96-sample oracle row uses interior amounts `attack=0.75`, `sustain=-0.5`. Its
+//! initial `2.0e-5` absolute sample limit was exceeded by `9.8083496e-7`. The accepted R2 amendment
+//! raises only this row's limit to `2.5e-5`; the complete row maximum is `2.098083496e-5`. Under
+//! the owner's explicit delegation, root judged the measured MQ-1 null likely inaudible in normal
+//! playback, while recording that this is neither a universal inaudibility claim nor a completed
+//! blinded listening test. See `docs/issue880-mb2.md`. The impulse, step and decay rows retain
+//! their `0.01` dB gates.
 
 mod common;
 
@@ -36,6 +37,10 @@ use dsp_reference::{ReferenceTransientShaper, ReferenceTransientShaperParameters
 use effect_contract::EffectProcessBlock;
 
 /// Red mutation: `DB_PER_OCTAVE = 20.0` (the `log10`/`log2` confusion) — the error leaves 0.5 dB.
+///
+/// Under the owner's explicit delegation, root amended this row's limit to `< 2.5e-5`; the
+/// measured MQ-1 null is `-102.350199 dBFS`. This is a scoped engineering judgment, not universal
+/// inaudibility or listening evidence. The `0.01` dB impulse/step/decay gates remain unchanged.
 #[test]
 fn scalar_matches_the_independent_f64_oracle() {
     let mut effect = prepare(&values_of(0.75, -0.5, 1.0));
@@ -61,7 +66,7 @@ fn scalar_matches_the_independent_f64_oracle() {
             reference.process_sample(f64::from(original), f64::from(original.abs())) as f32;
         let error = (sample - expected).abs();
         worst = worst.max(error);
-        assert!(error < 2.0e-5, "sample={sample} expected={expected}");
+        assert!(error < 2.5e-5, "sample={sample} expected={expected}");
     }
     println!("worst |production - oracle| on the 96-sample sine row: {worst:e}");
 }

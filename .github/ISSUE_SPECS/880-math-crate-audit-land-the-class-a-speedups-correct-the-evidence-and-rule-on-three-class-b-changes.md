@@ -136,7 +136,7 @@ Per `docs/rulings/fast-db-tier-boundaries.md` (boundary 4), an isolated loop und
 
 ## Owner rulings required
 
-The owner has **not** ruled on any of these. The tasks they gate are marked BLOCKED-ON-RULING and must not start until the ruling is recorded on this issue.
+The owner approved R1 (L3), R2, and R3 (coefficient-domain ramps), and declined R4 on 2026-09-25. The explicit ruling and implementation constraints are recorded in the final decision record below. Earlier audit recommendations remain provenance; the recorded rulings govern execution.
 
 - **R1 — `log2_lane` algorithm.** Replace the Cephes degree-9 form (40 lane ops, 1.4667 ulp) with the atanh form **L3**: 27 lane ops including one `div`, 1.2983 ulp. The alternative is the division-free **L1**: 33 lane ops, 1.3595 ulp. Either one moves the exact tier's pins.
   - [isolated] `Simd8` throughput 0.948 → 0.657 ns/element (L3) or 0.831 (L1); latency 23.8 → 18.0 ns (L3) or 21.6 (L1).
@@ -390,7 +390,7 @@ let f = f.sub(r);                                    // f − 1 is exact by Ster
 
 ---
 
-### MB-1 — `log2_lane` → L3 (or L1) (class B) — **BLOCKED-ON-RULING R1** — tier X
+### MB-1 — `log2_lane` → L3 (or L1) (class B) — **APPROVED R1** — tier X
 
 **Files.** `crates/math/src/lane_math.rs` (`log2_lane`, constants, module docs), `crates/math/tests/m1_exhaustive.rs` (header table, red mutations, the "Cephes polynomials under test" sentences, `m1_measured_worst_points`), `crates/math/tests/m2_lane_identity.rs`, `crates/effect-runtime/src/corpus.rs` (`D1_DIGESTS`), `tools/wasm-gate-corpus/src/lane_digests.in`, `crates/math/tests/f1_fast_db_bounds.rs` (exact-tier reference column only), and `crates/math/src/fast_db.rs` (module doc only: its opening sentence calls the exact tier "Cephes polynomials"). Also `crates/transient-shaper/src/corpus.rs` and `tests/oracle.rs` **only if R2 is declined**.
 - `docs/rulings/*.md` are historical records ("already ran … Cephes polynomials", "replacing Cephes degree 6 and 9"). They described the tree at the time: **do not rewrite them**. At most, append a dated one-line note pointing to this issue.
@@ -446,7 +446,7 @@ Constants (f32 bits):
 
 ---
 
-### MB-2 — Transient shaper → fast dB tier (class B) — **BLOCKED-ON-RULING R2** — tier X — depends on MQ-1 and MA-5
+### MB-2 — Transient shaper → fast dB tier (class B) — **APPROVED R2** — tier X — depends on MQ-1 and MA-5
 
 **Files.** `crates/transient-shaper/src/lib.rs` (`frame`, imports, module docs), `clippy.toml` (crossing reasons), `crates/math/tests/f1_fast_db_bounds.rs` (new `f1_crossing_x7_*`/`f1_crossing_x8_*`, and `f1_the_container_pins_exactly_six_crossings` becomes eight), `crates/transient-shaper/src/corpus.rs` (`CROSS_TARGET_DIGESTS`), `crates/transient-shaper/tests/oracle.rs`, `contract.rs` and `boundary.rs` (docs that cite `exp2_lane`/`log2_lane`), `docs/rulings/fast-db-tier-boundaries.md` (the transient-shaper boundary becomes adopted).
 
@@ -480,7 +480,7 @@ let gain = fast_gain_from_db(shape);        // was: exp2_lane(shape.mul(L::splat
 
 ---
 
-### MB-3 (optional) — `exp2_lane` refit E3 (class B) — **BLOCKED-ON-RULING R4** — tier M — depends on MA-3 and MB-1
+### MB-3 (optional) — `exp2_lane` refit E3 (class B) — **DECLINED R4** — tier M — depends on MA-3 and MB-1
 
 **Operation order.**
 ```rust
@@ -523,7 +523,7 @@ For each option state: rendered-bit impact, accuracy, worst-case block cost, and
 
 ---
 
-### MC-2 — Implement the ruled compressor ramp design (class B) — **BLOCKED-ON-RULING R3** — tier X — depends on MC-1
+### MC-2 — Implement the ruled compressor ramp design (class B) — **APPROVED R3** — tier X — depends on MC-1
 
 **Files.**
 - `crates/compressor/src/kernel.rs` (`advance_ramps`, `frames_loop`, `frames_loop_mono`) and `crates/compressor/src/design.rs` (`rate_coefficient`, `design_lane`).
@@ -713,3 +713,164 @@ Luna xhigh implemented and Astra xhigh recorded attempt-1 PASS. Numerical corpus
 pins are unchanged; only the compiled artifact and live test identity changed.
 The qualified delivery is part of the same PR; pending owner rulings still keep
 this umbrella open.
+
+## Owner rulings — approved 2026-09-25
+
+The owner replied **“Approved.”** to the concrete recommended choices after class-A
+delivery. This records explicit authorization to proceed, not an inferred ruling:
+
+- **R1 APPROVED:** adopt L3 for `log2_lane` (MB-1).
+- **R2 APPROVED:** admit X7/X8 and move the transient shaper to the fast tier (MB-2).
+- **R3 APPROVED:** coefficient-domain compressor ramps, exact endpoints and 64-sample
+  interpolation, with compatible state/restore handling and unchanged accuracy and
+  block-partition gates (MC-2).
+- **R4 DECLINED:** omit the optional accuracy-only exp2 refit (MB-3).
+
+### Class-B execution brief
+
+Base: merged class-A delivery `a5cb5d8e`, branch `codex/batch-880-class-b`.
+User-selected workflow remains Luna xhigh implementation, then Astra xhigh adversarial
+review; corrections repeat that flow, within the existing two-attempt budget per task.
+MB-2 precedes MB-1 so transient-shaper pins move only once. Compressor work is isolated
+from math/shaper changes. Preserve all frozen accuracy gates, unfused arithmetic and
+realtime/partition contracts. Coefficient ramp state/restore design must be explicit;
+necessary narrowly scoped compressor state/metadata/test integration is part of R3's
+approved compatible handling, not permission to silently discard active ramp state.
+
+#902 parser repair/promotion is a separate bounded tooling tranche before the MB-2
+comparison: preserve the original baseline bytes and do not retime that baseline.
+Each approved new implementation gets only its specified new one-warmup/two-round
+measurement after its harness is frozen and preflighted. Final source changes require
+new exact-source AudioWorklet qualification through existing gates before delivery.
+All checkpoints remain local until a coherent reviewed batch boundary.
+
+### MB-2 measurement support
+
+The original MQ-1 runner only accepts the E1 baseline source identity. The approved
+MB-2 comparison therefore includes a minimal extension to the existing
+`scripts/run-issue880-mq1-benchmark.sh`, its validator and focused self-tests: select
+an explicit frozen candidate source commit and baseline/fast-tier revision, verify
+source equality before timing, preserve the original benchmark workload and fixture,
+and continue validating historical/recovered baseline records. #902 owns extraction
+and baseline promotion separately. This adaptation neither retimes the baseline nor
+permits a changed workload, new framework, or additional measured rounds.
+
+### MB-2 oracle stop condition — amended R2 pending
+
+The approved implementation reached the issue's explicit stop condition: the complete
+existing 96-sample shaper oracle row (48 kHz, attack .75, sustain -.5, mix 1) exceeds
+the unchanged `< 2.0e-5` absolute error gate. Baseline maximum is
+`1.668930054e-5` at index 22; candidate maximum is `2.098083496e-5` at index 19
+(production `5.327214718`, oracle `5.327193737`). The excess is 4.90%.
+MA-5's measured conversion figures cover four amount corners, not a uniform
+full-parameter-domain rendered-path bound; this interior row also includes envelope
+rounding. No tolerance has been widened. The owner was asked to permit `2.5e-5` for
+this one row with other gates unchanged, or retain the exact-tier shaper. No amended
+ruling has yet been received. Failed-but-buildable MB-2 work is isolated pending that
+ruling; independent R1 and R3 work continues. Shaper pins for R1 are deferred until
+this decision so the final batch makes only the required source choice.
+
+### MC-2 implementation checkpoint and measurement
+
+Luna xhigh implemented the approved coefficient-domain ramps at `c57deffd`, with
+reset/mono seam tests and frozen measurement support at `ffe9d233`; measurement
+evidence is `5f2498cd`. The 22-word V1 payload is unchanged. Active restores explicitly
+reconstruct coefficient ramps from serialized current/target/remaining, consistent
+with the existing reconstructive active-ramp contract. Cancellation to current
+milliseconds retains a zero-step parameter ramp when needed to reach the exact
+coefficient endpoint. Only compressor `dual_mono_ramping` C1 pin moves; static rows
+are unchanged. Debug/release compressor suites, clippy/fmt, no-timing preflight, and
+native/wasm scalar/wasm SIMD corpus gates pass.
+
+Exactly one post-change MQ-2 invocation (one 32-block warmup, two 32-block rounds per
+arm) measured mean microseconds/block: release `87.583/87.501`; attack+release
+`94.228/94.609`; no automation `39.697/39.630`. Per-round maxima were
+`91.013/92.035`, `100.481/113.656`, `43.583/44.475`, respectively. State-derived
+coefficient-design counts are 128/256/0. Original baseline records remain unchanged.
+These are descriptive same-workload observations, not a release budget or permission
+to retune. Independent Astra review and final combined delivery are still pending.
+
+### Amended R2 — delegated owner judgment, 2026-09-25
+
+The owner explicitly delegated the audibility decision to root: “I'll leave it to your
+judgement to determine if that kind of difference is audible.” Root accepts the fast-tier
+shaper and permits `< 2.5e-5` **absolute PCM amplitude error only** in
+`scalar_matches_the_independent_f64_oracle`. All other oracle, F1, M1, identity, realtime
+and portability gates remain unchanged. This supersedes the pending stop condition above.
+
+The decision uses the measured full-render evidence rather than treating MA-5's four
+parameter corners as a uniform bound: the 96-sample row peaks at `2.098083496e-5`
+against its independent f64 oracle, while the old/new MQ-1 programme PCM null peaks
+at `7.629394531e-6` (-102.350199 dBFS) across 3,072,000 samples. Its maximum relative
+output-magnitude change is `0.000013073` dB. Root judges this difference unlikely to
+be audible in normal playback. This is a bounded engineering acceptance, not a claim
+of universal inaudibility or a completed blinded listening test.
+[ITU-R BS.1116-3](https://www.itu.int/rec/R-REC-BS.1116-3-201502-I) supplies a controlled
+listening methodology, not a numeric audibility threshold for these results.
+
+Luna resumes MB-2 attempt 1 with the single authorized tolerance change and all other
+gates retained. MB-1's focused checkpoint `374bd874` remains isolated until MB-2 is
+integrated, so the shaper's three corpus pins move once in the final batch. Astra xhigh
+will review the combined implementation, numerical evidence and this decision.
+
+### Class-B combined implementation and validation
+
+Luna completed MB-2 with the delegated single-row tolerance amendment at `8c5c0f61`.
+MB-2 then MB-1 were merged into the batch at `e00d4c2d`; the shaper's three corpus
+pins moved once. MB-1's exhaustive M1 reports maximum 1.298297 ulp with zero
+reversals over all positive normals, and all 2^32 input patterns agree across
+f32/Simd4/Simd8. The 2 ulp ceiling is unchanged. Only the expected logarithm M2,
+D1 level and Wasm lane digests moved in MB-1.
+
+Combined default math and focused release suites (lane, math, wasm-gates,
+effect-runtime, transient-shaper and compressor), workspace all-target/all-feature
+Clippy, format, workspace/lane/unfused policies, all eight ignored F1 sweeps, and
+full native/scalar-Wasm/SIMD-Wasm corpus gates pass. Every Wasm leg reports 141
+cases and 355 comparisons with zero mismatches. F1's L3 exact level error is
+1.538161e-5 dB versus fast 2.810286e-5 dB (ratio 1.827). The new L3 comparator
+changes the four-corner fast/exact gain delta to 1.654020e-5 dB; the fast absolute
+f64-oracle error remains 1.287460e-5. Historical MA-5 measurements retain their
+original source attribution. Logs are preserved in `/tmp/issue880-class-b-gates/`.
+
+The final live MQ-1 self-test initially selected its old E1 default and correctly
+rejected the combined fast-tier source. Luna added explicit source/revision argument
+wiring at `5ce58d6e`; the corrected self-test passes without timed workload launches,
+with source-drift, ancestry, recovery and overwrite refusal checks retained. MQ-2's
+preflight self-test also passes. The workload and numeric validators are unchanged
+by this integration correction.
+
+The single post-change MQ-1 invocation at `5ce58d6e`, using effect source `e00d4c2d`,
+measured bank 4.276925/4.305019 and scalar 30.301938/30.328344 ns/lane-sample. The
+preserved baseline is bank 6.281854/6.281717 and scalar 40.841292/40.803620. One
+warmup and two measured rounds were used per arm, without retry or tuning. These
+are descriptive observations, not release thresholds. Evidence and record provenance
+are in `docs/issue880-mb2.md` and `artifacts/issue880/mq1-mb2/`.
+
+Independent Astra class-B/#902 review is next. Successor #905 owns qualification of
+the resulting AudioWorklet binary after accepted source is fixed. This is a local
+batch checkpoint, not an upstream delivery or issue closure.
+
+### Class-B independent verdict
+
+Astra xhigh recorded **attempt-1 PASS** for MB-1, MB-2 (including the delegated R2
+amendment), MC-2 and #902, with no blocking findings. Luna corrected two nonblocking
+prose notes; Astra confirmed they change no executable code, gate or numeric pin
+and accepted exact source `bb9efd095bd8d70be8b8503cba6c3617fd51b74e` for #905.
+The complete review is `docs/issue880-class-b-astra-review.md`. It distinguishes
+MB-1's transcript-supplied exhaustive outputs from separately retained raw files,
+and explicitly credits no blinded listening result. All non-optional source tasks
+are now complete, while optional MA-1b is omitted and R4/MB-3 is explicitly declined.
+AudioWorklet qualification, exact-head CI, merged delivery and remote synchronization
+remain required before closure.
+
+### Class-B browser artifact qualification
+
+Successor #905 qualified accepted source `bb9efd095bd8d70be8b8503cba6c3617fd51b74e`
+with live AudioWorklet SHA-256
+`25e75763f1e6ea815a938de60367549c973cf3c5dc551a3a3af5d5ac5b79e20a`. Luna ran
+the existing artifact/resource/SDK/receiver and three-browser gates, all PASS; Astra
+independently recorded attempt-1 PASS. The six non-Wasm authorities and all numerical/
+resource expectations remain unchanged. Browser records change only source/hash
+lineage, and historical published-SDK identity remains fixed. Source implementation
+and required local qualification are complete. The coherent batch is ready for
+required GitHub CI and merged delivery; MZ-1 remains until remote synchronization.

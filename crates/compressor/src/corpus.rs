@@ -27,13 +27,13 @@
 //! The four cases together reach every branch of the kernel that a rendered block can reach: the
 //! three link laws, a hard and two soft knees, an upward and a downward ratio, the three identity
 //! selects (`bypass` is not a corpus case because it is the input unchanged), and — in the last
-//! case — the ramping body, its per-frame redesign and the exponential that designs a ballistic
-//! coefficient.
+//! case — the ramping body, its per-frame coefficient interpolation, and exact exponential
+//! endpoint design.
 
 use effect_contract::LinkMode;
 use lane::Lane;
 
-use crate::design::{MAX_WIDTH, PARAMETER_COUNT, SMOOTHING_SAMPLES};
+use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
 use crate::kernel::{Channel, Detector, process_block};
 
 /// Independent single-track signals in a case. A multiple of the widest backend.
@@ -184,10 +184,13 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 // block that contains the target frame carries it.
                 for (parameter, left_value, right_value) in AUTOMATION {
                     for lane in 0..width {
-                        left_channel.ramps[parameter][lane]
-                            .set_target(left_value, SMOOTHING_SAMPLES);
-                        right_channel.ramps[parameter][lane]
-                            .set_target(right_value, SMOOTHING_SAMPLES);
+                        left_channel.set_parameter_target(parameter, lane, left_value, SAMPLE_RATE);
+                        right_channel.set_parameter_target(
+                            parameter,
+                            lane,
+                            right_value,
+                            SAMPLE_RATE,
+                        );
                     }
                 }
             }
@@ -226,7 +229,9 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
 /// scalar `Lane` oracle is allowed when the property being pinned is identity). A mismatch is
 /// never repaired by re-pinning from the run that failed: it means a target, a width or an
 /// operation order stopped agreeing with the oracle, which is what this gate exists to catch.
-// Issue #737: deliberately re-derived from the independently reviewed causal scalar corpus.
+// Issue #737 established the causal scalar oracle. MC-2 re-pins only `dual_mono_ramping` because
+// attack/release now interpolate their exact f64-designed coefficients instead of re-designing
+// each sample from the linearly ramped milliseconds. Static cases remain unchanged.
 pub const C1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     // dual_mono_static
     [
@@ -248,8 +253,8 @@ pub const C1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     ],
     // dual_mono_ramping
     [
-        0xb0, 0xbf, 0x75, 0xab, 0xf8, 0x79, 0x56, 0x96, 0x98, 0x7c, 0x08, 0xcb, 0x72, 0x61, 0x9d,
-        0xc9, 0x08, 0x01, 0xbd, 0x6c, 0xde, 0x41, 0x3a, 0xd4, 0x26, 0x36, 0xe4, 0x28, 0xf8, 0xf2,
-        0x86, 0x6d,
+        0x6a, 0x9c, 0xa5, 0x96, 0xa0, 0xa3, 0x7f, 0x97, 0xb1, 0xd9, 0x80, 0x22, 0x94, 0x73, 0xd8,
+        0x46, 0x74, 0xec, 0x50, 0xaf, 0xac, 0x60, 0x19, 0x65, 0x65, 0xa6, 0xd7, 0xfb, 0xdb, 0x90,
+        0xad, 0xe2,
     ],
 ];
