@@ -38,10 +38,11 @@ master plan §5.1 lists. The rest are what those implementations transitively ne
 * `floor.rs` — libm 0.2.16 has `floor` only in `generic/floor.rs`. This is that algorithm
   specialised to `f64`/`f32`, with the FP-status plumbing (inexact-flag bookkeeping only) removed.
 * `sqrt.rs` — libm 0.2.16 has `sqrt` only in `generic/sqrt.rs`, which additionally short-circuits
-  to a hardware instruction on most targets. Neither is usable here (`core` has no `f64::sqrt`, and
-  the target-conditional path is exactly what D6 forbids), so `sqrt` is re-derived from `u128::isqrt`
-  with a proof of correct rounding in the file's header comment. `sqrt` and `sqrtf` are needed by
-  `pow`/`powf` for the `y == ±0.5` special case.
+  to a hardware instruction on most targets. The scalar API now uses the standard library's
+  IEEE 754 correctly rounded `f64::sqrt` and `f32::sqrt` operations directly; stable `core` does
+  not yet expose these inherent methods. Negative inputs produce target-dependent NaN bits, which
+  are outside the determinism contract. `sqrt` and `sqrtf` are needed by `pow`/`powf` for the
+  `y == ±0.5` special case.
 
 ## Edits applied to every vendored file
 

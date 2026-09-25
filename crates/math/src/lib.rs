@@ -19,17 +19,19 @@
 //!   inside a SIMD bank. Maximum error is proven below 2 ulp by an exhaustive sweep of all
 //!   2^32 `f32` inputs (gate M1).
 //!
-//! The crate is `no_std`; `std` is used only by its tests.
+//! The crate is `no_std`; it links `std` only to call the inherent `f32::sqrt` and `f64::sqrt`
+//! methods, which stable `core` does not yet expose. `no_std` keeps the allocating prelude out of
+//! reach.
 //!
 //! # Determinism
 //!
-//! No function in this crate branches on target features, calls an intrinsic, or fuses a multiply
-//! and an add. Gate M3 pins that structurally (a source scan) and numerically (digests over a
+//! Except for [`sqrt`] and [`sqrtf`], no function in this crate calls a hardware math operation or
+//! fuses a multiply and an add. Neither square-root wrapper branches on target features. Gate M3
+//! pins the vendored scalar layer structurally (a source scan) and numerically (digests over a
 //! one-million-point corpus, re-checked under wasmtime by job 83d).
 
 #![no_std]
 
-#[cfg(test)]
 extern crate std;
 
 #[macro_use]
@@ -210,14 +212,17 @@ pub fn floorf(x: f32) -> f32 {
 
 /// Correctly rounded square root (f64).
 ///
-/// IEEE 754 specifies `sqrt` exactly, so this agrees with hardware `sqrt` on every target; it
-/// exists because `core` has no `f64::sqrt`.
+/// Calls the IEEE 754 correctly rounded hardware operation through `f64::sqrt`; stable `core` does
+/// not yet expose this method. Every nonnegative, non-NaN input returns the correctly rounded
+/// result, including signed zero and positive infinity. Negative inputs return NaN, whose sign and
+/// payload depend on the target and are outside the determinism contract.
 #[inline]
 pub fn sqrt(x: f64) -> f64 {
     vendored::sqrt(x)
 }
 
-/// Correctly rounded square root (f32). See [`sqrt`].
+/// Correctly rounded square root (f32), using `f32::sqrt`. Negative inputs return a target-specific
+/// NaN. See [`sqrt`].
 #[inline]
 pub fn sqrtf(x: f32) -> f32 {
     vendored::sqrtf(x)
