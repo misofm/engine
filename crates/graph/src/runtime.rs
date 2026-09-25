@@ -94,6 +94,29 @@ fn test_only_observation_dispatch_member_access() {
     });
 }
 
+// Issue #900: calls to the permanent path's per-op observer walk, and the switch that restores the
+// unconditional unit walk so one test build can compare both paths. Unit tests only: neither the
+// count nor the switch exists in a production or `test-support` build.
+#[cfg(test)]
+thread_local! {
+    static TEST_ONLY_OBSERVE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_OBSERVER_SKIP_DISABLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Reset the `observe` call count; `skip_disabled` makes `observe_unit` walk every unit again.
+#[cfg(test)]
+pub(crate) fn test_only_observe_calls_reset(skip_disabled: bool) {
+    TEST_ONLY_OBSERVER_SKIP_DISABLED.with(|value| value.set(skip_disabled));
+    TEST_ONLY_OBSERVE_CALLS.with(|value| value.set(0));
+}
+
+/// Calls to the permanent path's per-op observer walk, `observe`, since the last reset.
+#[cfg(test)]
+pub(crate) fn test_only_observe_calls() -> u64 {
+    TEST_ONLY_OBSERVE_CALLS.with(std::cell::Cell::get)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_only_meter_input_reset(disabled: bool) {
     TEST_ONLY_METER_RESIDENT_DISABLED.with(|value| value.set(disabled));
@@ -960,6 +983,15 @@ pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
 }
 
 impl RuntimeUnit {
+    /// Whether `observe_unit` would dispatch any observer for this unit (issue #900): the same
+    /// op observer slices its walk visits. Bind-time only.
+    fn has_observers(&self) -> bool {
+        match self {
+            Self::Op(op) => !op.observers.is_empty(),
+            Self::Bank { members, .. } => members.iter().any(|member| !member.observers.is_empty()),
+        }
+    }
+
     pub(crate) fn qualification_counters(&self) -> [u64; 2] {
         match self {
             Self::Op(_) => [0, 0],
@@ -1317,6 +1349,11 @@ pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
+    /// Whether any op of this unit holds an observer binding (issue #900). Derived from the final
+    /// units by [`Runtime::new_with_observation_activation`], the one constructor every runtime
+    /// passes through, so a caller's value is a placeholder; nothing changes an op's observer
+    /// slice after that. Fits the existing identity padding.
+    observed: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
@@ -1611,13 +1648,16 @@ impl Runtime {
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
         split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
-        identity: Vec<UnitIdentity>,
+        mut identity: Vec<UnitIdentity>,
         response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
         folds: u64,
         observation_activation: Option<RealtimeObservationActivation>,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
+        for (row, unit) in identity.iter_mut().zip(&units) {
+            row.observed = unit.has_observers();
+        }
         #[cfg(any(test, feature = "test-support"))]
         if !split_pairs.is_empty() {
             TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
@@ -1918,6 +1958,15 @@ impl Runtime {
         first_sample: u64,
         validity: GraphObservationValidity,
     ) -> Result<(), RenderError> {
+        // Issue #900: a unit bound without any observer has nothing to dispatch and the walk
+        // below has no other production effect, so one bind-time flag answers it. `execute` has
+        // already indexed this unit's identity row in this block.
+        let observed = self.identity[index].observed;
+        #[cfg(test)]
+        let observed = observed || TEST_ONLY_OBSERVER_SKIP_DISABLED.with(std::cell::Cell::get);
+        if !observed {
+            return Ok(());
+        }
         let Self { lease, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, validity),
@@ -2394,6 +2443,8 @@ fn observe(
     resident: Option<rack::ResidentOutputLane<'_>>,
     validity: GraphObservationValidity,
 ) -> Result<(), RenderError> {
+    #[cfg(test)]
+    TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
     #[cfg(any(test, feature = "test-support"))]
     let resident =
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
@@ -4071,6 +4122,8 @@ pub(crate) fn build_sequential(
             identity.push(UnitIdentity {
                 banked: !membership.is_empty(),
                 resident_input: false,
+                // Derived from the finished unit by the runtime constructor.
+                observed: false,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
                     (0..stages)
@@ -5538,6 +5591,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -5627,6 +5681,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -5997,6 +6052,7 @@ mod tests {
         let identity = |population| UnitIdentity {
             banked: true,
             resident_input: false,
+            observed: false,
             stages: 1,
             upstream_of_seam_stages: 1,
             lane_tracks: (0..population)
@@ -6109,6 +6165,124 @@ mod tests {
         );
         // build_sequential retains the same vector capacity and boxes it once; no separate
         // resident table, per-block allocation, or transient acquisition buffer is introduced.
+    }
+
+    /// Issue #900: the constructor derives every unit's observed flag from the observer slices
+    /// the unit actually holds, whatever the caller wrote -- each placeholder below is the wrong
+    /// answer -- and `observe_unit` then walks exactly the units that hold one, including a bank
+    /// whose only observer sits on its last member. Forcing the unconditional walk back on is the
+    /// control that the counters see the skipped units.
+    #[test]
+    fn observed_flag_is_derived_at_construction_and_skips_only_unobserved_units() {
+        struct Visit(Arc<AtomicUsize>);
+        impl crate::GraphRuntimeObserver for Visit {
+            fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let visits = Arc::new(AtomicUsize::new(0));
+        let observers = |count: usize| -> Box<[GraphNodeObserverBinding]> {
+            (0..count)
+                .map(|handle| {
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::Output {
+                            output_id: crate::StableGraphId::parse("out").expect("id"),
+                        },
+                        handle as u64,
+                        Box::new(Visit(Arc::clone(&visits))),
+                    )
+                })
+                .collect()
+        };
+        let op = |observers| RuntimeOp {
+            inputs: Box::new([]),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::BankMember,
+            split_pair: None,
+            observers,
+        };
+        let bank = |observed_member: Option<usize>| RuntimeUnit::Bank {
+            members: (0..4)
+                .map(|member| op(observers(usize::from(observed_member == Some(member)))))
+                .collect(),
+            lanes: 4,
+            chain: BankChain::new(
+                AoSoaScratch::new(effect_contract::BankWidth::Four, 2).expect("scratch"),
+                Box::new([true; 4]),
+                vec![],
+            )
+            .expect("chain"),
+            fold: Box::new([]),
+            master: 0,
+        };
+        let row = |observed| UnitIdentity {
+            banked: false,
+            resident_input: false,
+            observed,
+            stages: 1,
+            upstream_of_seam_stages: 0,
+            lane_tracks: Box::new([]),
+        };
+        let mut runtime = Runtime::new(
+            stereo_lease(2, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RuntimeUnit::Op(op(observers(0))),
+                RuntimeUnit::Op(op(observers(2))),
+                bank(Some(3)),
+                bank(None),
+            ],
+            Vec::new(),
+            vec![row(true), row(false), row(false), row(true)],
+            Vec::new(),
+            0,
+            0,
+        );
+        assert_eq!(
+            runtime
+                .identity
+                .iter()
+                .map(|row| row.observed)
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+        // Per unit: [observe calls, observer accesses, bank member accesses, observer visits].
+        for (skip_disabled, expected) in [
+            (
+                false,
+                [[0, 0, 0, 0], [1, 2, 0, 2], [4, 1, 4, 1], [0, 0, 0, 0]],
+            ),
+            (
+                true,
+                [[1, 0, 0, 0], [1, 2, 0, 2], [4, 1, 4, 1], [4, 0, 4, 0]],
+            ),
+        ] {
+            for (unit, expected) in expected.into_iter().enumerate() {
+                test_only_observe_calls_reset(skip_disabled);
+                test_only_observation_dispatch_reset();
+                visits.store(0, Ordering::Relaxed);
+                assert_eq!(
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR),
+                    Ok(())
+                );
+                let [observers, members] = test_only_observation_dispatch_counts();
+                assert_eq!(
+                    [
+                        test_only_observe_calls(),
+                        observers,
+                        members,
+                        visits.load(Ordering::Relaxed) as u64,
+                    ],
+                    expected,
+                    "unit {unit}, unconditional walk {skip_disabled}"
+                );
+            }
+        }
+        test_only_observe_calls_reset(false);
     }
 
     #[test]
@@ -6294,6 +6468,7 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
+                observed: false,
                 stages: 1,
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
