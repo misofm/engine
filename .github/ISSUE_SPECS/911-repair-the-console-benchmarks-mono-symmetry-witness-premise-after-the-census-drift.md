@@ -27,3 +27,56 @@ No engine change, no benchmark run, no fixture change, no new rows.
 ## Dependencies
 
 Blocks the paired measurement of the pure-path batch (#885, #886, #898, #900).
+
+## Attempt 1 diagnosis and decision (Terra)
+
+Dump of `SessionRuntime::new(..).unit_eligibility()` for both mono arms at `Simd8` on a16bc5b6
+(the two arms are identical):
+
+| units | banked | stages | upstream of seam | lane tracks | eligible | census |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0-63 | no | 1 | 1 | `chNN`, one each | no | 0 of 64 |
+| 64-71 | yes | 6 | 4 | 8 tracks each, `ch00`..`ch63` in order | all | 64 of 64 |
+| 72 | no | 1 | 0 | `""` | yes | 1 of 1 |
+
+Census `[65, 129]`. No unit was added (`lanes` is still 129); unit 72 flipped from ineligible to
+eligible. It is the `main-out` output node. Units 0-63 are the tracks' `Input` stages, bound to the
+harness's `FrozenGraphSource`, a host `GraphRuntimeProcessor` whose default `channel_symmetry()`
+is `DECLINED`.
+
+Responsible commit: `d1cb3653` (issue #221 attempt 1, 2026-09-11) changed
+`tools/console-workload/src/lib.rs::source_binding` so the non-input nodes bind through
+`GraphNodeBinding::identity(node)` instead of the harness's own `GraphIdentity`, a do-nothing
+`Box<dyn GraphRuntimeProcessor>` (#221 asked for this, following audit #103 F1). The engine lowers
+an identity binding to `NodeKind::Identity`, which reports `SYMMETRIC`. The opaque processor had
+lowered to `NodeKind::Bound` and declined. `13c974cf` then re-pinned
+`chain_shape.rs` to `(64, [65, 129])` with a master-row discriminant, but `tools/bench/src/console.rs`
+still read the census's eligible half, and no CI job runs the benchmark.
+
+Counterfactual, run and then reverted: binding the output through an opaque do-nothing processor
+again gives `[64, 129]` for both arms, unit 72 goes back to `[false]`, and every other row stays
+the same. `NodeKind::channel_symmetry()` and the `DECLINED` default match between the sealed
+candidate `1fc6ed1e` and `main`, so the engine's classification did not change.
+
+Verdict: a legitimate census change, not an engine regression. The unit is not a track, so its
+lane names no track. It renders nothing upstream of the seam, so its witness is vacuous. The
+collapse never acts on it, because `arm_mono_collapse` arms bank chains only. `SYMMETRIC` is true
+for an identity. The old premise was right only by coincidence, while every non-bank unit declined.
+
+Decision: the premise counts the bank chains' track lanes. The new evidence accessor
+`SessionRuntime::bank_symmetry_counters()` returns `[eligible, lanes]` over the lanes of banked,
+non-vacuous units that name a track. Its doc lists what it leaves out and why: single ops (the
+host-bound inputs and the identity output, plus route ops where a fold declines), vacuous chains,
+and nameless lanes. The bench asserts `bank_symmetry_counters() == [tracks, tracks]` for each arm.
+The `console_mono` record now emits `symmetric_lanes` from that count and `lanes` from the whole
+census. That gives `64`/`129`, field for field the same as every sealed mono record (`strip4`,
+`mono2`, `mono3`, `issue420-rt3`), so the jq validator is unchanged.
+`chain_shape.rs::the_mono_row_pairs_unit_rows_are_pinned` pins every field of every row of both
+arms. It reads the chain count from the plan and fixes everything else. It also pins the census
+`[65, 129]`, rows summing to the census, `bank_symmetry_counters() == [64, 64]` and 64
+structural mono tracks. The validator suite gains the mutation `.symmetric_lanes = 65`.
+
+Red mutations, run and reverted:
+- Opaque output binding: the pin fails at unit 72 (`lane_eligible [false]`).
+- `banked` filter dropped from the accessor: every row still matches, and the premise count fails
+  at `[64, 128]`.

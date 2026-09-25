@@ -1273,6 +1273,47 @@ impl SessionRuntime {
         self.plan.unit_eligibility()
     }
 
+    /// `[collapse-eligible lanes, lanes]` over the **track lanes of this plan's bank chains** only
+    /// (issue #911): the part of [`SessionRuntime::symmetry_counters`] a mono row's premise is
+    /// about.
+    ///
+    /// The collapse acts on bank chains and on nothing else (`arm_mono_collapse` skips every
+    /// single op), so "every track of the fixture carries a symmetric prepared witness" is a
+    /// statement about the lanes that render a track's upstream-of-seam strip on a chain. The
+    /// census counts every scheduling unit, and three kinds of census row are excluded here, each
+    /// of them because it is not such a lane:
+    ///
+    /// * **Every single dispatched op.** On the console fixtures these are the tracks' `Input`
+    ///   stages and the `main-out` output (plus the route ops of a row whose route fold declines).
+    ///   The inputs are bound to this crate's `FrozenGraphSource`, a host-supplied processor the
+    ///   engine cannot see through, so they decline. The output is bound through
+    ///   `GraphNodeBinding::identity`, so the engine lowers it to its own identity kind, which
+    ///   reports `SYMMETRIC` -- truthfully, nothing in an identity can make two channels disagree
+    ///   -- while naming no track and rendering nothing upstream of the seam. That one row is why
+    ///   the mono fixture's census has read `[65, 129]` rather than `[64, 129]` since issue #221
+    ///   (`d1cb3653`) moved this crate's binding of the output off an opaque do-nothing processor,
+    ///   with not one track's witness changed.
+    /// * **Vacuous bank chains** ([`PlanUnitEligibility::witness_is_vacuous`]): a seam-side-only
+    ///   chain's witness is an unconditional `SYMMETRIC`, so its lanes would count a constant.
+    /// * **A bank lane naming no track**, which is not a track lane by definition. No console
+    ///   fixture builds one; the filter is here so the count cannot silently include one.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_symmetry_counters(&self) -> [u64; 2] {
+        self.plan
+            .unit_eligibility()
+            .iter()
+            .filter(|row| row.banked && !row.witness_is_vacuous())
+            .flat_map(|row| row.lane_tracks.iter().zip(row.lane_eligible.iter()))
+            .filter(|(track, _)| !track.is_empty())
+            .fold([0, 0], |mut total, (_, eligible)| {
+                total[0] += u64::from(*eligible);
+                total[1] += 1;
+                total
+            })
+    }
+
     /// Bank-chain lanes whose route and master accumulation this plan folded into the chain's own
     /// epilogue (issue #218).
     ///

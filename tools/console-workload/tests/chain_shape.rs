@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use bench_support::digest::Sha256Sink;
 use console_workload::{ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload};
 use effect_contract::ChannelSymmetryWitness;
+use engine::realtime::PlanUnitEligibility;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -697,6 +698,129 @@ fn the_mono_row_pair_renders_one_session() {
         eligible.2, forced.2,
         "and pay an identical round-trip count"
     );
+}
+
+/// Tracks of the mono fixture, in fixture order.
+const MONO_TRACKS: usize = 64;
+
+/// Every collapse-eligibility row the mono fixture's plan must realise, in execution order, at
+/// `chains` cohort chains. Written out rather than read back, because the rows are the claim.
+fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
+    assert_eq!(
+        MONO_TRACKS % chains,
+        0,
+        "the mono fixture is whole cohorts at any width"
+    );
+    let tracks: Vec<Box<str>> = (0..MONO_TRACKS)
+        .map(|track| format!("ch{track:02}").into_boxed_str())
+        .collect();
+    let row = |unit: usize,
+               banked: bool,
+               stages: u32,
+               upstream_of_seam_stages: u32,
+               lane_tracks: &[Box<str>],
+               eligible: bool| PlanUnitEligibility {
+        unit: u32::try_from(unit).expect("unit index"),
+        banked,
+        stages,
+        upstream_of_seam_stages,
+        lane_tracks: lane_tracks.into(),
+        lane_eligible: vec![eligible; lane_tracks.len()].into(),
+    };
+    let mut rows = Vec::with_capacity(MONO_TRACKS + chains + 1);
+    // Each track's `Input` stage: one op upstream of the seam, naming its track, and declined --
+    // the harness binds it to `FrozenGraphSource`, a host processor the engine cannot see through.
+    for track in &tracks {
+        rows.push(row(
+            rows.len(),
+            false,
+            1,
+            1,
+            core::slice::from_ref(track),
+            false,
+        ));
+    }
+    // One chain per cohort: the six strip slots, four of them upstream of the seam, each track on
+    // exactly one lane in fixture order, and every lane eligible. These lanes are the premise.
+    let slots = u32::try_from(SLOTS_PER_COHORT).expect("slot count");
+    for cohort in tracks.chunks(MONO_TRACKS / chains) {
+        rows.push(row(rows.len(), true, slots, slots - 2, cohort, true));
+    }
+    // The `main-out` output, last: bound through `GraphNodeBinding::identity`, so the engine's own
+    // identity kind reports `SYMMETRIC` -- truthfully -- while naming no track and rendering
+    // nothing upstream of the seam. The census's one eligible lane that no track owns.
+    rows.push(row(rows.len(), false, 1, 0, &[Box::from("")], true));
+    rows
+}
+
+/// The mono row-pair's premise, pinned unit by unit (issue #911).
+///
+/// The bench asserts in-run that every track of the mono fixture carries a symmetric prepared
+/// witness. It used to read that off the census's eligible half, which equalled the number of
+/// eligible bank lanes only while every other unit of the plan declined. Issue #221 rebound the
+/// harness's `main-out` from an opaque do-nothing processor (declines) to
+/// `GraphNodeBinding::identity` (the engine's identity kind, symmetric), the census moved from
+/// `[64, 129]` to `[65, 129]` with not one track's witness changed, and because the bench runs in
+/// no CI job the premise broke silently until the next measurement tried to run it.
+///
+/// The premise now counts the bank chains' track lanes (`bank_symmetry_counters`), and this test
+/// pins every row of both arms -- every field, in execution order -- plus the census and the
+/// premise's count, so the next change to the unit inventory fails here, at `cargo test`.
+///
+/// The cohort count is read from the plan, for the reason [`cohorts`] reads it: a four-lane host
+/// runs sixteen chains of four, and every other field is width-independent.
+///
+/// Red mutations, both run when this was written: bind `main-out` through an opaque processor
+/// again (the pre-#221 harness) and the last row fails (`lane_eligible` `[false]`; the census is
+/// `[64, 129]` in that tree) while every bank row, and so the premise's count, stays put; drop the
+/// `banked` filter from `bank_symmetry_counters` and every row still matches while the premise's
+/// count fails at `[64, 128]`, having taken in the 64 declined input ops.
+#[test]
+fn the_mono_row_pairs_unit_rows_are_pinned() {
+    for workload in [
+        Workload::SixtyFourTrackConsoleMono,
+        Workload::SixtyFourTrackConsoleMonoDual,
+    ] {
+        let kind = workload.kind();
+        let runtime = SessionRuntime::new(workload);
+        let chains = usize::try_from(runtime.bank_shape()[0]).expect("chain count");
+        assert!(chains > 0, "{kind}: the mono fixture banks its strip");
+        let expected = mono_fixture_rows(chains);
+        let rows = runtime.unit_eligibility();
+        assert_eq!(
+            rows.len(),
+            expected.len(),
+            "{kind}: {MONO_TRACKS} input ops, {chains} chains and the output"
+        );
+        for (actual, expected) in rows.iter().zip(&expected) {
+            assert_eq!(actual, expected, "{kind}: unit {}", expected.unit);
+        }
+        // The census and its rows cannot disagree: 64 eligible bank lanes plus the vacuous output,
+        // over 64 bank lanes, 64 input ops and the output.
+        let folded = rows.iter().fold([0_u64, 0], |mut total, row| {
+            total[0] += u64::from(row.eligible_lanes());
+            total[1] += u64::from(row.lanes());
+            total
+        });
+        assert_eq!(
+            runtime.symmetry_counters(),
+            folded,
+            "{kind}: rows sum to the census"
+        );
+        assert_eq!(runtime.symmetry_counters(), [65, 129], "{kind}: the census");
+        // What the bench's premise asserts and its `console_mono` record reports.
+        let tracks = MONO_TRACKS as u64;
+        assert_eq!(
+            runtime.bank_symmetry_counters(),
+            [tracks, tracks],
+            "{kind}: every track carries a symmetric prepared witness on its bank-chain lane"
+        );
+        assert_eq!(
+            runtime.structural_mono_tracks(),
+            tracks,
+            "{kind}: and a mono source"
+        );
+    }
 }
 
 /// The overhead floor row prepares nothing, and what it renders is the plumbing alone.
