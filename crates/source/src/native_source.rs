@@ -25,7 +25,7 @@ use crate::native_wave::{validate_region, validate_seek_frame};
 use crate::{
     HostChunkError, HostChunkProvider, NativeWaveDecoder, NativeWaveError, NativeWaveMetadata,
     NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig,
-    PcmSourceRingError, SourceCommand, SourceDiagnostic, SourceDiagnosticCode,
+    PcmSourceRingError, ReservedBlock, SourceCommand, SourceDiagnostic, SourceDiagnosticCode,
     SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, SourceResourceReport, SourceSeekError, parse_native_wave,
     prepare_graph_source_set,
@@ -103,8 +103,6 @@ pub struct NativeSourceResourceReport {
     pub ring: SourceResourceReport,
     /// One native decoder interleaved fixed read scratch allocation.
     pub decoder_read_scratch_bytes: u64,
-    /// One worker-owned planar `[channel][quantum]` staging allocation.
-    pub worker_planar_staging_bytes: u64,
     /// Exact bounded worker command item count.
     pub worker_control_queue_items: u64,
     /// Exact SPSC worker-command queue header and slot payload bytes.
@@ -126,7 +124,7 @@ pub struct NativeSourceResourceReport {
     pub worker: NativeWorkerResourceReport,
     /// Exact base source plus folded once-per-thread stop queue and job-array total.
     pub total_engine_owned_bytes: u64,
-    /// Largest exact ring, decoder, staging, queue, or typed boxed job-array allocation.
+    /// Largest exact ring, decoder, queue, or typed boxed job-array allocation.
     pub largest_allocation_bytes: u64,
 }
 
@@ -273,12 +271,6 @@ pub fn native_source_allocation_layout(
         category: "decoder.read_scratch",
         requested_size_bytes: report.decoder_read_scratch_bytes,
         alignment_bytes: 1,
-        count: 1,
-    });
-    entries.push(NativeSourceAllocationLayoutEntry {
-        category: "worker.planar_staging",
-        requested_size_bytes: report.worker_planar_staging_bytes,
-        alignment_bytes: u64::try_from(core::mem::align_of::<f32>()).expect("f32 alignment"),
         count: 1,
     });
     push_queue::<WorkerCommand>(
@@ -642,9 +634,12 @@ struct SourceJob<R: Read + Seek> {
     events: Producer<NativeSourceWorkerEvent>,
     provider: HostChunkProvider,
     decoder: NativeWaveDecoder<R>,
-    planar_staging: Box<[f32]>,
     generation: SourceGeneration,
+    /// Metadata of the quantum decoded into `reserved`, or of the block a `Full` commit left
+    /// deferred inside the provider when `reserved` is empty.
     pending: Option<PendingBlock>,
+    /// The recycled block the next or current quantum is decoded straight into.
+    reserved: Option<ReservedBlock>,
     pending_seek: Option<PendingSeek>,
     end_submitted: bool,
     source_ready_sent: bool,
@@ -748,6 +743,14 @@ impl NativeSourceController {
     }
 
     /// Wait outside render for the initial prepared source data event.
+    ///
+    /// The worker decodes only into a transfer block it has reserved, so after an admitted
+    /// seek on a full ring its next decode -- and a `Terminal` event for a decode failure at the
+    /// new position -- follows the render boundary that frees a block. The pre-#919 worker
+    /// decoded ahead into a private staging block and reported such a failure immediately. A
+    /// caller that waits for that event without rendering waits until rendering resumes. No
+    /// current host surface does; `tools/audit/src/source.rs` is the only caller outside this
+    /// crate.
     pub fn wait_for_event(
         &mut self,
     ) -> Result<NativeSourceWorkerEvent, NativeSourceWorkerControlError> {
@@ -1003,20 +1006,9 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
         report.decoder_read_scratch_bytes,
         decoder_read_scratch_bytes
     );
-    let quantum = usize::try_from(request.ring_config.quantum_frames.0)
-        .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
-    let quantum = NonZeroUsize::new(quantum).ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let decoder =
         NativeWaveDecoder::prepare(asset.reader, metadata, request.region, frames_per_read)
             .map_err(NativeSourcePrepareError::Wave)?;
-    let staging_samples = usize::from(metadata.channel_count)
-        .checked_mul(quantum.get())
-        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
-    let mut planar_staging = Vec::new();
-    planar_staging
-        .try_reserve_exact(staging_samples)
-        .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
-    planar_staging.resize(staging_samples, 0.0);
     let (producer, consumer, ring_report) =
         PcmSourceRing::prepare_at_source_frame(request.ring_config, request.region.start_frame)
             .map_err(NativeSourcePrepareError::Ring)?;
@@ -1042,9 +1034,9 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
             events: event_sender,
             provider,
             decoder,
-            planar_staging: planar_staging.into_boxed_slice(),
             generation: initial_generation,
             pending: None,
+            reserved: None,
             pending_seek: None,
             end_submitted: false,
             source_ready_sent: false,
@@ -1413,26 +1405,18 @@ fn source_resource_report(
     let ring =
         PcmSourceRing::resource_report(ring_config).map_err(NativeSourcePrepareError::Ring)?;
     let (_, decoder_read_scratch_bytes) = worker_decode_buffer_shape(metadata, ring_config, caps)?;
-    let worker_planar_staging_bytes = u64::from(ring_config.quantum_frames.0)
-        .checked_mul(u64::from(metadata.channel_count))
-        .and_then(|samples| {
-            samples.checked_mul(u64::try_from(core::mem::size_of::<f32>()).expect("f32 size"))
-        })
-        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let worker_control_queue = exact_queue_resources::<WorkerCommand>(caps.control_queue_items)?;
     let worker_event_queue =
         exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)?;
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
         .checked_add(decoder_read_scratch_bytes)
-        .and_then(|total| total.checked_add(worker_planar_staging_bytes))
         .and_then(|total| total.checked_add(worker_control_queue.total_bytes))
         .and_then(|total| total.checked_add(worker_event_queue.total_bytes))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let largest_allocation_bytes = ring
         .largest_allocation_bytes
         .max(decoder_read_scratch_bytes)
-        .max(worker_planar_staging_bytes)
         .max(worker_control_queue.largest_allocation_bytes)
         .max(worker_event_queue.largest_allocation_bytes);
     if total_engine_owned_bytes > caps.max_total_engine_owned_bytes
@@ -1443,7 +1427,6 @@ fn source_resource_report(
     Ok(NativeSourceResourceReport {
         ring,
         decoder_read_scratch_bytes,
-        worker_planar_staging_bytes,
         worker_control_queue_items: u64::try_from(caps.control_queue_items.get())
             .expect("usize fits u64"),
         worker_control_queue_bytes: worker_control_queue.total_bytes,
@@ -1518,7 +1501,6 @@ fn base_source_resources(
         .ring
         .largest_allocation_bytes
         .max(folded.decoder_read_scratch_bytes)
-        .max(folded.worker_planar_staging_bytes)
         .max(folded.worker_control_queue_largest_allocation_bytes)
         .max(folded.worker_event_queue_largest_allocation_bytes);
     Some(folded)
@@ -1639,14 +1621,22 @@ fn service_job<R: Read + Seek>(
         }
     }
     if let Some(block) = job.pending.take() {
-        match job.provider.submit_native_planar(
-            block.generation,
-            block.start_frame,
-            &job.planar_staging,
-            block.frames,
-            block.end_of_region,
-            block.native_decoder_sanitized_samples,
-        ) {
+        let committed = if job.reserved.is_some() {
+            // The quantum was decoded straight into its reserved block: validate, stamp, publish.
+            job.provider.commit_block(
+                &mut job.reserved,
+                block.generation,
+                block.start_frame,
+                block.frames,
+                block.end_of_region,
+                block.native_decoder_sanitized_samples,
+            )
+        } else {
+            // An earlier commit met a full data queue and its stamped block waits, deferred, in
+            // the provider. Push that block: a second commit would publish the quantum twice.
+            job.provider.commit_deferred()
+        };
+        match committed {
             Ok(_) => {
                 #[cfg(feature = "test-support")]
                 if job.audit_resume_after_submit {
@@ -1692,13 +1682,31 @@ fn service_job<R: Read + Seek>(
     if job.end_submitted {
         return Ok(idle);
     }
+    // The block comes before the decode: with no recycled block there is nothing to decode
+    // into, and the worker waits for the render exactly as a full submission made it wait.
+    let mut reserved = match job.reserved.take() {
+        // A seek discarded the quantum last decoded into this block; the decode overwrites it.
+        Some(reserved) => reserved,
+        None => match job.provider.reserve_block() {
+            Ok(reserved) => reserved,
+            Err(HostChunkError::Full { .. }) => {
+                return Ok(if idle == Idle::Progress {
+                    Idle::Progress
+                } else {
+                    Idle::WaitingForRender
+                });
+            }
+            Err(error) => return Err(NativeSourceWorkerExit::SubmitFailed(error)),
+        },
+    };
     let start_frame = job.decoder.next_source_frame();
     let channels = usize::from(job.decoder.metadata().channel_count);
-    let frames = job.planar_staging.len() / channels;
-    let decoded = job
-        .decoder
-        .decode_planar(&mut job.planar_staging, frames)
-        .map_err(NativeSourceWorkerExit::DecodeFailed)?;
+    let planes = reserved.planes_mut();
+    let frames = planes.len() / channels;
+    let decoded = job.decoder.decode_planar(planes, frames);
+    // The block stays with the job until its commit, whatever the decode reported.
+    job.reserved = Some(reserved);
+    let decoded = decoded.map_err(NativeSourceWorkerExit::DecodeFailed)?;
     job.sanitation = job.sanitation.max(decoded.sanitized_sample_count);
     job.pending = Some(PendingBlock {
         generation: job.generation,
@@ -1785,7 +1793,10 @@ mod tests {
     use super::*;
     use std::io::{self, Cursor, SeekFrom};
 
-    use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
+    use crate::{
+        HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceProducerTelemetry, SourceReadReport,
+        SubmitReport,
+    };
     use session::{CompileCaps, StableId, compile_session, parse_session_json};
 
     const SESSION_CONTENT: &[u8] =
@@ -1835,6 +1846,7 @@ mod tests {
 
         assert!(prepared.event_receiver.try_pop().is_err());
         assert!(prepared.job.pending.is_none());
+        assert!(prepared.job.reserved.is_none());
         assert!(prepared.job.pending_seek.is_none());
         assert!(!prepared.job.end_submitted);
         assert!(!prepared.job.source_ready_sent);
@@ -2047,7 +2059,7 @@ mod tests {
         let rounded = prepare_native_source_job(&mut rounded, request(region), rounded_caps, None)
             .expect("whole-quantum read buffer below cap");
         assert_eq!(rounded.resources.decoder_read_scratch_bytes, 48);
-        assert_eq!(rounded.job.planar_staging.len(), 4);
+        assert!(rounded.job.reserved.is_none());
     }
 
     #[test]
@@ -2062,7 +2074,6 @@ mod tests {
             prepare_native_source_parts(&mut native_resolver, request(region), caps())
                 .expect("prepare");
         assert_eq!(report.decoder_read_scratch_bytes, 64);
-        assert_eq!(report.worker_planar_staging_bytes, 16);
         assert!(matches!(
             controller.wait_for_event().expect("ready"),
             NativeSourceWorkerEvent::SourceReady { .. }
@@ -2311,7 +2322,6 @@ mod tests {
             .ring
             .largest_allocation_bytes
             .max(report.decoder_read_scratch_bytes)
-            .max(report.worker_planar_staging_bytes)
             .max(control.largest_allocation_bytes)
             .max(events.largest_allocation_bytes)
             .max(stop.largest_allocation_bytes)
@@ -2803,7 +2813,7 @@ mod tests {
                 reader,
             }),
         };
-        let (mut controller, mut worker, _consumer, _) = prepare_native_source_parts(
+        let (mut controller, mut worker, mut consumer, _) = prepare_native_source_parts(
             &mut native_resolver,
             request(NativeWaveRegion {
                 start_frame: SourceFrame(0),
@@ -2820,6 +2830,10 @@ mod tests {
             })
             .expect("seek to failing read");
         sync_worker(&mut controller);
+        // The worker decodes only into a block it has reserved (#919), and the ring is full of
+        // pre-seek blocks: the failing read happens once the render observes the seek and
+        // recycles them, not ahead of it into a staging block.
+        let _ = read_one(&mut consumer);
         // The synchronous snapshot may itself consume Terminal and retain its exact exit.
         let exit = if let Some(exit) = controller.worker_exit() {
             exit
@@ -4053,6 +4067,729 @@ mod tests {
         assert!(
             inert < reject && reject < spawn,
             "all inert jobs must reject before the sole worker start"
+        );
+    }
+
+    /// Issue #919 gate 1: one block exactly as the producer published it on the data queue.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct PublishedBlock {
+        generation: u64,
+        start_frame: u64,
+        frames: u32,
+        end_of_region: bool,
+        sanitized: u64,
+        /// Every published word: the first `frames` words of each `[channel][quantum]` plane.
+        words: Vec<u32>,
+    }
+
+    impl PublishedBlock {
+        fn record(block: &crate::TransferBlock, quantum: usize) -> Self {
+            let frames = usize::try_from(block.frames).expect("u32 fits usize");
+            Self {
+                generation: block.generation.0,
+                start_frame: block.start_frame.0,
+                frames: block.frames,
+                end_of_region: block.end_of_region,
+                sanitized: block.native_decoder_sanitized_samples,
+                words: block
+                    .samples
+                    .chunks_exact(quantum)
+                    .flat_map(|plane| plane[..frames].iter().map(|sample| sample.to_bits()))
+                    .collect(),
+            }
+        }
+
+        /// The recorded oracle row: the block's metadata and an FNV-1a digest of its words.
+        fn oracle_row(&self) -> (u64, u64, u32, bool, u64, u64) {
+            let digest = self
+                .words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            (
+                self.generation,
+                self.start_frame,
+                self.frames,
+                self.end_of_region,
+                self.sanitized,
+                digest,
+            )
+        }
+    }
+
+    /// A render side that takes blocks raw off the data queue, so the record holds every block
+    /// the producer published, including the stale ones a real consumer would discard.
+    struct ScriptedRender {
+        consumer: PcmSourceConsumer,
+        quantum: usize,
+        played: Option<Box<crate::TransferBlock>>,
+        published: Vec<PublishedBlock>,
+    }
+
+    impl ScriptedRender {
+        /// One render block boundary in the real consumer's order: observe an admitted seek
+        /// (freeing the ring's one seek slot), release the block played last, take the next.
+        fn block_boundary(&mut self) {
+            let _ = self.consumer.command_consumer.try_pop();
+            if let Some(mut block) = self.played.take() {
+                block.reset_metadata();
+                assert!(
+                    self.consumer.recycle_producer.try_push(block).is_ok(),
+                    "the recycle queue has a slot for every prepared block"
+                );
+            }
+            if let Ok(block) = self.consumer.data_consumer.try_pop() {
+                self.published
+                    .push(PublishedBlock::record(&block, self.quantum));
+                self.played = Some(block);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ScriptStep {
+        /// Service the worker until it reports no progress.
+        Run,
+        /// Service the worker exactly once.
+        ServiceOnce,
+        /// One render block boundary.
+        Render,
+        /// The controller queues a seek for the worker.
+        Seek { generation: u64, frame: u64 },
+        /// A test-only fault a prepared ring never has: hand the producer one block per free
+        /// data-queue slot, plus one, less any block already waiting on the recycle queue, so a
+        /// reserved block meets a full data queue whatever the ring's shape.
+        OverfillDataQueue,
+    }
+
+    struct WorkerTrace {
+        /// Transfer blocks the prepared ring put in circulation (before any injected block).
+        blocks: usize,
+        /// Logical capacity of the ring's data queue.
+        data_queue_capacity: usize,
+        published: Vec<PublishedBlock>,
+        idles: Vec<Idle>,
+        telemetry: Vec<SourceProducerTelemetry>,
+    }
+
+    /// Drive one prepared job through `script` on the test thread with `service` as its worker.
+    fn run_worker_script(
+        samples: &[f32],
+        request: NativeSourcePrepareRequest,
+        script: &[ScriptStep],
+        mut service: impl FnMut(
+            &mut SourceJob<Cursor<Vec<u8>>>,
+            &mut Consumer<()>,
+        ) -> Result<Idle, NativeSourceWorkerExit>,
+    ) -> WorkerTrace {
+        let quantum =
+            usize::try_from(request.ring_config.quantum_frames.0).expect("quantum fits usize");
+        let mut native_resolver = resolver_wave(stereo_float32_wave(samples), b"exact-identity");
+        let UnstartedNativeSource {
+            mut command_sender,
+            event_receiver: _events,
+            mut job,
+            consumer,
+            ..
+        } = prepare_native_source_job(&mut native_resolver, request, caps(), None)
+            .expect("prepare scripted job");
+        let (_stop_sender, mut stop) =
+            bounded_spsc::<()>(NonZeroUsize::new(1).expect("one"), QueueGeneration(13))
+                .expect("stop queue");
+        let mut render = ScriptedRender {
+            consumer,
+            quantum,
+            played: None,
+            published: Vec::new(),
+        };
+        let mut idles = Vec::new();
+        let mut telemetry = Vec::new();
+        // Every prepared block starts on the recycle queue, however many the ring allocates.
+        let prepared_blocks = job.provider.producer.recycle_consumer.available_at_entry();
+        let data_queue_capacity = job.provider.producer.data_producer.capacity();
+        assert!(prepared_blocks > 0);
+        let mut blocks = prepared_blocks;
+        for step in script {
+            match *step {
+                ScriptStep::Run => {
+                    let mut idle = Idle::Progress;
+                    for _ in 0..64 {
+                        idle = service(&mut job, &mut stop).expect("scripted worker stays live");
+                        if idle != Idle::Progress {
+                            break;
+                        }
+                    }
+                    assert_ne!(idle, Idle::Progress, "scripted worker never went idle");
+                    idles.push(idle);
+                }
+                ScriptStep::ServiceOnce => {
+                    idles.push(service(&mut job, &mut stop).expect("scripted worker stays live"));
+                }
+                ScriptStep::Render => render.block_boundary(),
+                ScriptStep::Seek { generation, frame } => command_sender
+                    .try_push(WorkerCommand::Seek {
+                        generation: SourceGeneration(generation),
+                        frame: SourceFrame(frame),
+                    })
+                    .expect("bounded worker command slot"),
+                ScriptStep::OverfillDataQueue => {
+                    let samples =
+                        render.quantum * usize::from(job.decoder.metadata().channel_count);
+                    let producer = &job.provider.producer;
+                    let needed = producer.data_producer.available_capacity() + 1;
+                    let waiting = producer.recycle_consumer.available_at_entry();
+                    assert!(waiting < needed, "a prepared ring already overfills");
+                    for _ in waiting..needed {
+                        let extra = Box::new(
+                            crate::TransferBlock::try_new(samples).expect("extra transfer block"),
+                        );
+                        assert!(render.consumer.recycle_producer.try_push(extra).is_ok());
+                    }
+                    blocks += needed - waiting;
+                }
+            }
+            // No block ever leaves circulation: each is queued, played, reserved by the job, or
+            // deferred inside the producer awaiting a data slot.
+            let producer = &job.provider.producer;
+            let circulating = render.consumer.data_consumer.available_at_entry()
+                + producer.recycle_consumer.available_at_entry()
+                + usize::from(render.played.is_some())
+                + usize::from(job.reserved.is_some())
+                + usize::from(producer.deferred_block.is_some());
+            assert_eq!(
+                circulating, blocks,
+                "a transfer block left circulation at {step:?}"
+            );
+            telemetry.push(job.provider.telemetry());
+        }
+        WorkerTrace {
+            blocks: prepared_blocks,
+            data_queue_capacity,
+            published: render.published,
+            idles,
+            telemetry,
+        }
+    }
+
+    /// 48 stereo float32 frames of distinct words plus a negative zero and replacement-bearing
+    /// samples (subnormal, NaN, infinities), placed only in quanta that both workers decode.
+    fn published_sequence_fixture() -> Vec<f32> {
+        let mut samples: Vec<f32> = (0_u16..96)
+            .map(|index| f32::from(index) * 0.375 - 7.0)
+            .collect();
+        // Interleaved index = frame * 2 + channel. Frames 21..=28 and 30..=33 stay plain: while
+        // stalled, the pre-change worker decoded 21..=24 (three circulating blocks) or 25..=28
+        // (four) ahead of the generation-2 seek, then 30..=33 ahead of the generation-3
+        // admission, and dropped both.
+        samples[2 * 2 + 1] = f32::from_bits(1);
+        samples[7 * 2] = -0.0;
+        samples[10 * 2] = f32::NAN;
+        samples[15 * 2 + 1] = f32::INFINITY;
+        samples[20 * 2 + 1] = f32::INFINITY;
+        samples[29 * 2] = f32::NEG_INFINITY;
+        samples[41 * 2 + 1] = f32::NAN;
+        samples[42 * 2] = f32::from_bits(0x8000_0001);
+        samples
+    }
+
+    /// Region `[1, 43)` of the fixture through a three-block ring of four-frame quanta.
+    fn published_sequence_request() -> NativeSourcePrepareRequest {
+        let mut request = request(NativeWaveRegion {
+            start_frame: SourceFrame(1),
+            length_frames: 42,
+        });
+        request.declared_channel_count = 2;
+        request.ring_config.channel_count = 2;
+        request.ring_config.frame_capacity = 12;
+        request
+    }
+
+    /// Every step lands where both workers are at the same point of their cycle: after a
+    /// `Run` (quiescent) or, for `ServiceOnce`, from a drained ring after the end of region.
+    fn published_sequence_script() -> Vec<ScriptStep> {
+        use ScriptStep::{Render, Run, Seek, ServiceOnce};
+        let mut script = vec![
+            // Fill the ring, then keep it full: two more service rounds with no render boundary,
+            // then a boundary that plays a block but recycles none (the played block is held).
+            Run,
+            Run,
+            Run,
+            Render,
+            Run,
+            // Resume: every later boundary releases one block.
+            Render,
+            Run,
+            Render,
+            Run,
+            // A seek while the worker is stalled on a full ring.
+            Seek {
+                generation: 2,
+                frame: 30,
+            },
+            Run,
+            // A newer seek while the first still occupies the ring's seek slot: backpressure.
+            Seek {
+                generation: 3,
+                frame: 6,
+            },
+            Run,
+        ];
+        // The render observes the first seek; the worker admits the newer one and streams to a
+        // one-frame end-of-region block, then the render drains the ring.
+        script.extend([Render, Run].repeat(14));
+        script.extend([Render].repeat(4));
+        // From a drained ring the seek and the first decode share one call; the next seek is
+        // backpressured until the render observes the first, then drops that decoded quantum.
+        script.extend([
+            Seek {
+                generation: 4,
+                frame: 20,
+            },
+            ServiceOnce,
+            Seek {
+                generation: 5,
+                frame: 12,
+            },
+            Run,
+        ]);
+        script.extend([Render, Run].repeat(12));
+        script.extend([Render].repeat(4));
+        script
+    }
+
+    #[test]
+    fn native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks() {
+        let trace = run_worker_script(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+            service_job,
+        );
+        let rows: Vec<_> = trace
+            .published
+            .iter()
+            .map(PublishedBlock::oracle_row)
+            .collect();
+        assert_eq!(rows, PUBLISHED_SEQUENCE_ORACLE);
+        // Where each `Run` and the one `ServiceOnce` left the worker, as the pre-change worker
+        // recorded it: stalled on the ring, idle after the end of region, or mid-decode.
+        let idles: Vec<Idle> = PUBLISHED_SEQUENCE_IDLE_RUNS
+            .iter()
+            .flat_map(|&(idle, count)| [idle].repeat(count))
+            .collect();
+        assert_eq!(trace.idles, idles);
+        // The script really stalled on a full ring and really hit seek backpressure.
+        assert!(
+            trace
+                .telemetry
+                .iter()
+                .all(|telemetry| telemetry.data_full_count == 0)
+        );
+        assert_eq!(trace.telemetry[2].recycle_empty_count, 3);
+        assert_eq!(
+            trace.telemetry[2].cumulative_written_frames,
+            4 * u64::try_from(trace.blocks).expect("block count fits u64")
+        );
+    }
+
+    /// The two recorded gate-1 constants as Rust source, ready to replace the ones below.
+    fn published_sequence_constants(trace: &WorkerTrace) -> String {
+        let mut text = String::from(
+            "    const PUBLISHED_SEQUENCE_ORACLE: &[(u64, u64, u32, bool, u64, u64)] = &[\n",
+        );
+        for block in &trace.published {
+            let (generation, start, frames, end, sanitized, digest) = block.oracle_row();
+            let hex = format!("{digest:016x}");
+            text.push_str(&format!(
+                "        ({generation}, {start}, {frames}, {end}, {sanitized}, 0x{}_{}_{}_{}),\n",
+                &hex[..4],
+                &hex[4..8],
+                &hex[8..12],
+                &hex[12..]
+            ));
+        }
+        text.push_str("    ];\n");
+        text.push_str("    const PUBLISHED_SEQUENCE_IDLE_RUNS: &[(Idle, usize)] = &[\n");
+        let mut runs: Vec<(Idle, usize)> = Vec::new();
+        for &idle in &trace.idles {
+            match runs.last_mut() {
+                Some((last, count)) if *last == idle => *count += 1,
+                _ => runs.push((idle, 1)),
+            }
+        }
+        for (idle, count) in runs {
+            text.push_str(&format!("        (Idle::{idle:?}, {count}),\n"));
+        }
+        text.push_str("    ];\n");
+        text
+    }
+
+    /// Prints the recorded constants from the verbatim pre-change worker on the ring this tree
+    /// prepares, for a deliberate re-record if the fixture, script or circulating block count
+    /// ever changes (issue #919 evidence, "Gate 1 after #917"). Run with `--ignored
+    /// --nocapture`; its output replaces the two constants in one paste.
+    #[test]
+    #[ignore = "prints the gate-1 constants for a deliberate re-record; asserts nothing"]
+    fn print_published_sequence_constants_from_the_pre_change_worker() {
+        let oracle = pre_change_trace(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+        );
+        println!("prepared transfer blocks: {}", oracle.blocks);
+        print!("{}", published_sequence_constants(&oracle));
+    }
+
+    /// Recorded from the pre-change production worker (decode into `planar_staging`, then
+    /// `submit_native_planar`, as of `c03848a3`) on this fixture, script and three-block ring:
+    /// `(generation, start frame, frames, end of region, sanitized watermark, FNV-1a-64 of the
+    /// published words)` per block, then the run-length idle states. Kept adjacent and in this
+    /// order so `print_published_sequence_constants_from_the_pre_change_worker` output replaces
+    /// both in one paste.
+    const PUBLISHED_SEQUENCE_ORACLE: &[(u64, u64, u32, bool, u64, u64)] = &[
+        (1, 1, 4, false, 1, 0x34d9_bb8f_8505_026d),
+        (1, 5, 4, false, 1, 0x0dcf_060d_29cb_76c8),
+        (1, 9, 4, false, 2, 0x8e8a_886e_16e6_cba0),
+        (1, 13, 4, false, 3, 0xda67_f95d_b40f_4e81),
+        (1, 17, 4, false, 4, 0x5e59_9b76_32c7_ff1e),
+        (3, 6, 4, false, 4, 0xa143_3619_35ea_7030),
+        (3, 10, 4, false, 5, 0xaf63_350f_14bd_4e68),
+        (3, 14, 4, false, 6, 0xf699_5fc0_678d_4065),
+        (3, 18, 4, false, 7, 0x31e9_9e34_2233_85d0),
+        (3, 22, 4, false, 7, 0x2913_d5cd_3aa0_e835),
+        (3, 26, 4, false, 8, 0x8752_b917_49be_3d5e),
+        (3, 30, 4, false, 8, 0xcd1f_a272_97b8_0d30),
+        (3, 34, 4, false, 8, 0x4397_75c4_c7f7_a775),
+        (3, 38, 4, false, 9, 0x35b8_5933_efba_884b),
+        (3, 42, 1, true, 10, 0xab4a_0732_2a3b_83fd),
+        (5, 12, 4, false, 12, 0x8cd0_48ba_c309_1175),
+        (5, 16, 4, false, 12, 0xf2b5_fbd5_5306_e945),
+        (5, 20, 4, false, 13, 0x46e9_d3c6_26e9_7094),
+        (5, 24, 4, false, 13, 0xd63b_821c_572d_c9c5),
+        (5, 28, 4, false, 14, 0x1b94_a93f_ffa2_81db),
+        (5, 32, 4, false, 14, 0x2564_c537_778d_ae75),
+        (5, 36, 4, false, 14, 0x2114_7b91_add9_18f5),
+        (5, 40, 3, true, 16, 0xda44_2ca2_da4a_27ab),
+    ];
+    const PUBLISHED_SEQUENCE_IDLE_RUNS: &[(Idle, usize)] = &[
+        (Idle::WaitingForRender, 17),
+        (Idle::WaitingForCommand, 5),
+        (Idle::Progress, 1),
+        (Idle::WaitingForRender, 7),
+        (Idle::WaitingForCommand, 6),
+    ];
+
+    /// The pre-change worker, kept as issue #919's live oracle: `service_job` verbatim as of the
+    /// parent commit, except that its `planar_staging` moved from the job into a parameter and the
+    /// removed `HostChunkProvider::submit_native_planar` is inlined below, also verbatim.
+    fn pre_change_service_job<R: Read + Seek>(
+        job: &mut SourceJob<R>,
+        #[cfg_attr(not(feature = "test-support"), allow(unused_variables))] stop: &mut Consumer<()>,
+        planar_staging: &mut [f32],
+    ) -> Result<Idle, NativeSourceWorkerExit> {
+        let mut idle = Idle::WaitingForCommand;
+        let mut latest_seek = None;
+        for _ in 0..job.commands.capacity() {
+            let Ok(command) = job.commands.try_pop() else {
+                break;
+            };
+            idle = Idle::Progress;
+            match command {
+                WorkerCommand::Seek {
+                    generation: requested,
+                    frame,
+                } => {
+                    let observed = PendingSeek {
+                        generation: requested,
+                        frame,
+                    };
+                    if latest_seek
+                        .is_none_or(|latest: PendingSeek| observed.generation > latest.generation)
+                    {
+                        latest_seek = Some(observed);
+                    }
+                }
+                WorkerCommand::Wake => {}
+                WorkerCommand::SnapshotSanitation => publish_worker_event(
+                    &mut job.events,
+                    NativeSourceWorkerEvent::SanitationSnapshot {
+                        native_decoder_sanitized_samples: job.sanitation,
+                    },
+                ),
+                #[cfg(feature = "test-support")]
+                WorkerCommand::AuditHold => job.audit_hold_after_submit = true,
+            }
+        }
+        if let Some(latest) = latest_seek {
+            job.pending_seek = Some(latest);
+        }
+        if let Some(seek) = job.pending_seek {
+            match job.provider.try_seek(SourceCommand::Seek {
+                generation: seek.generation,
+                frame: seek.frame,
+            }) {
+                Ok(()) => {
+                    job.decoder
+                        .seek_to_source_frame(seek.frame)
+                        .map_err(NativeSourceWorkerExit::DecodeFailed)?;
+                    job.generation = seek.generation;
+                    job.pending = None;
+                    job.end_submitted = false;
+                    job.pending_seek = None;
+                }
+                Err(SourceSeekError::Backpressure { .. }) => {
+                    return Ok(if idle == Idle::Progress {
+                        Idle::Progress
+                    } else {
+                        Idle::WaitingForRender
+                    });
+                }
+                Err(error) => return Err(NativeSourceWorkerExit::SeekFailed(error)),
+            }
+        }
+        if let Some(block) = job.pending.take() {
+            match pre_change_submit_native_planar(
+                &mut job.provider,
+                block.generation,
+                block.start_frame,
+                planar_staging,
+                block.frames,
+                block.end_of_region,
+                block.native_decoder_sanitized_samples,
+            ) {
+                Ok(_) => {
+                    #[cfg(feature = "test-support")]
+                    if job.audit_resume_after_submit {
+                        if let Some(gate) = job.audit_gate.as_mut() {
+                            gate.acknowledge_resumed();
+                        }
+                        job.audit_resume_after_submit = false;
+                    }
+                    #[cfg(feature = "test-support")]
+                    if job.audit_hold_after_submit {
+                        let Some(gate) = job.audit_gate.as_mut() else {
+                            return Err(NativeSourceWorkerExit::Stopped);
+                        };
+                        if !gate.hold(stop) {
+                            return Err(NativeSourceWorkerExit::Stopped);
+                        }
+                        job.audit_hold_after_submit = false;
+                        job.audit_resume_after_submit = true;
+                    }
+                    job.end_submitted = block.end_of_region;
+                    if !job.source_ready_sent {
+                        publish_worker_event(
+                            &mut job.events,
+                            NativeSourceWorkerEvent::SourceReady {
+                                native_decoder_sanitized_samples: job.sanitation,
+                            },
+                        );
+                        job.source_ready_sent = true;
+                    }
+                    return Ok(Idle::Progress);
+                }
+                Err(HostChunkError::Full { .. }) => {
+                    job.pending = Some(block);
+                    return Ok(if idle == Idle::Progress {
+                        Idle::Progress
+                    } else {
+                        Idle::WaitingForRender
+                    });
+                }
+                Err(error) => return Err(NativeSourceWorkerExit::SubmitFailed(error)),
+            }
+        }
+        if job.end_submitted {
+            return Ok(idle);
+        }
+        let start_frame = job.decoder.next_source_frame();
+        let channels = usize::from(job.decoder.metadata().channel_count);
+        let frames = planar_staging.len() / channels;
+        let decoded = job
+            .decoder
+            .decode_planar(planar_staging, frames)
+            .map_err(NativeSourceWorkerExit::DecodeFailed)?;
+        job.sanitation = job.sanitation.max(decoded.sanitized_sample_count);
+        job.pending = Some(PendingBlock {
+            generation: job.generation,
+            start_frame,
+            frames: decoded.decoded_frames,
+            end_of_region: decoded.end_of_region,
+            native_decoder_sanitized_samples: job.sanitation,
+        });
+        Ok(Idle::Progress)
+    }
+
+    /// `HostChunkProvider::submit_native_planar` verbatim as of #919's parent commit.
+    fn pre_change_submit_native_planar(
+        provider: &mut HostChunkProvider,
+        generation: SourceGeneration,
+        start_frame: SourceFrame,
+        planar_quantum: &[f32],
+        frames: u32,
+        end_of_region: bool,
+        native_decoder_sanitized_samples: u64,
+    ) -> Result<SubmitReport, HostChunkError> {
+        let quantum =
+            usize::try_from(provider.producer.quantum_frames).expect("prepared quantum fits usize");
+        let expected_samples = usize::try_from(provider.producer.channel_count)
+            .expect("u32 fits usize")
+            .checked_mul(quantum)
+            .expect("prepared planar samples");
+        if planar_quantum.len() != expected_samples {
+            return Err(HostChunkError::InternalInvariant);
+        }
+        provider.producer.submit_planes(
+            generation,
+            start_frame,
+            frames,
+            end_of_region,
+            native_decoder_sanitized_samples,
+            planar_quantum.chunks_exact(quantum),
+        )
+    }
+
+    /// The pre-change worker's trace on `script`, with its one-quantum staging block.
+    fn pre_change_trace(
+        samples: &[f32],
+        request: NativeSourcePrepareRequest,
+        script: &[ScriptStep],
+    ) -> WorkerTrace {
+        let channels =
+            usize::try_from(request.ring_config.channel_count).expect("channels fit usize");
+        let quantum =
+            usize::try_from(request.ring_config.quantum_frames.0).expect("quantum fits usize");
+        let mut planar_staging = vec![0.0_f32; channels * quantum];
+        run_worker_script(samples, request, script, |job, stop| {
+            pre_change_service_job(job, stop, &mut planar_staging)
+        })
+    }
+
+    #[test]
+    fn native_worker_matches_the_pre_change_worker_block_for_block() {
+        let current = run_worker_script(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+            service_job,
+        );
+        let oracle = pre_change_trace(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+        );
+        // Every published block, word for word, and where each step left the worker.
+        assert_eq!(current.published, oracle.published);
+        assert_eq!(current.idles, oracle.idles);
+        // The producer telemetry after every step is identical except for the count of failed
+        // recycle polls. On the call that admits the seek on a full ring the old worker decoded
+        // into staging where the current one polls for a block first, so from that step on it
+        // has polled the full ring exactly once more.
+        let seek_on_a_full_ring = 10;
+        assert_eq!(current.telemetry.len(), oracle.telemetry.len());
+        for (step, (current, oracle)) in current.telemetry.iter().zip(&oracle.telemetry).enumerate()
+        {
+            assert_eq!(
+                SourceProducerTelemetry {
+                    recycle_empty_count: oracle.recycle_empty_count,
+                    ..*current
+                },
+                *oracle
+            );
+            assert_eq!(
+                current.recycle_empty_count - oracle.recycle_empty_count,
+                u64::from(step >= seek_on_a_full_ring)
+            );
+        }
+        // The live oracle is the recorded one.
+        let rows: Vec<_> = oracle
+            .published
+            .iter()
+            .map(PublishedBlock::oracle_row)
+            .collect();
+        assert_eq!(rows, PUBLISHED_SEQUENCE_ORACLE);
+    }
+
+    #[test]
+    fn a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead() {
+        // The pre-change worker decoded one quantum into its staging block while the ring was
+        // full and dropped it at the generation-2 seek: frames 21..=24 with three circulating
+        // blocks, 25..=28 with four. The current worker, holding no block, never decodes it
+        // there. One NaN in each candidate makes exactly one replacement counted once more by
+        // the old worker either way; the other NaN lies in a quantum both workers publish or
+        // both decode later, for generations 3 and 5.
+        let mut samples = published_sequence_fixture();
+        samples[22 * 2] = f32::NAN;
+        samples[26 * 2] = f32::NAN;
+        let current = run_worker_script(
+            &samples,
+            published_sequence_request(),
+            &published_sequence_script(),
+            service_job,
+        );
+        let oracle = pre_change_trace(
+            &samples,
+            published_sequence_request(),
+            &published_sequence_script(),
+        );
+        assert_eq!(current.published.len(), oracle.published.len());
+        assert_eq!(current.idles, oracle.idles);
+        for (current, oracle) in current.published.iter().zip(&oracle.published) {
+            // The words and every other stamp are unchanged.
+            assert_eq!(
+                PublishedBlock {
+                    sanitized: oracle.sanitized,
+                    ..current.clone()
+                },
+                *oracle
+            );
+            let extra = u64::from(current.generation != 1);
+            assert_eq!(oracle.sanitized, current.sanitized + extra);
+        }
+    }
+
+    #[test]
+    fn worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication() {
+        use ScriptStep::{OverfillDataQueue, Render, Run};
+        // A prepared ring never lets a reserved block meet a full data queue; blocks injected
+        // past its capacity do, so the worker's commit takes its `Full` arm and its retry path.
+        let mut script = vec![Run, OverfillDataQueue, Run];
+        script.extend([Render, Run].repeat(6));
+        let current = run_worker_script(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &script,
+            service_job,
+        );
+        // The worker filled the data queue to its capacity, then the commit of one quantum more
+        // met the full queue: nothing past the full queue was acked, and the worker waited for
+        // the render with the stamped block deferred in the provider.
+        assert_eq!(current.idles[1], Idle::WaitingForRender);
+        assert!(current.telemetry[2].data_full_count > 0);
+        assert_eq!(
+            current.telemetry[2].cumulative_written_frames,
+            4 * u64::try_from(current.data_queue_capacity).expect("capacity fits u64")
+        );
+        // The retry published that block once, and the stream continued contiguously: the same
+        // blocks, word for word, as the pre-change worker streaming the region with no stall.
+        let mut plain = vec![Run];
+        plain.extend([Render, Run].repeat(12));
+        let oracle = pre_change_trace(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &plain,
+        );
+        assert_eq!(current.published.len(), 6);
+        assert_eq!(current.published, oracle.published[..6]);
+        assert_eq!(
+            current
+                .published
+                .iter()
+                .map(|block| block.start_frame)
+                .collect::<Vec<_>>(),
+            [1, 5, 9, 13, 17, 21]
         );
     }
 
