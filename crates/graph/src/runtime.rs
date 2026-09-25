@@ -12870,6 +12870,14 @@ mod tests {
         /// The last track's route feeds a submix that feeds the Output. Declined: the Output's
         /// producer is the submix.
         RouteIntoSubmix,
+        /// One more route, from track 0's `Input` to the Output. Track 0's input has two readers,
+        /// so neither of its routes runs in place. Declined: a route that copies lets its input's
+        /// colour die at the route, and its own output buffer is what the Output reads.
+        SharedInput,
+        /// Track 0's route also feeds track 0's `PostFader`, scheduled after the Output and
+        /// metered. Declined: the route's output has a second reader, which would read the
+        /// unmixed words.
+        LateReader,
     }
 
     impl RoutedShape {
@@ -12897,7 +12905,7 @@ mod tests {
         let inputs: Vec<_> = (0..fan_in)
             .map(|track| stage(track, TrackStage::Input))
             .collect();
-        let routes: Vec<_> = (0..fan_in)
+        let mut routes: Vec<_> = (0..fan_in)
             .map(|track| GraphNodeId::Route {
                 route_id: route_id(track),
             })
@@ -12910,6 +12918,7 @@ mod tests {
         };
         let alias = stage(0, TrackStage::PostSimd2PreFader);
         let extra = stage(fan_in, TrackStage::Input);
+        let late = stage(0, TrackStage::PostFader);
         let port = |node: &GraphNodeId, kind| crate::GraphPortId {
             node: node.clone(),
             kind,
@@ -12945,7 +12954,38 @@ mod tests {
         }
         let mut first = inputs.clone();
         let mut between = Vec::new();
+        let mut last = Vec::new();
         match shape {
+            RoutedShape::SharedInput => {
+                let shared = GraphNodeId::Route {
+                    route_id: route_id(fan_in),
+                };
+                edges.push(edge(
+                    GraphEdgeId::RouteSource {
+                        route_id: route_id(fan_in),
+                    },
+                    &inputs[0],
+                    &shared,
+                ));
+                edges.push(edge(
+                    GraphEdgeId::RouteDestination {
+                        route_id: route_id(fan_in),
+                    },
+                    &shared,
+                    &output,
+                ));
+                routes.push(shared);
+            }
+            RoutedShape::LateReader => {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: late.clone(),
+                    },
+                    &routes[0],
+                    &late,
+                ));
+                last.push(late.clone());
+            }
             RoutedShape::ObservedRouteAlias => {
                 edges.push(edge(
                     GraphEdgeId::TrackMain {
@@ -12988,7 +13028,7 @@ mod tests {
         }
         edges.sort_by(|left, right| left.id.cmp(&right.id));
         let outputs = vec![output.clone()];
-        let levels: Vec<&Vec<GraphNodeId>> = [&first, &routes, &between, &outputs]
+        let levels: Vec<&Vec<GraphNodeId>> = [&first, &routes, &between, &outputs, &last]
             .into_iter()
             .filter(|level| !level.is_empty())
             .collect();
@@ -13050,6 +13090,7 @@ mod tests {
             .collect();
         let mut required_bindings = first.clone();
         required_bindings.push(output.clone());
+        required_bindings.extend(last.iter().cloned());
         if matches!(
             shape,
             RoutedShape::SubmixContributor | RoutedShape::RouteIntoSubmix
@@ -13125,6 +13166,7 @@ mod tests {
             })
             .collect();
         nodes.push(GraphNodeBinding::identity(output.clone()));
+        nodes.extend(last.iter().cloned().map(GraphNodeBinding::identity));
         if matches!(
             shape,
             RoutedShape::SubmixContributor | RoutedShape::RouteIntoSubmix
@@ -13144,6 +13186,7 @@ mod tests {
                 observed.push((output, OUTPUT_METER_HANDLE + 1));
             }
             RoutedShape::ObservedRouteAlias => observed.push((alias, 1)),
+            RoutedShape::LateReader => observed.push((late, 1)),
             _ => {}
         }
         let controlled = shape == RoutedShape::Metered(true);
@@ -13219,6 +13262,8 @@ mod tests {
             RoutedShape::DelayedEdge,
             RoutedShape::SubmixContributor,
             RoutedShape::RouteIntoSubmix,
+            RoutedShape::SharedInput,
+            RoutedShape::LateReader,
         ];
         for frames in [1_u32, 3, 7, 13, 16, 64, 128] {
             for shape in shapes {
@@ -13291,7 +13336,7 @@ mod tests {
                     let (expected, actual) = (windows(&oracle_published), windows(&published));
                     let observers = match shape {
                         RoutedShape::Metered(_) => fan_in + 2,
-                        RoutedShape::ObservedRouteAlias => 1,
+                        RoutedShape::ObservedRouteAlias | RoutedShape::LateReader => 1,
                         _ => 0,
                     };
                     assert_eq!(
