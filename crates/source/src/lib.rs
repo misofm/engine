@@ -1314,6 +1314,7 @@ impl PcmSourceConsumer {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Borrow one channel plane of the played block in place, without copying or consuming it.
     ///
     /// The slice is exactly `quantum_frames` long: the played frames, then `+0.0` to the quantum
@@ -1331,6 +1332,7 @@ impl PcmSourceConsumer {
         let offset = usize::try_from(channel).ok()?.checked_mul(quantum)?;
         block.samples.get(offset..offset.checked_add(quantum)?)
     }
+    // REALTIME_POLICY_END
 
     /// Exact source channel count.
     #[must_use]
