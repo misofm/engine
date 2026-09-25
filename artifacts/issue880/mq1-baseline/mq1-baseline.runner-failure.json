@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 880,
+  "task": "MQ-1",
+  "kind": "transient_shaper_benchmark_failure",
+  "candidate_commit": "2a8977f5f0fb9b3384e2d71632f21c7f9896dce4",
+  "reason": "result_line_count",
+  "exit_status": 1,
+  "raw_output": "/tmp/issue880-mq1-baseline-2a8977f5.json.raw.log"
+}
