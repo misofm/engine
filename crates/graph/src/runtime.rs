@@ -12863,6 +12863,11 @@ mod tests {
         /// bound to it, so it reads the route's output. Declined.
         ObservedRouteAlias,
         /// Track 1's route-to-Output edge carries a three-sample compensation delay. Declined.
+        ///
+        /// Over signed-zero data, with track 1's 2x2 negative: the delay line's warm-up words are
+        /// `+0.0`, so the delayed route contributes `+0.0` there where its mix of them would be
+        /// `-0.0`. That is the one place a fused delayed route differs, and this data makes it
+        /// visible in the master.
         DelayedEdge,
         /// One more Output contributor: a submix (an identity op) fed straight by an extra track's
         /// `Input`. Declined: that input's producer is not a route.
@@ -12884,6 +12889,11 @@ mod tests {
         /// Whether the Output route fold is admitted for this shape.
         const fn folds(self) -> bool {
             matches!(self, Self::Plain | Self::NegativeZero | Self::Metered(_))
+        }
+
+        /// Whether every input word is `-0.0` rather than hostile.
+        const fn negative_zero(self) -> bool {
+            matches!(self, Self::NegativeZero | Self::DelayedEdge)
         }
     }
 
@@ -13066,25 +13076,31 @@ mod tests {
         } else {
             Vec::new()
         };
+        // Hostile constants, except over the signed-zero data: there every route's 2x2 is
+        // positive, so its mix of `-0.0` is `-0.0`, and on the delayed shape the delayed route's
+        // 2x2 is negative, so its mix of the delay line's initial `+0.0` is `-0.0` too.
         let mut state = 0x0920_0000_u64 ^ fan_in as u64;
-        let mut constant = || {
+        let mut constant = |track: usize, gain: bool| {
             let value = hostile_constant(&mut state);
-            if shape == RoutedShape::NegativeZero {
-                value.abs() + 0.5
-            } else {
+            if !shape.negative_zero() {
                 value
+            } else if shape == RoutedShape::DelayedEdge && track == 1 && !gain {
+                -(value.abs() + 0.5)
+            } else {
+                value.abs() + 0.5
             }
         };
         let prepared_routes = routes
             .iter()
-            .map(|node| crate::PreparedRoute {
+            .enumerate()
+            .map(|(track, node)| crate::PreparedRoute {
                 node: node.clone(),
                 transform: RouteTransform {
-                    gain: constant(),
-                    ll: constant(),
-                    lr: constant(),
-                    rl: constant(),
-                    rr: constant(),
+                    gain: constant(track, true),
+                    ll: constant(track, false),
+                    lr: constant(track, false),
+                    rl: constant(track, false),
+                    rr: constant(track, false),
                 },
             })
             .collect();
@@ -13160,7 +13176,7 @@ mod tests {
                     node.clone(),
                     Box::new(HostileInput {
                         seed: 0x0920 + track as u64,
-                        negative_zero: shape == RoutedShape::NegativeZero,
+                        negative_zero: shape.negative_zero(),
                     }),
                 )
             })
@@ -13329,7 +13345,7 @@ mod tests {
                     }
                     assert_eq!(
                         audible,
-                        shape != RoutedShape::NegativeZero,
+                        !shape.negative_zero(),
                         "{case}: the master carries audio"
                     );
                     let windows = |published: &Published| published.lock().unwrap().clone();
