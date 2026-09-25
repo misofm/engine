@@ -596,6 +596,203 @@ fn reduce_group_into<L: Lane, const N: usize>(
     accumulate_group::<L, N>(target, sources, initial_store)
 }
 
+/// The session Output op's reduction with each contributor's route fused in (issue #920).
+///
+/// Input `i` is the buffer a plain route ran in place over, and `routes[i]` is that route's
+/// folded 2x2. The route op itself is retired at bind ([`output_route_fold`]), so the buffer holds
+/// the route's *input*. This computes, per frame and per plane, exactly the value the route op and
+/// then [`reduce_many_into`] computed:
+///
+/// * **The mix** is [`lane::kernels::mix2x2_block`]'s, operand for operand:
+///   `left = lr.fma(r, ll.mul(l))` and `right = rr.fma(r, rl.mul(l))`, from the input's original
+///   `l` and `r`. The route op stored that word and the reduction loaded it back; a store and a
+///   load move an `f32`'s bits unchanged, so taking the word from a register instead is the same
+///   word. `Lane::fma` is two roundings on every backend, so the vector body and the `f32` tail
+///   agree lane for lane, as they do in `mix2x2_block`.
+/// * **The sum** is [`reduce_many`]'s: groups of [`REDUCE_GROUP`] in edge order; the first group
+///   stores `mix(in0) + mix(in1) + ...` and every later group reloads the running sum from the
+///   host plane and keeps adding, left to right.
+///
+/// Both planes are formed in one pass per group, because both mixes read both input planes: each
+/// input word is loaded once where the two-pass form would load it twice. Each output plane's
+/// arithmetic does not depend on the other's, so the pass order changes no bit.
+///
+/// `false`, before the first write, for a table that does not match the inputs or a fan-in below
+/// two; `false` mid-reduction only for a group whose shape check fails, which the host-plane length
+/// check at `HostMaster::new` rules out. The caller turns `false` into an error.
+#[inline]
+fn route_reduce<L: Lane>(
+    lease: &ArenaLease,
+    inputs: &[u32],
+    routes: &[[f32; 4]],
+    left: &mut [f32],
+    right: &mut [f32],
+) -> bool {
+    if inputs.len() != routes.len() || inputs.len() < 2 {
+        return false;
+    }
+    for (index, (group, table)) in inputs
+        .chunks(REDUCE_GROUP)
+        .zip(routes.chunks(REDUCE_GROUP))
+        .enumerate()
+    {
+        let initial_store = index == 0;
+        let reduced = match group.len() {
+            1 => route_group::<L, 1>(lease, group, table, left, right, initial_store),
+            2 => route_group::<L, 2>(lease, group, table, left, right, initial_store),
+            3 => route_group::<L, 3>(lease, group, table, left, right, initial_store),
+            4 => route_group::<L, 4>(lease, group, table, left, right, initial_store),
+            5 => route_group::<L, 5>(lease, group, table, left, right, initial_store),
+            6 => route_group::<L, 6>(lease, group, table, left, right, initial_store),
+            7 => route_group::<L, 7>(lease, group, table, left, right, initial_store),
+            8 => route_group::<L, 8>(lease, group, table, left, right, initial_store),
+            _ => false,
+        };
+        if !reduced {
+            return false;
+        }
+    }
+    true
+}
+
+/// One group of `N` consecutive routed inputs into both host planes: `2N` shared reads, one pass.
+#[inline]
+fn route_group<L: Lane, const N: usize>(
+    lease: &ArenaLease,
+    group: &[u32],
+    table: &[[f32; 4]],
+    left: &mut [f32],
+    right: &mut [f32],
+    initial_store: bool,
+) -> bool {
+    let (Ok(ids), Ok(table)) = (
+        <&[u32; N]>::try_from(group),
+        <&[[f32; 4]; N]>::try_from(table),
+    ) else {
+        return false;
+    };
+    let lefts = (*ids).map(|input| lease.read(0, input));
+    let rights = (*ids).map(|input| lease.read(1, input));
+    route_accumulate::<L, N>(left, right, lefts, rights, table, initial_store)
+}
+
+/// [`accumulate_group`] with a route in front of every source: the vector body at `L`, the frames
+/// that do not fill a vector at `L = f32`, and the one shape check before the first write.
+#[inline(always)]
+fn route_accumulate<L: Lane, const N: usize>(
+    left: &mut [f32],
+    right: &mut [f32],
+    lefts: [&[f32]; N],
+    rights: [&[f32]; N],
+    table: &[[f32; 4]; N],
+    initial_store: bool,
+) -> bool {
+    let frames = left.len();
+    if right.len() != frames
+        || lefts
+            .iter()
+            .chain(rights.iter())
+            .any(|source| source.len() != frames)
+    {
+        return false;
+    }
+    let vectored = frames - frames % L::WIDTH;
+    let (left_vectors, left_tail) = left.split_at_mut(vectored);
+    let (right_vectors, right_tail) = right.split_at_mut(vectored);
+    route_run::<L, N>(
+        left_vectors,
+        right_vectors,
+        lefts.map(|source| &source[..vectored]),
+        rights.map(|source| &source[..vectored]),
+        table,
+        initial_store,
+    ) && route_run::<f32, N>(
+        left_tail,
+        right_tail,
+        lefts.map(|source| &source[vectored..]),
+        rights.map(|source| &source[vectored..]),
+        table,
+        initial_store,
+    )
+}
+
+/// One width's share of [`route_accumulate`]. Every slice has one common length, a multiple of
+/// `L::WIDTH`. As in [`accumulate_run`], the store and accumulate forms are two loops, so each
+/// walks a fixed number of sources.
+#[inline(always)]
+fn route_run<L: Lane, const N: usize>(
+    left: &mut [f32],
+    right: &mut [f32],
+    lefts: [&[f32]; N],
+    rights: [&[f32]; N],
+    table: &[[f32; 4]; N],
+    initial_store: bool,
+) -> bool {
+    let coefficients = table.map(|route| route.map(L::splat));
+    let mut left_chunks = lefts.map(|source| source.chunks_exact(L::WIDTH));
+    let mut right_chunks = rights.map(|source| source.chunks_exact(L::WIDTH));
+    let outputs = left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH));
+    if initial_store {
+        let (Some((first, rest)), Some((first_left, rest_left)), Some((first_right, rest_right))) = (
+            coefficients.split_first(),
+            left_chunks.split_first_mut(),
+            right_chunks.split_first_mut(),
+        ) else {
+            return false;
+        };
+        for (out_left, out_right) in outputs {
+            let Some(acc) = first_left
+                .next()
+                .zip(first_right.next())
+                .map(|(l, r)| mix_chunk(first, l, r))
+                .and_then(|acc| add_mixed_chunks(acc, rest, rest_left, rest_right))
+            else {
+                return false;
+            };
+            acc.0.store(out_left);
+            acc.1.store(out_right);
+        }
+    } else {
+        for (out_left, out_right) in outputs {
+            let running = (L::load(out_left), L::load(out_right));
+            let Some(acc) =
+                add_mixed_chunks(running, &coefficients, &mut left_chunks, &mut right_chunks)
+            else {
+                return false;
+            };
+            acc.0.store(out_left);
+            acc.1.store(out_right);
+        }
+    }
+    true
+}
+
+/// One route's `mix2x2_block` over one chunk, in registers: `(lr.fma(r, ll.mul(l)),
+/// rr.fma(r, rl.mul(l)))`, the kernel's frozen operation order.
+#[inline(always)]
+fn mix_chunk<L: Lane>([ll, lr, rl, rr]: &[L; 4], left: &[f32], right: &[f32]) -> (L, L) {
+    let (l, r) = (L::load(left), L::load(right));
+    (lr.fma(r, ll.mul(l)), rr.fma(r, rl.mul(l)))
+}
+
+/// `((acc + mix(c0)) + mix(c1)) + ...` per plane over the next chunk of every routed source, or
+/// `None` if one has run out.
+#[inline(always)]
+fn add_mixed_chunks<L: Lane>(
+    mut acc: (L, L),
+    coefficients: &[[L; 4]],
+    lefts: &mut [core::slice::ChunksExact<'_, f32>],
+    rights: &mut [core::slice::ChunksExact<'_, f32>],
+) -> Option<(L, L)> {
+    for ((route, left), right) in coefficients.iter().zip(lefts).zip(rights) {
+        let (mixed_left, mixed_right) = mix_chunk(route, left.next()?, right.next()?);
+        acc = (acc.0.add(mixed_left), acc.1.add(mixed_right));
+    }
+    Some(acc)
+}
+
 // REALTIME_POLICY_END
 
 /// Integer-sample plugin-delay compensation for one stereo edge.
@@ -1987,6 +2184,11 @@ pub(crate) struct Runtime {
     /// bind by [`source_plane_table`]; empty when no claim is bound in place. See there for the
     /// mode each claim gets and why the rest keep the copy.
     source_plane_of_buffer: Box<[u32]>,
+    /// One folded 2x2 per input of the Output op, in its edge order, when this bind retired every
+    /// route that feeds it and fused them into its reduction ([`route_reduce`], issue #920).
+    /// Empty otherwise, and then the Output op reduces as every other op does. Only the Output
+    /// unit reads it: [`output_route_fold`] admits no other master.
+    output_routes: Box<[[f32; 4]]>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2040,6 +2242,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     folds: u64,
     output_unit: Option<usize>,
     source_plane_of_buffer: Box<[u32]>,
+    output_routes: Box<[[f32; 4]]>,
 }
 
 /// Layout witness for the retained [`Runtime`] owner without observation activation state.
@@ -2063,6 +2266,7 @@ pub(crate) struct RuntimeWithoutObservationActivation {
     pub(crate) folds: u64,
     pub(crate) output_unit: Option<usize>,
     pub(crate) source_plane_of_buffer: Box<[u32]>,
+    pub(crate) output_routes: Box<[[f32; 4]]>,
 }
 
 pub(crate) fn observation_runtime_layout() -> Option<u64> {
@@ -2154,6 +2358,13 @@ impl Runtime {
         self.folds
     }
 
+    /// Routes this bind retired into the session Output op's fused reduction (issue #920): one
+    /// per input of that op when the fold was admitted, zero otherwise.
+    #[cfg(test)]
+    pub(crate) fn output_route_folds(&self) -> u64 {
+        self.output_routes.len() as u64
+    }
+
     #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
@@ -2182,6 +2393,7 @@ impl Runtime {
             folds,
             None,
             None,
+            Vec::new(),
         )
     }
 
@@ -2201,11 +2413,28 @@ impl Runtime {
         folds: u64,
         observation_activation: Option<RealtimeObservationActivation>,
         output_unit: Option<usize>,
+        output_routes: Vec<[f32; 4]>,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
         debug_assert!(
             output_unit.is_none_or(|unit| matches!(units.get(unit), Some(RuntimeUnit::Op(_)))),
             "the session Output op is a plain unit of its own"
+        );
+        // Issue #920: a route table is the Output op's, and it names one route per input of a
+        // plain identity reduction. `output_route_fold` admitted exactly that shape at preflight.
+        debug_assert!(
+            output_routes.is_empty()
+                || output_unit
+                    .and_then(|unit| units.get(unit))
+                    .is_some_and(|unit| matches!(
+                        unit,
+                        RuntimeUnit::Op(op) if matches!(op.kind, NodeKind::Identity)
+                            && op.split_pair.is_none()
+                            && op.sidechain.is_none()
+                            && op.staged.is_empty()
+                            && op.inputs.len() == output_routes.len()
+                    )),
+            "a folded route table belongs to the Output op's identity reduction"
         );
         for (row, unit) in identity.iter_mut().zip(&units) {
             row.observed = unit.has_observers();
@@ -2251,6 +2480,7 @@ impl Runtime {
             folds,
             output_unit,
             source_plane_of_buffer: Box::default(),
+            output_routes: output_routes.into_boxed_slice(),
         }
     }
 
@@ -2389,6 +2619,7 @@ impl Runtime {
             bank_outputs,
             output_unit,
             source_plane_of_buffer,
+            output_routes,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -2409,7 +2640,10 @@ impl Runtime {
         let track_delays: &mut [TrackDelayLine] = track_delays;
         match &mut current[0] {
             RuntimeUnit::Op(op) => {
-                let host = (*output_unit == Some(index)).then_some(host);
+                let output = *output_unit == Some(index);
+                let host = output.then_some(host);
+                // Issue #920: only the Output op carries a route table; every other op reduces.
+                let routes: &[[f32; 4]] = if output { output_routes } else { &[] };
                 execute_op(
                     op,
                     lease,
@@ -2418,6 +2652,7 @@ impl Runtime {
                     split_pairs,
                     first_sample,
                     host,
+                    routes,
                 )
             }
             RuntimeUnit::Bank {
@@ -2444,6 +2679,7 @@ impl Runtime {
                             split_pairs,
                             first_sample,
                             None,
+                            &[],
                         )?;
                         bank_inputs[lane] = member.output;
                     }
@@ -2870,6 +3106,16 @@ fn observe_active_entry(
 /// [`output_planes`] or [`output_and_sidechain_planes`], so the two storages cannot diverge site by
 /// site. Staging a delayed input still goes through the arena, because a staging buffer is the
 /// op's input, not its output.
+///
+/// `routes` is empty for every op but the session Output op, and empty for that op too unless the
+/// bind retired every route that feeds it (issue #920, [`output_route_fold`]). When it is not
+/// empty, entry `i` is the folded 2x2 of the route whose in-place buffer is `op.inputs[i]`, and
+/// the reduction is [`route_reduce`]: each route's `mix2x2_block` taken in registers on the way
+/// into the sum, rather than as a store pass of its own before it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the op's owners and its two optional Output-op storages stay explicit parameters"
+)]
 fn execute_op(
     op: &mut RuntimeOp,
     lease: &mut ArenaLease,
@@ -2878,6 +3124,7 @@ fn execute_op(
     split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
     first_sample: u64,
     mut host: Option<HostMaster<'_>>,
+    routes: &[[f32; 4]],
 ) -> Result<(), RenderError> {
     let output = op.output;
     if let NodeKind::TrackDelay { line, .. } = op.kind {
@@ -2925,10 +3172,19 @@ fn execute_op(
                 reduce_plane(lease, 0, output, &op.inputs);
                 reduce_plane(lease, 1, output, &op.inputs);
             }
-            Some(host) => {
+            Some(host) if routes.is_empty() => {
                 let (left, right) = host.planes_mut();
                 reduce_plane_into(lease, 0, output, left, &op.inputs);
                 reduce_plane_into(lease, 1, output, right, &op.inputs);
+            }
+            Some(host) => {
+                // Issue #920: the retired routes' mixes, fused into the Output's reduction. A
+                // refused shape cannot occur for an admitted fold; were it to, the error path
+                // silences the host planes rather than play a partial sum.
+                let (left, right) = host.planes_mut();
+                if !route_reduce::<FrameLane>(lease, &op.inputs, routes, left, right) {
+                    return Err(RenderError::InvalidEnvelope);
+                }
             }
         }
     }
@@ -4477,6 +4733,27 @@ pub fn test_only_set_scatter_redirect_declined(declined: bool) {
     SCATTER_REDIRECT_DECLINED.with(|slot| slot.set(declined));
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Issue #920's unfused oracle: the same plan bound with the Output route fold declined, so
+    /// every route op runs and the Output op reduces their outputs. Bind-time only; render never
+    /// reads it.
+    static OUTPUT_ROUTE_FOLD_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Decline (`true`) or restore (`false`) the Output route fold for every later bind on this
+/// thread.
+///
+/// The unfused oracle for an Output-fold test (issue #920), on the pattern of
+/// [`test_only_set_route_fold_declined`]: read once per bind, in `preflight_sequential`, before
+/// any owner moves; render never reads it, and it does not exist without `test-support`. Callers
+/// restore `false` after the bind they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_output_route_fold_declined(declined: bool) {
+    OUTPUT_ROUTE_FOLD_DECLINED.with(|slot| slot.set(declined));
+}
+
 #[cfg(test)]
 thread_local! {
     /// Issue #916's arena oracle. Bind-time only; render never reads it.
@@ -4567,6 +4844,8 @@ pub(crate) struct SequentialPlan {
     /// The session Output node's op, whose storage is the host's planes (issue #916). Checked by
     /// `validate_fold_installation` to be a plain unit of its own.
     output_op: Option<usize>,
+    /// The routes retired into that op's fused reduction, and their table (issue #920).
+    output_fold: Option<OutputRouteFold>,
 }
 
 struct FoldInstallation {
@@ -4630,7 +4909,14 @@ pub(crate) fn preflight_sequential(
     let output_op = Some(output_op);
     #[cfg(test)]
     let output_op = output_op.filter(|_| !HOST_MASTER_DECLINED.with(std::cell::Cell::get));
-    validate_fold_installation(plan, program, run_units, fold, output_op)
+    // Issue #920: the fused kernel writes the host's planes, so it needs the Output unit. The
+    // arena oracle of #916 has none and keeps every route op.
+    let output_fold = output_op
+        .and_then(|master| output_route_fold(program, &plan.spec, &metadata, &run_units, master));
+    #[cfg(any(test, feature = "test-support"))]
+    let output_fold =
+        output_fold.filter(|_| !OUTPUT_ROUTE_FOLD_DECLINED.with(std::cell::Cell::get));
+    validate_fold_installation(plan, program, run_units, fold, output_op, output_fold)
 }
 
 /// Whether anything reads the session Output's value out of the arena (issue #916).
@@ -4667,8 +4953,15 @@ fn validate_fold_installation(
     run_units: Vec<(Vec<Membership>, Vec<usize>)>,
     fold: Option<RouteFold>,
     output_op: Option<usize>,
+    output_fold: Option<OutputRouteFold>,
 ) -> Result<SequentialPlan, &'static str> {
+    // Issue #920: the Output fold is admitted on a bankless plan only and the chain fold on a
+    // banked one, so the two never meet. The table is also only ever the Output op's.
+    if output_fold.is_some() && (fold.is_some() || output_op.is_none()) {
+        return Err("graph.route_fold.master");
+    }
     let retired = fold.as_ref().map(|fold| &fold.retired);
+    let output_retired = output_fold.as_ref().map(|fold| &fold.retired);
     let mut unit_of_run = vec![None; run_units.len()];
     let mut op_slot = vec![None; program.ops.len()];
     let mut emitted = 0;
@@ -4676,10 +4969,10 @@ fn validate_fold_installation(
         if ops.is_empty() {
             return Err("graph.route_fold.mapping");
         }
-        if ops
-            .iter()
-            .any(|op| retired.is_some_and(|retired| retired.contains(op)))
-        {
+        if ops.iter().any(|op| {
+            retired.is_some_and(|retired| retired.contains(op))
+                || output_retired.is_some_and(|retired| retired.contains(op))
+        }) {
             if !membership.is_empty() || ops.len() != 1 {
                 return Err("graph.route_fold.bank");
             }
@@ -4852,6 +5145,7 @@ fn validate_fold_installation(
         op_slot,
         installations,
         output_op,
+        output_fold,
     })
 }
 
@@ -4888,14 +5182,21 @@ pub(crate) fn build_sequential(
         op_slot,
         installations,
         output_op,
+        output_fold,
     } = planning;
     let folded_runs: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
         .unwrap_or_default();
-    let retired: std::collections::BTreeSet<usize> = fold
+    // Both folds' retired routes: a chain fold's (issue #218) and the Output fold's (issue #920).
+    // A retired route emits no unit, and every pass below that pairs or redirects ops skips it.
+    let mut retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map_or_else(Default::default, |fold| fold.retired.clone());
+    let output_routes = output_fold.map_or_else(Vec::new, |output_fold| {
+        retired.extend(output_fold.retired);
+        output_fold.routes
+    });
     // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
     // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
     // last slot reads the redirected buffer (see `scatter_target`).
@@ -5119,8 +5420,8 @@ pub(crate) fn build_sequential(
     // one from the arena buffers afterwards would be a second opinion about which lane is which.
     let mut identity: Vec<UnitIdentity> = Vec::with_capacity(run_units.len());
     for ((membership, ops), installation) in run_units.iter().zip(installations) {
-        // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
-        // reduction, no `mix2x2_block` pass of its own.
+        // A retired route op is absorbed by its cohort's epilogue, or by the Output op's fused
+        // reduction: no unit, no dispatch, no reduction, no `mix2x2_block` pass of its own.
         if ops.iter().all(|index| retired.contains(index)) {
             continue;
         }
@@ -5256,6 +5557,7 @@ pub(crate) fn build_sequential(
         folds,
         observation_activation,
         output_unit,
+        output_routes,
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
     runtime
@@ -6369,6 +6671,150 @@ fn route_fold(
         master_op,
         master: target,
     })
+}
+
+/// What [`output_route_fold`] admitted (issue #920): the route ops the session Output op's fused
+/// reduction absorbs, and one folded 2x2 per input of that op in its edge order.
+struct OutputRouteFold {
+    /// Route ops that are not built into units at all. Their mixes run inside
+    /// [`route_reduce`].
+    retired: std::collections::BTreeSet<usize>,
+    /// `routes[i]` is the folded 2x2 of the route whose in-place buffer is the Output op's input
+    /// `i`: [`folded_route`], the constants `node_kind` would have handed that route op.
+    routes: Vec<[f32; 4]>,
+}
+
+/// Retire every plain route that feeds the session Output op, and fuse their mixes into its
+/// reduction (issue #920).
+///
+/// The shape this replaces is the plumbing row's: one route op per track, each a whole stereo
+/// block of `mix2x2_block` stored over a buffer it runs in place on, then the Output op's
+/// reduction loading every one of those buffers back. The shape it renders instead is the
+/// reduction alone, with each route's 2x2 applied to the input it loads ([`route_reduce`]). The
+/// Output op keeps its inputs: an in-place route writes the buffer it reads, so the Output
+/// already names the route's input buffer, and only what that buffer holds when it is read
+/// changes -- the route's input rather than its output. Every clause below is one way that
+/// difference could be seen, or one way the fused arithmetic could stop being the two ops' own.
+/// Any failure declines the whole fold: the table has one entry per input or none.
+///
+/// **The master (`master_op`, the Output op by node).**
+///
+/// * **The plan binds no bank.** A banked plan's routes are [`route_fold`]'s, whose chain
+///   epilogues absorb them and the master's reduction together. Where that fold declines (the
+///   alternating half-mono row, or a test's declined oracle), this one declines too, so no
+///   banked plan changes shape here.
+/// * **Its kind is `NodeKind::Identity`**, by `node_kind`'s own cascade: no source, no bank, no
+///   bound processor, no effect, no route. A processor would run after the reduction on the host
+///   planes and is untouched by this change, but the issue admits the identity output only.
+/// * **No sidechain, no delayed input, fan-in two or more.** A delayed input is staged through a
+///   compensation line, and the op reads the staging buffer. Fused, the line would carry the
+///   route's input rather than its output, and the kernel would mix the line's initial `+0.0`
+///   words, which no route op ever mixed: a negative 2x2 turns them into `-0.0`. Fan-in one is the
+///   Output's copy, which is not a reduction. A split pair never binds the Output node: only a
+///   `PostFader`/`PostMatrix` pair does.
+///
+/// **Every input `i`, whose producer is `R` ([`input_producers`]).**
+///
+/// * **`R` is a plain route** ([`plain_route_gains`]): the table entry is the 2x2 `node_kind`
+///   would have built, from the same [`folded_route`]. It has one undelayed input and no
+///   sidechain, so it is exactly `mix2x2_block` over one buffer. Any other producer declines the
+///   whole fold, a pass-through (a submix) included: mixing it through an identity 2x2 is not a
+///   no-op, because `0 * r` is `+0.0` and turns a `-0.0` into `+0.0`.
+/// * **`R` ran in place** (`in_place`, and its output is its input's buffer). The buffer's colour
+///   is then owned from `R`'s producer through the Output op, its last reader, so the Output
+///   reads the words the producer wrote. A route that copied would have let its input's colour
+///   die at `R`.
+/// * **The Output op is `R`'s only reader** (`readers[R] == [master_op]`, sidechains counted).
+///   Any other reader, before the Output op or after it, would read the unmixed words where it
+///   read the route's output.
+/// * **Nothing observes `R`** (`observed`, `served_by_nothing`): neither an observer on the route
+///   node nor one on an elided stage whose `program::Tap` aliases `R`'s buffer after `R`. Either
+///   fires after `R` and would read the unmixed words. An observer on `R`'s *producer* fires
+///   before `R` ran, and reads the same words either way.
+/// * **`R` is a plain unit before the Output op's, and nothing in between names its buffer.**
+///   `R` used to mix the buffer at its own position, which is earlier than the Output op; every
+///   unit between the two now sees the unmixed words where it would have seen the mixed ones. So
+///   every op of every unit strictly between them is checked with [`op_names_buffer`] -- as an
+///   output, an input, a sidechain or a staging slot -- and any mention declines. The clauses
+///   above already rule a mention out: a write would need the live buffer's slot, which the
+///   colouring owns through the Output op, and a read is a second reader. So no test can make
+///   this scan fire (`crates/graph/tests/MUTATIONS.md` row 920-11); it is the belt to that brace,
+///   as [`route_fold`]'s in-between scan is. The other retired routes are scanned too: each names
+///   only its own buffer, which is live at the same time and so is a different slot.
+/// * **Each `R` feeds exactly one input position.** A route read twice has two readers.
+fn output_route_fold(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &impl PlanningMetadata,
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+    master_op: usize,
+) -> Option<OutputRouteFold> {
+    if !parts.membership().is_empty() {
+        return None;
+    }
+    let master = program.ops.get(master_op)?;
+    let node = &spec.nodes.get(master.node as usize)?.id;
+    if !matches!(node, GraphNodeId::Output { .. })
+        || parts.has_source(node)
+        || parts.membership().contains_key(&master.node)
+        || parts.has_binding(node)
+        || parts.has_effect(node)
+        || parts.route(node).is_some()
+    {
+        return None;
+    }
+    let inputs = program.inputs_of(master);
+    if master.sidechain.is_some()
+        || inputs.len() < 2
+        || inputs.iter().any(|input| input.delay.is_some())
+    {
+        return None;
+    }
+    let producers = input_producers(program, master_op);
+    if producers.len() != inputs.len() {
+        return None;
+    }
+    let (readers, _) = op_dataflow(program);
+    let run_of = |op: usize| run_units.iter().position(|(_, ops)| ops.contains(&op));
+    let master_run = run_of(master_op)?;
+    let mut retired = std::collections::BTreeSet::new();
+    let mut routes = Vec::with_capacity(inputs.len());
+    for (input, producer) in inputs.iter().zip(&producers) {
+        let route = (*producer)?;
+        let route_op = &program.ops[route];
+        let route_node = &spec.nodes[route_op.node as usize].id;
+        let gains = plain_route_gains(parts, route_node, route_op.node)?;
+        let [route_input] = program.inputs_of(route_op) else {
+            return None;
+        };
+        if route_op.sidechain.is_some()
+            || route_input.delay.is_some()
+            || !route_op.in_place
+            || route_op.output != route_input.buffer
+            || route_op.output != input.buffer
+            || readers[route].as_slice() != [master_op]
+            || observed(program, spec, parts, route, served_by_nothing)
+        {
+            return None;
+        }
+        let route_run = run_of(route)?;
+        let (membership, ops) = &run_units[route_run];
+        if !membership.is_empty() || ops.as_slice() != [route] || route_run >= master_run {
+            return None;
+        }
+        if run_units[route_run + 1..master_run]
+            .iter()
+            .flat_map(|(_, ops)| ops)
+            .any(|index| op_names_buffer(program, &program.ops[*index], route_op.output))
+        {
+            return None;
+        }
+        if !retired.insert(route) {
+            return None;
+        }
+        routes.push(gains);
+    }
+    Some(OutputRouteFold { retired, routes })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7665,10 +8111,28 @@ mod tests {
             .copy_from_slice(&[-0.75, 1.0]);
         lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
         lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
-        execute_op(&mut fader, &mut lease, &mut [], &mut [], &mut [], 0, None)
-            .expect("earlier fader");
+        execute_op(
+            &mut fader,
+            &mut lease,
+            &mut [],
+            &mut [],
+            &mut [],
+            0,
+            None,
+            &[],
+        )
+        .expect("earlier fader");
         assert_eq!(
-            execute_op(&mut matrix, &mut lease, &mut [], &mut [], &mut [], 0, None),
+            execute_op(
+                &mut matrix,
+                &mut lease,
+                &mut [],
+                &mut [],
+                &mut [],
+                0,
+                None,
+                &[]
+            ),
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
@@ -9565,7 +10029,7 @@ mod tests {
                 split_pair: None,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut lease, &mut [], &mut [], &mut [], 0, None).expect("op");
+            execute_op(&mut op, &mut lease, &mut [], &mut [], &mut [], 0, None, &[]).expect("op");
             let (left, right) = lease.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
@@ -13342,6 +13806,708 @@ mod tests {
                 ],
                 "{shape:?}: the in-place arm's [copies, played gathers, silent gathers]"
             );
+        }
+    }
+
+    // Issue #920: in-place routes folded into the session Output op's reduction.
+    // -----------------------------------------------------------------------------------------
+
+    /// One `route_reduce` case against the two production ops it replaces, at one width.
+    ///
+    /// The oracle is the production path itself: each route op is `execute_op`'s `Route` arm --
+    /// the in-place `mix2x2_block::<FrameLane>` over a buffer holding the route's input -- and the
+    /// reduction is `reduce_plane_into` over those mixed buffers, which #916's kernel test pins to
+    /// the arena reduction. The candidate reads the unmixed buffers and the route table.
+    fn assert_route_reduce_is_the_route_ops_and_the_reduction<L: Lane>() {
+        let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        let mut state = 0x0920_u64 ^ L::WIDTH as u64;
+        for frames in [1, 3, 7, 8, 13, 16, 33, 64] {
+            for fan_in in (2..=19_usize).chain([64]) {
+                for negative_zero in [false, true] {
+                    // Buffer 0 is the silence buffer and buffer 1 the op's own (unused) output;
+                    // then the routes' inputs, then the buffers the route ops mix in place.
+                    let mut lease = stereo_lease(frames, 2 + 2 * fan_in);
+                    let inputs: Vec<u32> = (0..fan_in).map(|index| 2 + index as u32).collect();
+                    let mixed: Vec<u32> =
+                        inputs.iter().map(|input| input + fan_in as u32).collect();
+                    // A signed-zero case: every word `-0.0` and every coefficient positive, so
+                    // every mix is `-0.0` and so is the master. A sum seeded with `+0.0` loses
+                    // the sign; the route ops and the reduction keep it.
+                    let routes: Vec<[f32; 4]> = (0..fan_in)
+                        .map(|_| {
+                            core::array::from_fn(|_| {
+                                let constant = hostile_constant(&mut state);
+                                if negative_zero {
+                                    constant.abs() + 0.5
+                                } else {
+                                    constant
+                                }
+                            })
+                        })
+                        .collect();
+                    for &input in &inputs {
+                        for plane in 0..2 {
+                            for word in lease.write(plane, input) {
+                                *word = if negative_zero {
+                                    -0.0
+                                } else {
+                                    hostile_sample(&mut state)
+                                };
+                            }
+                        }
+                    }
+                    for ((&input, &route), coefficients) in inputs.iter().zip(&mixed).zip(&routes) {
+                        for plane in 0..2 {
+                            let (route_plane, input_plane) = lease.write_read(plane, route, input);
+                            route_plane.copy_from_slice(input_plane);
+                        }
+                        let (left, right) = lease.write_stereo(route);
+                        mix2x2_block::<FrameLane>(left, right, *coefficients);
+                    }
+                    let pad = f32::from_bits(HOST_PAD);
+                    let mut expected = [vec![pad; frames], vec![pad; frames]];
+                    for (plane, target) in expected.iter_mut().enumerate() {
+                        reduce_plane_into(&lease, plane, 1, target, &mixed);
+                    }
+                    let (mut left, mut right) = (vec![pad; frames], vec![pad; frames]);
+                    assert!(
+                        route_reduce::<L>(&lease, &inputs, &routes, &mut left, &mut right),
+                        "{frames} frames, fan-in {fan_in}: an admitted shape reduces"
+                    );
+                    let case = format!(
+                        "width {}, {frames} frames, fan-in {fan_in}, -0.0 {negative_zero}",
+                        L::WIDTH
+                    );
+                    assert_eq!(bits(&left), bits(&expected[0]), "{case}: left");
+                    assert_eq!(bits(&right), bits(&expected[1]), "{case}: right");
+                    if negative_zero {
+                        assert!(
+                            left.iter()
+                                .chain(&right)
+                                .all(|word| word.to_bits() == 0x8000_0000),
+                            "{case}: every mix is -0.0, so the master keeps the sign"
+                        );
+                    }
+                }
+            }
+        }
+        // Refused before any write: a table that does not match the inputs, and fan-in one.
+        let lease = stereo_lease(5, 4);
+        let pad = f32::from_bits(HOST_PAD);
+        for (inputs, routes) in [
+            (&[2_u32, 3][..], &[[1.0_f32; 4]][..]),
+            (&[2, 3][..], &[[1.0; 4]; 3][..]),
+            (&[2][..], &[[1.0; 4]][..]),
+        ] {
+            let (mut left, mut right) = (vec![pad; 5], vec![pad; 5]);
+            assert!(!route_reduce::<L>(
+                &lease, inputs, routes, &mut left, &mut right
+            ));
+            assert!(
+                left.iter()
+                    .chain(&right)
+                    .all(|word| word.to_bits() == HOST_PAD),
+                "a refused shape writes nothing"
+            );
+        }
+    }
+
+    /// Issue #920's kernel: the fused reduction is each route op's `mix2x2_block` then the
+    /// Output's reduction, bit for bit, at every lane width.
+    ///
+    /// Hostile words (signed zeros, subnormals, magnitudes over `2^-24 .. 2^25`) and a hostile 2x2
+    /// per route; `frames` with and without ragged tails at both widths; fan-in two to nineteen
+    /// (every group length, one to three groups) and sixty-four; and a signed-zero case whose
+    /// master must stay `-0.0`. The width is free because `Lane::fma` is two roundings on every
+    /// backend, and the oracle's route ops run at `FrameLane` whatever the candidate's width.
+    ///
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #920): reverse the accumulation,
+    /// seed the first group from `+0.0`, mix the running sum instead of the input, swap the
+    /// coefficient roles, store in every group.
+    #[test]
+    fn a_route_reduction_is_the_route_ops_and_the_reduction_bit_for_bit() {
+        assert_route_reduce_is_the_route_ops_and_the_reduction::<f32>();
+        assert_route_reduce_is_the_route_ops_and_the_reduction::<lane::Simd4>();
+        assert_route_reduce_is_the_route_ops_and_the_reduction::<lane::Simd8>();
+    }
+
+    /// Per track and per block: hostile words ([`hostile_sample`]), or one signed zero per plane
+    /// throughout.
+    struct HostileInput {
+        seed: u64,
+        zeros: Option<[f32; 2]>,
+    }
+
+    impl GraphRuntimeProcessor for HostileInput {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            if let Some([left, right]) = self.zeros {
+                block.left.fill(left);
+                block.right.fill(right);
+                return Ok(());
+            }
+            let mut state = self.seed ^ block.first_sample.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            for word in block.left.iter_mut().chain(block.right.iter_mut()) {
+                *word = hostile_sample(&mut state);
+            }
+            Ok(())
+        }
+    }
+
+    /// Which issue #920 plan to bind: `fan_in` tracks, each `Input -> Route -> Output`, with the
+    /// shape's one change.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RoutedShape {
+        /// Every route plain, in place and read by the Output alone: the fold is admitted.
+        Plain,
+        /// Every input `-0.0` and every route coefficient positive: admitted, and the master is
+        /// `-0.0` throughout.
+        NegativeZero,
+        /// A meter on every track's `Input` (each route's producer) and two on the Output, bound
+        /// directly, or through the activation catalog when `true`. Admitted: none of them reads a
+        /// route's output.
+        Metered(bool),
+        /// Track 0's route feeds an elided `PostSimd2PreFader` boundary that feeds the Output. The
+        /// boundary's `program::Tap` aliases the route's buffer after the route, and a meter is
+        /// bound to it, so it reads the route's output. Declined.
+        ObservedRouteAlias,
+        /// Track 1's route-to-Output edge carries a three-sample compensation delay. Declined.
+        ///
+        /// Over signed-zero data, with track 1's 2x2 negative: the delay line's warm-up words are
+        /// `+0.0`, so the delayed route contributes `+0.0` there where its mix of them would be
+        /// `-0.0`. That is the one place a fused delayed route differs, and this data makes it
+        /// visible in the master.
+        DelayedEdge,
+        /// One more Output contributor: a submix (an identity op) fed straight by an extra track's
+        /// `Input`. Declined: that input's producer is not a route.
+        ///
+        /// Over signed-zero data, with the submix's input `(-0.0, +0.0)`. Mixing a pass-through
+        /// through an identity 2x2 is not a no-op: `0 * r` is `+0.0`, so its left plane would
+        /// become `+0.0` and so would the master's.
+        SubmixContributor,
+        /// The last track's route feeds a submix that feeds the Output. Declined: the Output's
+        /// producer is the submix.
+        ///
+        /// Over signed-zero data, with that route's 2x2 mixing `-0.0` to `(-0.0, +0.0)`, for the
+        /// reason [`RoutedShape::SubmixContributor`] gives.
+        RouteIntoSubmix,
+        /// One more route, from track 0's `Input` to the Output. Track 0's input has two readers,
+        /// so neither of its routes runs in place. Declined: a route that copies lets its input's
+        /// colour die at the route, and its own output buffer is what the Output reads.
+        SharedInput,
+        /// Track 0's route also feeds track 0's `PostFader`, scheduled after the Output and
+        /// metered. Declined: the route's output has a second reader, which would read the
+        /// unmixed words.
+        LateReader,
+    }
+
+    impl RoutedShape {
+        /// Whether the Output route fold is admitted for this shape.
+        const fn folds(self) -> bool {
+            matches!(self, Self::Plain | Self::NegativeZero | Self::Metered(_))
+        }
+
+        /// Whether every input word is a signed zero rather than hostile.
+        const fn negative_zero(self) -> bool {
+            matches!(
+                self,
+                Self::NegativeZero
+                    | Self::DelayedEdge
+                    | Self::SubmixContributor
+                    | Self::RouteIntoSubmix
+            )
+        }
+    }
+
+    /// The unbound plan and bindings of one [`RoutedShape`]. Every route has its own hostile 2x2
+    /// (or a positive one for [`RoutedShape::NegativeZero`]), so the reduction's order is visible
+    /// in its bits. Observers publish into `published`.
+    fn routed_output_parts(
+        shape: RoutedShape,
+        fan_in: usize,
+        frames: u32,
+        published: &Published,
+    ) -> (crate::PreparedGraphPlan, crate::GraphRuntimeBindings) {
+        let id = |text: String| crate::StableGraphId::parse(&text).expect("stable id");
+        let stage = |track: usize, stage| GraphNodeId::TrackStage {
+            track_id: id(format!("track{track:02}")),
+            stage,
+        };
+        let route_id = |track: usize| id(format!("route{track:02}"));
+        let inputs: Vec<_> = (0..fan_in)
+            .map(|track| stage(track, TrackStage::Input))
+            .collect();
+        let mut routes: Vec<_> = (0..fan_in)
+            .map(|track| GraphNodeId::Route {
+                route_id: route_id(track),
+            })
+            .collect();
+        let output = GraphNodeId::Output {
+            output_id: id("main".to_owned()),
+        };
+        let submix = GraphNodeId::Submix {
+            submix_id: id("bus".to_owned()),
+        };
+        let alias = stage(0, TrackStage::PostSimd2PreFader);
+        let extra = stage(fan_in, TrackStage::Input);
+        let late = stage(0, TrackStage::PostFader);
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue920".to_owned(),
+        };
+        let mut edges = Vec::new();
+        for track in 0..fan_in {
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id(track),
+                },
+                &inputs[track],
+                &routes[track],
+            ));
+            let destination = match shape {
+                RoutedShape::ObservedRouteAlias if track == 0 => &alias,
+                RoutedShape::RouteIntoSubmix if track == fan_in - 1 => &submix,
+                _ => &output,
+            };
+            edges.push(edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: route_id(track),
+                },
+                &routes[track],
+                destination,
+            ));
+        }
+        let mut first = inputs.clone();
+        let mut between = Vec::new();
+        let mut last = Vec::new();
+        match shape {
+            RoutedShape::SharedInput => {
+                let shared = GraphNodeId::Route {
+                    route_id: route_id(fan_in),
+                };
+                edges.push(edge(
+                    GraphEdgeId::RouteSource {
+                        route_id: route_id(fan_in),
+                    },
+                    &inputs[0],
+                    &shared,
+                ));
+                edges.push(edge(
+                    GraphEdgeId::RouteDestination {
+                        route_id: route_id(fan_in),
+                    },
+                    &shared,
+                    &output,
+                ));
+                routes.push(shared);
+            }
+            RoutedShape::LateReader => {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: late.clone(),
+                    },
+                    &routes[0],
+                    &late,
+                ));
+                last.push(late.clone());
+            }
+            RoutedShape::ObservedRouteAlias => {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: output.clone(),
+                    },
+                    &alias,
+                    &output,
+                ));
+                between.push(alias.clone());
+            }
+            RoutedShape::SubmixContributor => {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: submix.clone(),
+                    },
+                    &extra,
+                    &submix,
+                ));
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: output.clone(),
+                    },
+                    &submix,
+                    &output,
+                ));
+                first.push(extra.clone());
+                between.push(submix.clone());
+            }
+            RoutedShape::RouteIntoSubmix => {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: output.clone(),
+                    },
+                    &submix,
+                    &output,
+                ));
+                between.push(submix.clone());
+            }
+            _ => {}
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let outputs = vec![output.clone()];
+        let levels: Vec<&Vec<GraphNodeId>> = [&first, &routes, &between, &outputs, &last]
+            .into_iter()
+            .filter(|level| !level.is_empty())
+            .collect();
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.iter().cloned())
+            .collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(frames),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let inserted_delays = if shape == RoutedShape::DelayedEdge {
+            let delayed = GraphEdgeId::RouteDestination {
+                route_id: route_id(1),
+            };
+            vec![crate::InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(delayed.clone()),
+                },
+                edge_id: delayed,
+                samples: effect_contract::LatencySamples(3),
+            }]
+        } else {
+            Vec::new()
+        };
+        // Hostile constants, except over the signed-zero data. There every route's 2x2 is
+        // positive, so its mix of `-0.0` is `-0.0`, with two exceptions. On the delayed shape the
+        // delayed route's 2x2 is negative, so its mix of the delay line's initial `+0.0` is
+        // `-0.0`. On the route-into-submix shape that route's right row is negative, so it mixes
+        // `-0.0` to `(-0.0, +0.0)`.
+        let mut state = 0x0920_0000_u64 ^ fan_in as u64;
+        let mut constant = |negative: bool| {
+            let value = hostile_constant(&mut state);
+            if !shape.negative_zero() {
+                value
+            } else if negative {
+                -(value.abs() + 0.5)
+            } else {
+                value.abs() + 0.5
+            }
+        };
+        let delayed = |track: usize| shape == RoutedShape::DelayedEdge && track == 1;
+        let right_row = |track: usize| {
+            delayed(track) || (shape == RoutedShape::RouteIntoSubmix && track + 1 == fan_in)
+        };
+        let prepared_routes = routes
+            .iter()
+            .enumerate()
+            .map(|(track, node)| crate::PreparedRoute {
+                node: node.clone(),
+                transform: RouteTransform {
+                    gain: constant(false),
+                    ll: constant(delayed(track)),
+                    lr: constant(delayed(track)),
+                    rl: constant(right_row(track)),
+                    rr: constant(right_row(track)),
+                },
+            })
+            .collect();
+        let mut required_bindings = first.clone();
+        required_bindings.push(output.clone());
+        required_bindings.extend(last.iter().cloned());
+        if matches!(
+            shape,
+            RoutedShape::SubmixContributor | RoutedShape::RouteIntoSubmix
+        ) {
+            required_bindings.push(submix.clone());
+        }
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 920,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: (*nodes).clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays,
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: prepared_routes,
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let mut nodes: Vec<GraphNodeBinding> = first
+            .iter()
+            .enumerate()
+            .map(|(track, node)| {
+                GraphNodeBinding::new(
+                    node.clone(),
+                    Box::new(HostileInput {
+                        seed: 0x0920 + track as u64,
+                        // The submix contributor's input is `(-0.0, +0.0)`: an identity 2x2 would
+                        // mix its left plane to `+0.0` (`0 * r` is `+0.0`), which a pass-through
+                        // does not.
+                        zeros: shape.negative_zero().then_some(
+                            if shape == RoutedShape::SubmixContributor && track == fan_in {
+                                [-0.0, 0.0]
+                            } else {
+                                [-0.0, -0.0]
+                            },
+                        ),
+                    }),
+                )
+            })
+            .collect();
+        nodes.push(GraphNodeBinding::identity(output.clone()));
+        nodes.extend(last.iter().cloned().map(GraphNodeBinding::identity));
+        if matches!(
+            shape,
+            RoutedShape::SubmixContributor | RoutedShape::RouteIntoSubmix
+        ) {
+            nodes.push(GraphNodeBinding::identity(submix));
+        }
+        let mut observed: Vec<(GraphNodeId, u64)> = Vec::new();
+        match shape {
+            RoutedShape::Metered(_) => {
+                observed.extend(
+                    inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(track, node)| (node.clone(), track as u64 + 1)),
+                );
+                observed.push((output.clone(), OUTPUT_METER_HANDLE));
+                observed.push((output, OUTPUT_METER_HANDLE + 1));
+            }
+            RoutedShape::ObservedRouteAlias => observed.push((alias, 1)),
+            RoutedShape::LateReader => observed.push((late, 1)),
+            _ => {}
+        }
+        let controlled = shape == RoutedShape::Metered(true);
+        let observers = observed
+            .into_iter()
+            .map(|(node, handle)| {
+                let meter = Box::new(WordMeter {
+                    handle,
+                    accepts_resident: false,
+                    published: Arc::clone(published),
+                });
+                if controlled {
+                    GraphNodeObserverBinding::controlled(node, handle, meter)
+                } else {
+                    GraphNodeObserverBinding::new(node, handle, meter)
+                }
+            })
+            .collect();
+        (
+            plan,
+            crate::GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers,
+            },
+        )
+    }
+
+    /// One [`RoutedShape`] bound straight to its executor, with the Output route fold declined
+    /// when `declined`: the unfused oracle, whose route ops run and whose Output op reduces their
+    /// outputs.
+    fn bind_routed(
+        shape: RoutedShape,
+        fan_in: usize,
+        frames: u32,
+        declined: bool,
+        published: &Published,
+    ) -> crate::GraphExecutor {
+        let (plan, bindings) = routed_output_parts(shape, fan_in, frames, published);
+        test_only_set_output_route_fold_declined(declined);
+        let (executor, _, _) =
+            bind_executor(plan, bindings, shape == RoutedShape::Metered(true), None);
+        test_only_set_output_route_fold_declined(false);
+        executor
+    }
+
+    /// Gates 1 and 2 of issue #920: the fused Output reduction renders the route ops' and the
+    /// reduction's own bits, and every declining shape declines.
+    ///
+    /// Each case binds one plan twice -- as bound, and with the fold declined through
+    /// `test_only_set_output_route_fold_declined` -- and renders eight blocks of each through the
+    /// real `GraphExecutor::render` into host planes whose stride is `frames + 3`. Per block the
+    /// host storage, padding included, must be bit-identical between the two, and no padding word
+    /// may move. Per case: the fold count is the fan-in for an admitted shape and zero for a
+    /// declining one (and zero on the oracle); the fold removes exactly one unit per route; every
+    /// observer window is the oracle's.
+    ///
+    /// Shapes: every [`RoutedShape`], `frames` in `{1, 3, 7, 13, 16, 64, 128}`, fan-in sixty-four
+    /// (eight full groups), and also two and nine (a lone second group) for the admitted shapes.
+    /// Hostile words and a hostile 2x2 per route, except on the signed-zero shapes, whose data is
+    /// chosen so that the declined clause's hazard reaches the master's sign bit;
+    /// [`RoutedShape::NegativeZero`] must keep `-0.0`. Each declining shape declines on its own
+    /// clause of `output_route_fold` and no other: the alias meter on `observed`, the delayed edge
+    /// on the master's delayed input, both submix shapes on the plain-route clause, the shared
+    /// input on the in-place clause and the late reader on sole readership.
+    ///
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #920): the five kernel rows, each
+    /// red here as well as in the kernel test, and one row per declining clause, each red here on
+    /// the host planes or an observer window with the fold-count assertions removed.
+    #[test]
+    fn an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit() {
+        const BLOCKS: u64 = 8;
+        let shapes = [
+            RoutedShape::Plain,
+            RoutedShape::NegativeZero,
+            RoutedShape::Metered(false),
+            RoutedShape::Metered(true),
+            RoutedShape::ObservedRouteAlias,
+            RoutedShape::DelayedEdge,
+            RoutedShape::SubmixContributor,
+            RoutedShape::RouteIntoSubmix,
+            RoutedShape::SharedInput,
+            RoutedShape::LateReader,
+        ];
+        for frames in [1_u32, 3, 7, 13, 16, 64, 128] {
+            for shape in shapes {
+                let fan_ins: &[usize] = if shape.folds() { &[64, 2, 9] } else { &[64] };
+                for &fan_in in fan_ins {
+                    let case = format!("{shape:?}, fan-in {fan_in}, {frames} frames");
+                    let (oracle_published, published) =
+                        (Published::default(), Published::default());
+                    let mut oracle = bind_routed(shape, fan_in, frames, true, &oracle_published);
+                    let mut folded = bind_routed(shape, fan_in, frames, false, &published);
+                    let expected = if shape.folds() { fan_in as u64 } else { 0 };
+                    assert_eq!(folded.output_route_folds(), expected, "{case}: folds");
+                    assert_eq!(
+                        oracle.output_route_folds(),
+                        0,
+                        "{case}: the oracle folds none"
+                    );
+                    assert_eq!(
+                        folded.runtime.units.len() + expected as usize,
+                        oracle.runtime.units.len(),
+                        "{case}: each folded route is one unit fewer"
+                    );
+                    let frames = frames as usize;
+                    let stride = frames + 3;
+                    let mut audible = false;
+                    for block in 0..BLOCKS {
+                        let first_sample = block * frames as u64;
+                        let render = |executor: &mut crate::GraphExecutor| {
+                            let mut storage = vec![f32::from_bits(HOST_PAD); 2 * stride];
+                            render_host(
+                                executor,
+                                engine::realtime::PlanarBufferMut::try_new(
+                                    &mut storage,
+                                    2,
+                                    frames,
+                                    stride,
+                                )
+                                .expect("host output"),
+                                first_sample,
+                            )
+                            .expect("render");
+                            storage
+                                .iter()
+                                .map(|word| word.to_bits())
+                                .collect::<Vec<_>>()
+                        };
+                        let expected = render(&mut oracle);
+                        let actual = render(&mut folded);
+                        assert_eq!(actual, expected, "{case}, block {block}: the host planes");
+                        for (index, word) in actual.iter().enumerate() {
+                            let padding = index % stride >= frames;
+                            assert!(
+                                (*word == HOST_PAD) == padding,
+                                "{case}, block {block}: word {index} is padding iff untouched"
+                            );
+                            if !padding && *word != 0 && *word != 0x8000_0000 {
+                                audible = true;
+                            }
+                            if !padding && shape == RoutedShape::NegativeZero {
+                                assert_eq!(*word, 0x8000_0000, "{case}: the master keeps -0.0");
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        audible,
+                        !shape.negative_zero(),
+                        "{case}: the master carries audio"
+                    );
+                    let windows = |published: &Published| published.lock().unwrap().clone();
+                    let (expected, actual) = (windows(&oracle_published), windows(&published));
+                    let observers = match shape {
+                        RoutedShape::Metered(_) => fan_in + 2,
+                        RoutedShape::ObservedRouteAlias | RoutedShape::LateReader => 1,
+                        _ => 0,
+                    };
+                    assert_eq!(
+                        actual.len(),
+                        observers * BLOCKS as usize,
+                        "{case}: every observer saw every block"
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "{case}: every observer window is the oracle's"
+                    );
+                }
+            }
         }
     }
 }
