@@ -134,7 +134,12 @@ fn plain_track(track: &str, routes: &[&str]) -> (Vec<GraphNode>, Vec<GraphEdge>)
 }
 
 /// The headline #99 F2 result: nine semantic nodes and eight edges become six ops, three
-/// aliases and a two-buffer arena.
+/// aliases and a three-buffer arena.
+///
+/// It was a two-buffer arena until issue #916 dedicated the session output. The Output op used
+/// to fold in place onto the route's buffer. It now owns a third buffer, because its storage for
+/// a block is the host's planes. The input, the dedicated post-input builtins and the one
+/// fader/matrix/route slot are unchanged.
 ///
 /// Before lowering this graph executed nine schedule items, allocated one contribution buffer
 /// per edge (eight) plus nine coloured node outputs, copied every edge every block, and ran a
@@ -149,7 +154,7 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
 
     assert_eq!(program.ops.len(), 6);
     assert_eq!(program.taps.len(), 3);
-    assert_eq!(program.buffers, 2);
+    assert_eq!(program.buffers, 3);
     // Nothing needs a per-frame reduction: every op has exactly one input.
     assert_eq!(program.reduction_count(), 0);
     assert_eq!(program.delayed_input_count(), 0);
@@ -173,9 +178,10 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
         ]
     );
     // Input has no producer; the builtin stage is bank-eligible so it must own its buffer;
-    // everything downstream of it reads in place.
+    // everything downstream of it reads in place, except the session output, which is dedicated
+    // storage since issue #916 and so never folds onto its producer.
     let in_place: Vec<bool> = program.ops.iter().map(|op| op.in_place).collect();
-    assert_eq!(in_place, vec![false, false, false, true, true, true]);
+    assert_eq!(in_place, vec![false, false, false, true, true, false]);
 
     // The three elided stages alias the builtin stage's buffer and observe right after it.
     for tap in &program.taps {

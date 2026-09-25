@@ -204,10 +204,29 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
 /// should be. A bank's hazard is a *window*, not a node; the window is handled by
 /// [`bank_windows`], and [`lower`] records why extending this predicate to bank members was
 /// measured and rejected (issue #169).
+///
+/// The session output is dedicated too (issue #916). Its storage for a block is the host's
+/// planes, not its arena buffer, so its op has to own a buffer of its own. Two consequences
+/// follow, and both are what the executor relies on:
+///
+/// * **The Output op is never in place.** It never folds onto its sole producer's buffer, so
+///   the producer keeps writing its own buffer, and the Output op copies it into the host
+///   planes. That is one copy, as before; the executor's end-of-block copy is gone.
+/// * **Its slot is never returned to the free list**, so no later op can take it.
+///
+/// What dedication does **not** give is a slot no earlier buffer used. `take` may hand the
+/// Output the slot of a buffer that retired before it. Every console fixture gives it track
+/// zero's input slot, for instance. So a physical buffer index does not identify the Output op,
+/// and the runtime identifies it by node.
+///
+/// On a multi-input output nothing changes: its op already owned a fresh logical buffer and is
+/// the last reader of nothing. On a single-input output that was in place, the arena gains the
+/// one buffer the op now owns.
 const fn is_dedicated(node: &GraphNodeId) -> bool {
     match node {
         GraphNodeId::Effect(id) => !matches!(id.rack, RackId::Dynamic),
         GraphNodeId::TrackStage { stage, .. } => matches!(stage, TrackStage::PostInputBuiltins),
+        GraphNodeId::Output { .. } => true,
         _ => false,
     }
 }
@@ -727,7 +746,8 @@ fn lower_with(
         after_op_of_node[index] = Some(op_index);
     }
 
-    // The sole session output survives the last op: the executor copies it out afterwards.
+    // The sole session output survives the last op. Its op writes the host's planes (issue #916),
+    // and dedication already keeps its slot off the free list, so this is belt and braces.
     let output_node = spec
         .nodes
         .iter()
