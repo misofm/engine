@@ -6,8 +6,10 @@ type == "object" and
 .status == "measured" and
 (.candidate_commit | type == "string" and test("^[0-9a-f]{40}$")) and
 (.engine_effect_commit | type == "string" and test("^[0-9a-f]{40}$")) and
-.engine_effect_commit == "6f662fee7b47a5eb38b67e0ddc6d007edd438cfa" and
-.engine_effect_revision == "E1 (MA-3)" and
+((.engine_effect_revision == "E1 (MA-3)" and
+    .engine_effect_commit == "6f662fee7b47a5eb38b67e0ddc6d007edd438cfa") or
+ (.engine_effect_revision == "MB-2 (R2 fast dB tier)" and
+    .engine_effect_commit != "6f662fee7b47a5eb38b67e0ddc6d007edd438cfa")) and
 (.benchmark_source_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
 (.runner_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
 .sample_rate_hz == 48000 and

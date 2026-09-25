@@ -60,3 +60,45 @@ extract_mq1_result() {
                 all(.[]; type == "number" and isfinite and . == . and . > 0)))
     ' "$result_path" >/dev/null
 }
+
+# Validate the effect-source citation used by MQ-1. The supplied source commit
+# must be on the selected checkout's history and its tracked render sources
+# must still match the checkout. The MB-2 label is accepted only for the
+# approved X7/X8 fast-tier shaper source shape.
+validate_effect_source_selection() {
+    local repo=$1
+    local source_commit=$2
+    local revision=$3
+    local baseline_commit=$4
+    local source_file
+    local -a source_paths
+
+    [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    case "$revision" in
+        e1)
+            [[ "$source_commit" == "$baseline_commit" ]] || return 1
+            source_paths=(crates/math/src/lane_math.rs crates/transient-shaper/src)
+            ;;
+        mb2-fast-db)
+            [[ "$source_commit" != "$baseline_commit" ]] || return 1
+            source_paths=(crates/math/src/lane_math.rs crates/math/src/fast_db.rs crates/transient-shaper/src)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    git -C "$repo" cat-file -e "$source_commit^{commit}" 2>/dev/null || return 1
+    git -C "$repo" merge-base --is-ancestor "$source_commit" HEAD || return 1
+    git -C "$repo" diff --quiet "$source_commit" -- "${source_paths[@]}" || return 1
+    [[ -z "$(git -C "$repo" status --porcelain=v1 --untracked-files=all -- "${source_paths[@]}")" ]] || return 1
+
+    if [[ "$revision" == mb2-fast-db ]]; then
+        source_file=$(git -C "$repo" show "$source_commit:crates/transient-shaper/src/lib.rs") || return 1
+        [[ "$source_file" == *"FAST-DB-CROSSING X7"* &&
+            "$source_file" == *"FAST-DB-CROSSING X8"* &&
+            "$source_file" == *"fast_level_db("* &&
+            "$source_file" == *"fast_gain_from_db("* &&
+            "$source_file" != *"log2_lane("* &&
+            "$source_file" != *"exp2_lane("* ]] || return 1
+    fi
+}
