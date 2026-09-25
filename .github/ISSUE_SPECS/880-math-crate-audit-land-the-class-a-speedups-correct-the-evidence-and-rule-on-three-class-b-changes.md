@@ -644,3 +644,15 @@ Closing: MZ-1 (spec file in batch 1's first checkpoint; closure last)
   title matches this spec's filename. No unrelated issue state was changed.
 - Checkpoint commits accumulate locally for the issue's declared class-A batch; delivery evidence
   and remote issue state will be synchronized at the coherent batch boundary.
+
+### Integrated class-A checkpoint validation
+
+On `abd2c1e0` (MA-1/2/3/4 integrated), the coordinator ran:
+
+- `cargo test --locked --release -p lane -p math -p wasm-gates -p effect-runtime -p transient-shaper --features math/lane`: PASS.
+- `scripts/run-wasm-gates.sh`: PASS, native backend 2 / wasm scalar backend 0 / wasm SIMD backend 1; each leg ran 141 cases and 355 comparisons, with zero digest or min/max-lowering mismatches. Detector residency checks passed.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: PASS.
+- `bash scripts/check-workspace-policy.sh`, `bash scripts/check-unfused-seal.sh`, and `bash scripts/check-lane-policy.sh`: PASS.
+
+Task-local exhaustive results and codegen evidence accompany the implementation checkpoints.
+MA-5, MQ-1, MQ-2, MC-1 and independent Astra review are still pending; this is not issue closure.
