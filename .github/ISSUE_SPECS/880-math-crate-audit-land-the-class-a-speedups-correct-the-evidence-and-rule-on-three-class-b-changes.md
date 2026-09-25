@@ -665,3 +665,24 @@ failed to extract the result because libtest prefixed the `MQ1_RESULT` line. No 
 performed. Raw evidence and the failed disposition are preserved; record repair/promotion is
 bounded successor [#902](https://github.com/misofm/engine/issues/902), not a DSP blocker. These
 are descriptive shared-host measurements, not a claimed render speedup.
+
+### Decision evidence and review handoff
+
+- MA-5 (`fc20ea6e`): all 257,176,458 in-domain ratios and four attack/sustain sign corners
+  measured max post-clamp contrast difference `1.525879e-5` dB, max gain difference
+  `1.654115e-5` dB, and unit-input fast gain error `1.287460e-5` (exact tier
+  `2.199415e-6`). The existing `2.0e-5` oracle tolerance is sufficient. Low/high
+  out-of-domain rail proofs pass; named production crossings remain six.
+- MQ-2 (`e0c57d6f`, evidence `f16c88cf`): exactly one timed invocation, with one
+  warmup and two measured rounds. Mean/max microseconds per block: release-only
+  `169.448/175.995`, `169.313/174.312`; attack+release `215.761/220.029`,
+  `216.534/220.700`; no automation `40.739/45.918`, `40.833/45.236`. State-derived
+  call counts: 8,192 / 16,384 / 0 respectively. Record validation passed.
+- MC-1: `docs/issue880-mc1.md` compares all five designs, including state restoration,
+  changed-mask behavior, and block-partition constraints. No proposed design has been timed.
+- Luna xhigh supplied implementation/evidence. Fresh Astra xhigh review is underway on
+  the complete authorized class-A batch and briefs; no verdict is recorded yet.
+- R1/R2/R3/R4 were presented to the owner with these concrete findings; no response
+  or ruling has been received. MB-1/2/3 and MC-2 remain untouched and blocked. The
+  umbrella issue must remain open after class-A delivery unless rulings resolve all
+  required work.
