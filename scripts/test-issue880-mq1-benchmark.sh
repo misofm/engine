@@ -23,6 +23,66 @@ else
     status=$?
 fi
 [[ "$status" == 2 && "$output" == *usage:* ]]
+baseline_effect_commit=6f662fee7b47a5eb38b67e0ddc6d007edd438cfa
+if output=$(bash "$runner" --preflight --effect-source-commit "$baseline_effect_commit" \
+    --effect-revision unknown --output "$scratch/invalid-revision.json" 2>&1); then
+    printf 'MQ-1 runner accepted an unknown effect revision\n' >&2
+    exit 1
+else
+    status=$?
+fi
+[[ "$status" == 2 && "$output" == *usage:* ]]
+
+fixture_repo="$scratch/mb2-source"
+mkdir -p "$fixture_repo/crates/math/src" "$fixture_repo/crates/transient-shaper/src"
+git -C "$fixture_repo" init -q
+git -C "$fixture_repo" config user.name 'MQ-1 preflight fixture'
+git -C "$fixture_repo" config user.email 'mq1-fixture@example.invalid'
+printf 'pub fn lane_math() {}\n' >"$fixture_repo/crates/math/src/lane_math.rs"
+printf 'pub fn fast_db() {}\n' >"$fixture_repo/crates/math/src/fast_db.rs"
+printf 'pub fn exact_shaper() {}\n' >"$fixture_repo/crates/transient-shaper/src/lib.rs"
+git -C "$fixture_repo" add crates
+git -C "$fixture_repo" commit -qm 'fixture E1 source'
+fixture_baseline=$(git -C "$fixture_repo" rev-parse HEAD)
+cat >"$fixture_repo/crates/transient-shaper/src/lib.rs" <<'EOF'
+pub fn frame() {
+    // FAST-DB-CROSSING X7
+    fast_level_db(ratio);
+    // FAST-DB-CROSSING X8
+    fast_gain_from_db(shape);
+}
+EOF
+git -C "$fixture_repo" add crates/transient-shaper/src/lib.rs
+git -C "$fixture_repo" commit -qm 'fixture MB-2 fast-tier source'
+fixture_mb2=$(git -C "$fixture_repo" rev-parse HEAD)
+git -C "$fixture_repo" commit --allow-empty -qm 'fixture later metadata-only commit'
+validate_effect_source_selection "$fixture_repo" "$fixture_mb2" mb2-fast-db "$fixture_baseline"
+jq --arg commit "$fixture_mb2" \
+    '.engine_effect_commit = $commit | .engine_effect_revision = "MB-2 (R2 fast dB tier)"' \
+    "$fixture" >"$scratch/mb2-record.json"
+jq -e -L scripts -f "$validator" "$scratch/mb2-record.json" >/dev/null
+if jq '.engine_effect_revision = "unapproved"' "$scratch/mb2-record.json" | \
+    jq -e -L scripts -f "$validator" >/dev/null; then
+    printf 'MQ-1 record validator accepted an unknown effect revision\n' >&2
+    exit 1
+fi
+if validate_effect_source_selection "$fixture_repo" "$fixture_baseline" mb2-fast-db "$fixture_baseline"; then
+    printf 'MQ-1 source validator accepted E1 source as MB-2\n' >&2
+    exit 1
+fi
+printf '// uncommitted source drift\n' >>"$fixture_repo/crates/transient-shaper/src/lib.rs"
+if validate_effect_source_selection "$fixture_repo" "$fixture_mb2" mb2-fast-db "$fixture_baseline"; then
+    printf 'MQ-1 source validator accepted source drift from the cited commit\n' >&2
+    exit 1
+fi
+git -C "$fixture_repo" checkout -- crates/transient-shaper/src/lib.rs
+git -C "$fixture_repo" checkout --orphan unrelated-source >/dev/null 2>&1
+git -C "$fixture_repo" add crates
+git -C "$fixture_repo" commit --allow-empty -qm 'fixture unrelated source root'
+if validate_effect_source_selection "$fixture_repo" "$fixture_mb2" mb2-fast-db "$fixture_baseline"; then
+    printf 'MQ-1 source validator accepted a non-ancestor source commit\n' >&2
+    exit 1
+fi
 
 extract_mq1_result "$raw_fixture" "$scratch/prefixed-result.json"
 cmp -s "$scratch/prefixed-result.json" <(sed -n 's/.*MQ1_RESULT //p' "$raw_fixture")
