@@ -569,8 +569,10 @@ def automation_record_valid:
 # arm renders the same fixture dual, so the equality is a statement about the whole mechanism.
 #
 # The second is the premise that statement is *about*. `mono_source_tracks` is the count of tracks
-# whose structural (`SOURCE`) witness holds, and `symmetric_lanes`/`lanes` is the prepared plan's
-# own census of the remaining terms. Both must show every track eligible, because a pair measured
+# whose structural (`SOURCE`) witness holds; `symmetric_lanes` is the eligible count over the
+# banked track lanes alone (issue #911: the harness's identity output node is a symmetric op unit
+# the collapse can never arm, so the whole-census count reads one above the track count), and
+# `lanes` remains the prepared plan's whole census. Both must show every track eligible, because a pair measured
 # on a session with no mono-source track would be the standing console measured twice under
 # another name -- and it would pass the digest equality perfectly.
 #

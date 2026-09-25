@@ -8,7 +8,7 @@ Reproduce: on a clean checkout of `main`, `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=
 
 ## Smallest closable slice
 
-Tooling only. Authorized paths: `tools/bench/src/console.rs`, `tools/console-workload/src/lib.rs` (evidence accessors only), their tests, `scripts/test-console-benchmark.sh`, and this spec.
+Tooling only. Authorized paths: `tools/bench/src/console.rs`, `tools/console-workload/src/lib.rs` (evidence accessors only), their tests, `scripts/test-console-benchmark.sh`, `scripts/console-benchmark-record-lib.jq` (the column comment only; added by Sol's attempt-1 verdict), and this spec.
 
 1. Identify which unit gained eligibility (dump `unit_eligibility()` for the mono fixture; name the op kind and the commit that changed `channel_symmetry()` or the lowering).
 2. Decide whether the extra symmetric unit is a legitimate census change (an op that is genuinely channel-symmetric and was previously mis-classified, or a new op) or an engine regression. If legitimate, restate the premise so it counts the mono fixture's *bank lanes* (the quantity the assertion is about) rather than the whole census, or subtract the named non-track units explicitly with a comment naming them. If it is an engine regression, stop and report; do not paper over it.
@@ -113,3 +113,22 @@ Code under test: `39c727a2`.
      recorded.
    - The artifact directory and the throwaway branch were deleted afterwards. The worktree is
      clean.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `39c727a2` and `ea400d63` on base `a16bc5b6`.
+No blocking findings. Verified: `d1cb3653` changed the harness's `source_binding` from an opaque
+`GraphIdentity` processor to `GraphNodeBinding::identity`, so the output node lowers to
+`NodeKind::Identity` and reports SYMMETRIC; `NodeKind::channel_symmetry()` is byte-identical
+between the sealed candidate `1fc6ed1e` and `main`; `arm_mono_collapse` skips every non-bank
+unit, so the identity output's witness is vacuous and the census change is legitimate; no file
+under `crates/` or `hosts/` changed. The restated premise (`bank_symmetry_counters() ==
+[tracks, tracks]`) is strictly stronger for the property it is about (it also fails if a track
+stops banking, lands on a vacuous chain, on a nameless lane, or is duplicated). Both mutations
+re-applied and reverted, red at the named pin-test lines. Every sealed mono record (`strip4`,
+`mono2`, `mono3`, `mono3-baseline`, `issue368`, `issue420-rt3`) reads `64/129`, so the record
+columns are numerically unchanged; the one should-fix was that the record-lib comment still
+called `symmetric_lanes` a census half, corrected in this commit. Reviewer-run gates: `cargo fmt
+--all --check`, `cargo test -p bench -p console-workload`, the two-crate clippy, `test-console-
+benchmark.sh`, `check-bench-policy.sh`, all green. Not re-verified: the throwaway warmup-proof
+run (its artifact directory was deleted by design) and the workspace-wide clippy.
