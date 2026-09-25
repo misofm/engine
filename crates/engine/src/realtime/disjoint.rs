@@ -375,6 +375,62 @@ impl ArenaLease {
         }
     }
 
+    /// One written buffer and `N` read buffers in `plane`, every slice formed once (issue #898).
+    ///
+    /// `N` is one to eight, fixed at compile time. The reads may repeat one another and may name
+    /// the silence buffer -- they are shared -- but none may be `out`. The disjointness argument is
+    /// `write_read`'s, with its premises checked in release rather than by `debug_assert`: once per
+    /// call and before any reference is formed, `plane` must be in range, `out` must be in this
+    /// lease's write set, every read must be a reserved buffer, and no read may be `out`. A failed
+    /// premise returns `None` having formed nothing.
+    #[inline]
+    pub fn write_read_many<const N: usize>(
+        &mut self,
+        plane: usize,
+        out: u32,
+        inputs: &[u32; N],
+    ) -> Option<(&mut [f32], [&[f32]; N])> {
+        const { assert!(N >= 1 && N <= 8, "write_read_many forms one to eight reads") };
+        // `writes` is false past the end of the write-set table, which has exactly one entry per
+        // reserved buffer, and for the silence buffer, which `finish` never makes writable.
+        if plane >= self.arena.planes || !self.writes(out) {
+            return None;
+        }
+        if inputs
+            .iter()
+            .any(|&input| input == out || input as usize >= self.arena.buffers)
+        {
+            return None;
+        }
+        let arena: &DisjointArena = &self.arena;
+        let frames = arena.frames;
+        let cells = arena.cells.as_ptr();
+        let out_start = arena.offset(plane, out as usize);
+        let in_starts = inputs.map(|input| arena.offset(plane, input as usize));
+        // SAFETY: bounds -- `finish` allocated exactly `planes * buffers * frames` cells under
+        // checked multiplication, and the checks above give `plane < planes` and every buffer
+        // index `< buffers`, so each `[start, start + frames)` lies inside that allocation and no
+        // offset product overflows. Every pointer derives from `cells.as_ptr()`, the whole
+        // allocation, through `UnsafeCell::raw_get`; `UnsafeCell<f32>` has the layout of `f32`.
+        // Aliasing, as in `write_read`: I1 gives this lease the only mutable ownership of `out`,
+        // E1 keeps a foreign shared read off it, and `&mut self` excludes every other reference
+        // from this lease for the returned lifetime. The reads are I2/E1-ordered, as in `read`,
+        // and may overlap one another because they are shared. None overlaps the written range:
+        // each read index differs from `out`, and distinct buffers of one plane occupy disjoint
+        // `frames`-word ranges.
+        unsafe {
+            Some((
+                core::slice::from_raw_parts_mut(UnsafeCell::raw_get(cells.add(out_start)), frames),
+                in_starts.map(|start| {
+                    core::slice::from_raw_parts(
+                        UnsafeCell::raw_get(cells.add(start)).cast_const(),
+                        frames,
+                    )
+                }),
+            ))
+        }
+    }
+
     /// Both planes of one written buffer plus both planes of one read buffer.
     #[inline]
     pub fn write_read_stereo(&mut self, out: u32, input: u32) -> ArenaStereoPair<'_> {
@@ -694,6 +750,165 @@ mod tests {
         let (out, input) = lease.write_read(0, other, own);
         out.copy_from_slice(input);
         assert_eq!(lease.read(0, other), &[0.5; 4]);
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Borrows `inputs` and `out` through one `write_read_many` call and checks every slice
+    /// against the single-buffer borrow of the same buffer: same address, same length, same
+    /// words. It then writes a marker through the output and checks that it landed in `out`'s
+    /// `plane` and nowhere else.
+    fn assert_many_is_the_single_borrows<const N: usize>(
+        lease: &mut ArenaLease,
+        frames: usize,
+        plane: usize,
+        out: u32,
+        inputs: [u32; N],
+    ) {
+        const MARKER: u32 = 0x7fc0_0898;
+        let expected: Vec<(usize, Vec<u32>)> = inputs
+            .iter()
+            .map(|&input| {
+                let words = lease.read(plane, input);
+                (words.as_ptr() as usize, bits(words))
+            })
+            .collect();
+        let out_address = lease.write(plane, out).as_ptr() as usize;
+        let other_plane = bits(lease.read(1 - plane, out));
+        {
+            let (output, reads) = lease
+                .write_read_many(plane, out, &inputs)
+                .expect("a sound borrow set");
+            assert_eq!(output.as_ptr() as usize, out_address, "output address");
+            assert_eq!(output.len(), frames, "output length");
+            for (index, (read, (address, words))) in reads.iter().zip(&expected).enumerate() {
+                assert_eq!(read.as_ptr() as usize, *address, "read {index} address");
+                assert_eq!(read.len(), frames, "read {index} length");
+                assert_eq!(bits(read), *words, "read {index} words");
+            }
+            output.fill(f32::from_bits(MARKER));
+        }
+        assert!(
+            bits(lease.read(plane, out))
+                .iter()
+                .all(|&word| word == MARKER)
+        );
+        assert_eq!(bits(lease.read(1 - plane, out)), other_plane);
+        for (input, (_, words)) in inputs.iter().zip(&expected) {
+            assert_eq!(&bits(lease.read(plane, *input)), words, "read {input} kept");
+        }
+    }
+
+    /// Issue #898: the slices one `write_read_many` call forms are exactly the buffers the
+    /// single-buffer borrows name, in the requested plane, at every supported count, with
+    /// repeated reads and the silence buffer among them.
+    ///
+    /// Red mutations: compute a read's offset in the other plane, or off by one buffer -- the
+    /// address and word checks fail.
+    #[test]
+    fn write_read_many_forms_the_slices_the_single_borrows_form() {
+        const FRAMES: usize = 5;
+        let mut build = ArenaLeaseSetBuilder::new(
+            NonZeroUsize::new(2).expect("planes"),
+            NonZeroUsize::new(FRAMES).expect("frames"),
+        );
+        let owned: Vec<u32> = (0..10).map(|_| build.reserve()).collect();
+        build.lease(0, owned.clone(), owned.clone());
+        let (_arena, mut leases) = build.finish().expect("valid lease set");
+        let lease = &mut leases[0];
+        for plane in 0..2_u32 {
+            for &buffer in &owned {
+                for (frame, word) in lease.write(plane as usize, buffer).iter_mut().enumerate() {
+                    *word = f32::from_bits(0x4000_0000 | plane << 12 | buffer << 4 | frame as u32);
+                }
+            }
+        }
+        let out = owned[9];
+        for plane in 0..2 {
+            assert_many_is_the_single_borrows(lease, FRAMES, plane, out, [owned[2]]);
+            assert_many_is_the_single_borrows(lease, FRAMES, plane, out, [owned[1], owned[1]]);
+            assert_many_is_the_single_borrows(
+                lease,
+                FRAMES,
+                plane,
+                out,
+                [ARENA_SILENCE_BUFFER, owned[3], ARENA_SILENCE_BUFFER],
+            );
+            assert_many_is_the_single_borrows(
+                lease,
+                FRAMES,
+                plane,
+                out,
+                [
+                    owned[0], owned[1], owned[2], owned[3], owned[4], owned[5], owned[6], owned[7],
+                ],
+            );
+            assert_many_is_the_single_borrows(
+                lease,
+                FRAMES,
+                plane,
+                out,
+                [
+                    owned[8],
+                    ARENA_SILENCE_BUFFER,
+                    owned[8],
+                    owned[1],
+                    owned[1],
+                    ARENA_SILENCE_BUFFER,
+                    owned[4],
+                    owned[2],
+                ],
+            );
+        }
+    }
+
+    /// Issue #898: `write_read_many` checks every premise of its disjointness argument in
+    /// release and refuses, forming nothing, when one fails.
+    ///
+    /// Red mutations: drop the read-is-output check, the reserved-read check, the write-set check
+    /// or the plane check -- the matching `is_none` assertion fails.
+    #[test]
+    fn write_read_many_refuses_every_unsound_borrow() {
+        let mut build = builder();
+        let owned = build.reserve();
+        let first = build.reserve();
+        let foreign = build.reserve();
+        let unreserved = foreign + 1;
+        build.lease(0, vec![foreign], Vec::new());
+        build.lease(1, vec![owned, first], vec![foreign]);
+        let (_arena, mut leases) = build.finish().expect("valid lease set");
+        let lease = &mut leases[1];
+        assert!(
+            lease
+                .write_read_many(0, owned, &[first, foreign, ARENA_SILENCE_BUFFER])
+                .is_some()
+        );
+        assert!(lease.write_read_many(1, owned, &[first]).is_some());
+        // A read that is the output would alias the one mutable slice.
+        assert!(lease.write_read_many(0, owned, &[first, owned]).is_none());
+        assert!(lease.write_read_many(1, owned, &[owned]).is_none());
+        // An output outside this lease's write set: another lease's, the silence buffer, and
+        // buffers that were never reserved.
+        assert!(lease.write_read_many(0, foreign, &[first]).is_none());
+        assert!(
+            lease
+                .write_read_many(0, ARENA_SILENCE_BUFFER, &[first])
+                .is_none()
+        );
+        assert!(lease.write_read_many(0, unreserved, &[first]).is_none());
+        assert!(lease.write_read_many(0, u32::MAX, &[first]).is_none());
+        // A read that was never reserved.
+        assert!(
+            lease
+                .write_read_many(0, owned, &[first, unreserved])
+                .is_none()
+        );
+        assert!(lease.write_read_many(0, owned, &[u32::MAX]).is_none());
+        // A plane the arena does not have.
+        assert!(lease.write_read_many(2, owned, &[first]).is_none());
+        assert!(lease.write_read_many(usize::MAX, owned, &[first]).is_none());
     }
 
     fn many_lease(planes: usize, frames: usize) -> (Vec<u32>, u32, ArenaLease) {

@@ -150,7 +150,7 @@ async function localErrorResult(promise, result) {
 
 const REAL_STAGE_TIMEOUT_MS = 5000;
 const REAL_PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
-const REAL_WASM_SHA256 = "25e75763f1e6ea815a938de60367549c973cf3c5dc551a3a3af5d5ac5b79e20a";
+const REAL_WASM_SHA256 = "c46721aa776db28e60cbfc5c27f7f198add4252b3fc8651791bb30eeff4cb64f";
 const REAL_WASM_FILE = "miso-engine-v1-audio-worklet.simd128.wasm";
 const REAL_ARTIFACT_NAMES = Object.freeze([
   "miso-engine-v1-abi-layout.json",

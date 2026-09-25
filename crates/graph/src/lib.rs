@@ -32,6 +32,7 @@ pub use runtime::{
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
     test_only_split_pair_table_witness,
 };
 
@@ -5694,6 +5695,296 @@ mod tests {
             nontrivial >= 10,
             "the corpus must contain output fan-ins past the balanced/left-to-right divergence"
         );
+    }
+
+    /// One permanent-observer dispatch as its observer saw it (issue #900): handle, first sample,
+    /// whether the resident lane was accepted, and the left and right words.
+    type ObservationRow = (u64, u64, bool, Vec<u32>, Vec<u32>);
+
+    /// Appends every dispatch to one shared log, so the log is in global dispatch order.
+    /// `resident` accepts the resident lane wherever one is offered.
+    struct LoggingObserver {
+        handle: u64,
+        resident: bool,
+        log: Arc<std::sync::Mutex<Vec<ObservationRow>>>,
+    }
+    impl GraphRuntimeObserver for LoggingObserver {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            let bits = |plane: &[f32]| -> Vec<u32> { plane.iter().map(|x| x.to_bits()).collect() };
+            self.log.lock().expect("observation log").push((
+                self.handle,
+                block.first_sample,
+                false,
+                bits(block.left),
+                bits(block.right),
+            ));
+            Ok(())
+        }
+        fn observe_resident(
+            &mut self,
+            block: GraphResidentObservationBlock<'_>,
+        ) -> Option<Result<(), RenderError>> {
+            if !self.resident {
+                return None;
+            }
+            let lanes = block.lane.width().lanes() as usize;
+            let lane = block.lane.lane();
+            let frames = block.lane.frames() as usize;
+            let bits = |words: &[f32]| -> Vec<u32> {
+                (0..frames)
+                    .map(|frame| words[frame * lanes + lane].to_bits())
+                    .collect()
+            };
+            self.log.lock().expect("observation log").push((
+                self.handle,
+                block.first_sample,
+                true,
+                bits(block.lane.left()),
+                bits(block.lane.right()),
+            ));
+            Some(Ok(()))
+        }
+    }
+
+    /// What one permanent-path render exposes (issue #900): PCM bits, the ordered observation
+    /// log, `[observer, bank member]` dispatch accesses, `[planar, resident offered, resident
+    /// accepted]` meter inputs, and the number of per-op `observe` walks.
+    struct PermanentWalk {
+        pcm: Vec<u32>,
+        log: Vec<ObservationRow>,
+        dispatch: [u64; 2],
+        meter_inputs: [u64; 3],
+        observe_calls: u64,
+    }
+
+    /// Bind `plan` with one [`LoggingObserver`] per `observed` node and render `blocks` blocks on
+    /// the permanent path. `skip_disabled` forces the unconditional pre-#900 unit walk back on.
+    fn permanent_walk(
+        plan: PreparedGraphPlan,
+        mut bindings: GraphRuntimeBindings,
+        observed: &[(GraphNodeId, bool)],
+        frames: usize,
+        blocks: u64,
+        skip_disabled: bool,
+    ) -> PermanentWalk {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        bindings.observers = observed
+            .iter()
+            .enumerate()
+            .map(|(handle, (node, resident))| {
+                GraphNodeObserverBinding::new(
+                    node.clone(),
+                    handle as u64,
+                    Box::new(LoggingObserver {
+                        handle: handle as u64,
+                        resident: *resident,
+                        log: Arc::clone(&log),
+                    }),
+                )
+            })
+            .collect();
+        let mut bound = plan
+            .bind(bindings)
+            .unwrap_or_else(|failure| panic!("permanent bind: {}", failure.code));
+        runtime::test_only_observe_calls_reset(skip_disabled);
+        test_only_observation_dispatch_reset();
+        test_only_meter_input_reset(false);
+        let pcm = render_blocks(&mut bound, frames, blocks);
+        let walk = PermanentWalk {
+            pcm,
+            log: log.lock().expect("observation log").clone(),
+            dispatch: test_only_observation_dispatch_counts(),
+            meter_inputs: test_only_meter_input_counts(),
+            observe_calls: runtime::test_only_observe_calls(),
+        };
+        runtime::test_only_observe_calls_reset(false);
+        walk
+    }
+
+    /// Everything but the walk count must be the same bits whether or not unobserved units are
+    /// skipped.
+    fn assert_same_observation(skipped: &PermanentWalk, unconditional: &PermanentWalk, at: &str) {
+        assert_eq!(skipped.pcm, unconditional.pcm, "{at}: rendered bits");
+        assert_eq!(skipped.log, unconditional.log, "{at}: observation log");
+        assert_eq!(
+            skipped.dispatch[0], unconditional.dispatch[0],
+            "{at}: observer accesses"
+        );
+        assert_eq!(
+            skipped.meter_inputs, unconditional.meter_inputs,
+            "{at}: meter inputs"
+        );
+    }
+
+    /// Issue #900, gate 1: skipping the units that hold no observer moves no observed or rendered
+    /// bit. Every placement renders twice -- once with the unconditional unit walk forced back
+    /// on, once with the skip -- and the PCM, the globally ordered observation log, the observer
+    /// accesses and the meter inputs must match. Only the per-op `observe` walks may fall, and
+    /// they fall to exactly the ops of the units that hold an observer: a bank with one observed
+    /// member is still walked whole, whichever member it is.
+    #[test]
+    fn permanent_observer_skip_moves_no_observed_or_rendered_bit() {
+        const BLOCKS: u64 = 5;
+        let stage = |lane: usize, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
+            stage,
+        };
+        let input = |lane| stage(lane, TrackStage::Input);
+        let member = |lane| stage(lane, TrackStage::PostInputBuiltins);
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output id"),
+        };
+        // Four input ops, one four-member builtin bank and the output op: nine ops, six units.
+        let placements: [(Vec<(GraphNodeId, bool)>, u64); 5] = [
+            (vec![(input(1), false)], 1),
+            (vec![(member(3), false)], 4),
+            (vec![(member(0), true)], 4),
+            (
+                vec![
+                    (input(0), false),
+                    (member(2), true),
+                    (output.clone(), false),
+                ],
+                6,
+            ),
+            (
+                (0..4)
+                    .flat_map(|lane| [(input(lane), false), (member(lane), lane % 2 == 0)])
+                    .chain([(output.clone(), false)])
+                    .collect(),
+                9,
+            ),
+        ];
+        for (observed, walked_ops) in &placements {
+            let at = format!("bank placement {observed:?}");
+            let (plan, bindings, _) = four_track_builtin_plan(900, true, false);
+            let unconditional = permanent_walk(plan, bindings, observed, 1, BLOCKS, true);
+            let (plan, bindings, _) = four_track_builtin_plan(900, true, false);
+            let skipped = permanent_walk(plan, bindings, observed, 1, BLOCKS, false);
+            assert_same_observation(&skipped, &unconditional, &at);
+            assert_eq!(
+                skipped.log.len() as u64,
+                observed.len() as u64 * BLOCKS,
+                "{at}"
+            );
+            assert_eq!(unconditional.observe_calls, 9 * BLOCKS, "{at}");
+            assert_eq!(unconditional.dispatch[1], 4 * BLOCKS, "{at}");
+            assert_eq!(skipped.observe_calls, walked_ops * BLOCKS, "{at}");
+            let bank_walked = observed.iter().any(|(node, _)| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins,
+                        ..
+                    }
+                )
+            });
+            assert_eq!(
+                skipped.dispatch[1],
+                if bank_walked { 4 * BLOCKS } else { 0 },
+                "{at}"
+            );
+            let accepted = observed.iter().filter(|(_, resident)| *resident).count() as u64;
+            assert_eq!(skipped.meter_inputs[2], accepted * BLOCKS, "{at}");
+        }
+
+        // The random-DAG corpus: stage chains with elided alias stages, sends, submixes,
+        // sidechains and PDC, every unit a single op. A seeded third of the observable nodes
+        // carry an observer; the ops walked must be exactly the ops those observers resolve to,
+        // directly or through an alias's `after_op`.
+        const FRAMES: usize = 16;
+        let mut partial = 0_usize;
+        let mut aliased = 0_usize;
+        for seed in 0..50_u64 {
+            let (plan, _) = random_dag_plan(seed);
+            let lowered = plan.program().cloned().expect("lowered");
+            let mut state = seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1;
+            let observed: Vec<(GraphNodeId, bool)> = plan
+                .spec
+                .nodes
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node.id,
+                        GraphNodeId::TrackStage { .. } | GraphNodeId::Output { .. }
+                    )
+                })
+                .filter(|_| xorshift(&mut state).is_multiple_of(3))
+                .map(|node| (node.id.clone(), false))
+                .collect();
+            let walked: BTreeSet<u32> = observed
+                .iter()
+                .map(|(node, _)| {
+                    let index = program::node_index(&plan.spec, node).expect("observed node");
+                    lowered.node_op[index as usize].unwrap_or_else(|| {
+                        aliased += 1;
+                        lowered
+                            .taps
+                            .iter()
+                            .find(|tap| tap.node == index)
+                            .expect("an elided node has a tap")
+                            .after_op
+                    })
+                })
+                .collect();
+            let ops = lowered.ops.len() as u64;
+            if !walked.is_empty() && (walked.len() as u64) < ops {
+                partial += 1;
+            }
+            let at = format!("seed {seed}");
+            let (plan, bindings) = random_dag_plan(seed);
+            let unconditional = permanent_walk(plan, bindings, &observed, FRAMES, BLOCKS, true);
+            let (plan, bindings) = random_dag_plan(seed);
+            let skipped = permanent_walk(plan, bindings, &observed, FRAMES, BLOCKS, false);
+            assert_same_observation(&skipped, &unconditional, &at);
+            assert_eq!(
+                skipped.log.len() as u64,
+                observed.len() as u64 * BLOCKS,
+                "{at}"
+            );
+            assert_eq!(unconditional.observe_calls, ops * BLOCKS, "{at}");
+            assert_eq!(skipped.observe_calls, walked.len() as u64 * BLOCKS, "{at}");
+        }
+        assert!(
+            partial >= 25,
+            "the corpus must mix observed and unobserved units"
+        );
+        assert!(aliased > 0, "the corpus must observe an elided alias stage");
+    }
+
+    /// Issue #900, gate 1: a plan with no observers makes zero `observe` calls and visits no bank
+    /// member. The unconditional walk, forced back on, is the control: the same counter sees
+    /// every op there.
+    #[test]
+    fn a_plan_without_observers_makes_zero_observe_calls() {
+        const BLOCKS: u64 = 4;
+        let (plan, bindings, _) = four_track_builtin_plan(901, true, false);
+        let unconditional = permanent_walk(plan, bindings, &[], 1, BLOCKS, true);
+        let (plan, bindings, _) = four_track_builtin_plan(901, true, false);
+        let skipped = permanent_walk(plan, bindings, &[], 1, BLOCKS, false);
+        assert_same_observation(&skipped, &unconditional, "bank plan");
+        assert_eq!(
+            (unconditional.observe_calls, unconditional.dispatch),
+            (9 * BLOCKS, [0, 4 * BLOCKS])
+        );
+        assert_eq!(
+            (
+                skipped.observe_calls,
+                skipped.dispatch,
+                skipped.meter_inputs
+            ),
+            (0, [0, 0], [0, 0, 0])
+        );
+        for seed in 0..8_u64 {
+            let (plan, bindings) = random_dag_plan(seed);
+            let ops = plan.program().expect("lowered").ops.len() as u64;
+            let unconditional = permanent_walk(plan, bindings, &[], 16, BLOCKS, true);
+            let (plan, bindings) = random_dag_plan(seed);
+            let skipped = permanent_walk(plan, bindings, &[], 16, BLOCKS, false);
+            assert_same_observation(&skipped, &unconditional, &format!("seed {seed}"));
+            assert_eq!(unconditional.observe_calls, ops * BLOCKS, "seed {seed}");
+            assert_eq!(skipped.observe_calls, 0, "seed {seed}");
+        }
     }
 
     #[test]
