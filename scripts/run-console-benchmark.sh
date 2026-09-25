@@ -123,6 +123,21 @@
 # far. The baseline arm is the base commit with this arm registration and nothing else.
 #
 #
+# `--pure-path` and `--pure-path-baseline` are the paired arms of the pure-path batch (#885, #886,
+# #898, #900; PR #910): the route fold and the direct scatter stay armed under post-matrix and
+# final-tap observation, the master reduction derives its arena slices once per group of eight,
+# and the permanent observer walk is skipped for units without observers. Every change is class
+# **A** -- every `output_sha256` must reproduce the baseline arm's exactly, on every row and every
+# leg, and the two records differ only in time. The rows this batch can move are the unmetered
+# plumbing rows (`sixty_four_track_plumbing_only` through #898's reduction and #900's skipped
+# walk) and the `console_meters` pair, whose `meters_on` arm binds a `PostMatrix` meter on every
+# track -- the shape #885 keeps folded. That pair carries no fold or redirect counter, so a run
+# cannot show whether the fold fired on the metered arm; the metered console row of #881 is
+# where that counter belongs. The baseline arm is the base commit with this arm registration
+# and the #911 benchmark repair (tooling only; the runner cannot complete without it), and
+# nothing else. Both arms were captured under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` on a
+# host whose background services hold the load average above the ceiling; the records say so.
+#
 # `--strip4` is the strip/overhead round's job 4, and it is the one arm in this list that has **no
 # baseline partner**. Job 4 adds no engine change at all: it is the measurement plane -- two
 # overhead decomposition rows (`sixty_four_track_plumbing_only`, the route and the master reduction
@@ -263,10 +278,12 @@ if [[ "$#" == 1 ]]; then
         --issue415-rt1-measurement) phase_directory=issue415-rt1-measurement ;;
         --issue419-rt2) phase_directory=issue419-rt2 ;;
         --issue420-rt3) phase_directory=issue420-rt3 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3]\n' "$0" >&2; exit 2 ;;
+        --pure-path) phase_directory=pure-path ;;
+        --pure-path-baseline) phase_directory=pure-path-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
