@@ -259,8 +259,10 @@ restored.
 
 ## Issue #918 — banked source inputs gathered from the played transfer block
 
-Each row was applied alone to the committed tree (`7f027946`), the listed suites were run, and the
-file was restored with `git checkout`. Gate 1 is
+Each row was applied alone to a committed tree, the listed suites were run, and the file was
+restored with `git checkout`. Rows 918-1 to 918-9 ran on `3857a7fb`; rows 918-10 to 918-12 ran on
+`7f027946`, which adds gate 1's ninth (compensated) shape and the set's refusal test and changes
+none of the code rows 918-1 to 918-9 mutate. Gate 1 is
 `runtime::tests::a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`; gate 2 is
 host-core `source_in_place::a_ring_fed_banked_session_gathers_in_place_with_the_copy_bits`; gate 3
 is `rt10_source_in_place_alloc::an_in_place_source_gather_renders_the_copy_bits_and_allocates_nothing`.
