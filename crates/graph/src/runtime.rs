@@ -5016,8 +5016,7 @@ fn foldable_lane(
 ///   `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, and with the
 ///   production meter `a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`. Before #885
 ///   this clause declined post-matrix meters too, and two fold oracles were such a metered plan;
-///   they now decline the fold through `test_only_set_route_fold_declined` or render at the
-///   scalar dispatch instead.
+///   they now decline the fold through `test_only_set_route_fold_declined` instead.
 /// * **the opening chain's ops are excluded from the in-between scan** -> every fold in the tree
 ///   stops firing and `every_standing_workload_folds_one_route_per_track` goes red. That is the
 ///   conservative direction, and it is worth pinning: the colouring gives the session output the

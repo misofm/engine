@@ -143,8 +143,9 @@ unrelated.)
   same session with no meter, bound with the fold declined through the seam; `unfolded_folds == 0`
   and the bit comparison are unchanged. The two arms now differ in the fold alone (before, also in
   one meter).
-- **`the_folded_master_is_the_reductions_own_bits` (console-workload).** Deviation from the ruling,
-  stated rather than hidden: this crate does not build `graph`'s `test-support` feature
+- **`the_folded_master_is_the_reductions_own_bits` (console-workload).** *(Superseded by the second
+  amendment below, which moves this test to the seam.)* Deviation from the ruling, stated rather
+  than hidden: this crate does not build `graph`'s `test-support` feature
   (`cargo tree -p console-workload -e features -i graph` shows none; its manifest has no
   dev-dependency enabling it), so the exported seam does not exist in its test build, and enabling
   it needs one `[dev-dependencies] graph = { workspace = true, features = ["test-support"] }` line in
@@ -202,8 +203,46 @@ unifies it into that step's build, which is not a shipped artifact.
   `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` (pin-checked by
   `scripts/build-web-audioworklet.sh` in qualification) will need a repin at the batch boundary. Not
   run here: the script builds into its own target directory.
-- `crates/graph/tests/MUTATIONS.md` row 218-4 ("the observer clause is dropped from
-  `foldable_lane`" -> `the_folded_master_is_the_reductions_own_bits` RED) is a historical record of
-  the old clause; that test no longer covers the mutation. Today's coverage is
-  `a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed`. Left unedited
-  (outside the authorized paths).
+- `crates/graph/tests/MUTATIONS.md` row 218-4 named a catcher whose premise #885 removed; the
+  second amendment below re-runs the mutation and updates the row.
+
+### Second amendment (Sol): the console-workload oracle moves to the seam
+
+Sol approved two more edits: `tools/console-workload/Cargo.toml` and `crates/graph/tests/MUTATIONS.md`.
+
+- **`tools/console-workload/Cargo.toml`:** a new `[dev-dependencies]` table,
+  `graph = { workspace = true, features = ["test-support"] }`, with a comment that it serves only
+  this crate's tests. `Cargo.lock` is byte-identical (md5 `2b8b2fcbafb4a7f70923767599910db8`
+  before and after); features are not recorded there.
+- **`the_folded_master_is_the_reductions_own_bits`, final shape.** For each of the 15 builtins
+  workloads (the plumbing row stays skipped, as before), 64 blocks:
+  1. *folded:* `SessionRuntime::build(workload, BASELINE)`, digested;
+  2. *declined (the oracle):* the same build with `graph::test_only_set_route_fold_declined(true)`
+     around it (the switch is restored before rendering). It asserts 0 folds, the same
+     `bank_shape()` as the folded arm (so the arms differ in the fold alone), and digest equality
+     with the folded arm;
+  3. *metered candidate:* `SessionRuntime::build(workload, METERED)` (post-matrix meter on every
+     track) must fold exactly `folded_runtime.bank_route_folds()` routes and render the folded
+     digest.
+  The scalar-backend oracle is dropped. It was not cheap (it was the slowest arm), and the only
+  distinct claim it added -- banked equals unbanked -- is held elsewhere
+  (`banked_tracks_are_bit_identical_to_their_scalar_tails`, the graph compiler's per-node arms).
+  Test runtime: about 45 s in the debug profile (`chain_shape` 21 tests in 45.95 s), about the same
+  as the scalar variant (43 s); the three arms per workload dominate.
+- **Red mutation re-run:** build `RouteFold::runs` reversed -> "nine_track_baseline: the folded
+  master is not the reduction's bits".
+- **`MUTATIONS.md` row 218-4 re-run.** Dropping the whole observer clause from `foldable_lane`
+  reddens `runtime::tests::a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed`
+  ("Four: a meter at any other tap keeps declining the fold"). It leaves console-workload (21/21)
+  and graph-compiler (73/73) green. The row now names that catcher and notes that the old one's
+  premise was removed by #885.
+- The `route_fold` ledger in `runtime.rs` now says both former meter oracles use the switch.
+
+| Gate | Result |
+|---|---|
+| `cargo test -p console-workload` | 4 + 21 + 3 passed |
+| `cargo test -p graph-compiler` | lib 73; other targets 1, 3, 1, 8, 6 passed |
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --locked -p console-workload -p graph -p graph-compiler --all-targets --all-features -- -D warnings` | exit 0, no warnings |
+
+The web artifact pin is untouched, as directed; the coordinator repins at the batch boundary.

@@ -21,7 +21,6 @@ use std::collections::BTreeMap;
 use bench_support::digest::Sha256Sink;
 use console_workload::{ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload};
 use effect_contract::ChannelSymmetryWitness;
-use lane::Backend;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -750,25 +749,21 @@ fn the_plumbing_row_binds_no_strip_at_all() {
     );
 }
 
-/// The folded master carries the reduction's own bits, and the scalar-dispatch arm is the oracle
-/// that says so.
+/// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
+/// so.
 ///
-/// # Why the scalar-dispatch arm is a legitimate oracle
+/// # Why the declined arm is a legitimate oracle
 ///
-/// `Backend::Scalar` binds no bank chain at all, so there is no epilogue for a route to fold into:
-/// every route op runs, and the master is the D9 `sum2_block`/`sum_into_block` reduction over
-/// their buffers -- the Job-2 shape the fold replaced. Banking regroups lanes and never changes a
-/// lane's arithmetic (AGENTS.md; `banked_tracks_are_bit_identical_to_their_scalar_tails` and the
-/// graph compiler's per-node arms hold the strip to it), so the two arms differ in the fold and in
-/// a regrouping that is itself bit-neutral.
+/// The oracle is the same workload bound with the route fold declined
+/// (`graph::test_only_set_route_fold_declined`, read once at bind). That leaves the Job-2 shape
+/// standing: a route op per track, then the D9 `sum2_block`/`sum_into_block` reduction over their
+/// buffers. Nothing else about the plan moves, so the two arms differ in *exactly* the thing under
+/// test.
 ///
 /// Until issue #885 the oracle was the meter arm: a post-matrix meter on every track declined the
 /// fold plan-wide. A post-matrix meter now reads the folded lane's resident words and keeps the fold
-/// armed, so that arm is checked as a *candidate* here instead -- it must fold exactly as the
-/// unmetered arm does and render the same bits. The graph compiler's
-/// `the_intended_strip_folds_every_route_into_its_cohorts_epilogue` keeps a banked oracle that
-/// differs in the fold alone, through `graph::test_only_set_route_fold_declined`; this crate does
-/// not build `graph`'s `test-support` feature, so that switch is not reachable from here.
+/// armed, so that arm is checked as a *candidate* here instead -- it must fold exactly the routes the
+/// unmetered arm folds and render the same bits.
 ///
 /// # What this catches that nothing else does
 ///
@@ -778,8 +773,8 @@ fn the_plumbing_row_binds_no_strip_at_all() {
 /// proof on a session with eight cohorts whose partial sums genuinely differ.
 ///
 /// Red mutation: build `RouteFold::runs` from the candidate list reversed (leaving the association
-/// proof reading the forward order, so the plan still folds) -- every 64-track row's digest
-/// diverges from its scalar arm at the first block.
+/// proof reading the forward order, so the plan still folds) -- the digest diverges from the
+/// declined arm at the first block, on the first row.
 #[test]
 fn the_folded_master_is_the_reductions_own_bits() {
     const METERED: PlanConfig = PlanConfig {
@@ -806,21 +801,25 @@ fn the_folded_master_is_the_reductions_own_bits() {
         }
         let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
         let folded = digest(&mut folded_runtime);
-        let mut unfolded_runtime =
-            SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, Backend::Scalar);
-        let unfolded = digest(&mut unfolded_runtime);
+        graph::test_only_set_route_fold_declined(true);
+        let mut declined_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        graph::test_only_set_route_fold_declined(false);
+        let declined = digest(&mut declined_runtime);
         assert_eq!(
-            (
-                unfolded_runtime.bank_shape(),
-                unfolded_runtime.bank_route_folds()
-            ),
-            ([0, 0], 0),
-            "{}: the scalar arm must bind no chain and fold no route, or this is not an oracle",
+            declined_runtime.bank_route_folds(),
+            0,
+            "{}: the declined arm must fold no route, or this is not an oracle",
+            workload.kind()
+        );
+        assert_eq!(
+            declined_runtime.bank_shape(),
+            folded_runtime.bank_shape(),
+            "{}: declining the fold must leave the chains as they are",
             workload.kind()
         );
         assert_eq!(
             folded,
-            unfolded,
+            declined,
             "{}: the folded master is not the reduction's bits",
             workload.kind()
         );

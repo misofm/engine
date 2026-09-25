@@ -27,5 +27,11 @@ graph-compiler.workspace = true
 lane.workspace = true
 session.workspace = true
 
+# Test-only: `test_only_set_route_fold_declined` gives `the_folded_master_is_the_reductions_own_bits`
+# its unfolded oracle (issue #885). Dev-dependency features are resolved only when this crate's own
+# tests build, so the bench and the wasm guest that link it as a normal dependency are unaffected.
+[dev-dependencies]
+graph = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true
