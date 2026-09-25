@@ -304,48 +304,143 @@ fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) 
                 output.copy_from_slice(input);
             }
         }
-        [first, second, rest @ ..] => {
-            reduce_many::<FrameLane>(lease, plane, out, *first, *second, rest);
+        [_, _, ..] => reduce_many::<FrameLane>(lease, plane, out, inputs),
+    }
+}
+
+/// Reads one arena borrow forms at once: [`ArenaLease::write_read_many`] takes one to eight.
+const REDUCE_GROUP: usize = 8;
+
+/// Fan-in two or more: `((in0 + in1) + in2) + ...` per frame, in edge order (issue #898).
+///
+/// The inputs are taken in consecutive groups of up to [`REDUCE_GROUP`]. One `write_read_many`
+/// call forms a group's output and input slices once, and one pass walks them together in
+/// `chunks_exact` steps, so no slice is re-derived per vector. The first group stores
+/// `in0 + in1 + ...`; each later group loads that running sum back from the output and keeps
+/// adding. A store and a reload move an `f32`'s bits unchanged, and every add still takes the
+/// running sum and the next input in the same order, so the result is the one left-to-right chain
+/// at every fan-in. Starting a later group from a fresh subtotal instead would not be:
+/// `reduction_is_left_to_right_bit_identical_to_scalar_reference` pins the difference.
+#[inline(always)]
+fn reduce_many<L: Lane>(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+    debug_assert!(
+        inputs.len() >= 2,
+        "fan-in zero is a fill and fan-in one a copy"
+    );
+    for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
+        let initial_store = index == 0;
+        let reduced = match group.len() {
+            1 => reduce_group::<L, 1>(lease, plane, out, group, initial_store),
+            2 => reduce_group::<L, 2>(lease, plane, out, group, initial_store),
+            3 => reduce_group::<L, 3>(lease, plane, out, group, initial_store),
+            4 => reduce_group::<L, 4>(lease, plane, out, group, initial_store),
+            5 => reduce_group::<L, 5>(lease, plane, out, group, initial_store),
+            6 => reduce_group::<L, 6>(lease, plane, out, group, initial_store),
+            7 => reduce_group::<L, 7>(lease, plane, out, group, initial_store),
+            8 => reduce_group::<L, 8>(lease, plane, out, group, initial_store),
+            _ => false,
+        };
+        // Unreachable for a lowered program: a multi-input op's output is a fresh slot, never one
+        // of its own reads, because a slot retires one op after its last reader. Were a group ever
+        // refused, the later groups must not add into a running sum that was never stored.
+        debug_assert!(reduced, "a reduction group's arena borrow was refused");
+        if !reduced {
+            return;
         }
     }
 }
 
-#[inline(always)]
-fn reduce_many<L: lane::Lane>(
+/// One group of `N` consecutive inputs: one arena borrow, one pass over the output.
+#[inline]
+fn reduce_group<L: Lane, const N: usize>(
     lease: &mut ArenaLease,
     plane: usize,
     out: u32,
-    first: u32,
-    second: u32,
-    rest: &[u32],
-) {
-    let frames = lease.frames();
+    group: &[u32],
+    initial_store: bool,
+) -> bool {
+    let Ok(ids) = <&[u32; N]>::try_from(group) else {
+        return false;
+    };
+    let Some((output, sources)) = lease.write_read_many(plane, out, ids) else {
+        return false;
+    };
+    accumulate_group::<L, N>(output, sources, initial_store)
+}
+
+/// `output = s0 + s1 + ...` when `initial_store`, otherwise `output = ((output + s0) + s1) + ...`,
+/// per frame and left to right, in one pass over `output`.
+///
+/// The vector body runs at `L`, and the frames that do not fill a whole vector run the same body
+/// at `L = f32`, as every D9 kernel finishes its tail, so the result does not depend on the width.
+/// The one shape check happens before the first write.
+#[inline(always)]
+fn accumulate_group<L: Lane, const N: usize>(
+    output: &mut [f32],
+    sources: [&[f32]; N],
+    initial_store: bool,
+) -> bool {
+    let frames = output.len();
+    if sources.iter().any(|source| source.len() != frames) {
+        return false;
+    }
     let vectored = frames - frames % L::WIDTH;
-    let mut index = 0;
-    while index < vectored {
-        let mut acc = {
-            let source = lease.read(plane, first);
-            L::load(&source[index..])
+    let (vectors, tail) = output.split_at_mut(vectored);
+    accumulate_run::<L, N>(
+        vectors,
+        sources.map(|source| &source[..vectored]),
+        initial_store,
+    ) && accumulate_run::<f32, N>(
+        tail,
+        sources.map(|source| &source[vectored..]),
+        initial_store,
+    )
+}
+
+/// One width's share of [`accumulate_group`]. `output` and every source have one common length,
+/// a multiple of `L::WIDTH`, and each source is walked by its own `chunks_exact` iterator in step
+/// with the output's.
+///
+/// The store and accumulate forms are two loops rather than one branch per vector, so each loop
+/// walks a fixed number of sources.
+#[inline(always)]
+fn accumulate_run<L: Lane, const N: usize>(
+    output: &mut [f32],
+    sources: [&[f32]; N],
+    initial_store: bool,
+) -> bool {
+    let mut chunks = sources.map(|source| source.chunks_exact(L::WIDTH));
+    if initial_store {
+        let Some((first, rest)) = chunks.split_first_mut() else {
+            return false;
         };
-        for input in std::iter::once(second).chain(rest.iter().copied()) {
-            let value = {
-                let source = lease.read(plane, input);
-                L::load(&source[index..])
+        for out in output.chunks_exact_mut(L::WIDTH) {
+            let Some(acc) = first
+                .next()
+                .and_then(|chunk| add_chunks(L::load(chunk), rest))
+            else {
+                return false;
             };
-            acc = acc.add(value);
+            acc.store(out);
         }
-        acc.store(&mut lease.write(plane, out)[index..]);
-        index += L::WIDTH;
-    }
-    while index < frames {
-        let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
-        for input in std::iter::once(second).chain(rest.iter().copied()) {
-            let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
-            acc = acc.add(value);
+    } else {
+        for out in output.chunks_exact_mut(L::WIDTH) {
+            let Some(acc) = add_chunks(L::load(out), &mut chunks) else {
+                return false;
+            };
+            acc.store(out);
         }
-        acc.store(&mut lease.write(plane, out)[index..]);
-        index += 1;
     }
+    true
+}
+
+/// `((acc + c0) + c1) + ...` over the next chunk of every source, or `None` if one has run out.
+#[inline(always)]
+fn add_chunks<L: Lane>(mut acc: L, chunks: &mut [core::slice::ChunksExact<'_, f32>]) -> Option<L> {
+    for chunk in chunks {
+        acc = acc.add(L::load(chunk.next()?));
+    }
+    Some(acc)
 }
 
 // REALTIME_POLICY_END
@@ -6885,7 +6980,7 @@ mod tests {
                     actual.write(0, ids[index]).copy_from_slice(values);
                     old.write(0, ids[index]).copy_from_slice(values);
                 }
-                reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
+                reduce_many::<L>(&mut actual, 0, 1, &ids);
                 {
                     let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
                     sum2_block::<L>(output, first, second);
@@ -6937,6 +7032,267 @@ mod tests {
         assert_width_matches_old::<f32>();
         assert_width_matches_old::<lane::Simd4>();
         assert_width_matches_old::<lane::Simd8>();
+    }
+
+    /// Frozen pre-#898 oracle: `reduce_many` exactly as it stood before issue #898, re-deriving
+    /// every input's arena slice once per vector. It is the "before" side of the before/after gate.
+    fn frozen_per_vector_reduce_many<L: Lane>(
+        lease: &mut ArenaLease,
+        plane: usize,
+        out: u32,
+        first: u32,
+        second: u32,
+        rest: &[u32],
+    ) {
+        let frames = lease.frames();
+        let vectored = frames - frames % L::WIDTH;
+        let mut index = 0;
+        while index < vectored {
+            let mut acc = {
+                let source = lease.read(plane, first);
+                L::load(&source[index..])
+            };
+            for input in std::iter::once(second).chain(rest.iter().copied()) {
+                let value = {
+                    let source = lease.read(plane, input);
+                    L::load(&source[index..])
+                };
+                acc = acc.add(value);
+            }
+            acc.store(&mut lease.write(plane, out)[index..]);
+            index += L::WIDTH;
+        }
+        while index < frames {
+            let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
+            for input in std::iter::once(second).chain(rest.iter().copied()) {
+                let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
+                acc = acc.add(value);
+            }
+            acc.store(&mut lease.write(plane, out)[index..]);
+            index += 1;
+        }
+    }
+
+    /// The one NaN payload the #898 corpus uses; see `hoisting_word`.
+    const HOISTING_NAN: u32 = 0x7fc0_4898;
+
+    /// Xorshift32, frozen here so the #898 corpus does not depend on host RNG state.
+    fn hoisting_draw(state: &mut u32) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        *state
+    }
+
+    /// One #898 corpus word. Most are finite, with magnitudes spread over `2^-24..2^25` so that
+    /// association shows in the rounding. About one word in 170 is a signed zero, a subnormal,
+    /// `infinity` or the one NaN payload.
+    fn hoisting_word(state: &mut u32, infinity: f32) -> f32 {
+        let draw = hoisting_draw(state);
+        let sign = draw & 0x8000_0000;
+        let mantissa = hoisting_draw(state) & 0x007f_ffff;
+        match (draw >> 8) % 1024 {
+            0 | 1 => f32::from_bits(sign),
+            2 | 3 => f32::from_bits(sign | mantissa),
+            4 => infinity,
+            5 => f32::from_bits(HOISTING_NAN),
+            _ => f32::from_bits(sign | (127 - 24 + (draw >> 18) % 49) << 23 | mantissa),
+        }
+    }
+
+    /// Both planes of one reduction into buffer 1 of a fresh stereo lease whose buffers `2..` hold
+    /// `contents`, as bit patterns. The output starts at a sentinel, and every input buffer must
+    /// come out exactly as it went in.
+    fn hoisting_reduction_bits(
+        frames: usize,
+        contents: &[[Vec<f32>; 2]],
+        reduce: impl Fn(&mut ArenaLease, usize),
+    ) -> [Vec<u32>; 2] {
+        let mut lease = stereo_lease(frames, contents.len() + 1);
+        for plane in 0..2 {
+            lease.write(plane, 1).fill(f32::from_bits(0x7f7f_7f7f));
+            for (index, words) in contents.iter().enumerate() {
+                lease
+                    .write(plane, index as u32 + 2)
+                    .copy_from_slice(&words[plane]);
+            }
+        }
+        for plane in 0..2 {
+            reduce(&mut lease, plane);
+        }
+        let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        for (index, words) in contents.iter().enumerate() {
+            for (plane, plane_words) in words.iter().enumerate() {
+                assert_eq!(
+                    bits(lease.read(plane, index as u32 + 2)),
+                    bits(plane_words),
+                    "input buffer {} plane {plane} was written",
+                    index + 2
+                );
+            }
+        }
+        [bits(lease.read(0, 1)), bits(lease.read(1, 1))]
+    }
+
+    /// One width of the #898 gate: the hoisted kernel against the frozen per-vector one.
+    fn assert_hoisting_matches_frozen<L: Lane>(
+        frames: usize,
+        contents: &[[Vec<f32>; 2]],
+        ids: &[u32],
+        reference: &[Vec<u32>; 2],
+    ) {
+        let hoisted = hoisting_reduction_bits(frames, contents, |lease, plane| {
+            reduce_many::<L>(lease, plane, 1, ids);
+        });
+        let frozen = hoisting_reduction_bits(frames, contents, |lease, plane| {
+            frozen_per_vector_reduce_many::<L>(lease, plane, 1, ids[0], ids[1], &ids[2..]);
+        });
+        let context = format!(
+            "width {} fan-in {} frames {frames} ids {ids:?}",
+            L::WIDTH,
+            ids.len()
+        );
+        assert_eq!(hoisted, frozen, "hoisted vs frozen, {context}");
+        assert_eq!(
+            &hoisted, reference,
+            "hoisted vs scalar reference, {context}"
+        );
+    }
+
+    /// Issue #898 gate 1: random N-input reductions are bit-identical before and after the arena
+    /// slices were hoisted out of the vector loop.
+    ///
+    /// "Before" is `frozen_per_vector_reduce_many`, the pre-#898 kernel kept verbatim. The scalar
+    /// left-to-right `reduce` is the D9 definition both must equal. Every lane width runs, and so
+    /// does the production `reduce_plane`. Fan-in is random in `2..=64` and also pinned at every
+    /// group edge up to 65. Block lengths are random, including non-multiples of every lane
+    /// width. Edge lists repeat buffers and name the silence buffer, and both planes differ.
+    /// Every NaN in the corpus carries one payload and each case uses infinities of one sign, so
+    /// no expected bit depends on which operand of an add the compiler puts first.
+    ///
+    /// Red mutations: start each group after the first from a fresh subtotal, or take the groups
+    /// in reverse order. The test checks that its own corpus tells both apart from the reference.
+    #[test]
+    fn random_fan_in_reductions_are_bit_identical_before_and_after_slice_hoisting() {
+        use engine::realtime::ARENA_SILENCE_BUFFER;
+        let _fp_env = lane::fpenv::CanonicalFpEnv::enter();
+        let mut state = 0x0898_5eed_u32;
+        let mut cases: Vec<(usize, usize)> = [2, 7, 8, 9, 15, 16, 17, 63, 64, 65]
+            .into_iter()
+            .flat_map(|fan_in| [(fan_in, 1), (fan_in, 13), (fan_in, 128)])
+            .collect();
+        for _ in 0..120 {
+            let fan_in = 2 + hoisting_draw(&mut state) as usize % 63;
+            let frames = 1 + hoisting_draw(&mut state) as usize % 131;
+            cases.push((fan_in, frames));
+        }
+        let (mut fresh_subtotal_differs, mut reversed_groups_differ) = (0_usize, 0_usize);
+        for (case, &(fan_in, frames)) in cases.iter().enumerate() {
+            let infinity = if case % 2 == 0 {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            let contents: Vec<[Vec<f32>; 2]> = (0..fan_in)
+                .map(|_| {
+                    [0, 1].map(|_| {
+                        (0..frames)
+                            .map(|_| hoisting_word(&mut state, infinity))
+                            .collect()
+                    })
+                })
+                .collect();
+            // Buffer 1 is the output and `2..=fan_in + 1` hold `contents`; about one edge in
+            // sixteen reads the silence buffer, and the rest pick a content buffer with repeats.
+            let ids: Vec<u32> = (0..fan_in)
+                .map(|_| {
+                    let draw = hoisting_draw(&mut state);
+                    if draw.is_multiple_of(16) {
+                        ARENA_SILENCE_BUFFER
+                    } else {
+                        2 + (draw >> 4) % fan_in as u32
+                    }
+                })
+                .collect();
+            let word = |plane: usize, id: u32, frame: usize| {
+                if id == ARENA_SILENCE_BUFFER {
+                    0.0_f32
+                } else {
+                    contents[id as usize - 2][plane][frame]
+                }
+            };
+            let chain = |plane: usize, frame: usize, ids: &mut dyn Iterator<Item = u32>| {
+                ids.map(|id| word(plane, id, frame))
+                    .reduce(|a, b| a + b)
+                    .expect("a non-empty edge list")
+            };
+            let reference: [Vec<u32>; 2] = [0, 1].map(|plane| {
+                (0..frames)
+                    .map(|frame| chain(plane, frame, &mut ids.iter().copied()).to_bits())
+                    .collect()
+            });
+            for (plane, expected_plane) in reference.iter().enumerate() {
+                for (frame, &expected) in expected_plane.iter().enumerate() {
+                    let fresh = ids
+                        .chunks(REDUCE_GROUP)
+                        .map(|group| chain(plane, frame, &mut group.iter().copied()))
+                        .reduce(|a, b| a + b)
+                        .expect("a non-empty edge list");
+                    let reversed = chain(
+                        plane,
+                        frame,
+                        &mut ids.chunks(REDUCE_GROUP).rev().flatten().copied(),
+                    );
+                    fresh_subtotal_differs += usize::from(fresh.to_bits() != expected);
+                    reversed_groups_differ += usize::from(reversed.to_bits() != expected);
+                }
+            }
+
+            assert_hoisting_matches_frozen::<f32>(frames, &contents, &ids, &reference);
+            assert_hoisting_matches_frozen::<lane::Simd4>(frames, &contents, &ids, &reference);
+            assert_hoisting_matches_frozen::<lane::Simd8>(frames, &contents, &ids, &reference);
+            let production = hoisting_reduction_bits(frames, &contents, |lease, plane| {
+                reduce_plane(lease, plane, 1, &ids);
+            });
+            assert_eq!(
+                production, reference,
+                "reduce_plane vs scalar reference, fan-in {fan_in} frames {frames} ids {ids:?}"
+            );
+        }
+        assert!(
+            fresh_subtotal_differs > 0,
+            "the corpus cannot tell a fresh subtotal per group from the chain"
+        );
+        assert!(
+            reversed_groups_differ > 0,
+            "the corpus cannot tell reversed groups from the chain"
+        );
+    }
+
+    /// Issue #898: a fan-in of all `-0.0` stays `-0.0` across every group edge. A later group
+    /// that restarted from a `0.0` fill, rather than from the stored running sum, would return
+    /// `+0.0` here.
+    #[test]
+    fn negative_zero_survives_every_reduction_group_edge() {
+        for fan_in in [2_usize, 8, 9, 16, 17, 64, 65] {
+            for frames in [1_usize, 5, 8, 13] {
+                let contents: Vec<[Vec<f32>; 2]> = (0..fan_in)
+                    .map(|_| [vec![-0.0; frames], vec![-0.0; frames]])
+                    .collect();
+                let ids: Vec<u32> = (2..=fan_in as u32 + 1).collect();
+                let reduced = hoisting_reduction_bits(frames, &contents, |lease, plane| {
+                    reduce_plane(lease, plane, 1, &ids);
+                });
+                assert_eq!(
+                    reduced,
+                    [
+                        vec![(-0.0_f32).to_bits(); frames],
+                        vec![(-0.0_f32).to_bits(); frames]
+                    ],
+                    "fan-in {fan_in} frames {frames}"
+                );
+            }
+        }
     }
 
     #[test]
