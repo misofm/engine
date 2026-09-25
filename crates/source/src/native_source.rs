@@ -4150,6 +4150,8 @@ mod tests {
     }
 
     struct WorkerTrace {
+        /// Transfer blocks the prepared ring allocated (before any injected block).
+        blocks: usize,
         published: Vec<PublishedBlock>,
         idles: Vec<Idle>,
         telemetry: Vec<SourceProducerTelemetry>,
@@ -4188,8 +4190,9 @@ mod tests {
         let mut idles = Vec::new();
         let mut telemetry = Vec::new();
         // Every prepared block starts on the recycle queue, however many the ring allocates.
-        let mut blocks = job.provider.producer.recycle_consumer.available_at_entry();
-        assert!(blocks > 0);
+        let prepared_blocks = job.provider.producer.recycle_consumer.available_at_entry();
+        assert!(prepared_blocks > 0);
+        let mut blocks = prepared_blocks;
         for step in script {
             match *step {
                 ScriptStep::Run => {
@@ -4238,6 +4241,7 @@ mod tests {
             telemetry.push(job.provider.telemetry());
         }
         WorkerTrace {
+            blocks: prepared_blocks,
             published: render.published,
             idles,
             telemetry,
@@ -4250,14 +4254,16 @@ mod tests {
         let mut samples: Vec<f32> = (0_u16..96)
             .map(|index| f32::from(index) * 0.375 - 7.0)
             .collect();
-        // Interleaved index = frame * 2 + channel. Frames 21..=24 and 30..=33 stay plain: the
-        // pre-change worker decoded them ahead of a stall and then dropped them at a seek.
+        // Interleaved index = frame * 2 + channel. Frames 21..=28 and 30..=33 stay plain: while
+        // stalled, the pre-change worker decoded 21..=24 (three-block ring) or 25..=28 (#917's
+        // three-plus-one ring) ahead of the generation-2 seek, then 30..=33 ahead of the
+        // generation-3 admission, and dropped both.
         samples[2 * 2 + 1] = f32::from_bits(1);
         samples[7 * 2] = -0.0;
         samples[10 * 2] = f32::NAN;
         samples[15 * 2 + 1] = f32::INFINITY;
         samples[20 * 2 + 1] = f32::INFINITY;
-        samples[27 * 2] = f32::NEG_INFINITY;
+        samples[29 * 2] = f32::NEG_INFINITY;
         samples[41 * 2 + 1] = f32::NAN;
         samples[42 * 2] = f32::from_bits(0x8000_0001);
         samples
@@ -4344,11 +4350,10 @@ mod tests {
         assert_eq!(rows, PUBLISHED_SEQUENCE_ORACLE);
         // Where each `Run` and the one `ServiceOnce` left the worker, as the pre-change worker
         // recorded it: stalled on the ring, idle after the end of region, or mid-decode.
-        let mut idles = [Idle::WaitingForRender].repeat(17);
-        idles.extend([Idle::WaitingForCommand].repeat(5));
-        idles.push(Idle::Progress);
-        idles.extend([Idle::WaitingForRender].repeat(7));
-        idles.extend([Idle::WaitingForCommand].repeat(6));
+        let idles: Vec<Idle> = PUBLISHED_SEQUENCE_IDLE_RUNS
+            .iter()
+            .flat_map(|&(idle, count)| [idle].repeat(count))
+            .collect();
         assert_eq!(trace.idles, idles);
         // The script really stalled on a full ring and really hit seek backpressure.
         assert!(
@@ -4358,12 +4363,65 @@ mod tests {
                 .all(|telemetry| telemetry.data_full_count == 0)
         );
         assert_eq!(trace.telemetry[2].recycle_empty_count, 3);
-        assert_eq!(trace.telemetry[2].cumulative_written_frames, 12);
+        assert_eq!(
+            trace.telemetry[2].cumulative_written_frames,
+            4 * u64::try_from(trace.blocks).expect("block count fits u64")
+        );
     }
 
-    /// Recorded from the pre-change worker (decode into `planar_staging`, then
-    /// `submit_native_planar`) on this fixture and script: `(generation, start frame, frames,
-    /// end of region, sanitized watermark, FNV-1a-64 of the published words)` per block.
+    /// The two recorded gate-1 constants as Rust source, ready to replace the ones below.
+    fn published_sequence_constants(trace: &WorkerTrace) -> String {
+        let mut text = String::from(
+            "    const PUBLISHED_SEQUENCE_ORACLE: &[(u64, u64, u32, bool, u64, u64)] = &[\n",
+        );
+        for block in &trace.published {
+            let (generation, start, frames, end, sanitized, digest) = block.oracle_row();
+            let hex = format!("{digest:016x}");
+            text.push_str(&format!(
+                "        ({generation}, {start}, {frames}, {end}, {sanitized}, 0x{}_{}_{}_{}),\n",
+                &hex[..4],
+                &hex[4..8],
+                &hex[8..12],
+                &hex[12..]
+            ));
+        }
+        text.push_str("    ];\n");
+        text.push_str("    const PUBLISHED_SEQUENCE_IDLE_RUNS: &[(Idle, usize)] = &[\n");
+        let mut runs: Vec<(Idle, usize)> = Vec::new();
+        for &idle in &trace.idles {
+            match runs.last_mut() {
+                Some((last, count)) if *last == idle => *count += 1,
+                _ => runs.push((idle, 1)),
+            }
+        }
+        for (idle, count) in runs {
+            text.push_str(&format!("        (Idle::{idle:?}, {count}),\n"));
+        }
+        text.push_str("    ];\n");
+        text
+    }
+
+    /// Regenerates the recorded constants from the verbatim pre-change worker on the ring this
+    /// tree prepares (issue #919 evidence, "Regenerating gate 1"). Run with `--ignored
+    /// --nocapture` and paste its output over the two constants.
+    #[test]
+    #[ignore = "prints the gate-1 constants for a deliberate re-record; asserts nothing"]
+    fn print_published_sequence_constants_from_the_pre_change_worker() {
+        let oracle = pre_change_trace(
+            &published_sequence_fixture(),
+            published_sequence_request(),
+            &published_sequence_script(),
+        );
+        println!("prepared transfer blocks: {}", oracle.blocks);
+        print!("{}", published_sequence_constants(&oracle));
+    }
+
+    /// Recorded from the pre-change production worker (decode into `planar_staging`, then
+    /// `submit_native_planar`, as of `c03848a3`) on this fixture, script and three-block ring:
+    /// `(generation, start frame, frames, end of region, sanitized watermark, FNV-1a-64 of the
+    /// published words)` per block, then the run-length idle states. Kept adjacent and in this
+    /// order so `print_published_sequence_constants_from_the_pre_change_worker` output replaces
+    /// both in one paste.
     const PUBLISHED_SEQUENCE_ORACLE: &[(u64, u64, u32, bool, u64, u64)] = &[
         (1, 1, 4, false, 1, 0x34d9_bb8f_8505_026d),
         (1, 5, 4, false, 1, 0x0dcf_060d_29cb_76c8),
@@ -4375,7 +4433,7 @@ mod tests {
         (3, 14, 4, false, 6, 0xf699_5fc0_678d_4065),
         (3, 18, 4, false, 7, 0x31e9_9e34_2233_85d0),
         (3, 22, 4, false, 7, 0x2913_d5cd_3aa0_e835),
-        (3, 26, 4, false, 8, 0x06d9_d950_4515_21ee),
+        (3, 26, 4, false, 8, 0x8752_b917_49be_3d5e),
         (3, 30, 4, false, 8, 0xcd1f_a272_97b8_0d30),
         (3, 34, 4, false, 8, 0x4397_75c4_c7f7_a775),
         (3, 38, 4, false, 9, 0x35b8_5933_efba_884b),
@@ -4383,11 +4441,18 @@ mod tests {
         (5, 12, 4, false, 12, 0x8cd0_48ba_c309_1175),
         (5, 16, 4, false, 12, 0xf2b5_fbd5_5306_e945),
         (5, 20, 4, false, 13, 0x46e9_d3c6_26e9_7094),
-        (5, 24, 4, false, 14, 0xdb1a_4bd6_21f1_9076),
-        (5, 28, 4, false, 14, 0x9732_cdd3_b4e0_cc90),
+        (5, 24, 4, false, 13, 0xd63b_821c_572d_c9c5),
+        (5, 28, 4, false, 14, 0x1b94_a93f_ffa2_81db),
         (5, 32, 4, false, 14, 0x2564_c537_778d_ae75),
         (5, 36, 4, false, 14, 0x2114_7b91_add9_18f5),
         (5, 40, 3, true, 16, 0xda44_2ca2_da4a_27ab),
+    ];
+    const PUBLISHED_SEQUENCE_IDLE_RUNS: &[(Idle, usize)] = &[
+        (Idle::WaitingForRender, 17),
+        (Idle::WaitingForCommand, 5),
+        (Idle::Progress, 1),
+        (Idle::WaitingForRender, 7),
+        (Idle::WaitingForCommand, 6),
     ];
 
     /// The pre-change worker, kept as issue #919's live oracle: `service_job` verbatim as of the
@@ -4623,12 +4688,15 @@ mod tests {
 
     #[test]
     fn a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead() {
-        // The pre-change worker decoded frames 21..=24 into its staging block while the ring was
-        // full and dropped them at the generation-2 seek; the current worker, holding no block,
-        // never decodes them there. A replacement at frame 22 is therefore counted once more
-        // by the old worker (both still decode frame 22 later, for generations 3, 4 and 5).
+        // The pre-change worker decoded one quantum into its staging block while the ring was
+        // full and dropped it at the generation-2 seek: frames 21..=24 on a three-block ring,
+        // 25..=28 on #917's three-plus-one ring. The current worker, holding no block, never
+        // decodes it there. One NaN in each candidate makes exactly one replacement counted once
+        // more by the old worker on either shape; the other NaN lies in a quantum both workers
+        // publish or both decode later, for generations 3 and 5.
         let mut samples = published_sequence_fixture();
         samples[22 * 2] = f32::NAN;
+        samples[26 * 2] = f32::NAN;
         let current = run_worker_script(
             &samples,
             published_sequence_request(),
@@ -4669,11 +4737,15 @@ mod tests {
             &script,
             service_job,
         );
-        // The commit of frames 13..=16 met the full data queue: nothing was acked, and the
+        // The commit of the quantum after the ring's own blocks met the full data queue: nothing
+        // was acked (only the ring's own blocks are counted as written), and the
         // worker waited for the render with the stamped block deferred in the provider.
         assert_eq!(current.idles[1], Idle::WaitingForRender);
         assert!(current.telemetry[2].data_full_count > 0);
-        assert_eq!(current.telemetry[2].cumulative_written_frames, 12);
+        assert_eq!(
+            current.telemetry[2].cumulative_written_frames,
+            4 * u64::try_from(current.blocks).expect("block count fits u64")
+        );
         // The retry published that block once, and the stream continued contiguously: the same
         // blocks, word for word, as the pre-change worker streaming the region with no stall.
         let mut plain = vec![Run];
