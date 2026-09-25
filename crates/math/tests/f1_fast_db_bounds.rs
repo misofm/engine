@@ -637,6 +637,294 @@ fn f1_fast_tier_stays_within_twice_the_exact_tier() {
     }
 }
 
+// Issue #880 MA-5 restatements from transient-shaper `src/lib.rs`; parameter IDs 1 and 2 are both
+// in [-1, 1]. Keep this prospective evidence out of the six admitted-crossing count until R2.
+const SHAPER_FLOOR: f32 = f32::from_bits(0x322b_cc77);
+const SHAPER_CONTRAST_LIMIT_DB: f32 = 24.0;
+const SHAPER_SHAPE_LIMIT_DB: f32 = 18.0;
+const SHAPER_AMOUNT_MIN: f32 = -1.0;
+const SHAPER_AMOUNT_MAX: f32 = 1.0;
+const F1_SHAPER_LEVEL_MIN: f32 = 1.0e-8;
+const F1_SHAPER_LEVEL_MAX: f32 = 16.0;
+
+fn shaper_shape_f32(contrast_db: f32, attack: f32, sustain: f32) -> f32 {
+    attack
+        .mul(contrast_db.max(0.0))
+        .add(sustain.mul((-contrast_db).max(0.0)))
+        .clamp(-SHAPER_SHAPE_LIMIT_DB, SHAPER_SHAPE_LIMIT_DB)
+}
+
+fn shaper_shape_f64(contrast_db: f64, attack: f64, sustain: f64) -> f64 {
+    (attack * contrast_db.max(0.0) + sustain * (-contrast_db).max(0.0)).clamp(-18.0, 18.0)
+}
+
+#[test]
+fn f1_prospective_shaper_r2_domains_are_covered() {
+    assert_eq!(SHAPER_FLOOR.to_bits(), F1_SHAPER_LEVEL_MIN.to_bits());
+
+    // If the ±24 dB contrast clamp does not saturate, the amplitude ratio is within these bounds.
+    let unsaturated_ratio_min = math::pow(10.0, -24.0 / 20.0) as f32;
+    let unsaturated_ratio_max = math::pow(10.0, 24.0 / 20.0) as f32;
+    assert!(unsaturated_ratio_min >= F1_SHAPER_LEVEL_MIN);
+    assert!(unsaturated_ratio_max <= F1_SHAPER_LEVEL_MAX);
+
+    // For every corner of the parameter domains and contrast range, the final shape is clamped
+    // inside F1's applied-gain domain [-160, 24] dB.
+    for attack in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
+        for sustain in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
+            for contrast in [-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB] {
+                let shape = shaper_shape_f32(contrast, attack, sustain);
+                assert!((-18.0..=18.0).contains(&shape));
+                assert!((-160.0..=24.0).contains(&shape));
+            }
+        }
+    }
+}
+
+fn prospective_low_ratio_rail(x: f32) -> Measurement {
+    let fast = fast_level_db::<f32>(x);
+    let exact = exact_level_db(x);
+    let fast_rail = fast.clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+    let exact_rail = exact.clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+    let on_rail = fast <= -SHAPER_CONTRAST_LIMIT_DB
+        && exact <= -SHAPER_CONTRAST_LIMIT_DB
+        && fast_rail == -SHAPER_CONTRAST_LIMIT_DB
+        && exact_rail == -SHAPER_CONTRAST_LIMIT_DB;
+    Measurement {
+        error_db: Some(if on_rail { 0.0 } else { 1.0 }),
+        value: fast,
+    }
+}
+
+fn prospective_high_ratio_rail(x: f32) -> Measurement {
+    let fast = fast_level_db::<f32>(x);
+    let exact = exact_level_db(x);
+    let fast_rail = fast.clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+    let exact_rail = exact.clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+    let on_rail = fast >= SHAPER_CONTRAST_LIMIT_DB
+        && exact >= SHAPER_CONTRAST_LIMIT_DB
+        && fast_rail == SHAPER_CONTRAST_LIMIT_DB
+        && exact_rail == SHAPER_CONTRAST_LIMIT_DB;
+    Measurement {
+        error_db: Some(if on_rail { 0.0 } else { 1.0 }),
+        value: fast,
+    }
+}
+
+#[test]
+#[ignore = "full positive f32 range proof: run with --release -- --ignored"]
+fn f1_prospective_shaper_outside_level_domain_lands_on_clamp_rails_exhaustive() {
+    let floor_bits = SHAPER_FLOOR.to_bits();
+    let below = sweep(0, floor_bits - 1, 1, prospective_low_ratio_rail);
+    assert_eq!(below.checked, u64::from(floor_bits));
+    assert_eq!(
+        below.worst_scaled, 0,
+        "a ratio below the F1 floor missed -24 dB"
+    );
+    println!(
+        "prospective shaper low ratios: {} values including zero/subnormals, exact and fast clamp to -24 dB",
+        below.checked
+    );
+
+    let first_high_bits = F1_SHAPER_LEVEL_MAX.to_bits();
+    let last_finite_bits = f32::MAX.to_bits();
+    let above = sweep(
+        first_high_bits,
+        last_finite_bits,
+        1,
+        prospective_high_ratio_rail,
+    );
+    assert_eq!(
+        above.checked,
+        u64::from(last_finite_bits - first_high_bits) + 1
+    );
+    assert_eq!(
+        above.worst_scaled, 0,
+        "a finite ratio at or above 16 missed +24 dB"
+    );
+    println!(
+        "prospective shaper high ratios: {} finite values, exact and fast clamp to +24 dB",
+        above.checked
+    );
+
+    let positive_infinity = f32::INFINITY;
+    assert!(fast_level_db::<f32>(positive_infinity) >= SHAPER_CONTRAST_LIMIT_DB);
+    assert!(exact_level_db(positive_infinity) >= SHAPER_CONTRAST_LIMIT_DB);
+}
+
+#[derive(Clone, Copy, Default)]
+struct Maximum {
+    value: f64,
+    bits: u32,
+    attack: f32,
+    sustain: f32,
+}
+
+#[derive(Default)]
+struct ShaperPipelineSweep {
+    checked: u64,
+    contrast_difference: Maximum,
+    gain_difference_db: Maximum,
+    fast_oracle_gain_error: Maximum,
+    exact_oracle_gain_error: Maximum,
+}
+
+fn record_maximum(maximum: &mut Maximum, value: f64, bits: u32, attack: f32, sustain: f32) {
+    if value > maximum.value {
+        *maximum = Maximum {
+            value,
+            bits,
+            attack,
+            sustain,
+        };
+    }
+}
+
+fn shaper_pipeline_sweep() -> ShaperPipelineSweep {
+    let (first_bits, last_bits) = level_domain();
+    let total = u64::from(last_bits - first_bits) + 1;
+    let threads = thread::available_parallelism().map_or(1, |value| value.get().min(4));
+    let span = total.div_ceil(threads as u64);
+
+    let chunks = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for index in 0..threads {
+            handles.push(scope.spawn(move || {
+                let start = index as u64 * span;
+                let end = (start + span).min(total);
+                let mut local = ShaperPipelineSweep::default();
+                if start >= total {
+                    return local;
+                }
+                for offset in start..end {
+                    let bits = first_bits + offset as u32;
+                    let ratio = f32::from_bits(bits);
+                    let exact_contrast = exact_level_db(ratio)
+                        .clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+                    let fast_contrast = fast_level_db::<f32>(ratio)
+                        .clamp(-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB);
+                    record_maximum(
+                        &mut local.contrast_difference,
+                        f64::from((fast_contrast - exact_contrast).abs()),
+                        bits,
+                        0.0,
+                        0.0,
+                    );
+
+                    let oracle_contrast = restate_level_db(f64::from(ratio)).clamp(
+                        -f64::from(SHAPER_CONTRAST_LIMIT_DB),
+                        f64::from(SHAPER_CONTRAST_LIMIT_DB),
+                    );
+                    for attack in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
+                        for sustain in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
+                            let exact_shape = shaper_shape_f32(exact_contrast, attack, sustain);
+                            let fast_shape = shaper_shape_f32(fast_contrast, attack, sustain);
+                            let oracle_shape = shaper_shape_f64(
+                                oracle_contrast,
+                                f64::from(attack),
+                                f64::from(sustain),
+                            );
+                            let exact_gain = exact_gain_from_db(exact_shape);
+                            let fast_gain = fast_gain_from_db::<f32>(fast_shape);
+                            let oracle_gain = restate_gain(oracle_shape);
+                            let gain_difference_db = (20.0
+                                * math::log10(f64::from(fast_gain) / f64::from(exact_gain)))
+                            .abs();
+                            record_maximum(
+                                &mut local.gain_difference_db,
+                                gain_difference_db,
+                                bits,
+                                attack,
+                                sustain,
+                            );
+                            record_maximum(
+                                &mut local.fast_oracle_gain_error,
+                                (f64::from(fast_gain) - oracle_gain).abs(),
+                                bits,
+                                attack,
+                                sustain,
+                            );
+                            record_maximum(
+                                &mut local.exact_oracle_gain_error,
+                                (f64::from(exact_gain) - oracle_gain).abs(),
+                                bits,
+                                attack,
+                                sustain,
+                            );
+                        }
+                    }
+                    local.checked += 1;
+                }
+                local
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("MA-5 shaper worker panicked"))
+            .collect::<Vec<_>>()
+    });
+
+    let mut total_metrics = ShaperPipelineSweep::default();
+    for chunk in chunks {
+        total_metrics.checked += chunk.checked;
+        for (target, candidate) in [
+            (
+                &mut total_metrics.contrast_difference,
+                chunk.contrast_difference,
+            ),
+            (
+                &mut total_metrics.gain_difference_db,
+                chunk.gain_difference_db,
+            ),
+            (
+                &mut total_metrics.fast_oracle_gain_error,
+                chunk.fast_oracle_gain_error,
+            ),
+            (
+                &mut total_metrics.exact_oracle_gain_error,
+                chunk.exact_oracle_gain_error,
+            ),
+        ] {
+            record_maximum(
+                target,
+                candidate.value,
+                candidate.bits,
+                candidate.attack,
+                candidate.sustain,
+            );
+        }
+    }
+    total_metrics
+}
+
+#[test]
+#[ignore = "full shaper-pipeline sweep: run with --release -- --ignored"]
+fn f1_prospective_shaper_pipeline_error_and_oracle_are_exhaustive() {
+    let measured = shaper_pipeline_sweep();
+    assert_eq!(measured.checked, 257_176_458);
+    println!(
+        "prospective shaper max |Δcontrast|: {:.6e} dB at ratio {:#010x}",
+        measured.contrast_difference.value, measured.contrast_difference.bits
+    );
+    println!(
+        "prospective shaper max |Δgain|: {:.6e} dB at ratio {:#010x}, attack {}, sustain {}",
+        measured.gain_difference_db.value,
+        measured.gain_difference_db.bits,
+        measured.gain_difference_db.attack,
+        measured.gain_difference_db.sustain
+    );
+    println!(
+        "unit-input absolute gain error vs f64 oracle: fast {:.6e} (ratio {:#010x}), exact {:.6e}",
+        measured.fast_oracle_gain_error.value,
+        measured.fast_oracle_gain_error.bits,
+        measured.exact_oracle_gain_error.value
+    );
+    assert!(measured.contrast_difference.value <= 4.3487e-5);
+    assert!(measured.gain_difference_db.value <= 5.8e-5);
+    assert!(measured.fast_oracle_gain_error.value <= 2.0e-5);
+    assert!(measured.exact_oracle_gain_error.value <= 2.0e-5);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The six named crossings, each pinned by an independent restatement.
 //
