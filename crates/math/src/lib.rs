@@ -29,6 +29,21 @@
 //! fuses a multiply and an add. Neither square-root wrapper branches on target features. Gate M3
 //! pins the vendored scalar layer structurally (a source scan) and numerically (digests over a
 //! one-million-point corpus, re-checked under wasmtime by job 83d).
+//!
+//! # Adding a function
+//!
+//! A function needed per sample (T0), or per frame on the render thread, belongs here as a
+//! `Lane`-generic implementation built only from `Lane` basic operations, with unfused
+//! multiply-adds. Prove its numeric contract with an exhaustive or full-domain sweep like M1/F1:
+//! state monotonicity where the function is monotone, include red mutations, and show bit identity
+//! across `Scalar`, `Simd4`, `Simd8`, and wasm as in M2. Functions used only on the control plane
+//! (T2/T3) remain scalar. Any reduced-accuracy tier needs a static source seal modelled on
+//! `clippy.toml`'s `disallowed-methods` rule for the fast tier.
+//!
+//! Upcoming consumers include [#15 (De-esser)](https://github.com/misofm/engine/issues/15) and
+//! [#17 (Dynamic EQ)](https://github.com/misofm/engine/issues/17), which need per-sample dB
+//! conversions and may need per-sample coefficient updates, plus [#763 (engine-owned
+//! analysis)](https://github.com/misofm/engine/issues/763).
 
 #![no_std]
 

@@ -394,8 +394,8 @@ fn sqrt_is_correctly_rounded() {
         for mantissa in [
             0,
             1,
-            0x1555_5555_5555_5,
-            0x5555_5555_5555_5,
+            0x0001_5555_5555_5555,
+            0x0005_5555_5555_5555,
             0x000a_aaaa_aaaa_aaaa,
             0x000f_ffff_ffff_ffff,
         ] {
