@@ -754,3 +754,18 @@ source equality before timing, preserve the original benchmark workload and fixt
 and continue validating historical/recovered baseline records. #902 owns extraction
 and baseline promotion separately. This adaptation neither retimes the baseline nor
 permits a changed workload, new framework, or additional measured rounds.
+
+### MB-2 oracle stop condition — amended R2 pending
+
+The approved implementation reached the issue's explicit stop condition: the complete
+existing 96-sample shaper oracle row (48 kHz, attack .75, sustain -.5, mix 1) exceeds
+the unchanged `< 2.0e-5` absolute error gate. Baseline maximum is
+`1.668930054e-5` at index 22; candidate maximum is `2.098083496e-5` at index 19
+(production `5.327214718`, oracle `5.327193737`). The excess is 4.90%.
+MA-5's measured conversion figures cover four amount corners, not a uniform
+full-parameter-domain rendered-path bound; this interior row also includes envelope
+rounding. No tolerance has been widened. The owner was asked to permit `2.5e-5` for
+this one row with other gates unchanged, or retain the exact-tier shaper. No amended
+ruling has yet been received. Failed-but-buildable MB-2 work is isolated pending that
+ruling; independent R1 and R3 work continues. Shaper pins for R1 are deferred until
+this decision so the final batch makes only the required source choice.
