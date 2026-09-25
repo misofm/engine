@@ -1324,6 +1324,20 @@ impl SessionRuntime {
         self.plan.bank_route_folds()
     }
 
+    /// Bank-chain lanes whose scatter this plan pointed straight at their consumer's buffer (issue
+    /// #202 rec 3).
+    ///
+    /// A count for the reason [`SessionRuntime::bank_route_folds`] is one: the redirect renders the
+    /// same bits by construction, so nothing but a count can say whether it fired. Fixed at bind. A
+    /// folded lane is not counted: its tile goes to the chain's epilogue, so it has no scatter to
+    /// point anywhere.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_scatter_redirects(&self) -> u64 {
+        self.plan.bank_scatter_redirects()
+    }
+
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
     pub fn drain_meters(&mut self) -> u64 {
         let mut frames = 0;

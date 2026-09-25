@@ -86,3 +86,121 @@ None. Merge first in the cycle so the batch-boundary benchmark records carry the
 - The `issue` field of the record is the constant `ISSUE` (`console.rs:134`); leave it.
 - Every existing accepted record under `artifacts/` lacks the new keys and is historical
   evidence; the validator is applied to new records only, so do not rewrite artifacts.
+
+## Attempt 1 evidence
+
+Implementation commit: `569ba338` (Terra, attempt 1), on `codex/914-meters-fold-counters` from
+`12b621f2`. Tooling only: no file under `crates/` changed.
+
+**Design.** `SessionRuntime::bank_scatter_redirects` delegates to the plan beside
+`bank_route_folds` (`tools/console-workload/src/lib.rs`). `FacilityMeasurement` gains per-arm
+`bank_route_folds` and `bank_scatter_redirects` vectors, read once per arm right after the 64
+warm-up renders and before the audit is armed, so outside every clock; `meters_record` emits
+`meters_off_bank_route_folds`, `meters_on_bank_route_folds`, `meters_off_bank_scatter_redirects`
+and `meters_on_bank_scatter_redirects` from index 0 (`PlanConfig::BASELINE`) and index 1
+(`meters: true`) of `METER_CONFIGS`. The counters are recorded, not asserted in-run: an arm that
+stopped folding is a finding the raw record must keep (the runner preserves raw bytes on a
+validation failure) and the validator must refuse, whereas an in-run panic would lose the record
+and every row after it. `meters_keys` gains the four keys; `meters_record_valid` requires all four
+to be non-negative integers, `meters_off_bank_route_folds == .tracks` (which `.tracks == 64`
+already pins), and on == off for both counters.
+
+**Deviation (inside `console.rs`).** To produce the gate-3 record without running the benchmark,
+`FacilityMeasurement::run` now delegates to `run_for(configs, observations)`, and both facility
+records emit the stored `observations` rather than the `OBSERVATIONS` constant. Every run the
+runner launches passes `OBSERVATIONS` (1000), so production records are unchanged; a shortened run
+says so in its record, and `common_shape` refuses it (`.observations == 1000`).
+
+**Not changed, and why.** `console-benchmark-record-validator.jq` only includes the library.
+`console-benchmark-validator.jq` restates record counts (still two `console_meters` records,
+46 in total) and digest consistency, never the meters key list, so it is consistent as is.
+`run-console-benchmark.sh` has no comment enumerating the meters record's fields. No artifact
+under `artifacts/` was touched.
+
+**Observed values.** Both arms fold 64 routes and redirect 0 scatters. Zero redirects is what the
+graph runtime's own filter implies: a folded run's lanes are excluded from the redirect count
+(`crates/graph/src/runtime.rs`, the `folded_runs` filter under the comment "A folded chain is
+excluded"), and every route of this console folds. The validator pins the redirect pair equal, not
+to zero, as the brief specifies.
+
+**Tests added.**
+
+- `tools/bench/src/console.rs`: `console::tests::the_meters_record_carries_each_arms_fold_and_redirect_counters`
+  -- runs `FacilityMeasurement::run_for(&METER_CONFIGS, 8)`, asserts both arms fold `tracks`
+  routes and agree on redirects, then asserts each of the four keys appears exactly once in the
+  emitted record carrying its arm's value, and that the record states `"observations":8`.
+- `scripts/test-console-benchmark.sh`: the meters fixture carries the four fields (64, 64, 0, 0),
+  so the per-key structural sweep now deletes and nulls each of them; new named rejects: "a meters
+  record without its fold and redirect counters (the shape before #914)", "a meters record missing
+  the metered arm fold count", "a metered arm whose route fold declined", "a metered arm folding
+  more routes than the unmetered arm", "a metered arm whose scatter redirects differ from the
+  unmetered arm", "two arms that agree but do not fold every route of the console", "a negative
+  redirect count", "a fractional redirect count", "a redirect count written as a string"; new
+  accept: "a meters pair whose arms redirect the same lanes".
+
+**Gates** (all run in the worktree at `569ba338`).
+
+| gate | result |
+|---|---|
+| `bash scripts/test-console-benchmark.sh` | `console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0)` |
+| `bash scripts/check-bench-policy.sh` | `bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, 6 unsafe owners, 3 subjects on the shared timer)` |
+| `bash scripts/test-bench-policy.sh` | `... bench policy mutations: ok` |
+| `bash scripts/check-console-benchmark-fixture.sh` | `console fixture: ok (64 tracks, 8 full banks, EQ + compressor strip, 13 distinct trims)` |
+| `bash scripts/check-realtime-policy.sh` | `realtime policy: ok (50 marked regions in 14 files)` |
+| `cargo test -p bench -p console-workload` | bench 62 passed; console-workload automation 4, chain_shape 22, placement 3 passed; 0 failed |
+| `cargo clippy -p bench -p console-workload --all-targets --all-features -- -D warnings` | clean |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | clean |
+
+`scripts/run-console-benchmark.sh` was not run (coordinator instruction; the batch boundary
+benchmarks once).
+
+**Mutations run** (each applied alone, suite or test observed red, source restored and verified
+byte-identical with `cmp`).
+
+| mutation | red result |
+|---|---|
+| validator: drop the `all(nonnegative_integer)` clause | 3 failed: negative, fractional, string redirect counts accepted |
+| validator: drop `.meters_off_bank_route_folds == .tracks` | 1 failed: "two arms that agree but do not fold every route" accepted |
+| validator: drop the fold on == off clause | 2 failed: declined fold and over-fold accepted |
+| validator: drop the redirect on == off clause | 1 failed: unequal redirects accepted |
+| validator: drop two of the four keys from `meters_keys` | 4 failed: base record, redirect accept case and both 46-record aggregates rejected |
+| validator: fold on == off weakened to on <= off | 1 failed: declined fold accepted |
+| Rust: emit `bank_scatter_redirects[1]` as `meters_on_bank_route_folds` | test panics "meters_on_bank_route_folds must carry 64" |
+| Rust: misspell the `meters_on_bank_route_folds` key | test panics "must appear exactly once" |
+| Rust: read `bank_scatter_redirects` into `bank_route_folds` | test panics on the fold assertion |
+| Rust: emit `OBSERVATIONS` instead of `self.observations` | test panics "a shortened run must say it was shortened" |
+
+**Gate 3: descriptive record.** Printed by
+`cargo test -p bench the_meters_record -- --nocapture` at `569ba338`: the real subject (both
+`SessionRuntime` arms, 64 warm-up blocks, the counter read), 8 timed observations, **debug
+profile**, no runner metadata. The four counters are the point; the timings are debug-build numbers
+and are not to be read. Its key set equals `meters_keys` exactly; as emitted the record validator
+rejects it (8 observations, null metadata), and with only `observations` set to 1000 and the
+suite fixture's eleven metadata fields substituted it is accepted, so the emitted shape and the
+validator agree.
+
+```json
+{"schema_version":1,"issue":149,"record":"console_meters","workload_kind":"sixty_four_track_console","tracks":64,"round":1,"backend":"Simd8","observations":8,"pairing":"alternating_per_observation","arms":["meters_off","meters_on"],"meter_streams":64,"meter_tap":"post_matrix","meter_window_blocks":4,"meter_frames_drained":128,"units":"ns_per_block","percentile_method":"nearest_rank","meters_off_p50_ns":23685797,"meters_off_p95_ns":24056402,"meters_off_p99_ns":24056402,"meters_on_p50_ns":24465401,"meters_on_p95_ns":24523560,"meters_on_p99_ns":24523560,"paired_delta_median_ns":761620,"meters_off_output_sha256":"d1971a3639cc2e9400c372e6f750b85307874fde2182d7d86963762658d47e9f","meters_on_output_sha256":"d1971a3639cc2e9400c372e6f750b85307874fde2182d7d86963762658d47e9f","bit_identity":"meters_off == meters_on, asserted in-run","meters_off_bank_route_folds":64,"meters_on_bank_route_folds":64,"meters_off_bank_scatter_redirects":0,"meters_on_bank_scatter_redirects":0,"render_errors":0,"render_total_forbidden_operations":0,"cpu_model":null,"os":"linux","governor_or_power_mode":null,"rust_version":null,"llvm_version":null,"target_triple":null,"target_features":null,"profile":null,"background_load_note":null,"measurement_control":null,"cpu_affinity":null,"candidate_commit":null,"missing_metadata":["background_load_note","candidate_commit","cpu_affinity","cpu_model","governor_or_power_mode","llvm_version","measurement_control","profile","rust_version","target_features","target_triple"],"descriptive_only":true,"statistical_method":"two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is meters_on minus meters_off per observation; descriptive only; no threshold"}
+```
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `569ba338` and `afbcc58a` on base `12b621f2`.
+No blocking or should-fix findings. Verified: both counters are read once per arm from that arm's
+own plan, after the warm-up renders and before the audit and the timed loop; `METER_CONFIGS`
+index 0 is `BASELINE` and index 1 is `meters: true`, matching the record's `off`/`on` mapping;
+a folded lane never counts as a redirect (`runtime.rs` filters `scatter_redirects` by
+`!folded_runs.contains`); production still runs exactly 1000 observations and `common_shape`
+refuses any other count, so the `run_for` seam cannot admit a shortened record; the validator
+rules (non-negative integers, `off` folds equal to `tracks`, `on == off` for folds and for
+redirects) match the spec; the other two validators and the runner need no change. Five
+mutations re-applied and reverted, each red on the named case. The reviewer reproduced the
+record: 64/64 folds, 0/0 redirects on the standing 64-track console, which also settles the
+question the pure-path measurement left open: #885's fold does fire under post-matrix meters.
+Reviewer-run gates, all green: `test-console-benchmark.sh`, `check-bench-policy.sh`,
+`test-bench-policy.sh`, `check-console-benchmark-fixture.sh`, `check-realtime-policy.sh`,
+`cargo fmt --all --check`, the two-crate clippy, `cargo test -p bench -p console-workload`.
+No script re-validates sealed `artifacts/` records against the live key set, so earlier
+`console_meters` records stay valid as captured. Root-evidence line numbers in this spec predate
+the diff by a few dozen lines; harmless.
