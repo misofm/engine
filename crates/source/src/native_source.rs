@@ -1608,19 +1608,20 @@ fn service_job<R: Read + Seek>(
         }
     }
     if let Some(block) = job.pending.take() {
-        let committed = match job.reserved.take() {
+        let committed = if job.reserved.is_some() {
             // The quantum was decoded straight into its reserved block: validate, stamp, publish.
-            Some(reserved) => job.provider.commit_block(
-                reserved,
+            job.provider.commit_block(
+                &mut job.reserved,
                 block.generation,
                 block.start_frame,
                 block.frames,
                 block.end_of_region,
                 block.native_decoder_sanitized_samples,
-            ),
+            )
+        } else {
             // An earlier commit met a full data queue and its stamped block waits, deferred, in
             // the provider. Push that block: a second commit would publish the quantum twice.
-            None => job.provider.commit_deferred(),
+            job.provider.commit_deferred()
         };
         match committed {
             Ok(_) => {
@@ -4224,14 +4225,13 @@ mod tests {
                 }
             }
             // No block ever leaves circulation: each is queued, played, reserved by the job, or
-            // held by the producer as deferred (awaiting a data slot) or returned (unpublished).
+            // deferred inside the producer awaiting a data slot.
             let producer = &job.provider.producer;
             let circulating = render.consumer.data_consumer.available_at_entry()
                 + producer.recycle_consumer.available_at_entry()
                 + usize::from(render.played.is_some())
                 + usize::from(job.reserved.is_some())
-                + usize::from(producer.deferred_block.is_some())
-                + usize::from(producer.returned_block.is_some());
+                + usize::from(producer.deferred_block.is_some());
             assert_eq!(
                 circulating, blocks,
                 "a transfer block left circulation at {step:?}"
