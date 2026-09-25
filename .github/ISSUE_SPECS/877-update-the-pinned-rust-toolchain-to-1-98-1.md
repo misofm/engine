@@ -94,3 +94,14 @@ the recovery read differs deterministically. Until one of those lands, `main` ca
 1.98.1 pin without breaking its required check. No source outside the authorized paths was
 changed; the qualification runner and fixture were instrumented only in throwaway copies and
 reverted (`git status` clean apart from this record).
+
+**PR #878 qualification run 36075768720 (GitHub runners, 2026-09-25):** every job green except
+Chromium. Firefox and WebKit **pass** `sdk-spectrum-recovery` there with the 1.98.1 artifact, the
+opposite of the local result, and Chromium fails a *different* spectrum gate
+(`browser-execution: H1024 browser probe published 1 windows`, with 404 console errors), not
+`sdk-spectrum-recovery`. The failing gates therefore depend on the host's and browser's
+scheduling of publications against reads and change with the artifact's timing rather than with
+a deterministic behaviour of the module. That favours option (a): re-brief the publication-count
+and loss assertions in the spectrum browser gates so they test the contract (identity,
+truthful loss wherever it is reported, no underrun) rather than a particular interleaving, then
+re-run this PR's qualification.
