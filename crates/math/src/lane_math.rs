@@ -28,12 +28,15 @@
 //! > `logf.c`. Moshier, *Methods and Programs for Mathematical Functions*, Ellis Horwood, 1989.
 //!
 //! Cephes' `exp2f` set is fitted on `[-0.5, 0.5]`, so the argument reduction is Cephes' (floor,
-//! then fold when the fraction exceeds one half) rather than a reduction to `[0, 1)`. Using the
-//! published coefficients with a `[0, 1)` reduction costs about 10 ulp; the coefficient choice and
-//! the reduction are one decision.
+//! then move the rounded fraction to the nearest integer) rather than a reduction to `[0, 1)`.
+//! Using the published coefficients with a `[0, 1)` reduction costs about 10 ulp; the coefficient
+//! choice and the reduction are one decision.
 //!
-//! Every reduction step here is exact. `x - floor(x)` is exact for `|x| < 2^23`, and `f - 1` and
-//! `0.5 * m - 1` are exact by Sterbenz's lemma, so the only error is the polynomial's.
+//! `x - floor(x)` can round for negative non-integers in `(-0.5, 0)`, producing exactly `1.0` for
+//! some inputs; the rounded fraction remains in `[0, 1]`. The magic-constant round maps it to the
+//! nearest integer, with ties-to-even matching the old strict `f > 0.5` fold. When that result is
+//! one, `f - 1` is exact by Sterbenz's lemma. The `0.5 * m - 1` reduction in `log2_lane` is also
+//! exact by Sterbenz's lemma.
 //!
 //! **Accuracy (gate M1).** Exhaustively measured against the vendored `f64` `exp2`/`log2` oracle
 //! over every `f32` input: `exp2_lane` at most **1.4615 ulp** (at `x = -0.4910151`, over all
@@ -91,18 +94,20 @@ const SQRT2: f32 = core::f32::consts::SQRT_2;
 /// wasm would canonicalise (D5).
 ///
 /// Operation order, frozen (any change re-opens gate M1):
-/// clamp; `xi = floor(x)`; `f = x - xi`; fold `f > 0.5` into `xi + 1`, `f - 1`; six-term Horner in
-/// `f` with mul/add; `p = 1 + f * p`; `p * exp2_int_in_range(xi)`.
+/// clamp; `xi = floor(x)`; `f = x - xi`; `r = (f + 12_582_912) - 12_582_912`; `xi = xi + r`;
+/// `f = f - r`; six-term Horner in `f` with mul/add; `p = 1 + f * p`;
+/// `p * exp2_int_in_range(xi)`.
 #[inline(always)]
 pub fn exp2_lane<L: Lane>(x: L) -> L {
     let x = x.max(L::splat(-126.0)).min(L::splat(127.0));
     let xi = x.floor();
     let f = x.sub(xi);
 
-    // Cephes folds the fraction into [-0.5, 0.5], which is where its coefficients are fitted.
-    let fold = f.gt(L::splat(0.5));
-    let xi = L::select(fold, xi.add(L::splat(1.0)), xi);
-    let f = L::select(fold, f.sub(L::splat(1.0)), f);
+    // 1.5·2^23 rounds f ∈ [0, 1] to 0 or 1 using ties-to-even; this is exactly f > 0.5.
+    // Cephes' coefficients are fitted on [-0.5, 0.5], so move the rounded unit into xi and fold f.
+    let round = f.add(L::splat(12_582_912.0)).sub(L::splat(12_582_912.0));
+    let xi = xi.add(round);
+    let f = f.sub(round);
 
     let mut p = L::splat(EXP2_P[0]);
     let mut index = 1;
