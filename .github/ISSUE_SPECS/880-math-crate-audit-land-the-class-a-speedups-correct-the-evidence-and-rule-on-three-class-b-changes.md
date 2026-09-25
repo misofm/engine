@@ -713,3 +713,33 @@ Luna xhigh implemented and Astra xhigh recorded attempt-1 PASS. Numerical corpus
 pins are unchanged; only the compiled artifact and live test identity changed.
 The qualified delivery is part of the same PR; pending owner rulings still keep
 this umbrella open.
+
+## Owner rulings — approved 2026-09-25
+
+The owner replied **“Approved.”** to the concrete recommended choices after class-A
+delivery. This records explicit authorization to proceed, not an inferred ruling:
+
+- **R1 APPROVED:** adopt L3 for `log2_lane` (MB-1).
+- **R2 APPROVED:** admit X7/X8 and move the transient shaper to the fast tier (MB-2).
+- **R3 APPROVED:** coefficient-domain compressor ramps, exact endpoints and 64-sample
+  interpolation, with compatible state/restore handling and unchanged accuracy and
+  block-partition gates (MC-2).
+- **R4 DECLINED:** omit the optional accuracy-only exp2 refit (MB-3).
+
+### Class-B execution brief
+
+Base: merged class-A delivery `a5cb5d8e`, branch `codex/batch-880-class-b`.
+User-selected workflow remains Luna xhigh implementation, then Astra xhigh adversarial
+review; corrections repeat that flow, within the existing two-attempt budget per task.
+MB-2 precedes MB-1 so transient-shaper pins move only once. Compressor work is isolated
+from math/shaper changes. Preserve all frozen accuracy gates, unfused arithmetic and
+realtime/partition contracts. Coefficient ramp state/restore design must be explicit;
+necessary narrowly scoped compressor state/metadata/test integration is part of R3's
+approved compatible handling, not permission to silently discard active ramp state.
+
+#902 parser repair/promotion is a separate bounded tooling tranche before the MB-2
+comparison: preserve the original baseline bytes and do not retime that baseline.
+Each approved new implementation gets only its specified new one-warmup/two-round
+measurement after its harness is frozen and preflighted. Final source changes require
+new exact-source AudioWorklet qualification through existing gates before delivery.
+All checkpoints remain local until a coherent reviewed batch boundary.
