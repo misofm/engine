@@ -39,9 +39,9 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, RenderError, ResponseSnapshotAvailability,
-    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection,
-    ResponseSnapshotSink,
+    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, RenderError,
+    ResponseSnapshotAvailability, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
+    ResponseSnapshotSection, ResponseSnapshotSink,
 };
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
@@ -1442,6 +1442,44 @@ struct ArenaMembers<'a> {
     fold: &'a [FoldLane],
     /// Where a folded lane's routed tile lands. Meaningless when `fold` is empty.
     master: MasterPlanes<'a>,
+    /// The played source planes a gather reads in place of an input buffer (issue #918).
+    sources: SourceGather<'a>,
+}
+
+/// No source claim is read in place at this arena buffer: the `u32` [`Runtime`]'s
+/// `source_plane_of_buffer` holds everywhere but at a claim bound in place.
+pub(crate) const NO_SOURCE_CLAIM: u32 = u32::MAX;
+
+/// What a bank's gather needs to read a source claim's played block in place (issue #918): the
+/// source set's planes for this block and the bind-time table of the buffers they replace.
+#[derive(Clone, Copy)]
+struct SourceGather<'a> {
+    /// `None` in a plan with no source set.
+    planes: Option<&'a dyn crate::GraphSourcePlanes>,
+    /// [`Runtime`]'s `source_plane_of_buffer`.
+    of_buffer: &'a [u32],
+    /// This unit's [`UnitIdentity::source_lanes`]: the only lanes that consult `of_buffer`.
+    lanes: u8,
+}
+
+impl SourceGather<'_> {
+    /// No source set: every gather reads the arena. What a hand-built `ArenaMembers` carries.
+    #[cfg(test)]
+    const NONE: Self = Self {
+        planes: None,
+        of_buffer: &[],
+        lanes: 0,
+    };
+
+    /// The claim lane `lane` gathers in place from `buffer`, if it is a marked lane.
+    #[inline]
+    fn claim(&self, lane: usize, buffer: u32) -> Option<usize> {
+        if lane >= 8 || self.lanes & (1 << lane) == 0 {
+            return None;
+        }
+        let claim = *self.of_buffer.get(buffer as usize)?;
+        (claim != NO_SOURCE_CLAIM).then_some(claim as usize)
+    }
 }
 
 /// A folded chain's master for one block: the runtime form of [`FoldTarget`] (issue #916).
@@ -1475,13 +1513,40 @@ pub(crate) struct FoldLane {
 }
 
 impl BankMembers for ArenaMembers<'_> {
+    /// A lane's gather source: the arena buffer `inputs[lane]`, unless the lane is marked as
+    /// gathering a source claim bound in place (issue #918), whose planes are then the played
+    /// block's.
+    ///
+    /// A claim is bound in place only when its input's every reader is such a gather
+    /// ([`source_plane_table`]), so the words are the ones the executor's copy loop would have
+    /// written into the buffer: the played block's on `Some`, and on `None` (underrun, end of
+    /// region) the arena's silence buffer, which is the `+0.0` the copy fills an unplayed quantum
+    /// with. One mask test per lane per block, and one table lookup for a marked lane; nothing is
+    /// copied.
     fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
         #[cfg(any(test, feature = "test-support"))]
         TEST_ONLY_RESIDENT_COUNTS.with(|count| {
             let [gathers, residents] = count.get();
             count.set([gathers + 1, residents]);
         });
-        self.lease.read_stereo(self.inputs[lane])
+        let buffer = self.inputs[lane];
+        if let Some(planes) = self.sources.planes
+            && let Some(claim) = self.sources.claim(lane, buffer)
+        {
+            return match planes.played_planes(claim) {
+                Some(played) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_count_source_plane(1);
+                    played
+                }
+                None => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_count_source_plane(2);
+                    self.lease.read_stereo(ARENA_SILENCE_BUFFER)
+                }
+            };
+        }
+        self.lease.read_stereo(buffer)
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
         self.lease.write_stereo(self.outputs[lane])
@@ -1816,6 +1881,11 @@ pub(crate) struct UnitIdentity {
     /// passes through, so a caller's value is a placeholder; nothing changes an op's observer
     /// slice after that. Fits the existing identity padding.
     observed: bool,
+    /// Issue #918: bit `l` is set when first-slot lane `l` of this bank unit gathers a source
+    /// claim bound in place, whose planes [`ArenaMembers::plane`] then reads from the played block.
+    /// Set by [`source_plane_table`] at bind; zero for a plain unit. A bank has at most eight lanes,
+    /// and the byte fits the existing identity padding.
+    source_lanes: u8,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
@@ -1912,6 +1982,11 @@ pub(crate) struct Runtime {
     /// elided, banked or retired, so it is always a plain unit of its own. `None` only in a test's
     /// hand-built runtime, whose units then all write the arena.
     output_unit: Option<usize>,
+    /// Issue #918: arena buffer -> the source claim a bank's gather reads **in place** from the
+    /// played transfer block when it would read that buffer, or [`NO_SOURCE_CLAIM`]. Built at
+    /// bind by [`source_plane_table`]; empty when no claim is bound in place. See there for the
+    /// mode each claim gets and why the rest keep the copy.
+    source_plane_of_buffer: Box<[u32]>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1964,6 +2039,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     redirects: u64,
     folds: u64,
     output_unit: Option<usize>,
+    source_plane_of_buffer: Box<[u32]>,
 }
 
 /// Layout witness for the retained [`Runtime`] owner without observation activation state.
@@ -1986,6 +2062,7 @@ pub(crate) struct RuntimeWithoutObservationActivation {
     pub(crate) redirects: u64,
     pub(crate) folds: u64,
     pub(crate) output_unit: Option<usize>,
+    pub(crate) source_plane_of_buffer: Box<[u32]>,
 }
 
 pub(crate) fn observation_runtime_layout() -> Option<u64> {
@@ -2173,6 +2250,7 @@ impl Runtime {
             redirects,
             folds,
             output_unit,
+            source_plane_of_buffer: Box::default(),
         }
     }
 
@@ -2204,6 +2282,14 @@ impl Runtime {
             return Err(ResponseSnapshotError::MissingTrack);
         }
         Ok(owners)
+    }
+
+    /// Whether claim `claim`, whose input is arena buffer `buffer`, is bound in place (issue
+    /// #918): its bank gathers the played block, so the executor's copy loop skips it.
+    pub(crate) fn source_in_place(&self, claim: usize, buffer: u32) -> bool {
+        self.source_plane_of_buffer
+            .get(buffer as usize)
+            .is_some_and(|tabled| usize::try_from(*tabled).ok() == Some(claim))
     }
 
     // REALTIME_POLICY_BEGIN
@@ -2280,11 +2366,16 @@ impl Runtime {
     /// `host` is the block's [`HostMaster`]. Two kinds of unit write it: the Output op's own unit
     /// ([`Self::output_unit`]), and every folded chain whose master is the Output
     /// ([`FoldTarget::Output`]), which all run before it. Every other unit ignores it.
+    ///
+    /// `sources` is the source set's played planes for this block (issue #918), `None` in a plan
+    /// with no source set. Only a bank's gather reads it, and only for a buffer
+    /// [`Self::source_plane_of_buffer`] names; every other read of the arena is unchanged.
     pub(crate) fn execute(
         &mut self,
         index: usize,
         first_sample: u64,
         host: HostMaster<'_>,
+        sources: Option<&dyn crate::GraphSourcePlanes>,
     ) -> Result<(), RenderError> {
         let Self {
             lease,
@@ -2296,6 +2387,7 @@ impl Runtime {
             bank_inputs,
             bank_outputs,
             output_unit,
+            source_plane_of_buffer,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -2370,6 +2462,11 @@ impl Runtime {
                     outputs: &bank_outputs[..lanes],
                     fold,
                     master,
+                    sources: SourceGather {
+                        planes: sources,
+                        of_buffer: source_plane_of_buffer,
+                        lanes: identity[index].source_lanes,
+                    },
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 if let Some(predecessor) = predecessor {
@@ -4399,6 +4496,65 @@ pub(crate) fn test_only_set_host_master_declined(declined: bool) {
     HOST_MASTER_DECLINED.with(|slot| slot.set(declined));
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Issue #918's copy oracle. Bind-time only; render never reads it.
+    static SOURCE_IN_PLACE_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `[claims copied into the arena, gathers from a played block, gathers of silence]`.
+    static SOURCE_PLANE_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// Decline (`true`) or restore (`false`) the in-place source gather for every later bind on this
+/// thread: issue #918's copy oracle, on the pattern of [`test_only_set_route_fold_declined`].
+///
+/// A plan bound declined binds every source claim on the copy, the path every claim took before
+/// the issue: the executor copies each claim's played block into its arena buffer and every
+/// gather reads the arena. The switch is read once per bind, in `GraphExecutor::new`; render never
+/// reads it, and it does not exist without `test-support`. Callers restore `false` after the bind
+/// they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_source_in_place_declined(declined: bool) {
+    SOURCE_IN_PLACE_DECLINED.with(|slot| slot.set(declined));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn test_only_source_in_place_declined() -> bool {
+    SOURCE_IN_PLACE_DECLINED.with(std::cell::Cell::get)
+}
+
+/// Reset this thread's issue #918 source-plane counts.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_source_plane_reset() {
+    SOURCE_PLANE_COUNTS.with(|counts| counts.set([0; 3]));
+}
+
+/// `[claims copied into the arena, gathers served from a played block, gathers served silence]`
+/// on this thread since the last reset: the mode counter that tells a claim bound in place from
+/// one still copied when both render the same bits.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_source_plane_counts() -> [u64; 3] {
+    SOURCE_PLANE_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_source_plane(slot: usize) {
+    SOURCE_PLANE_COUNTS.with(|counts| {
+        let mut value = counts.get();
+        value[slot] += 1;
+        counts.set(value);
+    });
+}
+
+/// One claim copied into the arena by the executor's copy loop.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn test_only_count_source_copy() {
+    test_only_count_source_plane(0);
+}
+
 /// Prepared before caller-owned processors, observers, banks or sources move. Emission consumes
 /// this exact schedule and its owned fold configurations; it never replans route retirement.
 pub(crate) struct SequentialPlan {
@@ -4699,6 +4855,10 @@ fn validate_fold_installation(
 }
 
 /// Builds the sequential executor's runtime: one coloured arena, producers read in place.
+///
+/// `source_claims` are the source set's claim nodes in claim order when its driver lends its played
+/// planes (issue #918), and empty otherwise; [`source_plane_table`] decides which of them a bank
+/// gathers in place.
 pub(crate) fn build_sequential(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -4706,6 +4866,7 @@ pub(crate) fn build_sequential(
     frames: usize,
     planning: SequentialPlan,
     observation_activation: Option<RealtimeObservationActivation>,
+    source_claims: &[GraphNodeId],
 ) -> Runtime {
     #[cfg(any(test, feature = "test-support"))]
     test_only_reset_selected_split_fader();
@@ -4975,6 +5136,7 @@ pub(crate) fn build_sequential(
                 resident_input: false,
                 // Derived from the finished unit by the runtime constructor.
                 observed: false,
+                source_lanes: 0,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
                     (0..stages)
@@ -5069,7 +5231,17 @@ pub(crate) fn build_sequential(
     let output_unit = output_op
         .and_then(|op| op_slot.get(op).copied().flatten())
         .map(|(unit, _)| unit);
-    Runtime::new_with_observation_activation(
+    // Issue #918: decided on the finished units, after every redirect has repointed its member.
+    let source_plane_of_buffer = source_plane_table(
+        program,
+        spec,
+        &units,
+        &op_slot,
+        &readers,
+        source_claims,
+        &mut identity,
+    );
+    let mut runtime = Runtime::new_with_observation_activation(
         leases.pop().expect("the sequential lease"),
         delays,
         // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
@@ -5083,7 +5255,152 @@ pub(crate) fn build_sequential(
         folds,
         observation_activation,
         output_unit,
-    )
+    );
+    runtime.source_plane_of_buffer = source_plane_of_buffer;
+    runtime
+}
+
+/// Whether first-slot bank member `member` reads arena buffer `buffer` and nothing else, and does
+/// not write it before its chain gathers it (issue #918, [`source_plane_table`] clause (b)).
+///
+/// A [`NodeKind::BankMember`] op's whole body is its reduction, and one undelayed, unmixed input
+/// makes that reduction a copy of `buffer` into the member's output, or nothing when the output is
+/// `buffer` itself. `Runtime::execute` then gathers `buffer` either way: through
+/// [`bank_gather_source`] when the member owns a buffer of its own (the dedication copy, skipped),
+/// and through the member's own output when that output *is* `buffer`. The second happens when the
+/// member runs in place over its input, or when a scatter redirect repointed a single-slot chain's
+/// member at a consumer that took `buffer`'s slot after the input retired: its reduction is then
+/// the `[own output]` no-op, and the chain's scatter writes `buffer` only after the gather.
+fn gathers_only(member: &RuntimeOp, buffer: u32) -> bool {
+    matches!(member.kind, NodeKind::BankMember)
+        && member.staged.is_empty()
+        && member.sidechain.is_none()
+        && *member.inputs == [buffer]
+}
+
+/// Issue #918: which source claims a bank's gather reads **in place** from the played transfer
+/// block, as [`Runtime`]'s `source_plane_of_buffer` (arena buffer -> claim index, or
+/// [`NO_SOURCE_CLAIM`]). Every other claim keeps the copy.
+///
+/// A claim is bound in place, and the executor's copy loop skips it, only when nothing but a bank
+/// gather could ever read the words that copy writes. Each clause below is one way the copy is
+/// still needed, and the claim keeps it:
+///
+/// * **(a) The input op is a plain [`NodeKind::SourceInput`].** A delayed input
+///   ([`NodeKind::TrackDelay`]) runs its delay line in place over the copied words, so the arena
+///   buffer holds the aligned block rather than the played one, and a gather must read it there.
+///   The only other op that could write the input's value is an in-place consumer, and (b) admits
+///   one only when it is a bank member whose reduction is the `[own output]` no-op: it writes the
+///   buffer with its chain's scatter, after its own gather has read the input.
+/// * **(b) Every reader is a bank gather of exactly this buffer.** `op_dataflow`'s readers of the
+///   input op are every op that reads its value: main inputs and sidechains, through elided aliases,
+///   delayed or not. Each must be a first-slot member of a bank unit that reads this buffer and
+///   nothing else and writes nothing before its chain gathers it ([`gathers_only`]), because
+///   [`ArenaMembers::plane`] is the only read that consults the table. A route, a submix, a
+///   dynamic-rack or bound processor, the Output op, any other in-place consumer, a delayed (staged)
+///   or sidechain read all read the arena buffer itself, so they need the copy. A claim with no
+///   reader at all is bound in place too: nothing reads the copy.
+/// * **(c) No observer at the input stage.** An observer bound to the input node, or to an elided
+///   alias of its buffer, is dispatched after the input op and reads `lease.read_stereo(op.output)`:
+///   the copied words.
+/// * **(d) The driver lends its planes.** `source_claims` is empty unless
+///   [`crate::GraphPreparedSourceSetDriver::provides_played_planes`] is `true`.
+///
+/// The table is keyed by the physical arena buffer, and the colouring hands a retired input's slot
+/// to later ops (a route, the Output, another cohort's member, which a later bank may gather). So
+/// the key alone does not identify the claim's value, and the table is never consulted by key
+/// alone: each reader gather of (b) marks its lane in its unit's [`UnitIdentity::source_lanes`],
+/// and [`ArenaMembers::plane`] looks a buffer up only for a marked lane. Every other gather of the
+/// same slot reads the arena, as it always did.
+///
+/// Why the in-place words are the copy's: `op_dataflow`'s readers are every read of the claim's
+/// value, and by (b) they are the marked gathers. Under the copy the played block is in the buffer
+/// from before the first unit until the buffer's first write, and nothing writes it before those
+/// gathers read it: the input op is a no-op (a) and each reader's reduction only reads it (b). So a
+/// marked gather reads the same words from the block. A later read of the slot is a read of
+/// another value -- the reader's own scatter, or an op the slot was recoloured to -- and depends on
+/// the copied words no more than it did under the copy.
+fn source_plane_table(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    units: &[RuntimeUnit],
+    op_slot: &[Option<(usize, usize)>],
+    readers: &[Vec<usize>],
+    claims: &[GraphNodeId],
+    identity: &mut [UnitIdentity],
+) -> Box<[u32]> {
+    // The first-slot lane `(unit, lane)` an op runs as, and its bank's members. A lane beyond the
+    // eighth could not be marked in `UnitIdentity::source_lanes`; no bank is that wide.
+    let first_slot = |op: usize| -> Option<(usize, usize, &RuntimeOp)> {
+        let (unit, member) = op_slot.get(op).copied().flatten()?;
+        match units.get(unit)? {
+            RuntimeUnit::Bank { members, lanes, .. } if member < *lanes && member < 8 => {
+                Some((unit, member, members.get(member)?))
+            }
+            _ => None,
+        }
+    };
+    // `(claim, buffer)` of every claim clauses (a) to (c) admit, and the `(unit, lane)` of every
+    // reader gather of those claims.
+    let mut admitted: Vec<(u32, u32)> = Vec::new();
+    let mut marked: Vec<(usize, usize)> = Vec::new();
+    for (claim, node) in claims.iter().enumerate() {
+        let Ok(claim) = u32::try_from(claim) else {
+            continue;
+        };
+        let Some(op) = crate::program::node_index(spec, node)
+            .and_then(|index| program.node_op.get(index as usize).copied().flatten())
+            .map(|op| op as usize)
+        else {
+            continue;
+        };
+        let Some(buffer) = program.ops.get(op).map(|op| op.output.0 + ARENA_BASE) else {
+            continue;
+        };
+        // (a) and (c).
+        let plain = op_slot
+            .get(op)
+            .copied()
+            .flatten()
+            .and_then(|(unit, _)| units.get(unit))
+            .is_some_and(|unit| {
+                matches!(unit, RuntimeUnit::Op(input)
+                    if matches!(input.kind, NodeKind::SourceInput) && input.observers.is_empty())
+            });
+        if !plain || claim == NO_SOURCE_CLAIM {
+            continue;
+        }
+        // (b).
+        let mut gathers = Vec::with_capacity(readers[op].len());
+        for reader in &readers[op] {
+            match first_slot(*reader) {
+                Some((unit, lane, member)) if gathers_only(member, buffer) => {
+                    gathers.push((unit, lane));
+                }
+                _ => break,
+            }
+        }
+        if gathers.len() == readers[op].len() {
+            admitted.push((claim, buffer));
+            marked.extend(gathers);
+        }
+    }
+    // Mark each reader gather's lane, so only these lanes ever consult the table.
+    let Some(len) = admitted
+        .iter()
+        .map(|(_, buffer)| *buffer as usize + 1)
+        .max()
+    else {
+        return Box::default();
+    };
+    let mut table = vec![NO_SOURCE_CLAIM; len];
+    for (claim, buffer) in admitted {
+        table[buffer as usize] = claim;
+    }
+    for (unit, lane) in marked {
+        identity[unit].source_lanes |= 1 << lane;
+    }
+    table.into_boxed_slice()
 }
 
 fn response_owner_bindings(
@@ -6514,6 +6831,7 @@ mod tests {
                 banked: false,
                 resident_input: false,
                 observed: false,
+                source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -6604,6 +6922,7 @@ mod tests {
                 banked: false,
                 resident_input: false,
                 observed: false,
+                source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -6677,6 +6996,7 @@ mod tests {
                     outputs: &[1],
                     fold: &[],
                     master: MasterPlanes::Arena(0),
+                    sources: SourceGather::NONE,
                 },
                 3,
                 71,
@@ -6874,7 +7194,7 @@ mod tests {
                 return false;
             };
             let expected = [
-                "if let Err(error) = runtime.execute(unit, time.absolute_sample, host.reborrow()) {",
+                "if let Err(error) = runtime.execute(unit, time.absolute_sample, host.reborrow(), sources) {",
                 "return Err(error);",
                 "if let Err(error) = runtime.observe_unit(unit, time.absolute_sample, source_validity, &host) {",
                 "return Err(error);",
@@ -6984,6 +7304,7 @@ mod tests {
             banked: true,
             resident_input: false,
             observed: false,
+            source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 1,
             lane_tracks: (0..population)
@@ -7153,6 +7474,7 @@ mod tests {
             banked: false,
             resident_input: false,
             observed,
+            source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 0,
             lane_tracks: Box::new([]),
@@ -7404,6 +7726,7 @@ mod tests {
                 banked: false,
                 resident_input: false,
                 observed: false,
+                source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
@@ -7597,6 +7920,7 @@ mod tests {
                     outputs: &[2],
                     fold: if folded { &fold } else { &[] },
                     master: MasterPlanes::Arena(2),
+                    sources: SourceGather::NONE,
                 };
                 chain
                     .run(&mut members, FRAMES as u32, 0)
@@ -8308,6 +8632,7 @@ mod tests {
                 outputs: &outputs,
                 fold: &fold,
                 master: MasterPlanes::Arena(ARENA_BASE),
+                sources: SourceGather::NONE,
             },
             cohorts: 0,
         };
@@ -8372,6 +8697,7 @@ mod tests {
             outputs: &outputs,
             fold: &[],
             master: MasterPlanes::Arena(0),
+            sources: SourceGather::NONE,
         };
         chain
             .run(&mut members, FRAMES as u32, 0)
@@ -8467,6 +8793,7 @@ mod tests {
                 outputs: &[],
                 fold: &fold,
                 master: MasterPlanes::Arena(master),
+                sources: SourceGather::NONE,
             };
             let mut staged_left: Vec<f32> = tiles
                 .iter()
@@ -8539,6 +8866,7 @@ mod tests {
                 outputs: &[],
                 fold: &fold,
                 master: MasterPlanes::Arena(master),
+                sources: SourceGather::NONE,
             };
             members.fold_cohort(
                 FoldCohort::new(&[0], &mut left, &mut right, frames, frames)
@@ -8594,6 +8922,7 @@ mod tests {
                 outputs: &[],
                 fold: &fold,
                 master: MasterPlanes::Arena(ARENA_BASE),
+                sources: SourceGather::NONE,
             };
             members.fold_cohort(
                 FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES)
@@ -8632,6 +8961,7 @@ mod tests {
             outputs: &[],
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
+            sources: SourceGather::NONE,
         };
         members.fold_cohort(
             FoldCohort::new(&[0], &mut left, &mut right, FRAMES + 1, FRAMES + 1)
@@ -8829,6 +9159,7 @@ mod tests {
                                         outputs: &output_ids[members.clone()],
                                         fold: &fold[members],
                                         master: MasterPlanes::Arena(master),
+                                        sources: SourceGather::NONE,
                                     },
                                     fused,
                                     counts: [0; 3],
@@ -8929,6 +9260,7 @@ mod tests {
                     outputs: &[],
                     fold,
                     master: MasterPlanes::Arena(master),
+                    sources: SourceGather::NONE,
                 }
                 .fold_resident(cohort);
                 let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
@@ -8985,6 +9317,7 @@ mod tests {
                         outputs: &[],
                         fold: &fold,
                         master: MasterPlanes::Arena(ARENA_BASE),
+                        sources: SourceGather::NONE,
                     }
                     .fold_resident(cohort)
                 );
@@ -9035,6 +9368,7 @@ mod tests {
             outputs: &[],
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
+            sources: SourceGather::NONE,
         };
         let mut left = vec![-0.0_f32; FRAMES];
         let mut right = vec![-0.0_f32; FRAMES];
@@ -9085,6 +9419,7 @@ mod tests {
             outputs: &[],
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
+            sources: SourceGather::NONE,
         };
         seed_members.fold_plane(0, &mut seed_left, &mut seed_right);
 
@@ -9120,6 +9455,7 @@ mod tests {
             outputs: &[],
             fold: &accumulate_fold,
             master: MasterPlanes::Arena(ARENA_BASE),
+            sources: SourceGather::NONE,
         };
         accumulate_members.fold_plane(0, &mut added_left, &mut added_right);
         let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
@@ -9150,6 +9486,7 @@ mod tests {
             outputs: &[],
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
+            sources: SourceGather::NONE,
         };
         let mut cohort_left = vec![-0.0_f32; FRAMES];
         let mut cohort_right = vec![-0.0_f32; FRAMES];
@@ -11090,7 +11427,7 @@ mod tests {
                 before_master = Some(stereo_bits(runtime.buffer(slot)));
             }
             runtime
-                .execute(unit, first_sample, host.reborrow())
+                .execute(unit, first_sample, host.reborrow(), None)
                 .expect("oracle unit");
             if !selective {
                 runtime
@@ -12239,6 +12576,741 @@ mod tests {
                 metered,
                 Some(track_zero_fader),
                 &shape,
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #918: a banked track's source input is gathered from the played transfer block.
+    // -----------------------------------------------------------------------------------------
+
+    /// What one fake source block holds, by block index.
+    #[derive(Clone, Copy, Debug)]
+    enum PlayedBlock {
+        /// A whole quantum.
+        Full,
+        /// This many played frames, then `+0.0` to the quantum: a short end-of-region block.
+        Short(usize),
+        /// Nothing was played: the whole quantum is the underrun.
+        Underrun,
+    }
+
+    /// Issue #918's gate-1 script: eight blocks, one of them an underrun and one short.
+    const PLAYED_SCRIPT: [PlayedBlock; 8] = [
+        PlayedBlock::Full,
+        PlayedBlock::Full,
+        PlayedBlock::Full,
+        PlayedBlock::Underrun,
+        PlayedBlock::Full,
+        PlayedBlock::Short(9),
+        PlayedBlock::Full,
+        PlayedBlock::Full,
+    ];
+
+    /// A fake source set with the production driver's contract: `begin_block` plays one block of
+    /// seeded noise per channel (tail zeroed in place on a short block, nothing on an underrun),
+    /// `copy_track_input` copies a claim's `(left, right)` channels exactly as `copy_channel` does,
+    /// and the played planes stay readable until the next `begin_block`.
+    struct PlayedSource {
+        frames: usize,
+        /// Per claim, the `(left, right)` source channels. A mono claim names one channel twice.
+        mapping: Vec<[usize; 2]>,
+        /// `channels * frames` words: this block's played planes.
+        planes: Vec<f32>,
+        played: bool,
+    }
+
+    impl PlayedSource {
+        fn new(frames: u32, mapping: Vec<[usize; 2]>) -> Self {
+            let channels = mapping.iter().flatten().max().map_or(0, |max| max + 1);
+            Self {
+                frames: frames as usize,
+                mapping,
+                planes: vec![0.0; channels * frames as usize],
+                played: false,
+            }
+        }
+
+        fn channel(&self, channel: usize) -> &[f32] {
+            &self.planes[channel * self.frames..(channel + 1) * self.frames]
+        }
+    }
+
+    impl crate::GraphPreparedSourceSetDriver for PlayedSource {
+        fn claim_count(&self) -> usize {
+            self.mapping.len()
+        }
+
+        fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError> {
+            let block = (first_sample / u64::from(frames)) as usize;
+            let played = match PLAYED_SCRIPT[block % PLAYED_SCRIPT.len()] {
+                PlayedBlock::Full => Some(self.frames),
+                PlayedBlock::Short(played) => Some(played),
+                PlayedBlock::Underrun => None,
+            };
+            self.played = played.is_some();
+            if let Some(played) = played {
+                for (channel, plane) in self.planes.chunks_exact_mut(self.frames).enumerate() {
+                    let mut state = (channel as u32 + 1).wrapping_mul(0x9e37_79b9)
+                        ^ (first_sample as u32).wrapping_mul(0x85eb_ca6b);
+                    for word in &mut plane[..played] {
+                        *word = lcg(&mut state);
+                    }
+                    // A negative zero survives only a bit-exact path.
+                    plane[0] = -0.0;
+                    plane[played..].fill(0.0);
+                }
+            }
+            Ok(())
+        }
+
+        fn copy_track_input(
+            &mut self,
+            claim: usize,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            let [left_channel, right_channel] = self.mapping[claim];
+            if self.played {
+                left.copy_from_slice(self.channel(left_channel));
+                right.copy_from_slice(self.channel(right_channel));
+            } else {
+                left.fill(0.0);
+                right.fill(0.0);
+            }
+            Ok(())
+        }
+
+        fn provides_played_planes(&self) -> bool {
+            true
+        }
+
+        fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+            let [left_channel, right_channel] = *self.mapping.get(claim)?;
+            self.played
+                .then(|| (self.channel(left_channel), self.channel(right_channel)))
+        }
+    }
+
+    /// One issue #918 gate-1 plan: `Input -> <stages> -> Route -> Output` per track, each stage a
+    /// builtin bank per cohort, every input claimed by a [`PlayedSource`].
+    ///
+    /// With the default single `PostInputBuiltins` stage, which is dedicated storage, each member's
+    /// reduction is the dedication copy and its gather reads the input's buffer (the route takes the
+    /// input's retired slot, so the scatter redirect repoints the member's output at it and the
+    /// member's reduction becomes the `[own output]` no-op). The options each give one track a
+    /// reason to keep the copy, or reach another way a gather reads an input.
+    #[derive(Clone, Copy, Debug)]
+    struct SourceShape {
+        width: BankWidth,
+        tracks: usize,
+        frames: u32,
+        /// The bank stages each banked track runs, in order.
+        stages: &'static [TrackStage],
+        /// The stages every banked track is metered at.
+        meters: &'static [TrackStage],
+        /// A bound scalar stage ([`ScalarTilt`]) each banked track runs between its bank stages,
+        /// in stage order.
+        scalar: Option<TrackStage>,
+        /// Bind with every scatter redirect declined, so each member keeps its own buffer and its
+        /// gather reads the input through `bank_gather_source`.
+        redirect_declined: bool,
+        /// This track's input is delayed in place (`NodeKind::TrackDelay`) before its bank reads it.
+        delayed: Option<usize>,
+        /// This track's input stage is metered.
+        observed: Option<usize>,
+        /// This track has no builtin bank: its route reads the input in place.
+        routed: Option<usize>,
+    }
+
+    impl SourceShape {
+        const fn banked(width: BankWidth, tracks: usize, frames: u32) -> Self {
+            Self {
+                width,
+                tracks,
+                frames,
+                stages: &[TrackStage::PostInputBuiltins],
+                meters: &[TrackStage::PostInputBuiltins],
+                scalar: None,
+                redirect_declined: false,
+                delayed: None,
+                observed: None,
+                routed: None,
+            }
+        }
+
+        /// `Input -> PostInputBuiltins (bank) -> PostFader (bound scalar) -> PostMatrix (bank)`:
+        /// the fader takes the input's retired slot, and the `PostMatrix` bank runs in place over
+        /// it, so a later gather reads each input's slot for another value.
+        const fn scalar_fader(
+            width: BankWidth,
+            tracks: usize,
+            meters: &'static [TrackStage],
+        ) -> Self {
+            Self {
+                stages: &[TrackStage::PostInputBuiltins, TrackStage::PostMatrix],
+                scalar: Some(TrackStage::PostFader),
+                meters,
+                ..Self::banked(width, tracks, 13)
+            }
+        }
+
+        /// Every third track reads one source channel on both sides; the rest read two.
+        fn mapping(self) -> Vec<[usize; 2]> {
+            (0..self.tracks)
+                .map(|track| {
+                    if track % 3 == 2 {
+                        [2 * track, 2 * track]
+                    } else {
+                        [2 * track, 2 * track + 1]
+                    }
+                })
+                .collect()
+        }
+    }
+
+    const INPUT_METER_HANDLE: u64 = 500;
+
+    /// [`SourceShape`]'s unbound plan, bindings and source set. Meters: one per banked track at
+    /// each of `meters`, one on the observed input, and two on the Output.
+    fn source_fixture_parts(
+        shape: SourceShape,
+        published: &Published,
+    ) -> (
+        crate::PreparedGraphPlan,
+        crate::GraphRuntimeBindings,
+        crate::GraphPreparedSourceSet,
+    ) {
+        let id = |text: String| crate::StableGraphId::parse(&text).expect("stable id");
+        let stage_node = |track: usize, stage| GraphNodeId::TrackStage {
+            track_id: id(format!("track{track:02}")),
+            stage,
+        };
+        let banked: Vec<usize> = (0..shape.tracks)
+            .filter(|track| shape.routed != Some(*track))
+            .collect();
+        let inputs: Vec<_> = (0..shape.tracks)
+            .map(|track| stage_node(track, TrackStage::Input))
+            .collect();
+        // Every banked track's stages in order, and one level per stage: that stage's node of
+        // every banked track.
+        let mut chain: Vec<TrackStage> = shape.stages.iter().copied().chain(shape.scalar).collect();
+        chain.sort_unstable();
+        let stages: Vec<Vec<_>> = chain
+            .iter()
+            .map(|stage| {
+                banked
+                    .iter()
+                    .map(|track| stage_node(*track, *stage))
+                    .collect()
+            })
+            .collect();
+        let scalars: Vec<_> = stages
+            .iter()
+            .zip(&chain)
+            .filter(|(_, stage)| shape.scalar == Some(**stage))
+            .flat_map(|(nodes, _)| nodes.iter().cloned())
+            .collect();
+        let routes: Vec<_> = (0..shape.tracks)
+            .map(|track| GraphNodeId::Route {
+                route_id: id(format!("route{track:02}")),
+            })
+            .collect();
+        let output = GraphNodeId::Output {
+            output_id: id("main".to_owned()),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue918".to_owned(),
+        };
+        let mut edges = Vec::new();
+        for track in 0..shape.tracks {
+            let route_id = id(format!("route{track:02}"));
+            let mut upstream = inputs[track].clone();
+            if shape.routed != Some(track) {
+                for stage in &chain {
+                    let member = stage_node(track, *stage);
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: member.clone(),
+                        },
+                        &upstream,
+                        &member,
+                    ));
+                    upstream = member;
+                }
+            }
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                &upstream,
+                &routes[track],
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination { route_id },
+                &routes[track],
+                &output,
+            ));
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let outputs = vec![output.clone()];
+        let levels: Vec<&Vec<GraphNodeId>> = core::iter::once(&inputs)
+            .chain(&stages)
+            .chain([&routes, &outputs])
+            .filter(|level| !level.is_empty())
+            .collect();
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.iter().cloned())
+            .collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(shape.frames),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let backend = match shape.width {
+            BankWidth::Four => lane::Backend::Simd4,
+            BankWidth::Eight => lane::Backend::Simd8,
+        };
+        let builtin_banks = stages
+            .iter()
+            .zip(&chain)
+            .filter(|(_, stage)| shape.scalar != Some(**stage))
+            .flat_map(|(members, _)| members.chunks(shape.width.lanes() as usize))
+            .map(|cohort| GraphPreparedBuiltinBank {
+                backend,
+                members: cohort.to_vec().into_boxed_slice(),
+                processor: Box::new(CrossTilt),
+                scratch: AoSoaScratch::new(shape.width, shape.frames).expect("scratch"),
+            })
+            .collect();
+        let mut required_bindings = inputs.clone();
+        required_bindings.extend(stages.iter().flatten().cloned());
+        required_bindings.push(output.clone());
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 918,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: (*nodes).clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: routes
+                .iter()
+                .enumerate()
+                .map(|(track, node)| crate::PreparedRoute {
+                    node: node.clone(),
+                    transform: RouteTransform {
+                        gain: 0.5 + 0.0625 * track as f32,
+                        ll: 0.875,
+                        lr: -0.25 + 0.03125 * track as f32,
+                        rl: 0.3,
+                        rr: 1.125 - 0.046875 * track as f32,
+                    },
+                })
+                .collect(),
+            track_delays: shape
+                .delayed
+                .map(|track| crate::PreparedTrackDelay {
+                    node: inputs[track].clone(),
+                    left_samples: 3,
+                    right_samples: 5,
+                })
+                .into_iter()
+                .collect(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks,
+            observers: Vec::new(),
+        });
+        let meter = |node: GraphNodeId, handle: u64| {
+            GraphNodeObserverBinding::new(
+                node,
+                handle,
+                Box::new(WordMeter {
+                    handle,
+                    accepts_resident: false,
+                    published: Arc::clone(published),
+                }),
+            )
+        };
+        let mut observers = Vec::new();
+        for (index, stage) in shape.meters.iter().enumerate() {
+            for track in &banked {
+                let handle = (index * shape.tracks + track) as u64 + 1;
+                observers.push(meter(stage_node(*track, *stage), handle));
+            }
+        }
+        if let Some(track) = shape.observed {
+            observers.push(meter(
+                inputs[track].clone(),
+                INPUT_METER_HANDLE + track as u64,
+            ));
+        }
+        for handle in [OUTPUT_METER_HANDLE, OUTPUT_METER_HANDLE + 1] {
+            observers.push(meter(output.clone(), handle));
+        }
+        let source_set = crate::GraphPreparedSourceSet::new(
+            envelope,
+            inputs
+                .iter()
+                .map(|node| crate::GraphSourceInputClaim { node: node.clone() })
+                .collect(),
+            crate::GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(PlayedSource::new(shape.frames, shape.mapping())),
+        );
+        (
+            plan,
+            crate::GraphRuntimeBindings {
+                envelope,
+                nodes: scalars
+                    .into_iter()
+                    .map(|node| GraphNodeBinding::new(node, Box::new(ScalarTilt)))
+                    .chain([GraphNodeBinding::identity(output)])
+                    .collect(),
+                observers,
+            },
+            source_set,
+        )
+    }
+
+    /// Words no source path ever writes: the arena slot of every claim holds these before a block.
+    const SOURCE_SLOT_POISON: [u32; 2] = [0x7fc1_0918, 0x7fc2_0918];
+
+    /// What one issue #918 arm rendered: every block's master bits, and every published meter
+    /// frame; and how it was bound: each claim's mode (`true` in place), the source-plane counts
+    /// over the render, and `[route folds, scatter redirects]`.
+    struct SourceRun {
+        masters: Vec<Vec<u32>>,
+        meters: Vec<MeterFrame>,
+        in_place: Vec<bool>,
+        counts: [u64; 3],
+        shape: [u64; 2],
+    }
+
+    impl SourceRun {
+        /// FNV-1a over every master word and every meter frame, in render order.
+        fn digest(&self) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            let mut word = |value: u64| {
+                for byte in value.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            };
+            for master in &self.masters {
+                master.iter().for_each(|bits| word(u64::from(*bits)));
+            }
+            for frame in &self.meters {
+                word(frame.handle);
+                word(frame.first_sample);
+                frame
+                    .left
+                    .iter()
+                    .chain(&frame.right)
+                    .chain(&frame.peak)
+                    .chain(&frame.energy)
+                    .for_each(|bits| word(u64::from(*bits)));
+            }
+            hash
+        }
+    }
+
+    /// The arena slot of every track's input, in claim order.
+    fn source_slots(plan: &crate::PreparedGraphPlan, tracks: usize) -> Vec<u32> {
+        let program = plan.lowered().expect("lowered");
+        (0..tracks)
+            .map(|track| {
+                let node = GraphNodeId::TrackStage {
+                    track_id: crate::StableGraphId::parse(&format!("track{track:02}"))
+                        .expect("stable id"),
+                    stage: TrackStage::Input,
+                };
+                let index = crate::program::node_index(&plan.spec, &node).expect("input node");
+                program.node_buffer[index as usize].0 + ARENA_BASE
+            })
+            .collect()
+    }
+
+    /// Bind `shape` -- in place, or with `declined` every claim on the copy -- and render
+    /// [`PLAYED_SCRIPT`], poisoning every claim's arena slot before each block so that a read of
+    /// a slot the copy no longer writes shows in the bits.
+    fn render_source_shape(shape: SourceShape, declined: bool) -> SourceRun {
+        let published = Published::default();
+        let (plan, bindings, source_set) = source_fixture_parts(shape, &published);
+        let slots = source_slots(&plan, shape.tracks);
+        test_only_set_source_in_place_declined(declined);
+        test_only_set_scatter_redirect_declined(shape.redirect_declined);
+        let (mut executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        test_only_set_source_in_place_declined(false);
+        test_only_set_scatter_redirect_declined(false);
+        let in_place = slots
+            .iter()
+            .enumerate()
+            .map(|(claim, slot)| executor.runtime.source_in_place(claim, *slot))
+            .collect();
+        let frames = shape.frames as usize;
+        let mut masters = Vec::new();
+        test_only_source_plane_reset();
+        for block in 0..PLAYED_SCRIPT.len() as u64 {
+            for slot in &slots {
+                let (left, right) = executor.runtime.buffer_mut(*slot);
+                left.fill(f32::from_bits(SOURCE_SLOT_POISON[0]));
+                right.fill(f32::from_bits(SOURCE_SLOT_POISON[1]));
+            }
+            let mut storage = vec![f32::from_bits(HOST_PAD); 2 * frames];
+            render_host(
+                &mut executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, frames, frames)
+                    .expect("host output"),
+                block * u64::from(shape.frames),
+            )
+            .expect("render");
+            masters.push(storage.iter().map(|word| word.to_bits()).collect());
+        }
+        let counts = test_only_source_plane_counts();
+        let meters = published.lock().unwrap().clone();
+        SourceRun {
+            masters,
+            meters,
+            in_place,
+            counts,
+            shape: [
+                executor.runtime.route_folds(),
+                executor.runtime.scatter_redirects(),
+            ],
+        }
+    }
+
+    /// Issue #918 gate 1: the copy arm's digest ([`SourceRun::digest`]) of each shape, recorded by
+    /// this fixture on the executor as it stood before the issue (`63eeebf0`, where every claim was
+    /// copied), and the claims each shape binds on the copy.
+    const SOURCE_SHAPES: [(SourceShape, u64, &[usize]); 8] = [
+        (
+            SourceShape::banked(BankWidth::Eight, 8, 13),
+            0x7da8_2488_c5b7_8876,
+            &[],
+        ),
+        (
+            SourceShape::banked(BankWidth::Four, 4, 16),
+            0xc9da_ced7_80fa_e77f,
+            &[],
+        ),
+        (
+            SourceShape::banked(BankWidth::Four, 6, 13),
+            0xf317_5c3f_c88e_6167,
+            &[],
+        ),
+        (
+            SourceShape {
+                delayed: Some(1),
+                observed: Some(2),
+                routed: Some(4),
+                ..SourceShape::banked(BankWidth::Four, 6, 13)
+            },
+            0x25f5_d764_10a6_b66a,
+            &[1, 2, 4],
+        ),
+        (
+            SourceShape {
+                redirect_declined: true,
+                ..SourceShape::banked(BankWidth::Eight, 8, 13)
+            },
+            0x7da8_2488_c5b7_8876,
+            &[],
+        ),
+        (
+            SourceShape {
+                stages: &[TrackStage::PostMatrix],
+                meters: &[TrackStage::PostMatrix],
+                ..SourceShape::banked(BankWidth::Four, 6, 13)
+            },
+            0xf317_5c3f_c88e_6167,
+            &[],
+        ),
+        (
+            SourceShape::scalar_fader(BankWidth::Four, 6, &[TrackStage::PostMatrix]),
+            0x6c18_6a5b_3585_e2a6,
+            &[],
+        ),
+        (
+            SourceShape::scalar_fader(BankWidth::Eight, 8, &[]),
+            0x0be8_59e1_1a6e_5267,
+            &[],
+        ),
+    ];
+
+    /// Gate 1 of issue #918: a banked track's gather reads the played block in place of the
+    /// executor's ring-to-arena copy, and moves no rendered bit.
+    ///
+    /// Every shape renders [`PLAYED_SCRIPT`] (eight blocks: an underrun, a short block with a zeroed
+    /// tail, and six whole ones) with every third claim a mono mapping (`left == right`). The
+    /// shapes, in [`SOURCE_SHAPES`] order:
+    ///
+    /// 1. a full `W8 x 8` bank; 2. a full `W4 x 4` bank over a whole number of tiles; 3. a `W4 x 6`
+    ///    plan whose second cohort is a partial bank, gathered lane by lane rather than tiled. In
+    ///    all three the route takes the input's retired slot and the scatter redirect repoints each
+    ///    member there, so the member gathers its input through its own output.
+    /// 4. The `W4 x 6` plan with a delayed track, a metered input, and a track routed straight from
+    ///    its input: the three claims that keep the copy.
+    /// 5. The `W8 x 8` plan with the redirects declined: each member keeps its own buffer and gathers
+    ///    through `bank_gather_source`, the dedication copy the brief names.
+    /// 6. `W4 x 6` with the members at `PostMatrix`, which is not dedicated: each runs in place over
+    ///    its input, and its route folds into the Output.
+    /// 7. and 8. A bound fader between two bank stages ([`SourceShape::scalar_fader`]) takes each
+    ///    input's retired slot, so the second bank gathers that slot for the fader's value. Only
+    ///    the lanes marked at bind may be served a played block.
+    ///
+    /// Per shape:
+    ///
+    /// * **The mode table.** In place: every claim whose input only a bank gathers. On the copy:
+    ///   the delayed claim (its delay line writes the arena buffer), the metered one (its meter
+    ///   reads it) and the routed one (its route reads it in place). The declined arm binds every
+    ///   claim on the copy.
+    /// * **The copy arm is the pre-change executor.** Its digest over every master word and every
+    ///   meter frame is the one [`SOURCE_SHAPES`] recorded before the issue.
+    /// * **The in-place arm is the copy arm, bit for bit**: every block's master, every meter window
+    ///   (each bank stage's and both Output meters'), and the bound shape, with each claim's arena
+    ///   slot poisoned before every block, so a gather that read the slot the copy no longer fills
+    ///   would show.
+    /// * **The mode counter.** The copy arm copies every claim every block and serves no gather
+    ///   from a played block. The in-place arm copies only its copy claims, and serves each
+    ///   in-place claim's gather from the played block on the seven played blocks and from the
+    ///   silence buffer on the underrun. Bit identity alone cannot tell a kept copy from a skipped
+    ///   one; this is what does.
+    ///
+    /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issue #918.
+    #[test]
+    fn a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy() {
+        let blocks = PLAYED_SCRIPT.len() as u64;
+        let underruns = PLAYED_SCRIPT
+            .iter()
+            .filter(|block| matches!(block, PlayedBlock::Underrun))
+            .count() as u64;
+        for (shape, pre_change, copied) in SOURCE_SHAPES {
+            let in_place = render_source_shape(shape, false);
+            let copy = render_source_shape(shape, true);
+            let expected: Vec<bool> = (0..shape.tracks)
+                .map(|track| !copied.contains(&track))
+                .collect();
+            assert_eq!(in_place.in_place, expected, "{shape:?}: the mode table");
+            assert_eq!(
+                copy.in_place,
+                vec![false; shape.tracks],
+                "{shape:?}: declined, every claim is copied"
+            );
+            assert_eq!(
+                copy.digest(),
+                pre_change,
+                "{shape:?}: the copy arm is the pre-change executor"
+            );
+            assert_eq!(in_place.shape, copy.shape, "{shape:?}: one bound shape");
+            assert_eq!(in_place.masters.len(), copy.masters.len());
+            for (block, (actual, expected)) in
+                in_place.masters.iter().zip(&copy.masters).enumerate()
+            {
+                assert_eq!(
+                    actual, expected,
+                    "{shape:?}, block {block} ({:?}): the master is the copy arm's",
+                    PLAYED_SCRIPT[block]
+                );
+                assert!(
+                    matches!(PLAYED_SCRIPT[block], PlayedBlock::Underrun)
+                        || actual.iter().any(|word| *word != 0),
+                    "{shape:?}, block {block}: a played block carries audio"
+                );
+            }
+            assert_eq!(
+                in_place.meters, copy.meters,
+                "{shape:?}: every meter window is the copy arm's"
+            );
+            assert_eq!(
+                in_place.meters.len(),
+                (shape.meters.len() * (shape.tracks - usize::from(shape.routed.is_some()))
+                    + usize::from(shape.observed.is_some())
+                    + 2)
+                    * PLAYED_SCRIPT.len(),
+                "{shape:?}: every meter published every block"
+            );
+            let lent = expected.iter().filter(|lent| **lent).count() as u64;
+            let tracks = shape.tracks as u64;
+            assert_eq!(
+                copy.counts,
+                [tracks * blocks, 0, 0],
+                "{shape:?}: the copy arm's [copies, played gathers, silent gathers]"
+            );
+            assert_eq!(
+                in_place.counts,
+                [
+                    (tracks - lent) * blocks,
+                    lent * (blocks - underruns),
+                    lent * underruns
+                ],
+                "{shape:?}: the in-place arm's [copies, played gathers, silent gathers]"
             );
         }
     }
