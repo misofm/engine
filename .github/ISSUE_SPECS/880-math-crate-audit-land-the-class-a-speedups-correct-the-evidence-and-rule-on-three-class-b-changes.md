@@ -656,3 +656,12 @@ On `abd2c1e0` (MA-1/2/3/4 integrated), the coordinator ran:
 
 Task-local exhaustive results and codegen evidence accompany the implementation checkpoints.
 MA-5, MQ-1, MQ-2, MC-1 and independent Astra review are still pending; this is not issue closure.
+
+### MQ-1 post-workload tooling failure
+
+The single authorized run at `2a8977f5` completed its warmup and two rounds. Its raw output reports
+Simd8 6.281854 / 6.281717 ns per lane-sample and scalar 40.841292 / 40.803620. The runner then
+failed to extract the result because libtest prefixed the `MQ1_RESULT` line. No timed retry was
+performed. Raw evidence and the failed disposition are preserved; record repair/promotion is
+bounded successor [#902](https://github.com/misofm/engine/issues/902), not a DSP blocker. These
+are descriptive shared-host measurements, not a claimed render speedup.
