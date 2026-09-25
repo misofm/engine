@@ -215,9 +215,10 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
 /// * **Its slot is never returned to the free list**, so no later op can take it.
 ///
 /// What dedication does **not** give is a slot no earlier buffer used. `take` may hand the
-/// Output the slot of a buffer that retired before it. Every console fixture gives it track
-/// zero's input slot, for instance. So a physical buffer index does not identify the Output op,
-/// and the runtime identifies it by node.
+/// Output the slot of a buffer that retired before it. The standing console workloads, compiled
+/// with their builtins, give it track zero's input slot (`runtime::route_fold` records this). So
+/// a physical buffer index does not identify the Output op, and the runtime identifies it by
+/// node.
 ///
 /// On a multi-input output nothing changes: its op already owned a fresh logical buffer and is
 /// the last reader of nothing. On a single-input output that was in place, the arena gains the

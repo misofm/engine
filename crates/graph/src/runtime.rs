@@ -306,9 +306,9 @@ pub(crate) type FrameLane = f32;
 ///
 /// Both writers are picked by **node**, at bind, and never by comparing a buffer index with the
 /// session output's. The colouring may give the Output op's physical slot to a buffer that
-/// retired before it; every console fixture gives it track zero's input slot. So
-/// `op.output == program.output` holds for those earlier ops too, and would send their audio
-/// here.
+/// retired before it. The standing console workloads give it track zero's input slot (see
+/// [`route_fold`]'s ledger). So `op.output == program.output` holds for those earlier ops too,
+/// and would send their audio here.
 ///
 /// A later parameter of `execute` (a source set's planes, say) goes after this one, so every call
 /// site keeps one shape.
@@ -4412,10 +4412,10 @@ struct FoldInstallation {
 ///
 /// This is the node identity the runtime uses to pick the one op whose storage is the host's
 /// planes. It is deliberately not "the op whose output is `program.output`": the Output op's
-/// physical slot may have belonged to a buffer that retired before it, and every console fixture
-/// gives it track zero's input slot. `None` if the lowering recorded no op for the node, or an op
-/// that does not write `program.output`. Neither can happen for a lowered program, and callers
-/// then leave every op on the arena.
+/// physical slot may have belonged to a buffer that retired before it, as track zero's input
+/// slot does on the standing console workloads. `None` if the lowering recorded no op for the
+/// node, or an op that does not write `program.output`. Neither can happen for a lowered
+/// program, and callers then leave every op on the arena.
 fn output_op(program: &ExecutionProgram, spec: &GraphSpec) -> Option<usize> {
     let node = spec
         .nodes
@@ -11184,11 +11184,13 @@ mod tests {
     /// Output slot is a gathered track input, a folded and an unfolded fan-in-one route, and a
     /// bank straight into the Output op (whose scatter redirect is withheld).
     ///
-    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, rows 916-1 to 916-6): restore the arena
-    /// path with the end-of-block copy (the output-slot check); write the Output op's master to
-    /// the arena and skip the host (the plane checks); install every folded Output master as an
-    /// arena master (the plane checks); read the fan-in-one input from the other plane; identify
-    /// the Output op by buffer index; stop withholding the redirect into the Output op.
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, rows 916-1 to 916-6, 916-10, 916-11 and
+    /// 916-15). They restore the arena path with the end-of-block copy, which only the
+    /// output-slot check sees. They write the Output op's master to the arena and skip the host,
+    /// install every folded Output master as an arena master, and read the fan-in-one input from
+    /// the other plane. They identify the Output op by buffer index, stop withholding the redirect
+    /// into the Output op, and fill the planes on success. They undedicate the Output, and point
+    /// its observers at the arena.
     #[test]
     fn the_host_planes_are_the_arena_oracles_master_bit_for_bit_at_every_stride() {
         const BLOCKS: u64 = 4;
@@ -11389,8 +11391,10 @@ mod tests {
     /// all of it (a failed Output observer), or the previous block's (a failed source set). The
     /// padding past `frames` is never written, failure or not.
     ///
-    /// Red mutation (`crates/graph/tests/MUTATIONS.md` row 916-7): skip the fill on the unit
-    /// failure path, and the `Unit` arm keeps five cohorts' partial master.
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md` rows 916-7, 916-8, 916-9, 916-12, 916-13
+    /// and 916-14). One skips the fill on each failure path: on the unit path the `Unit` arm keeps
+    /// five cohorts' partial master. Another drops the planes' length check, so the short
+    /// rejection panics in the fold epilogue instead of being refused.
     #[test]
     fn a_failed_render_silences_the_host_planes_and_a_rejected_one_leaves_them_alone() {
         const FRAMES: u32 = 13;
