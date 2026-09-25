@@ -1770,12 +1770,9 @@ impl GraphSourcePlanes for GraphPreparedSourceSet {
             return None;
         }
         let quantum = self.envelope.quantum.0 as usize;
-        let planes = self.driver.played_planes(claim_index);
-        debug_assert!(
-            planes.is_none_or(|(left, right)| left.len() == quantum && right.len() == quantum),
-            "a driver lent a plane that is not one quantum"
-        );
-        planes.filter(|(left, right)| left.len() == quantum && right.len() == quantum)
+        self.driver
+            .played_planes(claim_index)
+            .filter(|(left, right)| left.len() == quantum && right.len() == quantum)
     }
 }
 // REALTIME_POLICY_END
@@ -7287,5 +7284,78 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #918: a source set lends a driver's planes only for one of its own claims and only
+    /// when both are exactly one quantum, the checks `copy_track_input` makes of its destinations.
+    /// Anything else is refused as `None`, which a gather serves as silence, never handed on.
+    #[test]
+    fn a_source_set_lends_only_quantum_planes_of_its_own_claims() {
+        const FRAMES: usize = 5;
+        struct Lender(Vec<f32>);
+        impl GraphPreparedSourceSetDriver for Lender {
+            fn claim_count(&self) -> usize {
+                2
+            }
+            fn begin_block(&mut self, _: u64, _: u32) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn copy_track_input(
+                &mut self,
+                _: usize,
+                _: &mut [f32],
+                _: &mut [f32],
+            ) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn provides_played_planes(&self) -> bool {
+                true
+            }
+            /// Claim 1's right plane is one word short; every other index lends a quantum,
+            /// including 2, which is not one of the set's claims.
+            fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+                let right = if claim == 1 { FRAMES - 1 } else { FRAMES };
+                Some((&self.0[..FRAMES], &self.0[FRAMES..FRAMES + right]))
+            }
+        }
+        let envelope = RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
+        };
+        let claim = |track: &str| GraphSourceInputClaim {
+            node: GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(track).expect("track id"),
+                stage: TrackStage::Input,
+            },
+        };
+        let words: Vec<f32> = (0..2 * FRAMES).map(|word| word as f32).collect();
+        let set = GraphPreparedSourceSet::new(
+            envelope,
+            vec![claim("a"), claim("b")],
+            GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(Lender(words.clone())),
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 0),
+            Some((&words[..FRAMES], &words[FRAMES..])),
+            "a whole quantum of a claim is lent as is"
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 1),
+            None,
+            "a short plane is refused"
+        );
+        assert_eq!(
+            GraphSourcePlanes::played_planes(&set, 2),
+            None,
+            "an index past the set's claims is refused"
+        );
     }
 }

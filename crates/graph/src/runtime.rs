@@ -12719,6 +12719,9 @@ mod tests {
         delayed: Option<usize>,
         /// This track's input stage is metered.
         observed: Option<usize>,
+        /// This track's edge from its input into its first bank stage carries a compensation
+        /// delay, which the member stages from the input's buffer before it reduces.
+        compensated: Option<usize>,
         /// This track has no builtin bank: its route reads the input in place.
         routed: Option<usize>,
     }
@@ -12735,6 +12738,7 @@ mod tests {
                 redirect_declined: false,
                 delayed: None,
                 observed: None,
+                compensated: None,
                 routed: None,
             }
         }
@@ -12923,7 +12927,22 @@ mod tests {
                 })
                 .collect(),
             route_timings: Vec::new(),
-            inserted_delays: Vec::new(),
+            inserted_delays: shape
+                .compensated
+                .map(|track| {
+                    let edge_id = GraphEdgeId::TrackMain {
+                        target: stage_node(track, chain[0]),
+                    };
+                    crate::InsertedDelay {
+                        node: GraphNodeId::CompensationDelay {
+                            edge_id: Box::new(edge_id.clone()),
+                        },
+                        edge_id,
+                        samples: effect_contract::LatencySamples(4),
+                    }
+                })
+                .into_iter()
+                .collect(),
             buffer_assignments: Vec::new(),
             estimate: crate::GraphResourceEstimate {
                 logical_nodes: 0,
@@ -13149,7 +13168,7 @@ mod tests {
     /// Issue #918 gate 1: the copy arm's digest ([`SourceRun::digest`]) of each shape, recorded by
     /// this fixture on the executor as it stood before the issue (`63eeebf0`, where every claim was
     /// copied), and the claims each shape binds on the copy.
-    const SOURCE_SHAPES: [(SourceShape, u64, &[usize]); 8] = [
+    const SOURCE_SHAPES: [(SourceShape, u64, &[usize]); 9] = [
         (
             SourceShape::banked(BankWidth::Eight, 8, 13),
             0x7da8_2488_c5b7_8876,
@@ -13202,6 +13221,14 @@ mod tests {
             0x0be8_59e1_1a6e_5267,
             &[],
         ),
+        (
+            SourceShape {
+                compensated: Some(3),
+                ..SourceShape::banked(BankWidth::Four, 6, 13)
+            },
+            0xb0c7_a1d1_e6bd_959f,
+            &[3],
+        ),
     ];
 
     /// Gate 1 of issue #918: a banked track's gather reads the played block in place of the
@@ -13224,13 +13251,15 @@ mod tests {
     /// 7. and 8. A bound fader between two bank stages ([`SourceShape::scalar_fader`]) takes each
     ///    input's retired slot, so the second bank gathers that slot for the fader's value. Only
     ///    the lanes marked at bind may be served a played block.
+    /// 9. The `W4 x 6` plan with a compensation delay on one track's edge into its bank: that
+    ///    member stages the input's buffer through its delay line, so the claim keeps the copy.
     ///
     /// Per shape:
     ///
     /// * **The mode table.** In place: every claim whose input only a bank gathers. On the copy:
     ///   the delayed claim (its delay line writes the arena buffer), the metered one (its meter
-    ///   reads it) and the routed one (its route reads it in place). The declined arm binds every
-    ///   claim on the copy.
+    ///   reads it), the routed one (its route reads it in place) and the compensated one (its
+    ///   member's staging reads it). The declined arm binds every claim on the copy.
     /// * **The copy arm is the pre-change executor.** Its digest over every master word and every
     ///   meter frame is the one [`SOURCE_SHAPES`] recorded before the issue.
     /// * **The in-place arm is the copy arm, bit for bit**: every block's master, every meter window
