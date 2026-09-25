@@ -8513,11 +8513,12 @@ mod tests {
     /// still folds all sixty-four routes. It is an oracle for the effects and not for the fold, and
     /// saying so is the point of asserting its fold count rather than assuming it.
     ///
-    /// The fold's own oracle is a **post-matrix meter**, which binds an observer to the chain's
-    /// last slot and declines the fold plan-wide (see
-    /// `a_meter_on_the_matrix_declines_the_route_fold_and_still_meters`). That arm renders the
-    /// route ops and the D9 reduction the fold replaced, and AGENTS.md requires a meter not to
-    /// change signal flow, so the two arms differ in exactly the thing under test.
+    /// The fold's own oracle is the same session bound with the fold **declined**
+    /// (`graph::test_only_set_route_fold_declined`). That arm renders the route ops and the D9
+    /// reduction the fold replaced, and nothing else about the plan moves, so the two arms differ in
+    /// exactly the thing under test. Until issue #885 the decline came from a post-matrix meter on
+    /// ch00; a post-matrix meter now keeps the fold armed
+    /// (`a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`), so the decline is explicit.
     #[test]
     fn the_intended_strip_folds_every_route_into_its_cohorts_epilogue() {
         const BLOCKS: u64 = 12;
@@ -8551,26 +8552,16 @@ mod tests {
         );
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with the route fold");
 
-        // The fold's own oracle: the same session with a post-matrix meter, which declines it.
-        let meters = vec![MeterRequest {
-            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
-            track_id: "ch00".to_owned(),
-            tap: MeterTap::PostMatrix,
-            config: MeterConfig {
-                period_frames: NonZeroU32::new(128).expect("constant"),
-                peak_hold_frames: 0,
-                peak_decay_db_per_second: 0.0,
-                queue_capacity: NonZeroUsize::new(64).expect("constant"),
-                reset_generation: 0,
-            },
-        }];
+        // The fold's own oracle: the same session, bound with the fold declined.
         let unfolded_artifact =
-            compile_console_model_with_builtins(&intended, 2_188, &meters, &registry);
+            compile_console_model_with_builtins(&intended, 2_188, &[], &registry);
+        graph::test_only_set_route_fold_declined(true);
         let (unfolded_pcm, _, _, _, _, _, unfolded_folds) =
             render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
+        graph::test_only_set_route_fold_declined(false);
         assert_eq!(
             unfolded_folds, 0,
-            "the metered arm must decline the fold, or it is not an oracle for it"
+            "the declined arm must not fold, or it is not an oracle for it"
         );
         assert_pcm_bits_equal(
             &pcm,
@@ -8628,19 +8619,26 @@ mod tests {
         );
     }
 
-    /// A meter on the matrix declines the route fold, and still meters.
+    /// A meter on the matrix keeps the route fold, and still meters (issue #885).
     ///
     /// The observer clause. `MeterTap::PostMatrix` binds a `GraphNodeObserverBinding` to the chain's
-    /// **last slot**, whose planar buffer a folded lane stops writing: the meter would read the
-    /// previous block for ever. The cost is stated rather than hidden -- a console that leases a
-    /// post-matrix meter gives up the fold for the whole plan -- and it is the same trade
-    /// `a_leased_stage_meter_declines_the_merge_and_still_meters` records for the chain merge.
+    /// **last slot**, whose planar buffer a folded lane stops writing. Until #885 that declined the
+    /// fold for the whole plan; now the meter reads the lane's resident final words, which are the
+    /// words the epilogue mixes, and an observer that declines that view is handed the member
+    /// buffer written from the same words first. This is the one end-to-end check of that path
+    /// with the production `MeterObserver`, so it checks the meter against three arms:
     ///
-    /// Red mutation: drop the `observed(program, spec, parts, producer)` clause -- the plan folds
-    /// and every metered window reports the previous block's peak, which the falsifiability
-    /// assertion below turns red.
+    /// * the per-node-effects arm, as before (its builtins still bank, so it folds too);
+    /// * the **unfolded** arm -- the same session and meter bound with the fold declined, the path
+    ///   this meter itself forced before #885 -- master bits and every meter window, whole;
+    /// * the folded arm with the resident offer withdrawn, so the real meter reads the written
+    ///   member buffer -- master bits and every meter window, whole.
+    ///
+    /// Red mutations: offer no resident view to a folded lane (restore the dispatchers'
+    /// `fold.is_empty()` clause) -- the render fails; skip `write_resident_lane` -- the withdrawn
+    /// arm's windows read stale words and stop matching the unfolded arm's.
     #[test]
-    fn a_meter_on_the_matrix_declines_the_route_fold_and_still_meters() {
+    fn a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters() {
         const BLOCKS: u64 = 12;
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
@@ -8661,9 +8659,16 @@ mod tests {
         }];
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_184, &meters, &registry);
+        graph::test_only_meter_input_reset(false);
         let (pcm, _, _, _, frames, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(folds, 0, "a post-matrix meter declines the fold");
+        let counts = graph::test_only_meter_input_counts();
+        assert_eq!(folds, 64, "a post-matrix meter keeps every route folded");
+        assert_eq!(
+            counts,
+            [0, BLOCKS, BLOCKS],
+            "the meter reads the folded lane's resident words on every block, never a planar block"
+        );
 
         let scalar_artifact = compile_console_model_with_builtins(
             &intended,
@@ -8677,7 +8682,7 @@ mod tests {
         assert_eq!(
             frames.len(),
             scalar_frames.len(),
-            "the declining plan publishes the same meter windows"
+            "the folded plan publishes the same meter windows"
         );
         for (banked, scalar) in frames.iter().zip(scalar_frames.iter()) {
             assert_eq!(
@@ -8697,6 +8702,47 @@ mod tests {
                 .iter()
                 .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
             "the metered windows must carry signal"
+        );
+
+        // The unfolded oracle: the same session and meter, bound with the fold declined.
+        let unfolded_artifact =
+            compile_console_model_with_builtins(&intended, 2_189, &meters, &registry);
+        graph::test_only_set_route_fold_declined(true);
+        let (unfolded_pcm, _, _, _, unfolded_frames, _, unfolded_folds) =
+            render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
+        graph::test_only_set_route_fold_declined(false);
+        assert_eq!(unfolded_folds, 0, "the declined arm renders the routes");
+        assert_pcm_bits_equal(
+            &pcm,
+            &unfolded_pcm,
+            "the metered fold against the reduction",
+        );
+        assert_eq!(
+            frames, unfolded_frames,
+            "every meter window of the folded plan is the unfolded plan's"
+        );
+
+        // The member-buffer fallback, with the real meter: withdraw the resident offer.
+        let withdrawn_artifact =
+            compile_console_model_with_builtins(&intended, 2_190, &meters, &registry);
+        graph::test_only_meter_input_reset(true);
+        let (withdrawn_pcm, _, _, _, withdrawn_frames, _, withdrawn_folds) =
+            render_console_builtins_blocks(withdrawn_artifact, BLOCKS, Vec::new());
+        let withdrawn_counts = graph::test_only_meter_input_counts();
+        graph::test_only_meter_input_reset(false);
+        assert_eq!(
+            withdrawn_folds, 64,
+            "withdrawing the offer does not decline the fold"
+        );
+        assert_eq!(
+            withdrawn_counts,
+            [BLOCKS, 0, 0],
+            "the meter reads the written member buffer on every block"
+        );
+        assert_pcm_bits_equal(&pcm, &withdrawn_pcm, "the folded master, planar meter");
+        assert_eq!(
+            withdrawn_frames, unfolded_frames,
+            "a planar read of a folded lane is the unfolded plan's window"
         );
     }
 

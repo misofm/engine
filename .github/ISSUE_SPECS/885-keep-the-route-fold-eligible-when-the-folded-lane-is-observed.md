@@ -42,11 +42,21 @@ Measurement only: "Add a metered live-console row to the console benchmark". Ind
 
 ## Attempt 1 evidence
 
+**Scope amendment (Sol).** Three tests asserted "a post-matrix meter declines the route fold": graph
+compiler `a_meter_on_the_matrix_declines_the_route_fold_and_still_meters` (the rule stated as a
+count) and `the_intended_strip_folds_every_route_into_its_cohorts_epilogue`, plus console-workload
+`the_folded_master_is_the_reductions_own_bits` (both used a post-matrix-metered plan as their
+unfolded oracle). Each pinned exactly the rule this issue removes, so updating them is part of the
+issue. Added paths: `crates/graph-compiler/src/lib.rs` (those two tests only, no production line),
+`tools/console-workload/tests/chain_shape.rs` (that test), and `crates/graph/src/lib.rs` (only to
+export the fold-decline switch as a `test-support` seam, bind-time only, absent from production
+builds).
+
 Implementer: Terra, branch `codex/885-route-fold-under-observation`. Implementation and tests in
-`79ef3fd9`; this record in the commit that adds it. Only `crates/graph/src/runtime.rs` and this spec
-changed: `crates/rack` (`final_output_lane` already sufficed) and `observation_activation.rs` (the
-catalog's coordinates are the same folded or not) needed nothing. The spec's `file:line` anchors
-matched this base exactly; no drift.
+`79ef3fd9`; the amendment's test updates and seam export in the commit after `8b7d0790`, which
+also carries this revised record. The spec's `file:line` anchors matched this base exactly; no
+drift. `crates/rack` (`final_output_lane` already sufficed) and `observation_activation.rs` (the
+catalog's coordinates are the same folded or not) needed nothing.
 
 ### Design
 
@@ -81,8 +91,11 @@ redirect eligibility are untouched.
   published meter frame (the exact words plus peak and energy) equal to the oracle's. The graph crate
   has no builtin meter, so the frame is a test meter's; the builtin `MeterObserver` consumes the same
   words through unchanged arithmetic.
-- Test-only seam `test_only_decline_route_fold` (`#[cfg(test)]`, read once in `preflight_sequential`
-  at bind; render gains no branch).
+- Seam `test_only_set_route_fold_declined(bool)` (renamed from the first commit's
+  `test_only_decline_route_fold` to match the `test_only_set_*` setter exports): a thread-local,
+  `#[cfg(any(test, feature = "test-support"))]`, read once per bind in `preflight_sequential` before
+  any owner moves; render never reads it and gains no branch. Exported `#[doc(hidden)]` from
+  `crates/graph/src/lib.rs` beside the other `test_only_*` seams.
 - Updated: `resident_meter_entry_has_one_final_output_dispatch_and_admission_control` (the
   dispatcher shape gate now requires the folded-lane write and flag, with three new mutation
   controls) and `resident_meter_dispatch_preserves_binding_order_lazy_fallback_and_accepted_errors`
@@ -113,27 +126,66 @@ Workspace: `cargo fmt --all --check` passes; `cargo clippy --locked --workspace 
 `crates/graph/tests/rt9_resident_bank_input_alloc.rs`; that is pre-existing on the base and
 unrelated.)
 
-### Out-of-scope reds (blocking; need an amended scope)
+### Amendment: the three tests
 
-Three tests outside the authorized paths assert the clause this issue removes, and fail at that
-premise assertion before any bit comparison:
+- **`a_meter_on_the_matrix_declines_the_route_fold_and_still_meters` -> renamed
+  `a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`.** `assert_eq!(folds, 0)` becomes
+  `assert_eq!(folds, 64)`. Every other check is kept unchanged: master bits equal the per-node-effects
+  arm, same window count, per-window `sample_peak` bits equal, signal present (one message string
+  changed from "the declining plan ..." to "the folded plan ..."). Added, all with the production
+  `MeterObserver`: meter input counts `[0, 12, 12]` (the meter reads the folded lane's resident
+  words on every block); an **unfolded** arm (same session and meter, fold declined through the
+  seam) with 0 folds, equal master bits and whole-`MeterSnapshot` equality of every window; and a
+  resident-offer-withdrawn arm (`test_only_meter_input_reset(true)`) with 64 folds, counts
+  `[12, 0, 0]`, equal master bits and every window equal to the unfolded arm's -- the
+  `write_resident_lane` path with the real meter.
+- **`the_intended_strip_folds_every_route_into_its_cohorts_epilogue`.** The unfolded oracle is the
+  same session with no meter, bound with the fold declined through the seam; `unfolded_folds == 0`
+  and the bit comparison are unchanged. The two arms now differ in the fold alone (before, also in
+  one meter).
+- **`the_folded_master_is_the_reductions_own_bits` (console-workload).** Deviation from the ruling,
+  stated rather than hidden: this crate does not build `graph`'s `test-support` feature
+  (`cargo tree -p console-workload -e features -i graph` shows none; its manifest has no
+  dev-dependency enabling it), so the exported seam does not exist in its test build, and enabling
+  it needs one `[dev-dependencies] graph = { workspace = true, features = ["test-support"] }` line in
+  `tools/console-workload/Cargo.toml`, which the amendment does not authorize. The oracle is instead
+  the same workload at `Backend::Scalar` (`SessionRuntime::build_with_dispatch`), which binds no
+  chain, so every route op runs and the master is the D9 reduction; asserted `bank_shape() ==
+  [0, 0]` and 0 folds, then digest equality over 64 blocks for all 15 builtins workloads (bit-equal
+  on this host). The old metered arm stays as a candidate: it must fold exactly as many routes as
+  the unmetered arm (the #885 rule pinned at console level) and render the same digest. The
+  documented red mutation (build `RouteFold::runs` reversed) was re-run and reddens it at the first
+  row. If Sol prefers the seam here, the one-line dev-dependency above makes the oracle differ in the
+  fold alone.
 
-- `crates/graph-compiler/src/lib.rs` `a_meter_on_the_matrix_declines_the_route_fold_and_still_meters`
-  (`assert_eq!(folds, 0, ..)`). Its remaining assertions -- master bits equal to the per-node-effects
-  arm, the real post-matrix meter's windows equal to that arm's, signal present -- are this issue's
-  claim with the builtin meter; the natural amendment flips the count to 64 and keeps the rest.
-- `crates/graph-compiler/src/lib.rs` `the_intended_strip_folds_every_route_into_its_cohorts_epilogue`
-  (`assert_eq!(unfolded_folds, 0, ..)`): its unfolded oracle was a post-matrix meter.
-- `tools/console-workload/tests/chain_shape.rs` `the_folded_master_is_the_reductions_own_bits`
-  (`assert_eq!(metered_runtime.bank_route_folds(), 0, ..)`): same oracle.
+Mutations on the amended graph-compiler tests: skip `write_resident_lane` in `observe` -> "a planar
+read of a folded lane is the unfolded plan's window" fails; restore the `fold.is_empty()` clause ->
+render fails; make the seam a no-op -> both tests' "declined arm" fold-count assertions fail.
 
-The last two need an unfolded oracle that no longer comes from a meter; exporting the bind switch as a
-`test-support` seam from `crates/graph/src/lib.rs` would supply one. Related passing evidence:
-console-workload `console_facilities_do_not_change_the_chain_shape_or_the_bits` (the 64-track console
-with a post-matrix meter per track, now folded, renders the unmetered baseline's digest);
-`cargo test -p builtins-compiler --features test-support` and `cargo test -p host-core --all-features`
-all pass; graph-compiler 71 pass / 2 fail and console-workload `chain_shape` 20 pass / 1 fail, exactly
-the three above.
+### Amendment gates
+
+| Gate | Result |
+|---|---|
+| `cargo test -p graph-compiler` | lib 73 passed (was 71 + 2 red); other targets 1, 3, 1, 8, 6 passed |
+| `cargo test -p console-workload` | 4 + 21 + 3 passed (`chain_shape` 21/21) |
+| `cargo test -p graph` | lib 83, rt1 1, rt9 1 passed |
+| `cargo test -p graph --features test-support` | lib 83, rt1 1, rt9 8 passed |
+| `cargo test -p rack` | 38 + 10 + 4 passed |
+| `cargo test -p builtins-compiler --features test-support` | 58 + 9 + 3 + 6 + 1 + 2 passed |
+| `cargo test -p host-core --all-features` | all passed (2 pre-existing `#[ignore]`) |
+| `scripts/check-graph-determinism.sh` | `PASS (100/100)` |
+| `scripts/check-graph-policy.sh` | `PASS` |
+| `scripts/check-realtime-policy.sh` | `ok (50 marked regions in 14 files)` |
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | exit 0, no warnings |
+
+Shipped artifacts do not enable `test-support`: `cargo tree -p host-web --target
+wasm32-unknown-unknown -e features -i graph` (the npm AudioWorklet, built alone by
+`scripts/build-web-audioworklet.sh`) and `cargo tree -p capi -e features -i graph` resolve `graph`
+with its default features only. Two internal tools, `tools/bench` and `tools/audit`, enable
+`graph/test-support` in their own dependencies, as they already did for the existing `test_only_*`
+seams; a combined `cargo build -p audit -p bench -p capi` (qualification's release-shape step)
+unifies it into that step's build, which is not a shipped artifact.
 
 ### Notes for review
 
@@ -146,3 +198,12 @@ the three above.
   fails loudly rather than exposing stale words.
 - No allocation-audit test covers the folded, observed path specifically; the new render code is in
   marked realtime regions, allocates nothing by construction, and passes the realtime policy scan.
+- The production change moves the web AudioWorklet binary, so
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` (pin-checked by
+  `scripts/build-web-audioworklet.sh` in qualification) will need a repin at the batch boundary. Not
+  run here: the script builds into its own target directory.
+- `crates/graph/tests/MUTATIONS.md` row 218-4 ("the observer clause is dropped from
+  `foldable_lane`" -> `the_folded_master_is_the_reductions_own_bits` RED) is a historical record of
+  the old clause; that test no longer covers the mutation. Today's coverage is
+  `a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed`. Left unedited
+  (outside the authorized paths).

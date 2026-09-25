@@ -3655,16 +3655,22 @@ pub(crate) fn inject_fold_fault(fault: FoldFault) {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// Issue #885's control arm: the same plan bound with the route fold declined, which is the
-    /// path a post-matrix observer forced before that issue. Bind-time only; render never reads it.
+    /// Issue #885's unfolded oracle: the same plan bound with the route fold declined, which is the
+    /// path a post-matrix meter forced before that issue. Bind-time only; render never reads it.
     static ROUTE_FOLD_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Decline (or restore) the route fold for every later bind on this thread. Test-only.
-#[cfg(test)]
-pub(crate) fn test_only_decline_route_fold(declined: bool) {
+/// Decline (`true`) or restore (`false`) the route fold for every later bind on this thread.
+///
+/// The unfolded oracle for a fold test (issue #885): until then a post-matrix meter declined the
+/// fold and doubled as that oracle, and it no longer does. Read once per bind, in
+/// `preflight_sequential`, before any owner moves; render never reads it, and it does not exist
+/// without `test-support`. Callers restore `false` after the bind they meant to decline.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_route_fold_declined(declined: bool) {
     ROUTE_FOLD_DECLINED.with(|slot| slot.set(declined));
 }
 
@@ -3710,7 +3716,7 @@ pub(crate) fn preflight_sequential(
         })
         .collect();
     let fold = route_fold(program, &plan.spec, &metadata, &run_units);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let fold = fold.filter(|_| !ROUTE_FOLD_DECLINED.with(std::cell::Cell::get));
     validate_fold_installation(plan, program, run_units, fold)
 }
@@ -5007,10 +5013,11 @@ fn foldable_lane(
 ///   excusing no observer leaves the metered arms unfolded, and excusing every observer folds the
 ///   post-fader-metered arm. What makes the post-matrix excuse sound -- the resident view, and
 ///   the member buffer written for an observer that declines it -- is
-///   `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`. Before #885
-///   this clause declined post-matrix meters too, and
-///   `the_folded_master_is_the_reductions_own_bits` used such a meter as its unfolded oracle; a
-///   post-matrix meter no longer produces that plan.
+///   `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, and with the
+///   production meter `a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`. Before #885
+///   this clause declined post-matrix meters too, and two fold oracles were such a metered plan;
+///   they now decline the fold through `test_only_set_route_fold_declined` or render at the
+///   scalar dispatch instead.
 /// * **the opening chain's ops are excluded from the in-between scan** -> every fold in the tree
 ///   stops firing and `every_standing_workload_folds_one_route_per_track` goes red. That is the
 ///   conservative direction, and it is worth pinning: the colouring gives the session output the
@@ -8358,7 +8365,7 @@ mod tests {
             nodes,
             observers,
         };
-        test_only_decline_route_fold(fixture.fold_declined);
+        test_only_set_route_fold_declined(fixture.fold_declined);
         let bound = if fixture.controlled {
             let (plan, mut controller) = plan
                 .bind_with_observation_activation(
@@ -8379,7 +8386,7 @@ mod tests {
                 None,
             )
         };
-        test_only_decline_route_fold(false);
+        test_only_set_route_fold_declined(false);
         bound
     }
 

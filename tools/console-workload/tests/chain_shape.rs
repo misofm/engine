@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use bench_support::digest::Sha256Sink;
 use console_workload::{ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload};
 use effect_contract::ChannelSymmetryWitness;
+use lane::Backend;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -749,17 +750,25 @@ fn the_plumbing_row_binds_no_strip_at_all() {
     );
 }
 
-/// The folded master carries the reduction's own bits, and the meter arm is the oracle that says
-/// so.
+/// The folded master carries the reduction's own bits, and the scalar-dispatch arm is the oracle
+/// that says so.
 ///
-/// # Why the meter arm is a legitimate oracle
+/// # Why the scalar-dispatch arm is a legitimate oracle
 ///
-/// The console leases one meter per track at `post_matrix`, and `post_matrix` is the chain's last
-/// slot. An observer there reads a planar buffer the fold stops writing, so `route_fold` declines
-/// the whole plan -- which leaves the Job-2 shape standing: a route op per track, then the D9
-/// `sum2_block`/`sum_into_block` reduction over their buffers. The two arms therefore differ in
-/// *exactly* the thing under test and in a meter that AGENTS.md requires not to change signal
-/// flow.
+/// `Backend::Scalar` binds no bank chain at all, so there is no epilogue for a route to fold into:
+/// every route op runs, and the master is the D9 `sum2_block`/`sum_into_block` reduction over
+/// their buffers -- the Job-2 shape the fold replaced. Banking regroups lanes and never changes a
+/// lane's arithmetic (AGENTS.md; `banked_tracks_are_bit_identical_to_their_scalar_tails` and the
+/// graph compiler's per-node arms hold the strip to it), so the two arms differ in the fold and in
+/// a regrouping that is itself bit-neutral.
+///
+/// Until issue #885 the oracle was the meter arm: a post-matrix meter on every track declined the
+/// fold plan-wide. A post-matrix meter now reads the folded lane's resident words and keeps the fold
+/// armed, so that arm is checked as a *candidate* here instead -- it must fold exactly as the
+/// unmetered arm does and render the same bits. The graph compiler's
+/// `the_intended_strip_folds_every_route_into_its_cohorts_epilogue` keeps a banked oracle that
+/// differs in the fold alone, through `graph::test_only_set_route_fold_declined`; this crate does
+/// not build `graph`'s `test-support` feature, so that switch is not reachable from here.
 ///
 /// # What this catches that nothing else does
 ///
@@ -770,7 +779,7 @@ fn the_plumbing_row_binds_no_strip_at_all() {
 ///
 /// Red mutation: build `RouteFold::runs` from the candidate list reversed (leaving the association
 /// proof reading the forward order, so the plan still folds) -- every 64-track row's digest
-/// diverges from its meter arm at the first block.
+/// diverges from its scalar arm at the first block.
 #[test]
 fn the_folded_master_is_the_reductions_own_bits() {
     const METERED: PlanConfig = PlanConfig {
@@ -778,32 +787,55 @@ fn the_folded_master_is_the_reductions_own_bits() {
         control: false,
         observation: ObservationArm::Absent,
     };
+    let digest = |runtime: &mut SessionRuntime| {
+        let mut sink = Sha256Sink::new();
+        for block in 0..BLOCKS {
+            runtime.render(block).expect("console render");
+            runtime.hash_output(&mut sink);
+        }
+        sink.finish_hex()
+    };
     for workload in WORKLOADS {
-        // The oracle is a meter lease, and a meter stream is leased from the prepared builtins
-        // session that the overhead floor row deliberately does not have. There is nothing to
-        // check on that row anyway: it folds no route, so the fold's association order is not a
-        // property it has. `every_standing_workload_folds_one_route_per_track` pins what it does
-        // have.
+        // A meter stream is leased from the prepared builtins session that the overhead floor row
+        // deliberately does not have, so the metered candidate cannot be built there. There is
+        // nothing to check on that row anyway: it folds no route, so the fold's association order
+        // is not a property it has. `every_standing_workload_folds_one_route_per_track` pins what it
+        // does have.
         if workload == Workload::SixtyFourTrackPlumbingOnly {
             continue;
         }
-        let folded = render(workload, PlanConfig::BASELINE, BLOCKS);
-        let mut metered_runtime = SessionRuntime::build(workload, METERED);
-        let mut metered = Sha256Sink::new();
-        for block in 0..BLOCKS {
-            metered_runtime.render(block).expect("console render");
-            metered_runtime.hash_output(&mut metered);
-        }
+        let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        let folded = digest(&mut folded_runtime);
+        let mut unfolded_runtime =
+            SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, Backend::Scalar);
+        let unfolded = digest(&mut unfolded_runtime);
         assert_eq!(
-            metered_runtime.bank_route_folds(),
-            0,
-            "{}: a meter on the matrix must decline the fold, or this is not an oracle",
+            (
+                unfolded_runtime.bank_shape(),
+                unfolded_runtime.bank_route_folds()
+            ),
+            ([0, 0], 0),
+            "{}: the scalar arm must bind no chain and fold no route, or this is not an oracle",
             workload.kind()
         );
         assert_eq!(
-            folded.0,
-            metered.finish_hex(),
+            folded,
+            unfolded,
             "{}: the folded master is not the reduction's bits",
+            workload.kind()
+        );
+        let mut metered_runtime = SessionRuntime::build(workload, METERED);
+        let metered = digest(&mut metered_runtime);
+        assert_eq!(
+            metered_runtime.bank_route_folds(),
+            folded_runtime.bank_route_folds(),
+            "{}: a meter on the matrix must fold exactly the routes the unmetered plan folds",
+            workload.kind()
+        );
+        assert_eq!(
+            metered,
+            folded,
+            "{}: a metered, folded master is not the reduction's bits",
             workload.kind()
         );
     }
