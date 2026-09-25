@@ -1,18 +1,20 @@
 //! Control-rate coefficient design: parameter values in, lane words out.
 //!
-//! Nothing in this module runs per sample in steady state. It is called at preparation, at a
-//! reset, at a restore, and once per frame for at most the 64 frames a `Linear 64` ramp is in
-//! flight — and then only for the lanes and the coefficients whose parameter actually moved.
-//! That is the whole of the divergence the 83c audit recorded against this crate: the pre-audit
-//! code evaluated `expf(-1 / (0.001 * ms * fs))` **per sample, unconditionally**, on the render
-//! path, through the platform libm.
+//! Exponential coefficient design runs at preparation, reset, restore and when an attack/release
+//! target arrives. During its 64-sample `Linear 64` parameter ramp, the render path interpolates
+//! between the exact coefficient endpoints without calling an exponential. Only lanes and
+//! coefficients whose parameters are active are advanced. The 83c audit found the old per-sample
+//! libm evaluation of `expf(-1 / (0.001 * ms * fs))`; MC-2 removes that call while preserving the
+//! `f64` design law at both endpoints.
 //!
 //! # One law
 //!
-//! [`design_lane`] is the only place a coefficient is derived, so a ramp that has finished
-//! produces exactly the words a fresh preparation at the same value would. A second derivation
-//! anywhere would make a block boundary observable (gate E3) and a finished ramp differ from a
-//! fresh prepare (gate E6).
+//! [`rate_coefficient`] is the only ballistic coefficient law. [`design_lane`] uses it for a full
+//! design, and the event path uses it to design a new target. The coefficient ramp's last sample
+//! snaps to that exact target, so a finished ramp matches a fresh preparation at the same value.
+//! Restore re-derives the start and end words from the v1 payload's current/target/remaining triple
+//! because the 22-word layout does not serialize its auxiliary coefficient ramp; block partition
+//! invariance is preserved.
 //!
 //! # Why the exponential is `f64`
 //!

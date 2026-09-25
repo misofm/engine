@@ -14,7 +14,7 @@
 //! | `Ramp` with a per-sample division | `effect_runtime::ramp::LinearRamp` (D11) |
 //! | the five-way branching gain computer | `effect_runtime::dynamics::gain_delta_db` (GMR eq. 4) |
 //! | `20 * log10` / `10^(x/20)` through libm | `dynamics::level_db` / `dynamics::gain_from_db` (D6) |
-//! | `expf` per sample for the ballistics | `design::rate_coefficient`, at event rate, in `f64` |
+//! | `expf` per sample for the ballistics | exact event-rate endpoints plus coefficient interpolation |
 //! | the two-rounding one-pole | `effect_runtime::envelope::rms_follow` + one `Lane::select` |
 //! | `sanitize` / `recover` / `flushed` per value | `lane::flush` on `g`, one block-boundary check (D7) |
 //! | `write_*` / `read_*` byte helpers | `effect_runtime::state_payload` |
@@ -53,9 +53,7 @@ use effect_runtime::bank::block_is_positive_zero;
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use lane::{Backend, Lane, Simd4, Simd8};
 
-use crate::design::{
-    COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT, SMOOTHING_SAMPLES,
-};
+use crate::design::{COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT};
 use crate::kernel::{Channel, Detector};
 
 /// Fixed scalar words each channel section carries in the current causal payload.
@@ -391,17 +389,14 @@ fn apply_automation<L: Lane>(
         last_order = Some(order);
         pending[channel_index][parameter_index] = Some(normalize_zero(span.start_value));
     }
-    for (parameter_index, (left_ramp, right_ramp)) in left
-        .ramps
-        .iter_mut()
-        .zip(right.ramps.iter_mut())
-        .enumerate()
+    for (parameter_index, (left_value, right_value)) in
+        pending[0].iter().zip(pending[1].iter()).enumerate()
     {
-        if let Some(value) = pending[0][parameter_index] {
-            left_ramp[lane].set_target(value, SMOOTHING_SAMPLES);
+        if let Some(value) = *left_value {
+            left.set_parameter_target(parameter_index, lane, value, metadata.sample_rate);
         }
-        if let Some(value) = pending[1][parameter_index] {
-            right_ramp[lane].set_target(value, SMOOTHING_SAMPLES);
+        if let Some(value) = *right_value {
+            right.set_parameter_target(parameter_index, lane, value, metadata.sample_rate);
         }
     }
 }
@@ -713,6 +708,16 @@ impl<L: Lane> Instance<L> {
                 return false;
             }
         }
+        for slot in 0..2 {
+            let (l, r) = (&left.rate_ramps[slot][lane], &right.rate_ramps[slot][lane]);
+            if l.current.to_bits() != r.current.to_bits()
+                || l.target.to_bits() != r.target.to_bits()
+                || l.step.to_bits() != r.step.to_bits()
+                || l.remaining != r.remaining
+            {
+                return false;
+            }
+        }
         true
     }
 }
@@ -861,7 +866,7 @@ impl PreparedNativeEffect for PreparedCompressor {
         } else {
             &mut self.instance.right
         };
-        channel.ramps[index][0].set_target(value, SMOOTHING_SAMPLES);
+        channel.set_parameter_target(index, 0, value, self.instance.metadata.sample_rate);
         Ok(())
     }
 
