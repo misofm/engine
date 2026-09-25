@@ -2368,8 +2368,9 @@ impl Runtime {
     /// ([`FoldTarget::Output`]), which all run before it. Every other unit ignores it.
     ///
     /// `sources` is the source set's played planes for this block (issue #918), `None` in a plan
-    /// with no source set. Only a bank's gather reads it, and only for a buffer
-    /// [`Self::source_plane_of_buffer`] names; every other read of the arena is unchanged.
+    /// with no source set. Only a bank's gather reads it, and only on a lane its unit marks
+    /// (`UnitIdentity::source_lanes`) for a buffer [`Self::source_plane_of_buffer`] names; every
+    /// other read of the arena is unchanged.
     pub(crate) fn execute(
         &mut self,
         index: usize,
