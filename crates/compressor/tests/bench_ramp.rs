@@ -81,11 +81,11 @@ impl SpanPlans {
         let mut offsets = [0_u32; BANK_WIDTH + 1];
         let mut variants = [Vec::new(), Vec::new()];
         for lane in 0..BANK_WIDTH {
-            for variant in 0..2 {
+            for (variant, spans) in variants.iter_mut().enumerate() {
                 match arm {
                     Arm::ReleaseOnly => {
                         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-                            variants[variant].push(point(
+                            spans.push(point(
                                 RELEASE_PARAMETER,
                                 channel,
                                 if variant == 0 { 800.0 } else { 1_600.0 },
@@ -101,7 +101,7 @@ impl SpanPlans {
                             ),
                         ] {
                             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-                                variants[variant].push(point(parameter, channel, value));
+                                spans.push(point(parameter, channel, value));
                             }
                         }
                     }
@@ -321,30 +321,30 @@ fn request_points(arm: Arm, variant: usize, first_sample: u64) -> Vec<PreparedAu
     events.clone()
 }
 
-fn process_bank_block(
-    bank: &mut dyn PreparedNativeEffectBank,
-    width: BankWidth,
-    left: &mut [f32],
-    right: &mut [f32],
-    first_sample: u64,
-    events: &[PreparedAutomationSpan],
-    offsets: &[u32],
-    frames: u32,
-) {
+fn process_bank_block(bank: &mut dyn PreparedNativeEffectBank, block: PayloadProbeBlock<'_>) {
     bank.process_bank(
         EffectBankProcessBlock::new(
-            left,
-            right,
+            block.left,
+            block.right,
             None,
-            frames,
-            width,
-            first_sample,
-            events,
-            offsets,
+            block.frames,
+            BankWidth::Eight,
+            block.first_sample,
+            block.events,
+            block.offsets,
             QUANTUM,
         )
         .expect("ramp payload probe block"),
     );
+}
+
+struct PayloadProbeBlock<'a> {
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+    first_sample: u64,
+    events: &'a [PreparedAutomationSpan],
+    offsets: &'a [u32],
+    frames: u32,
 }
 
 fn assert_lane_ramp_state(
@@ -390,13 +390,14 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
     let mut right = right_source.clone();
     process_bank_block(
         bank.as_mut(),
-        BankWidth::Eight,
-        &mut left,
-        &mut right,
-        0,
-        &release_a,
-        &offsets_a,
-        1,
+        PayloadProbeBlock {
+            left: &mut left,
+            right: &mut right,
+            first_sample: 0,
+            events: &release_a,
+            offsets: &offsets_a,
+            frames: 1,
+        },
     );
     for track in 0..BANK_WIDTH {
         assert_lane_ramp_state(
@@ -413,13 +414,14 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
     let mut settle_right = vec![0.0_f32; BANK_WIDTH * (RAMP_FRAMES - 1)];
     process_bank_block(
         bank.as_mut(),
-        BankWidth::Eight,
-        &mut settle_left,
-        &mut settle_right,
-        1,
-        &empty,
-        &EMPTY_OFFSETS,
-        (RAMP_FRAMES - 1) as u32,
+        PayloadProbeBlock {
+            left: &mut settle_left,
+            right: &mut settle_right,
+            first_sample: 1,
+            events: &empty,
+            offsets: &EMPTY_OFFSETS,
+            frames: (RAMP_FRAMES - 1) as u32,
+        },
     );
     for track in 0..BANK_WIDTH {
         assert_lane_ramp_state(bank.as_ref(), reference.as_ref(), track as u32, 4, 800.0, 0);
@@ -428,13 +430,14 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
     let release_b = request_points(Arm::ReleaseOnly, 1, RAMP_FRAMES as u64);
     process_bank_block(
         bank.as_mut(),
-        BankWidth::Eight,
-        &mut left[..BANK_WIDTH],
-        &mut right[..BANK_WIDTH],
-        RAMP_FRAMES as u64,
-        &release_b,
-        &offsets_a,
-        1,
+        PayloadProbeBlock {
+            left: &mut left[..BANK_WIDTH],
+            right: &mut right[..BANK_WIDTH],
+            first_sample: RAMP_FRAMES as u64,
+            events: &release_b,
+            offsets: &offsets_a,
+            frames: 1,
+        },
     );
     for track in 0..BANK_WIDTH {
         assert_lane_ramp_state(
@@ -458,13 +461,14 @@ fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
     let mut both_right = right_source;
     process_bank_block(
         both_banks[0].as_mut(),
-        BankWidth::Eight,
-        &mut both_left,
-        &mut both_right,
-        0,
-        &both,
-        &offsets_b,
-        1,
+        PayloadProbeBlock {
+            left: &mut both_left,
+            right: &mut both_right,
+            first_sample: 0,
+            events: &both,
+            offsets: &offsets_b,
+            frames: 1,
+        },
     );
     for track in 0..BANK_WIDTH {
         assert_lane_ramp_state(
@@ -534,5 +538,8 @@ fn mq2_compressor_ramp_spike() {
 /// Exercises marker extraction against this target's actual libtest output in the preflight.
 #[test]
 fn mq2_libtest_result_marker_probe() {
-    println!("MQ2_RESULT_PROBE {{\"probe\":true}}");
+    println!(
+        "MQ2_RESULT_PROBE {{\"probe\":true,\"simd8\":{}}}",
+        Backend::current() == Backend::Simd8
+    );
 }
