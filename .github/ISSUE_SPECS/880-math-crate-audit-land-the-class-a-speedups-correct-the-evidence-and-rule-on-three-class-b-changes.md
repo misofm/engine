@@ -743,3 +743,14 @@ Each approved new implementation gets only its specified new one-warmup/two-roun
 measurement after its harness is frozen and preflighted. Final source changes require
 new exact-source AudioWorklet qualification through existing gates before delivery.
 All checkpoints remain local until a coherent reviewed batch boundary.
+
+### MB-2 measurement support
+
+The original MQ-1 runner only accepts the E1 baseline source identity. The approved
+MB-2 comparison therefore includes a minimal extension to the existing
+`scripts/run-issue880-mq1-benchmark.sh`, its validator and focused self-tests: select
+an explicit frozen candidate source commit and baseline/fast-tier revision, verify
+source equality before timing, preserve the original benchmark workload and fixture,
+and continue validating historical/recovered baseline records. #902 owns extraction
+and baseline promotion separately. This adaptation neither retimes the baseline nor
+permits a changed workload, new framework, or additional measured rounds.
