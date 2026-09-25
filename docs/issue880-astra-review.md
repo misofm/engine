@@ -73,3 +73,28 @@ not a source formatting defect, and must remain unchanged.
   MA-5 sweeps are ignored; the default domain/container checks remain active.
 
 These nits do not alter the task verdicts or require another measurement.
+
+## MA-3 attempt 2 — final adversarial verdict
+
+Reviewed correction `51c1fd1bece827462d92f985e5982ed513c5767d` on 2026-09-25.
+**MA-3: PASS. Authorized Class-A batch: PASS, with no remaining review blocker.**
+This supersedes the attempt-1 batch failure above; that record remains preserved.
+
+The correction adds only the `e1_identity` Cargo test declaration with
+`required-features = ["lane"]` and resolves the two optional prose nits. It preserves
+the optional lane dependency, test body, production arithmetic, corpus pins, and
+benchmark records. The explicit feature requirement matches the existing M1/M2/F1
+target declarations and fixes B1 without concealing the exhaustive proof.
+
+Independent final checks:
+
+- `cargo test --locked --release -p math`: PASS, including the scalar source-scan
+  and unchanged M3 digest gates; the lane-only E1 target is correctly skipped.
+- `cargo test --locked --release -p math --features lane --test e1_identity -- --ignored --nocapture --test-threads=1`:
+  PASS, 4,294,967,296 patterns across scalar/pre-E1/Simd4/Simd8, zero mismatches.
+
+All other task verdicts and their stated scope limits remain unchanged. MQ-1 record
+promotion remains assigned to #902. R1/R2/R3/R4 are still pending, and this PASS
+authorizes neither Class-B implementation nor closure of #880. The coordinator
+still owns upstream publication and evidence synchronization. No timed workload
+was launched during either review attempt.
