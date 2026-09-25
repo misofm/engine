@@ -4167,10 +4167,6 @@ mod tests {
     ) -> WorkerTrace {
         let quantum =
             usize::try_from(request.ring_config.quantum_frames.0).expect("quantum fits usize");
-        let mut blocks = usize::try_from(
-            request.ring_config.frame_capacity / u64::from(request.ring_config.quantum_frames.0),
-        )
-        .expect("block count fits usize");
         let mut native_resolver = resolver_wave(stereo_float32_wave(samples), b"exact-identity");
         let UnstartedNativeSource {
             mut command_sender,
@@ -4191,6 +4187,9 @@ mod tests {
         };
         let mut idles = Vec::new();
         let mut telemetry = Vec::new();
+        // Every prepared block starts on the recycle queue, however many the ring allocates.
+        let mut blocks = job.provider.producer.recycle_consumer.available_at_entry();
+        assert!(blocks > 0);
         for step in script {
             match *step {
                 ScriptStep::Run => {

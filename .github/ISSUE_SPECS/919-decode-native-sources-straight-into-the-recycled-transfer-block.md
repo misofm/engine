@@ -179,7 +179,8 @@ claim.
   `reserved` (failed validation) or moves it to the data queue or `deferred_block`.
   `commit_deferred` moves it to the data queue or back to `deferred_block`. A seek and a decode
   error both leave it in `reserved`. The harness asserts this count after every script step
-  (`run_worker_script`, `:4237`).
+  (`run_worker_script`, `:4236`). The count is measured on the recycle queue before the first step,
+  so the check holds for any prepared block count.
 - No duplicate: the retry after `Full` pushes the deferred block itself (M6 below). No stale
   ack: a seek admitted between a `Full` commit and its retry makes the retry fail validation.
   The block then stays deferred and is published unacked by the next reservation, and the
@@ -314,3 +315,12 @@ ring. So M3 is red only where one test-injected extra block makes it reachable.
 
    Until they are re-pinned, `cargo test -p audit` and the qualification job fail on these pins
    only.
+7. **Merge with #917 (`count + 1` blocks, queues `count + 1`).** A full data queue still
+   implies an empty recycle queue, so the reservation stays the backpressure point and the
+   conservation check adapts on its own. The gate-1 literal rows and idle states are specific to
+   this ring shape, though: one more buffered block moves the stall points. Whichever branch
+   merges second regenerates `PUBLISHED_SEQUENCE_ORACLE` and the idle list from the verbatim
+   `pre_change_service_job` on the new shape. That regeneration is the live comparison
+   `native_worker_matches_the_pre_change_worker_block_for_block` already runs. The test
+   `prepared_contiguous_native_submission_matches_planar_ring_shape` is edited on both branches
+   (its submit call here, its pins there).
