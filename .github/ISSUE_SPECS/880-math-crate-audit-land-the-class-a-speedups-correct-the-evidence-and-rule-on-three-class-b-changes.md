@@ -628,3 +628,19 @@ Closing: MZ-1 (spec file in batch 1's first checkpoint; closure last)
 - **Exactness checks** (e.g. whether an f32 subtraction rounded) use an error-free transformation such as Knuth TwoSum in f32 (`s = a + b; bb = s − a; err = (a − (s − bb)) + (b − bb)`, exact iff `err == 0`) or integer arithmetic. Never compare against an f64 result (see F-5).
 - **Measured runtime of the audit harness:** 41 s wall on 32 threads (EPYC 7313P) for the floor-exactness count, the E1 identity, five width-identity sweeps and six M1 sweeps.
 
+
+## Execution record — 2026-09-25
+
+- Coordinator accepted the bounded task scopes and objective gates above. The user's explicit
+  workflow is GPT-6 Luna xhigh implementation followed by GPT-6 Astra xhigh adversarial review;
+  corrections repeat that flow, within the two-attempt budget per task.
+- Batch branch: `codex/batch-880`, based on synchronized `origin/main` `e09302ad`. The primary
+  checkout is untouched. Independent task worktrees preserve class-A gate isolation.
+- First implementation tranche: MA-1, MA-2, MA-3 independently. MA-4 and MA-5 follow their
+  dependencies; MQ-1/MQ-2 and MC-1 supply concrete owner-decision evidence. Class-B implementation
+  remains blocked until the corresponding owner ruling is recorded. Optional MA-1b is omitted.
+- Local issue-boundary audit: 445 existing numbered/spec Markdown files compared with 557
+  GitHub issues; no numbered local spec lacks a matching remote issue. #880 is open and its
+  title matches this spec's filename. No unrelated issue state was changed.
+- Checkpoint commits accumulate locally for the issue's declared class-A batch; delivery evidence
+  and remote issue state will be synchronized at the coherent batch boundary.
