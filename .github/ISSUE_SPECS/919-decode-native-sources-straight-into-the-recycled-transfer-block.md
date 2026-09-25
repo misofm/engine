@@ -114,12 +114,29 @@ implemented concurrently; the second to merge rebases.
 
 ## Attempt 1 evidence
 
+### Scope amendment (Sol)
+
+Sol authorized two files beyond this brief's paths, for the repin only (commit `672a70fa`). The
+change removes the 512-byte `worker.planar_staging` layout row, and `worker.job_array` shrinks
+by 8 bytes (the job's 16-byte staging slice out, one 8-byte reserved-block slot in):
+
+- `tools/audit/src/source_duration.rs`:
+  - The cited lines are `before`/`after` the repin. `:324`/`:325`: the row count, 17 → 16.
+  - `:326`/`:330`: the layout total, `6_416` → `5_896` (-520 = 512 + 8).
+  - `:329`/`:334`: the canonical accounting digest, `0xfc47_9666_aec5_0448` → `0xafc6_12be_270e_b257`,
+    the value the live `audit source-duration` run produces.
+  - Comments name the removed row and the job-array shrink.
+- `.github/workflows/qualification.yml:660`: `"layout_entries": 17, "layout_total_bytes": 6416` →
+  `16, 5896`. Nothing else in the file changed.
+
 Terra, branch `codex/919-decode-into-recycled-block` on `12b621f2`. Commits: `c03848a3` (gate-1
 oracle recorded against the pre-change worker, before any production edit), `92905c91`
 (implementation), `22126bdc` (block-conservation check in the harness), `18eca7a8` (rejected
-block stays with the caller; see deviation 1), and this evidence commit. Paths touched:
-`crates/source/src/lib.rs`, `crates/source/src/native_source.rs`, this spec. No performance
-claim.
+block stays with the caller; see deviation 1), `7d498ed3` (evidence), `bbee135b` (block count
+from the prepared ring), `672a70fa` (the amendment's repin), `54ab2cf9` (gate 1 made
+regenerable for #917's ring), and this evidence update. Paths touched:
+`crates/source/src/lib.rs`, `crates/source/src/native_source.rs`, this spec, and the two
+amendment files. No performance claim.
 
 ### Design
 
@@ -179,7 +196,7 @@ claim.
   `reserved` (failed validation) or moves it to the data queue or `deferred_block`.
   `commit_deferred` moves it to the data queue or back to `deferred_block`. A seek and a decode
   error both leave it in `reserved`. The harness asserts this count after every script step
-  (`run_worker_script`, `:4236`). The count is measured on the recycle queue before the first step,
+  (`run_worker_script`, `:4239`). The count is measured on the recycle queue before the first step,
   so the check holds for any prepared block count.
 - No duplicate: the retry after `Full` pushes the deferred block itself (M6 below). No stale
   ack: a seek admitted between a `Full` commit and its retry makes the retry fail validation.
@@ -191,7 +208,8 @@ claim.
 - Gate 1, `native_source.rs`. `run_worker_script` drives a prepared job's `service_job` on the
   test thread. A scripted render takes blocks raw off the data queue, so stale blocks are
   recorded too; it observes seeks and holds the played block until the next boundary. Fixture:
-  stereo float32; region `[1, 43)`; quantum 4; three blocks; a subnormal, NaN, ±inf and -0.0.
+  stereo float32; region `[1, 43)`; quantum 4; three blocks. It carries a subnormal, NaN, ±inf
+  and -0.0, all outside the frames either ring shape decodes ahead (21..=28, 30..=33).
   Script: fill, two more service rounds on a full ring, a boundary that plays a block but frees
   none, a seek on a stalled ring, a newer seek backpressured on the seek slot, run to a one-frame
   end-of-region block, drain, an in-phase restart whose first decoded quantum a second seek
@@ -199,8 +217,11 @@ claim.
   block.
   - `native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks`: 23
     `(generation, start, frames, end, sanitized watermark, FNV-1a of the published words)` rows
-    and the 36 Run/ServiceOnce idle states. Recorded from the pre-change worker in `c03848a3`,
-    where the test passes against the old code.
+    (`PUBLISHED_SEQUENCE_ORACLE`) and the 36 Run/ServiceOnce idle states
+    (`PUBLISHED_SEQUENCE_IDLE_RUNS`, run-length). Both were recorded from the pre-change
+    production worker: first in `c03848a3`, where the test passes against the old code; then,
+    for `54ab2cf9`'s fixture move (-inf from frame 27 to 29), from `c03848a3`'s code with only
+    that move applied.
   - `native_worker_matches_the_pre_change_worker_block_for_block`: `pre_change_service_job`
     and `pre_change_submit_native_planar` are the parent's code verbatim. The only differences:
     staging passed as a parameter, and the removed method inlined as a test helper (a diff of
@@ -210,8 +231,8 @@ claim.
   - `a_stalled_seek_no_longer_counts_the_quantum_only_the_old_worker_decoded_ahead`
     (deviation 2).
   - `worker_retries_a_full_commit_through_the_deferred_block_without_loss_or_duplication`. One
-    injected extra block makes a commit meet a full data queue. Nothing is acked (cumulative 12,
-    `data_full_count > 0`), the retry publishes it once, and the six published blocks equal the
+    injected extra block makes a commit meet a full data queue. Nothing is acked (cumulative =
+    4 × prepared blocks, `data_full_count > 0`), the retry publishes it once, and the six published blocks equal the
     old worker's no-stall stream word for word.
 - Producer, `lib.rs`:
   - `native_commit_publishes_the_decoded_block_without_a_copy` (gate 2 sibling): no
@@ -250,7 +271,7 @@ claim.
 | `scripts/test-native-pcm-runner-v1-policy.sh` | ok |
 | `audit source` (live, audited allocator) | 0 violations; underrun 128/1; resume 384 |
 | `audit source-duration` | layout equal across durations: 16 rows, 5 896 bytes |
-| `cargo test -p audit --all-features` | 48 passed, 1 failed: the out-of-scope pin below |
+| `cargo test -p audit -p source --all-features` (after the amendment) | see "Amendment gates" |
 
 ### Mutations (all red; each applied alone, then restored)
 
@@ -304,23 +325,55 @@ ring. So M3 is red only where one test-injected extra block makes it reachable.
    one service call after that release would make the old worker publish one more stale-
    generation block, which the consumer discards. Real threaded interleavings were never
    deterministic.
-6. **Out-of-scope pin (not edited; needs owner authorization).** Removing the 512-byte
-   staging row, plus the job array shrinking by one pointer (a 16-byte slice out, an 8-byte slot
-   in), moves:
-   - `tools/audit/src/source_duration.rs:324`: `17` → `16`.
-   - `:326`: `6_416` → `5_896`.
-   - `:329`: `0xfc47_9666_aec5_0448` → `0xafc6_12be_270e_b257`.
-   - `.github/workflows/qualification.yml:660`: `"layout_entries": 17, "layout_total_bytes": 6416`
-     → `16, 5896`. The release `audit source-duration` record measured here gives exactly those.
-
-   Until they are re-pinned, `cargo test -p audit` and the qualification job fail on these pins
-   only.
+6. **Allocation-layout pins.** These were out of scope and are repinned under the scope
+   amendment above.
 7. **Merge with #917 (`count + 1` blocks, queues `count + 1`).** A full data queue still
-   implies an empty recycle queue, so the reservation stays the backpressure point and the
-   conservation check adapts on its own. The gate-1 literal rows and idle states are specific to
-   this ring shape, though: one more buffered block moves the stall points. Whichever branch
-   merges second regenerates `PUBLISHED_SEQUENCE_ORACLE` and the idle list from the verbatim
-   `pre_change_service_job` on the new shape. That regeneration is the live comparison
-   `native_worker_matches_the_pre_change_worker_block_for_block` already runs. The test
-   `prepared_contiguous_native_submission_matches_planar_ring_shape` is edited on both branches
-   (its submit call here, its pins there).
+   implies an empty recycle queue, so the reservation stays the backpressure point. The
+   conservation check and the cumulative-frame assertions derive from the prepared block count.
+   Only the two recorded constants depend on the ring shape. `prepared_contiguous_native_submission_matches_planar_ring_shape`
+   is edited on both branches (its submit call here, its pins there): a textual conflict only.
+
+### Regenerating gate 1 after #917
+
+#917 makes the fixture's three-block ring (`published_sequence_request`, `frame_capacity = 12`)
+prepare four blocks, so `native_worker_publishes_the_recorded_block_sequence_through_stall_and_seeks`
+fails on its two recorded constants and nothing else. To regenerate on the merged tree:
+
+1. Run `cargo test -p source --all-features --lib -- --ignored print_published_sequence_constants_from_the_pre_change_worker --nocapture`.
+   It first prints `prepared transfer blocks: 4`. It then prints both constants as Rust source,
+   computed by the verbatim pre-change worker (`pre_change_service_job`) on the prepared ring.
+2. Replace the whole adjacent `const PUBLISHED_SEQUENCE_ORACLE` … `const
+   PUBLISHED_SEQUENCE_IDLE_RUNS` block in `native_source.rs`'s tests with that output. Keep its
+   doc comment and change "three-block ring" to "three-plus-one ring (#917)". Nothing else
+   changes: not the fixture, the script, `seek_on_a_full_ring = 10`, or any other test.
+3. Run `cargo test -p source --all-features`.
+
+Expected output, dry-run on this tree with an equivalent four-block ring (`frame_capacity = 16`
+here prepares the same four blocks with four-slot queues as #917's 3 + 1):
+
+- **Rows:** the printer's rows equal the genuine pre-change production worker's record on that
+  ring. Relative to the current constant there is exactly one change: a generation-1 row
+  `(1, 21, 4, false, 4, 0x69a2_2fbf_be64_3585)` is inserted after `(1, 17, …)`, for 24 rows.
+- **Idle runs:** they become `(WaitingForRender, 17), (WaitingForCommand, 5), (Progress, 1),
+  (WaitingForRender, 6), (WaitingForCommand, 7)`.
+- **Tests:** with the output pasted, all four gate-1 tests pass.
+
+If the printer shows anything else, #917 changed more than the block count and queue depth,
+and the difference needs review rather than a paste. The fixture already keeps both shapes'
+decode-ahead quanta (21..=24 and 25..=28, plus 30..=33) free of replacement samples, so the
+live comparison holds on either ring.
+
+### Amendment gates
+
+These results are for `54ab2cf9`, on top of `672a70fa`.
+
+| gate | result |
+|---|---|
+| `cargo test -p audit -p source --all-features` | audit 49 passed (including `exact_duration_independent_accounting_serialization_is_canonical`); source 68 passed, 1 ignored (the printer), doc 1 |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --locked -p audit -p source --all-targets --all-features -- -D warnings` | exit 0 |
+| `python3 -B scripts/check-ci-path-routing.py` (qualification.yml's own self-check) | contract passed |
+| `python3 -B scripts/test-ci-path-routing.py` | classifier and mutation tests passed |
+| `bash scripts/check-realtime-policy.sh` | ok (50 regions, 14 files) |
+| mutations M1-M8 re-run after the fixture move | all red, same tests as the table above |
+| live `audit source-duration` | 16 rows, 5 896 bytes, layout equal across durations |
