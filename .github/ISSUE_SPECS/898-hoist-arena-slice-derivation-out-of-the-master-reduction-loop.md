@@ -91,3 +91,38 @@ Codegen (descriptive only, no timing). In `cargo rustc --release -p graph --lib 
 - **Mutation ledger.** `crates/graph/tests/MUTATIONS.md` is outside the authorized paths, so the red mutations are recorded here only.
 - **Pre-existing clippy failure.** `cargo clippy -p engine -p graph --all-targets -- -D warnings` without `--all-features` fails on dead code inside the untouched `crates/graph/tests/rt9_resident_bank_input_alloc.rs`, which needs `test-support`. The same command with `--all-features`, and the workspace gate, are clean.
 - **Spec anchors.** All matched the base tree: `runtime.rs:291`, `disjoint.rs:309`, `read` at `:198`, `kernels.rs:644`.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `633ab4aa` and `ee5547bd` on base `6b150fba`.
+No blocking findings. Independently verified: the summation is `((in0 + in1) + in2) + ...` in
+edge order at every fan-in, across group boundaries, in the scalar tail, and for repeated inputs,
+the silence buffer and all-`-0.0` inputs, against a verbatim copy of the old kernel and a scalar
+reference at `f32`, `Simd4` and `Simd8`; the corpus discriminates a fresh-subtotal-per-group and a
+reversed-group order; `write_read_many` has `write_read`'s disjointness proof, checks every premise
+in release before forming a reference, and keeps the workspace's `unsafe` inside `disjoint.rs`;
+the refused-borrow return in `reduce_many` is unreachable for lowered programs (`in_place` requires
+`single`, slots retire one op late, and the 64-input master test asserts no input aliases the
+output); three mutations re-applied and reverted, all red on the random fan-in test.
+
+**Ruling on the group carry (the decision this record exists for).** For fan-in above eight the
+running sum travels through the output buffer: `ceil(N / 8)` passes, one extra L1-resident reload
+and one extra store per vector per later group. Against the 64-input, 128-frame `Simd8` master
+that is 112 extra loads and 112 extra stores to a 512-byte output per plane, in exchange for
+removing about nine thousand per-vector slice-derivation instructions and their branches. Read from
+the release binary, the eight-input group loop is one reload, eight in-order `vaddps` with memory
+operands, and one store. The arithmetic and its order are unchanged, so the class-A criterion that
+matters is met; the "fewer stores" clause is not met above fan-in eight and this ruling accepts
+that explicitly, because the register-accumulator alternative needs `N` simultaneously live read
+slices (heap is forbidden on the render path, a compiled bound would be a `MAX_TRACKS`, and raw
+pointers in `graph` would move `unsafe` out of `disjoint.rs`), a vector-outermost re-borrow per
+group costs more instructions than it saves, and a larger group constant already spills base
+pointers. `fold_cohort` ships the same carry through `ordered_accumulate_block`. No attempt 2.
+The spec lists no benchmark row and none is owed; a later measurement would need the 64-track
+console's master-reduction share not to rise.
+
+Reviewer-run gates: `cargo test -p engine -p graph`, the focused reduction tests in `--release`,
+`check-graph-determinism.sh` (100/100), `check-realtime-policy.sh`, `cargo fmt --all --check`, and
+`cargo clippy --locked -p engine -p graph --all-targets --all-features -- -D warnings`, all green.
+Not re-verified by the reviewer: the byte-identity of the determinism JSON against a base rebuild
+(the script compares fresh processes), and the full-workspace clippy the implementer reports.
