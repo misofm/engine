@@ -352,3 +352,32 @@ allocation-freedom is evidenced by the `audit source` run above, which drives it
     `resource_lifecycle` tests green), then committed under the amendment.
 - The `M2` run's hung binary was a native worker test waiting on a ring with no free block; it
   was killed by hand, and the mutation was reverted like the others.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `a7f8ce93`, `9cbbc8ad`, `5e24b839`, `d197ee83`
+and `c21e6866` on base `12b621f2`, including the coordinator's scope amendment. No blocking
+findings. The acked-batch question, traced in code: producer code carries no diff hunk, the ack is
+returned only inside the data queue's successful push, both queues have logical capacity
+`N + 1` for `N + 1` blocks so no push can be refused and neither deferral path is reachable, the
+played block reaches the producer only through the recycle queue, the only push of retained
+storage is inside `play()` from `begin_block` (`&mut self`), plane borrows are `&self` with no
+interior mutability in the consumer, and seek discards touch only `current` and the data queue.
+The admission sequence is unchanged because exactly one of `played`/`retained_idle` is always
+`Some`, so the consumer's hold is "what it held before, plus one" at every boundary with one more
+block allocated; the reviewer re-recorded gate 1's 604-word oracle on the base tree and it is
+equal word for word. Memory: `+1,088` bytes per source natively (1,024 PCM + 48 block + 16 queue
+slots + 8 consumer field - 8 deleted driver field), stem-length independent, matching the report
+rows and the C-ABI mirror; the web rows are arithmetically consistent. Realtime: `played_plane`
+inside a policy region; `audit source` at 100,000 blocks with zero allocations, locks and
+syscalls. Mutations M1, M2 (which also hung two native-worker tests), M3 re-applied and reverted,
+red as claimed; M6 (`N` queue slots) confirmed equivalent and the `N + 1` sizing kept on purpose
+so "no push refused" stays a local ring invariant that #919's producer changes cannot disturb.
+The flipped driver test asserts the removed starvation with a strictly stronger set.
+
+One should-fix applied in this commit: the consumer doc and `docs/REALTIME_MEMORY.md` said the
+consumer owns "exactly one block outside both queues" at every boundary; it retains exactly one
+block *in addition to* the pre-fetched `current` block it already held before #917 at boundaries
+where that block starts ahead of the next frame. Not re-verified by the reviewer: the browser rows
+against a built module (repinned at the batch boundary), mutations M4/M5, and the individual
+wasm32 struct sizes.

@@ -684,8 +684,10 @@ impl PcmSourceRing {
     }
 }
 
-/// Transfer blocks the render consumer owns outside both queues at every block boundary: the
-/// played block while one is readable, otherwise the same storage idle (#917).
+/// Transfer blocks the render consumer *retains* outside both queues at every block boundary:
+/// the played block while one is readable, otherwise the same storage idle (#917). This is in
+/// addition to the pre-fetched `current` block the consumer already held before #917 whenever its
+/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun).
 const RETAINED_TRANSFER_BLOCKS: usize = 1;
 
 struct PreparedShape {
@@ -1069,9 +1071,12 @@ fn validate_submission_metadata(
 /// in place and [`Self::copy_channel`] can copy them, as often as the render needs.
 ///
 /// Its storage stays with the consumer after that point too. The ring allocates one block beyond
-/// the configured `transfer_block_count`, and at every block boundary the consumer owns exactly
-/// one block outside both queues: the played block while one is readable, otherwise the same
-/// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`). The
+/// the configured `transfer_block_count`, and at every block boundary the consumer retains exactly
+/// one block outside both queues -- the played block while one is readable, otherwise the same
+/// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`) -- in
+/// addition to the pre-fetched `current` block it already held before #917 at the boundaries
+/// where `current.start_frame` is ahead of `next_frame`. The hold is therefore "what it held
+/// before, plus one", which is what keeps the producer's admission sequence unchanged. The
 /// idle storage goes back to the producer's recycle queue only inside `begin_block`, at the moment
 /// a newer block becomes the played block. So:
 ///

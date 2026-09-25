@@ -67,9 +67,11 @@ and adds one hold rule on top of this protocol (#917): the render consumer keeps
 from `begin_block` until the next `begin_block`, `prepare_seek`, `end_block`, or drop, so a render
 can read its planes in place (`played_plane`, a short block's tail zeroed in place once). The ring
 allocates `transfer_block_count + 1` blocks and sizes both queues at that count, so no push can be
-refused. At every block boundary the consumer owns exactly one block outside the queues -- the
+refused. At every block boundary the consumer retains exactly one block outside the queues -- the
 played block, or the same storage idle after an underrun, the end of the region or `end_block` --
-and hands the idle block to the recycle queue only when a newer block becomes the played block.
+in addition to the pre-fetched `current` block it already held before #917 at boundaries where
+that block starts ahead of the next frame; it hands the idle block to the recycle queue only when
+a newer block becomes the played block.
 The producer therefore admits the configured `transfer_block_count` at every boundary, the same
 admission sequence as before the hold, and can never reach a block the render still reads; an
 admission is still acked only after its push into the data queue. The extra block's PCM, metadata
