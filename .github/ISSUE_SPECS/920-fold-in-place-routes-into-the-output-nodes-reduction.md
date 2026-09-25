@@ -204,8 +204,14 @@ removed.
   `_console_mono`, `_console_mono_dual` and `_console_half_mono`.
 - Their chain folds, bank shapes and digests are unchanged, and
   `every_standing_workload_folds_one_route_per_track` passes unchanged.
-- No existing graph, graph-compiler, builtins-compiler, host-core or capi test binds a plan that
-  takes the fold. It is exercised only by the new tests and the plumbing row.
+- Outside the new tests and the plumbing row, the same probe found two existing tests that bind
+  a plan taking the fold, both in host-core and both passing unchanged:
+  - `builtin_batch_endpoint::tests::endpoint_selects_existing_pair_factories_without_observer_barriers`
+    (fan-in 3).
+  - `builtin_batch_endpoint::tests::forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses`
+    (fan-in 9). Its forced-scalar arm is bankless and now takes the Output fold. Its native-bank
+    arm takes the chain fold. The test's equality of the two arms still holds.
+- No graph, graph-compiler, builtins-compiler or capi test binds a plan that takes it.
 
 ### Tests
 
