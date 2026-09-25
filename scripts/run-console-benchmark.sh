@@ -128,12 +128,15 @@
 # final-tap observation, the master reduction derives its arena slices once per group of eight,
 # and the permanent observer walk is skipped for units without observers. Every change is class
 # **A** -- every `output_sha256` must reproduce the baseline arm's exactly, on every row and every
-# leg, and the two records differ only in time. The rows this batch can move are the ones nobody
-# meters (`sixty_four_track_plumbing_only` through #898's reduction) and the ones a meter would
-# have unfolded (#885/#886), which the standing rows do not exercise: the metered console row
-# (#881) is not yet on `main`, so this pair measures the unmetered strip only, and a metered
-# pairing is owed once that row lands. The baseline arm is the base commit with this arm
-# registration and nothing else.
+# leg, and the two records differ only in time. The rows this batch can move are the unmetered
+# plumbing rows (`sixty_four_track_plumbing_only` through #898's reduction and #900's skipped
+# walk) and the `console_meters` pair, whose `meters_on` arm binds a `PostMatrix` meter on every
+# track -- the shape #885 keeps folded. That pair carries no fold or redirect counter, so a run
+# cannot show whether the fold fired on the metered arm; the metered console row of #881 is
+# where that counter belongs. The baseline arm is the base commit with this arm registration
+# and the #911 benchmark repair (tooling only; the runner cannot complete without it), and
+# nothing else. Both arms were captured under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` on a
+# host whose background services hold the load average above the ceiling; the records say so.
 #
 # `--strip4` is the strip/overhead round's job 4, and it is the one arm in this list that has **no
 # baseline partner**. Job 4 adds no engine change at all: it is the measurement plane -- two
