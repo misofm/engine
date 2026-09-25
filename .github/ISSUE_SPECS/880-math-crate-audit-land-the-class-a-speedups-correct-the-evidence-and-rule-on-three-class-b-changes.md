@@ -849,3 +849,16 @@ are in `docs/issue880-mb2.md` and `artifacts/issue880/mq1-mb2/`.
 Independent Astra class-B/#902 review is next. Successor #905 owns qualification of
 the resulting AudioWorklet binary after accepted source is fixed. This is a local
 batch checkpoint, not an upstream delivery or issue closure.
+
+### Class-B independent verdict
+
+Astra xhigh recorded **attempt-1 PASS** for MB-1, MB-2 (including the delegated R2
+amendment), MC-2 and #902, with no blocking findings. Luna corrected two nonblocking
+prose notes; Astra confirmed they change no executable code, gate or numeric pin
+and accepted exact source `bb9efd095bd8d70be8b8503cba6c3617fd51b74e` for #905.
+The complete review is `docs/issue880-class-b-astra-review.md`. It distinguishes
+MB-1's transcript-supplied exhaustive outputs from separately retained raw files,
+and explicitly credits no blinded listening result. All non-optional source tasks
+are now complete, while optional MA-1b is omitted and R4/MB-3 is explicitly declined.
+AudioWorklet qualification, exact-head CI, merged delivery and remote synchronization
+remain required before closure.

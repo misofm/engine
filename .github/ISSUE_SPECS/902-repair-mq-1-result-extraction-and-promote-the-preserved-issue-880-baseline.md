@@ -31,3 +31,14 @@ Two attempts maximum: one implementation and one correction, each followed by in
 - Existing artifacts were preserved: raw log SHA-256 `f77b1db698c8248d82cf73a433032c8cb1482bff98886a7eeca9c5c3e9adb565`, failed disposition SHA-256 `725b7aaff22970a96771023aa4fa4b86ac5685b53d1551bb59e3a164dd67a3cf`, and runner failure report SHA-256 `1c88fb8cfb1b0bbf6caa765eaba4883c15b566eaa2757f676cb8de1d110fd3d4`.
 - Validation: `bash -n` passed for the runner, helper, and self-test; `bash scripts/test-issue880-mq1-benchmark.sh` passed, including prefixed/unprefixed extraction, invalid-result rejection, full fixture promotion, existing preflight/schema/exit/overwrite checks, and source-artifact hash preservation. Its cargo step was `--no-run`; timed workload launches: 0. The committed recovered record passed the MQ-1 record validator.
 - Attempt 1 is ready for independent adversarial review. MB2 candidate-specific preflight remains outside this bounded MQ-1 repair; its existing E1 source pin will need the separately approved minimal adaptation before any MB2 post-change benchmark.
+
+## Independent review and integration
+
+Astra xhigh recorded **attempt-1 PASS** with no blocking findings in
+`docs/issue880-class-b-astra-review.md`. It independently checked selected-source
+preflight, complete offline promotion, original artifact preservation, record/source
+hashes and additional malformed/nonfinite/duplicate parser probes. No timing was
+rerun. The separately approved #880 MB-2 adapter now passes an explicit source/revision
+through the self-test, so the combined fast-tier source is no longer tested as E1.
+The original E1 record and provenance remain unchanged. Reviewed implementation is
+complete; coherent batch delivery and GitHub synchronization remain pending.
