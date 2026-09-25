@@ -1,8 +1,9 @@
 //! Exact causal compressor state payload codec.
 //!
 //! Each channel is 22 little-endian words (88 bytes): word 0 is gain reduction, followed by
-//! current/target/remaining for each of the seven smoothed parameters.  There is no cursor,
-//! lookahead value, audio ring, detector ring, or staging storage in the current payload.
+//! current/target/remaining for each of the seven smoothed parameters. The coefficient-domain
+//! attack/release ramps are reconstructed from those words on restore; their private state does
+//! not change the version-1 payload shape.
 
 use effect_contract::{StatePayloadError, StatePayloadOutput, StatePayloadSizes};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
@@ -110,6 +111,7 @@ pub(crate) fn commit_channel<L: Lane>(
         };
     }
     channel.redesign(lane, sample_rate);
+    channel.restore_rate_ramps(lane, sample_rate);
 }
 
 pub(crate) fn snapshot_lane<L: Lane>(
