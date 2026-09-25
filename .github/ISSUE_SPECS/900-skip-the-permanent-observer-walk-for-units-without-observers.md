@@ -65,7 +65,7 @@ Mutation controls (each applied alone, then reverted). Every one fails at least 
 
 ### Gates
 
-- `cargo test -p graph`: PASS, 84 lib tests (81 existing + 3 new), plus `rt1_direct_bank_alloc` 1 and doctests 0. `cargo test -p graph --features test-support`: PASS, 84 lib, `rt1` 1, `rt9_resident_bank_input_alloc` 8.
+- `cargo test -p graph`: PASS, 84 lib tests (81 existing + 3 new), plus `rt1_direct_bank_alloc` 1, `rt9_resident_bank_input_alloc` 1 (the featureless placeholder) and doctests 0. `cargo test -p graph --features test-support`: PASS, 84 lib, `rt1` 1, `rt9_resident_bank_input_alloc` 8.
 - `bash scripts/check-graph-policy.sh`: `graph policy: PASS`.
 - `bash scripts/check-realtime-policy.sh`: `realtime policy: ok (50 marked regions in 14 files)`.
 - `cargo fmt --all --check`: PASS.
@@ -80,3 +80,20 @@ Mutation controls (each applied alone, then reverted). Every one fails at least 
 - `cargo clippy -p graph --all-targets -- -D warnings` without `test-support` fails on `main` too (dead code in `tests/rt9_resident_bank_input_alloc.rs`, which this change does not touch). The workspace gate uses `--all-features` and is unaffected.
 - A fully observed plan now pays one load of the identity row `execute` already read this block, plus one predictable branch per unit per block. No arithmetic, order or observer input changed. The failure-only `invalidate_observers*` walks are unchanged.
 - No benchmark row is listed, and no saving is claimed.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `2cc64e77` and `c81993c1` on base `6b150fba`.
+No blocking or should-fix findings. Independently verified: the removed walk had no production
+effect for an unobserved unit (empty observer loop, pure-read eligibility predicate, `&self`
+accessors); `RuntimeOp::observers` is assigned only in `build_op` and `Runtime::units` only in the
+deriving constructor, so the bind-time flag cannot go stale; every `#[cfg(test)]` seam is absent
+from production and `test-support` builds (`cargo check` in both configurations); three of the
+implementer's mutation controls re-applied and reverted with the listed tests failing; the
+`UnitIdentity` layout test asserts `size_of`/`align_of` against a 32-byte shadow, which the new
+`bool` fits; scope is the three authorized paths. Gates re-run by the reviewer: `cargo test -p
+graph` (84 lib, rt1 1, rt9 1), `--features test-support` (84 lib, rt1 1, rt9 8),
+`cargo fmt --all --check`, `check-realtime-policy.sh`, `check-graph-policy.sh`, all green.
+Two nits recorded here, neither requiring a code change: the gate count line above omitted the
+featureless `rt9` placeholder (corrected in this section's commit), and the `observed` doc
+comment's "placeholder" wording is load-bearing only for the derivation test.
