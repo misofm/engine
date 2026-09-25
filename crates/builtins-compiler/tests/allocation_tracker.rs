@@ -306,11 +306,16 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     test_only_reset_fader_matrix_witness();
     let mut eligible = builtins_compiler::test_only_prepared_pair_graph(false);
     let prepared = test_only_fader_matrix_witness();
-    assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
+    // Issue #916: the eight-lane first cohort pairs beside the one-lane tail. Its lane 0 is the
+    // output track, whose post-matrix buffer used to be the graph output and declined the
+    // cohort; the Output is dedicated storage now. So 2 pairs over 9 members, and every block
+    // below counts the first cohort's settled pair (always fused: nothing is queued for it) on
+    // top of the tail's branch.
+    assert_eq!((prepared.factory_calls, prepared.factory_members), (2, 9));
 
     let settled = audit_graph_render(&mut eligible, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
-    assert_eq!(settled.process_members, 1);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
+    assert_eq!(settled.process_members, 9);
 
     {
         let tail = eligible
@@ -338,9 +343,9 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
             .unwrap();
     }
     let ramp_a = audit_graph_render(&mut eligible, &mut output, 64);
-    assert_eq!((ramp_a.fused_calls, ramp_a.fallback_calls), (0, 1));
+    assert_eq!((ramp_a.fused_calls, ramp_a.fallback_calls), (1, 1));
     let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
-    assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (1, 0));
+    assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (2, 0));
 
     eligible
         .track_controls
@@ -355,9 +360,9 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
         })
         .unwrap();
     let retarget = audit_graph_render(&mut eligible, &mut output, 192);
-    assert_eq!((retarget.fused_calls, retarget.fallback_calls), (0, 1));
+    assert_eq!((retarget.fused_calls, retarget.fallback_calls), (1, 1));
     let resettled = audit_graph_render(&mut eligible, &mut output, 256);
-    assert_eq!((resettled.fused_calls, resettled.fallback_calls), (1, 0));
+    assert_eq!((resettled.fused_calls, resettled.fallback_calls), (2, 0));
 
     test_only_reset_fader_matrix_witness();
     let mut observed = builtins_compiler::test_only_prepared_pair_graph(true);
@@ -405,15 +410,18 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     let mut output = [0.0_f32; 128];
     test_only_reset_fader_matrix_witness();
     let mut selected = builtins_compiler::test_only_prepared_scalar_pair_graph(false);
+    // Issue #916: t00 pairs beside t01. t00's post-matrix buffer used to be the graph output,
+    // which declined it; the Output is dedicated storage now. Every block below counts t00's
+    // settled pair (always fused: nothing is queued for it) on top of t01's branch.
     assert_eq!(
         (
             test_only_fader_matrix_witness().factory_calls,
             test_only_fader_matrix_witness().factory_members
         ),
-        (1, 1)
+        (2, 2)
     );
     let settled = audit_graph_render(&mut selected, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
     {
         let scalar = selected
             .track_controls
@@ -441,19 +449,21 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
             })
             .unwrap();
     }
-    for (sample, expected) in [(64, (0, 1)), (128, (0, 1)), (192, (1, 0))] {
+    for (sample, expected) in [(64, (1, 1)), (128, (1, 1)), (192, (2, 0))] {
         let witness = audit_graph_render(&mut selected, &mut output, sample);
         assert_eq!((witness.fused_calls, witness.fallback_calls), expected);
-        assert_eq!(witness.process_members, 1);
+        assert_eq!(witness.process_members, 2);
     }
 
     test_only_reset_fader_matrix_witness();
     let mut observed = builtins_compiler::test_only_prepared_scalar_pair_graph(true);
     let observed_call = audit_graph_render(&mut observed, &mut output, 0);
+    // Issue #916: the post-fader meter is on t01, which keeps its separate owners; t00 is
+    // unobserved and pairs, so one pair runs where none used to.
     assert_eq!(
         (observed_call.process_calls, observed_call.factory_calls),
-        (0, 0),
-        "the actual observed scalar graph retains separate owners"
+        (1, 0),
+        "the actual observed scalar graph retains separate owners for the observed track"
     );
     assert!(
         observed.meter_consumers[0].consumer.try_pop().is_ok(),
@@ -599,8 +609,10 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let [fader, matrix, outer] = test_only_scalar_owner_layouts();
     let split_outer = test_only_scalar_split_outer_layout();
+    // Issue #916: both tracks of this two-track plan pair (t00's post-matrix buffer is no longer
+    // the graph output), so binding builds two adjacent outers, one per track.
     let retained_owner_bytes_expected =
-        2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
+        2 * fader.size_bytes + 2 * matrix.size_bytes + 2 * outer.size_bytes;
     let owner_max = fader
         .size_bytes
         .max(matrix.size_bytes)
@@ -643,8 +655,8 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     assert!(!binding.overflowed);
     assert_eq!(
         test_only_scalar_outer_lifetime(),
-        [1, 1, 0],
-        "one actual selected scalar outer was constructed and remains live after bind"
+        [2, 2, 0],
+        "two actual selected scalar outers were constructed and remain live after bind"
     );
     for retained in [fader, matrix] {
         assert!(
@@ -670,7 +682,7 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         })
         .map_or(0, |observed| observed.allocation_count);
     let typed_outer_count = test_only_scalar_outer_lifetime()[0];
-    assert_eq!(typed_outer_count, 1);
+    assert_eq!(typed_outer_count, 2);
     assert!(
         outer_allocations >= typed_outer_count,
         "the bounded allocator window contains the allocation whose typed construction is witnessed"
@@ -680,7 +692,7 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         unrelated_same_layout_allocations > 0,
         "the fixture discriminates same-layout graph storage instead of charging it as an owner"
     );
-    let bound_outer_bytes = outer.size_bytes;
+    let bound_outer_bytes = 2 * outer.size_bytes;
     assert_eq!(
         retained_owner_bytes + bound_outer_bytes,
         retained_owner_bytes_expected
@@ -693,9 +705,9 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .expect("actual owners fit conservative scalar allowance");
     assert_eq!(
         conservative_spare_outer,
-        2 * split_outer.size_bytes - outer.size_bytes
+        2 * split_outer.size_bytes - 2 * outer.size_bytes
             + core::mem::size_of::<Box<dyn graph::GraphRuntimeSplitPairProcessor>>() as u64,
-        "the scalar allowance reserves two possible split owners and one possible table entry while this adjacent bind uses the smaller outer"
+        "the scalar allowance reserves two possible split owners and one possible table entry while this adjacent bind uses two of the smaller outers"
     );
     assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
 
@@ -708,8 +720,8 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         LIVE_FREES.get() > 0,
         "bound owners release only during off-render drop"
     );
-    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
-    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
+    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 2]);
+    assert_eq!(test_only_scalar_outer_lifetime(), [2, 0, 2]);
 }
 
 #[test]

@@ -2021,7 +2021,6 @@ pub struct PreparedTrackDelay {
 /// functions (#98 F7).
 struct GraphExecutor {
     runtime: runtime::Runtime,
-    output: u32,
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
@@ -2034,7 +2033,6 @@ struct GraphExecutor {
 #[allow(dead_code)]
 struct GraphExecutorWithoutSplitPairTable {
     runtime: runtime::RuntimeWithoutSplitPairTable,
-    output: u32,
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
@@ -2046,7 +2044,6 @@ struct GraphExecutorWithoutSplitPairTable {
 #[allow(dead_code)]
 struct GraphExecutorWithoutObservationActivation {
     runtime: runtime::RuntimeWithoutObservationActivation,
-    output: u32,
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
@@ -2133,8 +2130,6 @@ impl GraphExecutor {
                     .collect()
             })
             .unwrap_or_default();
-        // The shared arena reserves buffer zero for silence, so every coloured buffer is offset.
-        let output = program.output.0 + runtime::ARENA_BASE;
         let parts = runtime::RuntimeParts::new(
             &plan.spec,
             plan.routes,
@@ -2159,7 +2154,6 @@ impl GraphExecutor {
         );
         Self {
             runtime,
-            output,
             sample_rate_hz,
             source_set,
             source_input_buffers,
@@ -2197,6 +2191,25 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// Render one block into `output`, whose two planes are the session Output op's storage for
+    /// the block (issue #916). Nothing is copied out of the arena afterwards: the Output op, and a
+    /// folded chain whose master it is, write the planes directly.
+    ///
+    /// # What `output` holds when this returns
+    ///
+    /// * **`Ok`:** each plane's `frames` words are this block's master. Nothing past `frames` is
+    ///   written, so a `plane_stride` wider than the block keeps its padding.
+    /// * **Envelope rejection: untouched.** A non-stereo `output` is refused with
+    ///   `Buffer(InvalidPlane)`. A plane that is not exactly `lease.frames()` words is refused with
+    ///   `InvalidEnvelope`. Both refusals come before any observer boundary, source work or unit.
+    ///   `PreparedRenderPlan::render_inner` already refuses the same mismatch as `OutputShape`
+    ///   before it calls this, so this check is belt and braces.
+    /// * **Executor-level failure: all `+0.0`.** This covers the source set failing in
+    ///   `begin_block` or `copy_track_input`, and a unit or an observer failing inside the unit
+    ///   loop. By then the Output op or a folded master may have written part of the block, so
+    ///   both planes are filled with `+0.0` before the error returns, and a host that ignores the
+    ///   error plays silence. The fill is on the failure paths only; a successful block never
+    ///   writes a plane twice.
     fn render(
         &mut self,
         _arena: &mut BufferArena,
@@ -2206,11 +2219,14 @@ impl PreparedPlanExecutor for GraphExecutor {
     ) -> Result<(), RenderError> {
         let Self {
             runtime,
-            output: output_buffer,
             sample_rate_hz: _,
             source_set,
             source_input_buffers,
         } = self;
+        let (left, right) = output.stereo_planes_mut()?;
+        let Some(mut host) = runtime::HostMaster::new(left, right, runtime.lease.frames()) else {
+            return Err(RenderError::InvalidEnvelope);
+        };
         // Snapshot publication is the only activation state transition, and it occurs before any
         // source work so observer hooks and the block's source facts share one boundary.
         runtime.begin_observation_block(time.absolute_sample);
@@ -2221,12 +2237,14 @@ impl PreparedPlanExecutor for GraphExecutor {
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
             {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
+                host.silence();
                 return Err(error);
             }
             for &(claim, buffer) in source_input_buffers.iter() {
                 let (left, right) = runtime.buffer_mut(buffer);
                 if let Err(error) = source_set.copy_track_input(claim, left, right) {
                     runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    host.silence();
                     return Err(error);
                 }
             }
@@ -2235,8 +2253,9 @@ impl PreparedPlanExecutor for GraphExecutor {
             GraphObservationValidity::CLEAR
         };
         for unit in 0..runtime.units.len() {
-            if let Err(error) = runtime.execute(unit, time.absolute_sample) {
+            if let Err(error) = runtime.execute(unit, time.absolute_sample, host.reborrow()) {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
+                host.silence();
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
@@ -2249,9 +2268,10 @@ impl PreparedPlanExecutor for GraphExecutor {
             }
             if !selective_observation {
                 if let Err(error) =
-                    runtime.observe_unit(unit, time.absolute_sample, source_validity)
+                    runtime.observe_unit(unit, time.absolute_sample, source_validity, &host)
                 {
                     runtime.invalidate_observers_after_failure(time.absolute_sample);
+                    host.silence();
                     #[cfg(any(test, feature = "test-support"))]
                     if !runtime::test_only_completion_disabled() {
                         runtime.complete_pending(time.absolute_sample);
@@ -2264,9 +2284,10 @@ impl PreparedPlanExecutor for GraphExecutor {
                 }
             } else if active_observation
                 && let Err(error) =
-                    runtime.observe_active_unit(unit, time.absolute_sample, source_validity)
+                    runtime.observe_active_unit(unit, time.absolute_sample, source_validity, &host)
             {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
+                host.silence();
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
                     runtime.complete_pending(time.absolute_sample);
@@ -2278,9 +2299,6 @@ impl PreparedPlanExecutor for GraphExecutor {
                 return Err(error);
             }
         }
-        let (left, right) = runtime.buffer(*output_buffer);
-        output.plane_mut(0)?.copy_from_slice(left);
-        output.plane_mut(1)?.copy_from_slice(right);
         Ok(())
     }
     // REALTIME_POLICY_END
@@ -5528,7 +5546,9 @@ mod tests {
             "three internal boundaries are aliases"
         );
         assert_eq!(program.ops.len(), 5);
-        assert!(program.buffers <= 2, "the arena is coloured, not per-node");
+        // Two coloured slots for the track, plus the buffer the dedicated session output owns
+        // since issue #916; before it, the output folded in place onto the matrix's slot.
+        assert!(program.buffers <= 3, "the arena is coloured, not per-node");
         let (materialised, materialised_bindings) = build(false, None);
         assert_eq!(
             materialised.program().expect("lowered").taps.len(),

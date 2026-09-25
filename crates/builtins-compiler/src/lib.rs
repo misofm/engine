@@ -6123,9 +6123,12 @@ mod tests {
         let route = GraphNodeId::Route {
             route_id: StableGraphId::parse("proof-send").expect("harness ID"),
         };
-        // Track 0 is already ineligible because its post-matrix buffer is the graph output.
-        // Put the synthetic alias on the otherwise-eligible trailing cohort so toggling its
-        // observer independently discriminates the observer barrier.
+        // Issue #916: every track is eligible for the scalar fader/matrix pair. Track 0 used to be
+        // ineligible because the Output folded in place onto its post-matrix buffer, making that
+        // buffer the graph output. The session Output is now dedicated storage whose block is the
+        // host's planes, so no track's post-matrix buffer is the graph output, and track 0 pairs
+        // too. The synthetic alias stays on the trailing cohort, so toggling its observer
+        // discriminates the observer barrier on that one track while track 0 pairs throughout.
         let alias_track = n - 1;
         let alias = stage(alias_track, TrackStage::PostDynamic);
         let sidechain_effect_id = EffectNodeId {
@@ -7116,16 +7119,14 @@ mod tests {
                 ));
         }
         if intervening_observer_error {
-            let observer_track = if variant == BoundaryVariant::NonadjacentTrackA {
-                n - 1
-            } else {
-                0
-            };
-            let observer_stage = if variant == BoundaryVariant::NonadjacentTrackA {
-                TrackStage::PostFader
-            } else {
-                TrackStage::PostMatrix
-            };
+            // The failing observer sits inside the selected split pair's interval. Since issue
+            // #916 both nonadjacent variants select t00's pair: `F0` is offered first, and t00 is
+            // eligible now that its post-matrix buffer is no longer the graph output. So the
+            // observer is on t01's `PostFader`, which runs between `F0` and `M0`. Before #916 the
+            // `Nonadjacent` variant selected t01's pair and put the observer on t00's
+            // `PostMatrix`, between `F1` and `M1`.
+            let observer_track = n - 1;
+            let observer_stage = TrackStage::PostFader;
             artifact
                 .builtin_observers
                 .push(GraphNodeObserverBinding::new(
@@ -7264,40 +7265,132 @@ mod tests {
             .expect("owner matrix state trace")
     }
 
+    /// Render one block of the paired plan and of its separate-owner twin, and require four
+    /// things:
+    ///
+    /// * the same post-matrix PCM on the captured track;
+    /// * the same host planes;
+    /// * exactly `pairs` scalar pair owners invoked once each, with the given `(fused, fallback)`
+    ///   branch counts summed over those owners;
+    /// * every owner's last recorded fader and matrix state equal to its separate twin's.
+    ///
+    /// `pairs` is 2 wherever both tracks of the two-track harness pair, and 1 where the schedule
+    /// admits a single split pair. Issue #916 made track 0 eligible, now that its post-matrix
+    /// buffer is no longer the graph output.
+    ///
+    /// The host planes are track 0's post-matrix output, the Output's only input. Comparing them
+    /// is the check that a plan whose track 0 takes the scalar pair renders what the same plan
+    /// with the pair declined renders. The separate twin is prepared with concurrent control
+    /// delivery, which the pair factories refuse. Before #916 this helper compared only the
+    /// captured trailing track, because track 0 never paired.
+    ///
+    /// Owner state is compared per owner rather than as the one globally last-recorded word. Which
+    /// owner records last depends on where the pair's arithmetic runs: a split pair on track 0
+    /// records at `M0`, after the separate `F1`. That order is not a property of either owner.
     fn render_scalar_pair_and_compare(
         paired: &mut PreparedBuiltinsGraphBound,
         separate: &mut PreparedBuiltinsGraphBound,
         paired_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
         separate_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
         sample: u64,
+        pairs: u64,
         branches: (u64, u64),
     ) -> TestOnlyFaderMatrixWitness {
         test_only_reset_fader_matrix_witness();
-        let _ = render_bound(paired, sample);
+        let paired_host = render_bound(paired, sample);
         let witness = test_only_fader_matrix_witness();
+        let paired_trace = test_only_scalar_state_trace();
         test_only_reset_fader_matrix_witness();
-        let _ = render_bound(separate, sample);
-        let separate_witness = test_only_fader_matrix_witness();
+        let separate_host = render_bound(separate, sample);
+        let separate_trace = test_only_scalar_state_trace();
         assert_eq!(
             std::mem::take(&mut *paired_capture.lock().unwrap()),
             std::mem::take(&mut *separate_capture.lock().unwrap()),
             "actual selected scalar PCM must equal old separate-owner PCM"
         );
         assert_eq!(
+            paired_host, separate_host,
+            "the host planes of a paired track 0 must equal its separate-owner twin's"
+        );
+        assert!(
+            paired_host.iter().any(|word| *word != 0),
+            "the host planes carry audio"
+        );
+        assert_eq!(
             (witness.process_calls, witness.process_members),
-            (1, 1),
+            (pairs, pairs),
             "this assertion fails under the real selection-to-separate mutation"
         );
         assert_eq!((witness.fused_calls, witness.fallback_calls), branches);
-        assert_eq!(
-            witness.scalar_fader_words,
-            separate_witness.scalar_fader_words
-        );
-        assert_eq!(
-            witness.scalar_matrix_words,
-            separate_witness.scalar_matrix_words
-        );
+        assert_owner_states_match(paired_trace, separate_trace);
         witness
+    }
+
+    /// Every owner that recorded a scalar state in either run recorded one in both, and its last
+    /// recorded fader and matrix words are equal.
+    fn assert_owner_states_match(
+        paired: TestOnlyScalarStateTrace,
+        separate: TestOnlyScalarStateTrace,
+    ) {
+        assert!(
+            !paired.fader_overflow
+                && !paired.matrix_overflow
+                && !separate.fader_overflow
+                && !separate.matrix_overflow,
+            "the scalar state trace overflowed"
+        );
+        let owners = |trace: &[u16]| {
+            let mut owners = trace.to_vec();
+            owners.sort_unstable();
+            owners.dedup();
+            owners
+        };
+        let last = |owners: &[u16], words: &[[u32; 15]], owner: u16| {
+            owners
+                .iter()
+                .rposition(|candidate| *candidate == owner)
+                .map(|index| words[index])
+        };
+        let fader_owners = owners(&paired.fader_owners[..paired.fader_len]);
+        assert!(
+            !fader_owners.is_empty(),
+            "a scalar fader recorded its state"
+        );
+        assert_eq!(
+            fader_owners,
+            owners(&separate.fader_owners[..separate.fader_len]),
+            "the same fader owners recorded"
+        );
+        let matrix_owners = owners(&paired.matrix_owners[..paired.matrix_len]);
+        assert_eq!(
+            matrix_owners,
+            owners(&separate.matrix_owners[..separate.matrix_len]),
+            "the same matrix owners recorded"
+        );
+        for owner in fader_owners {
+            let fader = |trace: &TestOnlyScalarStateTrace| {
+                trace.fader_owners[..trace.fader_len]
+                    .iter()
+                    .rposition(|candidate| *candidate == owner)
+                    .map(|index| trace.fader_words[index])
+            };
+            assert_eq!(fader(&paired), fader(&separate), "fader owner {owner}");
+        }
+        for owner in matrix_owners {
+            assert_eq!(
+                last(
+                    &paired.matrix_owners[..paired.matrix_len],
+                    &paired.matrix_words,
+                    owner
+                ),
+                last(
+                    &separate.matrix_owners[..separate.matrix_len],
+                    &separate.matrix_words,
+                    owner
+                ),
+                "matrix owner {owner}"
+            );
+        }
     }
 
     /// #443's compact product fixture reaches the genuine scalar graph selection seam. The
@@ -7337,9 +7430,13 @@ mod tests {
             &paired_capture,
             &separate_capture,
             0,
-            (1, 0),
+            2,
+            (2, 0),
         );
-        assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
+        // Issue #916: both tracks pair. Track 0's post-matrix buffer is no longer the graph
+        // output, so it is eligible beside track 1. Every block below therefore counts track 0's
+        // settled pair (always fused: nothing is queued for it) on top of track 1's branch.
+        assert_eq!((selected.factory_calls, selected.factory_members), (2, 2));
         assert_eq!(
             (
                 settled.fader_records_drained,
@@ -7386,7 +7483,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
         assert_eq!(
             (
@@ -7410,7 +7508,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             2 * HARNESS_QUANTUM as u64,
-            (0, 1),
+            2,
+            (1, 1),
         );
         assert_eq!(ramping.fader_records_drained, 1);
         let _settled_again = render_scalar_pair_and_compare(
@@ -7419,7 +7518,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             3 * HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
 
         for bound in [&mut paired, &mut separate] {
@@ -7445,7 +7545,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             4 * HARNESS_QUANTUM as u64,
-            (0, 1),
+            2,
+            (1, 1),
         );
         for bound in [&mut paired, &mut separate] {
             bound.track_controls[1]
@@ -7463,7 +7564,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             5 * HARNESS_QUANTUM as u64,
-            (0, 1),
+            2,
+            (1, 1),
         );
         let _retarget_settled = render_scalar_pair_and_compare(
             &mut paired,
@@ -7471,7 +7573,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             6 * HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
         for bound in [&mut paired, &mut separate] {
             let producer = &mut bound.track_controls[1].fader;
@@ -7496,7 +7599,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             7 * HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
         assert_eq!(muted.scalar_fader_words[12], 1);
         assert_ne!(
@@ -7520,7 +7624,8 @@ mod tests {
             &paired_capture,
             &separate_capture,
             8 * HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
         assert_eq!(unmuted.scalar_fader_words[12], 0);
         assert_eq!(unmuted.scalar_fader_words[0], unmuted.scalar_fader_words[5]);
@@ -7557,12 +7662,14 @@ mod tests {
             std::mem::take(&mut *declined_capture.lock().unwrap()),
             std::mem::take(&mut *declined_reference_capture.lock().unwrap())
         );
+        // Issue #916: the meter observes track 1's fader, so track 1 declines; track 0 is
+        // unobserved and still pairs. The mutation takes the pair count from 2 to 1.
         assert_eq!(
             (
                 mutation_witness.process_calls,
                 mutation_witness.factory_calls
             ),
-            (0, 0),
+            (1, 1),
             "the SAME selected-mechanism assertion above fails for this graph mutation"
         );
         assert!(
@@ -7574,6 +7681,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(test, feature = "test-support"))]
     #[test]
     fn actual_scalar_nonadjacent_schedule_selects_the_split_owner() {
         let _guard = PAIR_WITNESS_LOCK
@@ -7596,6 +7704,19 @@ mod tests {
         );
         let selected = test_only_fader_matrix_witness();
         assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
+        // Issue #916: the split owner is t00's. The stage-major schedule offers `F0` first, and
+        // t00 is eligible now that its post-matrix buffer is no longer the graph output. Before
+        // #916 it was ineligible, and t01's interval was the one selected. One split pair is
+        // admitted per plan, so t01 stays separate.
+        assert_eq!(
+            graph::test_only_selected_split_fader()
+                .expect("a split pair is selected")
+                .node,
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse("t00").expect("track"),
+                stage: TrackStage::PostFader,
+            }
+        );
         let mut separate = prepared_pair_graph_variant(
             false,
             false,
@@ -7614,6 +7735,7 @@ mod tests {
             &paired_capture,
             &separate_capture,
             0,
+            1,
             (1, 0),
         );
         assert_eq!(settled.factory_calls, 0, "factory runs only at preparation");
@@ -7727,17 +7849,32 @@ mod tests {
         );
     }
 
+    /// The output track takes the split pair: there is no physical output conflict any more.
+    ///
+    /// Before issue #916 this test was
+    /// `actual_scalar_nonadjacent_physical_output_conflict_declines_before_owner_transfer`. The
+    /// Output folded in place onto the output track's post-matrix buffer, so that track's fader
+    /// buffer *was* the graph output. `scalar_split_interval_is_clear` declined it before either
+    /// owner moved. Now the Output is dedicated storage whose block is the host's planes, so no
+    /// fader shares a live buffer with it. The slot comparison that declined the pair went with
+    /// the premise (`crates/graph/tests/MUTATIONS.md` row 916-16).
+    ///
+    /// The first fixture is unchanged. With t00's fader metered and t00 the output track, t01's
+    /// interval is the only candidate, and it is selected. The second fixture keeps the t00 meter
+    /// and makes t01 the output track. t01 is now selected there too, where it used to be
+    /// declined. It must render exactly what the separate-owner twin renders: the host planes,
+    /// which are t01's post-matrix output, the captured post-matrix PCM, and both owners' states.
+    #[cfg(all(test, feature = "test-support"))]
     #[test]
-    fn actual_scalar_nonadjacent_physical_output_conflict_declines_before_owner_transfer() {
+    fn actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let declined_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Keep the otherwise-equivalent candidate live: with t00 observed, the t01 interval is
-        // the only remaining candidate when the output is t00. This proves the conflict fixture
-        // below is declining a real candidate rather than merely finding no pair.
+        // With t00 observed, the t01 interval is the only remaining candidate when the output is
+        // t00. It is selected.
         test_only_reset_fader_matrix_witness();
         let eligible = prepared_pair_graph_variant(
             true,
@@ -7758,7 +7895,7 @@ mod tests {
                 eligible_witness.factory_members
             ),
             (1, 1),
-            "the same t01 candidate is eligible when the output buffer is free"
+            "the t01 candidate is eligible when t00 is the output track"
         );
         assert_eq!(
             graph::test_only_selected_split_fader()
@@ -7771,13 +7908,14 @@ mod tests {
         );
         drop(eligible);
 
+        // The same candidate when t01 is the output track: selected too (issue #916).
         test_only_reset_fader_matrix_witness();
-        let mut declined = prepared_pair_graph_variant(
+        let mut paired = prepared_pair_graph_variant(
             true,
             false,
             false,
             true,
-            Some(Arc::clone(&declined_capture)),
+            Some(Arc::clone(&paired_capture)),
             Backend::Scalar,
             2,
             BoundaryVariant::NonadjacentOutputConflict,
@@ -7787,8 +7925,17 @@ mod tests {
         let prepared = test_only_fader_matrix_witness();
         assert_eq!(
             (prepared.factory_calls, prepared.factory_members),
-            (0, 0),
-            "the output-buffer conflict declines before moving either owner"
+            (1, 1),
+            "the output track's interval is selected: its buffer is no longer the graph output"
+        );
+        assert_eq!(
+            graph::test_only_selected_split_fader()
+                .expect("the output track's candidate")
+                .node,
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse("t01").expect("track"),
+                stage: TrackStage::PostFader,
+            }
         );
         let mut reference = prepared_pair_graph_variant(
             false,
@@ -7803,31 +7950,46 @@ mod tests {
             None,
         );
         test_only_reset_fader_matrix_witness();
-        let declined_output = render_bound(&mut declined, 0);
-        let declined_state = test_only_fader_matrix_witness();
+        let paired_output = render_bound(&mut paired, 0);
+        let paired_state = test_only_fader_matrix_witness();
+        let paired_trace = test_only_scalar_state_trace();
         test_only_reset_fader_matrix_witness();
         let reference_output = render_bound(&mut reference, 0);
         let reference_state = test_only_fader_matrix_witness();
-        assert_eq!(declined_output, reference_output);
+        let reference_trace = test_only_scalar_state_trace();
         assert_eq!(
-            std::mem::take(&mut *declined_capture.lock().unwrap()),
+            paired_output, reference_output,
+            "the host planes, the paired output track's post-matrix output, are the separate \
+             owners'"
+        );
+        assert!(paired_output.iter().any(|word| *word != 0));
+        assert_eq!(
+            std::mem::take(&mut *paired_capture.lock().unwrap()),
             std::mem::take(&mut *reference_capture.lock().unwrap()),
-            "the declined physical conflict preserves separate-owner PCM"
+            "the paired output track preserves separate-owner PCM"
         );
         assert_eq!(
-            declined_state.scalar_fader_words,
+            paired_state.scalar_fader_words,
             reference_state.scalar_fader_words
         );
         assert_eq!(
-            declined_state.scalar_matrix_words,
+            paired_state.scalar_matrix_words,
             reference_state.scalar_matrix_words
         );
+        assert_owner_states_match(paired_trace, reference_trace);
         assert_eq!(
-            (declined_state.process_calls, declined_state.factory_calls),
-            (0, 0)
+            (paired_state.process_calls, paired_state.factory_calls),
+            (1, 0),
+            "the selected split pair runs once per block and is built only at preparation"
+        );
+        assert_eq!(
+            (reference_state.process_calls, reference_state.factory_calls),
+            (0, 0),
+            "the concurrent twin selects no pair"
         );
     }
 
+    #[cfg(all(test, feature = "test-support"))]
     #[test]
     fn actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries() {
         let _guard = PAIR_WITNESS_LOCK
@@ -7897,9 +8059,18 @@ mod tests {
             },
             smoothing_samples: 0,
         };
+        // Issue #916: the selected split pair is t00's, so its controls are the ones the failing
+        // observer must interrupt between `F0` and `M0`.
+        assert!(matches!(
+            paired.test_only_post_fader_node.as_ref(),
+            Some(GraphNodeId::TrackStage {
+                track_id,
+                stage: TrackStage::PostFader,
+            }) if track_id.as_str() == "t00"
+        ));
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1].fader.try_push(fader).unwrap();
-            bound.track_controls[1].producer.try_push(matrix).unwrap();
+            bound.track_controls[0].fader.try_push(fader).unwrap();
+            bound.track_controls[0].producer.try_push(matrix).unwrap();
         }
 
         INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
@@ -7907,6 +8078,7 @@ mod tests {
         let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
         let paired_error = render_bound_result(&mut paired, 0, &mut paired_pcm).unwrap_err();
         let paired_failed = test_only_fader_matrix_witness();
+        let paired_failed_trace = test_only_scalar_state_trace();
         assert_eq!(paired_error, RenderError::InvalidEnvelope);
         assert_eq!(INTERVENING_OBSERVER_ERRORS.load(Ordering::Relaxed), 1);
         assert_eq!(paired_failed.fader_records_drained, 1);
@@ -7917,16 +8089,30 @@ mod tests {
         let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
         let separate_error = render_bound_result(&mut separate, 0, &mut separate_pcm).unwrap_err();
         let separate_failed = test_only_fader_matrix_witness();
+        let separate_failed_trace = test_only_scalar_state_trace();
         assert_eq!(separate_error, paired_error);
         assert_eq!(separate_failed.fader_records_drained, 1);
         assert_eq!(separate_failed.matrix_records_drained, 0);
+        // Per owner, because the pending fader is completed after t01's separate fader ran, so
+        // the globally last-recorded word names a different owner in the two runs.
+        assert!(!paired_failed_trace.fader_overflow && !paired_failed_trace.matrix_overflow);
+        assert!(!separate_failed_trace.fader_overflow && !separate_failed_trace.matrix_overflow);
+        for owner in [0, 1] {
+            assert_eq!(
+                last_fader_state(paired_failed_trace, owner),
+                last_fader_state(separate_failed_trace, owner),
+                "observer error preserves fader {owner}'s state before retry"
+            );
+        }
+        let initial_matrix = initial_matrix_state(0).expect("t00 initial matrix state");
         assert_eq!(
-            paired_failed.scalar_fader_words, separate_failed.scalar_fader_words,
-            "observer error preserves fader state before retry"
-        );
-        assert_eq!(
-            paired_failed.scalar_matrix_words, separate_failed.scalar_matrix_words,
+            last_matrix_state(paired_failed_trace, 0),
+            initial_matrix,
             "observer error leaves the later matrix command untouched"
+        );
+        assert!(
+            !separate_failed_trace.matrix_owners[..separate_failed_trace.matrix_len].contains(&0),
+            "the separate twin never reached M0 either"
         );
 
         INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
@@ -7935,12 +8121,14 @@ mod tests {
         render_bound_result(&mut paired, HARNESS_QUANTUM as u64, &mut paired_pcm)
             .expect("paired retry after observer error");
         let paired_retry = test_only_fader_matrix_witness();
+        let paired_retry_trace = test_only_scalar_state_trace();
         INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
         test_only_reset_fader_matrix_witness();
         separate_pcm.fill(0.0);
         render_bound_result(&mut separate, HARNESS_QUANTUM as u64, &mut separate_pcm)
             .expect("separate retry after observer error");
         let separate_retry = test_only_fader_matrix_witness();
+        let separate_retry_trace = test_only_scalar_state_trace();
         assert_eq!(
             paired_pcm
                 .iter()
@@ -7954,13 +8142,10 @@ mod tests {
         );
         assert_eq!(paired_retry.matrix_records_drained, 1);
         assert_eq!(
-            paired_retry.scalar_fader_words,
-            separate_retry.scalar_fader_words
+            separate_retry.matrix_records_drained, 1,
+            "the separate twin drains the same queued matrix command on retry"
         );
-        assert_eq!(
-            paired_retry.scalar_matrix_words,
-            separate_retry.scalar_matrix_words
-        );
+        assert_owner_states_match(paired_retry_trace, separate_retry_trace);
         assert_eq!(
             (paired_retry.fused_calls, paired_retry.fallback_calls),
             (1, 0)
@@ -8847,13 +9032,15 @@ mod tests {
             separate_state.scalar_matrix_words
         );
 
+        // Issue #916: track 0 pairs beside track 1, and its settled pair fuses on the retry too.
         let retry = render_scalar_pair_and_compare(
             &mut paired,
             &mut separate,
             &paired_capture,
             &separate_capture,
             HARNESS_QUANTUM as u64,
-            (1, 0),
+            2,
+            (2, 0),
         );
         assert_eq!(
             retry.matrix_records_drained, 1,
@@ -8894,16 +9081,33 @@ mod tests {
             1,
             None,
         );
+        // Issue #916: t00 pairs, since its post-matrix buffer is no longer the graph output. The
+        // extra reader is on t01's fader, the selected trailing track, and it still declines
+        // t01 before ownership transfer. So preparation builds one pair, t00's, where it used to
+        // build none; the plain two-track fixture builds two.
         assert_eq!(
             (prepared.factory_calls, prepared.factory_members),
-            (0, 0),
+            (1, 1),
             "the selected scalar fader's real extra reader declines before ownership transfer"
         );
         test_only_reset_fader_matrix_witness();
-        let _ = render_bound(&mut declined, 0);
+        let declined_host = render_bound(&mut declined, 0);
         let rendered = test_only_fader_matrix_witness();
-        let _ = render_bound(&mut reference, 0);
-        assert_eq!((rendered.process_calls, rendered.factory_calls), (0, 0));
+        let reference_host = render_bound(&mut reference, 0);
+        assert_eq!(
+            (
+                rendered.process_calls,
+                rendered.process_members,
+                rendered.factory_calls
+            ),
+            (1, 1, 0),
+            "only t00's pair runs"
+        );
+        assert_eq!(
+            declined_host, reference_host,
+            "the host planes, t00's paired post-matrix output, are the separate owners'"
+        );
+        assert!(declined_host.iter().any(|word| *word != 0));
         assert_eq!(
             std::mem::take(&mut *declined_capture.lock().unwrap()),
             std::mem::take(&mut *reference_capture.lock().unwrap()),
@@ -9018,12 +9222,18 @@ mod tests {
             1,
             Some((1, Arc::clone(&observed_reference))),
         );
-        assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
+        // Issue #916: both unobserved peers pair, t02 and t00. t00 is eligible now that its
+        // post-matrix buffer is no longer the graph output. The metered t01 stays separate.
+        assert_eq!((prepared.factory_calls, prepared.factory_members), (2, 2));
         test_only_reset_fader_matrix_witness();
-        let _ = render_bound(&mut paired, 0);
+        let paired_host = render_bound(&mut paired, 0);
         let rendered = test_only_fader_matrix_witness();
-        let _ = render_bound(&mut reference, 0);
-        assert_eq!((rendered.process_calls, rendered.process_members), (1, 1));
+        let reference_host = render_bound(&mut reference, 0);
+        assert_eq!((rendered.process_calls, rendered.process_members), (2, 2));
+        assert_eq!(
+            paired_host, reference_host,
+            "the host planes, t00's paired post-matrix output, are the separate owners'"
+        );
         assert_eq!(
             std::mem::take(&mut *eligible.lock().unwrap()),
             std::mem::take(&mut *eligible_reference.lock().unwrap()),
@@ -9153,24 +9363,32 @@ mod tests {
         separate.plan.force_mono_collapse_off(true);
 
         test_only_reset_fader_matrix_witness();
-        let _ = render_bound(&mut collapsed, 0);
+        let collapsed_host = render_bound(&mut collapsed, 0);
         let pair_witness = test_only_fader_matrix_witness();
-        let _ = render_bound(&mut separate, 0);
+        let separate_host = render_bound(&mut separate, 0);
         let collapsed_initial = std::mem::take(&mut *collapsed_capture.lock().unwrap());
         let separate_initial = std::mem::take(&mut *separate_capture.lock().unwrap());
         assert_eq!(collapsed_initial, separate_initial);
+        assert_eq!(
+            collapsed_host, separate_host,
+            "the host planes, track 0's paired output, are the separate owners'"
+        );
         assert!(
             collapsed.plan.bank_collapse_counters()[0] > 0,
             "real input bank collapsed"
         );
         assert_eq!(separate.plan.bank_collapse_counters()[0], 0);
+        // Issue #916: both cohorts pair, the eight-lane first cohort and the one-lane tail. The
+        // first cohort's lane 0 is the output track, whose post-matrix buffer used to be the
+        // graph output and declined the cohort. So each block runs two fused pairs over all nine
+        // members, where it ran the tail's one.
         assert_eq!(
             (pair_witness.fused_calls, pair_witness.fallback_calls),
-            (1, 0)
+            (2, 0)
         );
         assert_eq!(
-            pair_witness.process_members, 1,
-            "the selected tail pair executed"
+            pair_witness.process_members, 9,
+            "the first cohort's pair and the tail pair executed"
         );
 
         let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
@@ -9190,11 +9408,12 @@ mod tests {
                 .try_push(command)
                 .unwrap();
         }
-        let _ = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
+        let collapsed_host = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
         let collapsed_asymmetric = std::mem::take(&mut *collapsed_capture.lock().unwrap());
-        let _ = render_bound(&mut separate, HARNESS_QUANTUM as u64);
+        let separate_host = render_bound(&mut separate, HARNESS_QUANTUM as u64);
         let separate_asymmetric = std::mem::take(&mut *separate_capture.lock().unwrap());
         assert_eq!(collapsed_asymmetric, separate_asymmetric);
+        assert_eq!(collapsed_host, separate_host);
         assert!(
             collapsed.plan.bank_collapse_transitions()[0] > 0,
             "input command disengages"
@@ -9241,7 +9460,7 @@ mod tests {
         );
         assert_eq!(
             (hostile_witness.fused_calls, hostile_witness.process_members),
-            (1, 1)
+            (2, 9)
         );
         test_only_reset_fader_matrix_witness();
         let _ = render_bound(&mut recovered, HARNESS_QUANTUM as u64);
@@ -9265,7 +9484,7 @@ mod tests {
         );
         assert_eq!(
             (clean_witness.fused_calls, clean_witness.process_members),
-            (1, 1)
+            (2, 9)
         );
     }
 
@@ -9283,8 +9502,12 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #916: both cohorts pair, the full first cohort and the one-lane tail. The first
+        // cohort's lane 0 is the output track, whose post-matrix buffer used to be the graph
+        // output and declined the whole cohort, leaving the tail as the one offer. With a
+        // dedicated Output every track pairs, so the members are all `tracks`.
         for (tracks, backend, offers, executed) in
-            [(5, Backend::Simd4, 1, 1), (9, Backend::Simd8, 1, 1)]
+            [(5, Backend::Simd4, 2, 2), (9, Backend::Simd8, 2, 2)]
         {
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
@@ -9313,13 +9536,12 @@ mod tests {
                 "every reachable live pair must execute once per rendered block"
             );
             assert_eq!(witness.factory_calls, offers as u64);
-            assert_eq!(witness.factory_members, (tracks - backend.width()) as u64);
+            assert_eq!(witness.factory_members, tracks as u64);
             assert_eq!(witness.fused_calls, executed as u64 * HARNESS_BLOCKS);
             assert_eq!(witness.fallback_calls, 0);
-            assert_eq!(
-                witness.process_members,
-                witness.fused_calls * witness.factory_members
-            );
+            // Every member of every pair, once per block. With one pair this was
+            // `fused_calls * factory_members`; with a full cohort and a tail it is the track count.
+            assert_eq!(witness.process_members, HARNESS_BLOCKS * tracks as u64);
         }
     }
 
@@ -9539,17 +9761,25 @@ mod tests {
             observed_calls, HARNESS_BLOCKS as usize,
             "the lowered alias observer executes on every block"
         );
+        // Issue #916: the first cohort (tracks 0 to 7) pairs too. Its lane 0 is the output track,
+        // whose post-matrix buffer used to be the graph output and declined the whole cohort. The
+        // Output is dedicated storage now, so both cohorts are eligible, and the alias observer
+        // discriminates the tail alone: 2 pairs over 9 members unobserved, 1 over 8 observed.
         assert_eq!(
-            eligible_witness.factory_calls, 1,
-            "the unobserved alias leaves the tail eligible"
+            eligible_witness.factory_calls, 2,
+            "the unobserved alias leaves the tail eligible beside the first cohort"
         );
         assert_eq!(
-            eligible_witness.factory_members, 1,
-            "the accepted cohort is the one-lane tail"
+            eligible_witness.factory_members, 9,
+            "the accepted cohorts are the eight-lane first cohort and the one-lane tail"
         );
         assert_eq!(
-            observed_witness.factory_calls, 0,
+            observed_witness.factory_calls, 1,
             "observing that same lowered alias rejects the otherwise-eligible tail"
+        );
+        assert_eq!(
+            observed_witness.factory_members, 8,
+            "and only the tail: the first cohort still pairs"
         );
     }
 

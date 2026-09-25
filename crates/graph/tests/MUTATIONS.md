@@ -194,3 +194,65 @@ The rack rows for the same issue (the offer itself) are in `rack/tests/MUTATIONS
 Rows 915-3b, 915-4 (console only) and 915-6 are the honest half of this ledger. Each mutation is
 caught, but only by the gate built for it and not by the end-to-end digests. The end-to-end
 digests cannot reach an all-`-0.0` frame, a tail, or a later lane that stores.
+
+## Issue #916 — the master written straight into the host planes
+
+Every row below was applied to the working tree at `608f0379`, the whole graph lib suite was run
+(`cargo test -p graph --lib`, 98 tests), every red test was recorded, and the tree was restored
+before the next row. Each mutation is an exact-text replacement, so an unmatched pattern would have
+been reported rather than silently skipped. Host: `x86_64`, workspace `.cargo/config.toml` pin
+`-C target-feature=+avx2,+fma`, debug profile. The new tests these rows name:
+
+- "Gate 1" is `runtime::tests::the_host_planes_are_the_arena_oracles_master_bit_for_bit_at_every_stride`.
+- "Gate 3" is `runtime::tests::a_failed_render_silences_the_host_planes_and_a_rejected_one_leaves_them_alone`.
+- "The kernel test" is `runtime::tests::a_host_plane_reduction_is_the_arena_reduction_bit_for_bit`.
+- "Metered" is `runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 916-1 | the pre-issue arena path: `preflight_sequential` resolves no Output op (so there is no Output unit and every fold master is `FoldTarget::Arena`), and `render` copies the Output's arena buffer into the host planes after the last unit | `graph/src/runtime.rs` `preflight_sequential`, `graph/src/lib.rs` `render` | gate 1 | RED, on its structural `output_unit.expect("an Output unit")`. Every other test is GREEN, because this path renders the same bits. |
+| 916-1b | 916-1, with gate 1's structural Output-unit assertion removed from the test | as 916-1, plus the test | gate 1 | RED on the behavioural check alone: `Folded(13, false), stride 13, block 0: the output slot was written`. The block's plane and padding assertions, which run first, had passed. This is the brief's "keep the end-of-block copy" row. Only the no-arena-write assertion sees it, and it does. |
+| 916-2 | the Output op writes its arena buffer and not the host (`execute` passes the Output op no `HostMaster`) | `graph/src/runtime.rs` `Runtime::execute` | gate 1, metered, and 11 pre-existing lib tests | RED on all of them (gate 1: `Unfolded, stride 13, block 0: the host planes are the oracle's`, whose planes still hold the `0x7fc0_0916` pad). The Folded shapes pass this row's gate-1 checks, as they should: a folded Output op's reduction is neutralised, so it writes nothing either way. |
+| 916-3 | every folded Output master is installed as an arena master (`FoldTarget::Output` is never chosen) | `graph/src/runtime.rs` `validate_fold_installation` | gate 1, metered, `route_fold_preflight_returns_original_owners_and_sources_for_retry` | RED, RED, RED (gate 1: `Folded(13, false) ... the host planes are the oracle's`; the host planes hold their pad) |
+| 916-4 | the fan-in-one copy reads the other plane (`lease.read(1 - plane, ..)`) | `graph/src/runtime.rs` `reduce_plane_into` | the kernel test, gate 1, and 5 pre-existing lib tests | RED on all of them (`1 frames, fan-in 1, plane 0`; gate 1 at `Submix`, the fan-in-one submix) |
+| 916-5 | the Output op is identified by buffer index, as the brief wrote it (`op.output == output slot` in `execute` for plain ops and bank members, and in `observe_unit`) | `graph/src/runtime.rs` `Runtime::execute`, `Runtime::observe_unit` | gate 1, and 5 pre-existing lib tests | RED on all of them. Gate 1 fails at `Submix ... the output slot was written`: the pad strip that shares the Output's slot rendered into the host. The lib tests include `fifty_random_dag_sessions_render_deterministic_nonsilent_pcm` (`seed 4: the corpus must not be silent`) and `level_major_w4_builtin_bank_is_analytic_for_three_blocks`. This row is why the runtime picks the Output op by node. |
+| 916-6 | the scatter redirect into the Output op is no longer withheld | `graph/src/runtime.rs` `build_sequential` | gate 1 | RED (`BankIntoOutput: [route folds, scatter redirects]`, `[0, 1]`). Without the count assertion, the chain scatters into the Output's arena buffer, the Output op's reduction is neutralised, and the host planes are never written. |
+| 916-7 | no `+0.0` fill when a unit fails | `graph/src/lib.rs` `render` | gate 3 | RED (`Unit: both planes are +0.0`; five folded cohorts' partial master stays) |
+| 916-8 | no fill when an observer fails (`observe_unit`) | `graph/src/lib.rs` `render` | gate 3 | RED (`Observer(false): both planes are +0.0`) |
+| 916-13 | no fill when an active observer fails (`observe_active_unit`) | `graph/src/lib.rs` `render` | gate 3 | RED (`Observer(true): both planes are +0.0`) |
+| 916-9 | no fill when the source set's `begin_block` fails | `graph/src/lib.rs` `render` | gate 3 | RED (`Source(true): both planes are +0.0`; the previous block's master stays) |
+| 916-14 | no fill when `copy_track_input` fails | `graph/src/lib.rs` `render` | gate 3 | RED (`Source(false): both planes are +0.0`) |
+| 916-10 | the fill also runs on the success path | `graph/src/lib.rs` `render` | gate 1, gate 3, metered, and 15 other lib tests | RED on all of them |
+| 916-11 | the session output is not dedicated storage (`is_dedicated` loses its `Output` arm) | `graph/src/program.rs` `is_dedicated` | gate 1, gate 3, `chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers`, and 6 other lib tests | RED on all of them. An in-place Output op's single input is its own slot, so its reduction is neutralised and the host planes are never written. Gate 1 fails at `Submix ... the host planes are the oracle's`, whose planes hold the pad. |
+| 916-12 | `HostMaster::new` checks no length | `graph/src/runtime.rs` `HostMaster::new` | gate 3 | RED. The rejection arm's short planes reach the fold epilogue and panic (`runtime.rs` `fold_resident_tiles`, an index past the plane) instead of returning `InvalidEnvelope`. |
+| 916-15 | the Output op's observers read its arena buffer, not the host planes (the `observe_unit` host arm never taken) | `graph/src/runtime.rs` `Runtime::observe_unit` | gate 1 | RED (`Folded(13, false), stride 13: every observer window is the oracle's`) |
+
+### Issue #916 scope amendment (Sol): the slot comparisons with `program.output`
+
+Rows 916-16 and 916-17 were applied to the working tree after the scope amendment. One mutation at a
+time, the suites below were run and the tree was restored:
+
+- `cargo test -p builtins-compiler --features test-support --lib`
+- builtins-compiler `tests/allocation_tracker.rs`, with `graph/test-support` and
+  `engine/realtime-audit`
+- `cargo test -p graph --lib`
+
+Each row puts back a clause that #916 removed. Neither clause identified the Output: each compared a
+producer's physical slot with `program.output`. After #916 the dedicated Output takes a retired
+slot. So such a clause fires by colouring coincidence, and declines a pair or a merge that is sound.
+Rows 916-1 to 916-15 were recorded at `608f0379`, before this change. They mutate code this change
+does not touch.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 916-16 | `chains_into` again declines `producer.output == program.output` | `graph/src/runtime.rs` `chains_into` | builtins-compiler lib: `actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners`, `actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail`, `staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs`, `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated`, `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`, `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`, `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`; allocation_tracker: `actual_queued_scalar_graph_allocates_and_frees_nothing`, `actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts`, `actual_scalar_split_table_and_failed_render_fit_the_resource_gate` | RED on all ten. The two-track harness's Output takes the slot the trailing track's fader and matrix retire from. So the trailing track stops pairing, and the counts of 2 fall to 1. **GREEN on the graph corpus**: `cohort_chain_merging_preserves_dataflow_on_random_graphs` interprets through `chains_into_model`, not the runtime predicate. Its merge pin (3862) guards the model's copy of the clause. Putting the model's clause back gives the pre-amendment 3752. |
+| 916-17 | `scalar_split_interval_is_clear` again declines `program.output == buffer` | `graph/src/runtime.rs` `scalar_split_interval_is_clear` | builtins-compiler lib: `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated`, `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`, `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries`, `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`; allocation_tracker: `actual_scalar_split_table_and_failed_render_fit_the_resource_gate` | RED on all five. The split pair whose fader slot the Output later takes is declined again. |
+
+### Issue #916 Sol verdict, should-fix S1: nothing reads the session output's arena slot
+
+Applied to the working tree after the verdict. `cargo test -p graph --lib` was run, and the tree was
+restored.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 916-18 | `preflight_sequential` no longer refuses a plan that reads the session output (`output_value_is_read` not called) | `graph/src/runtime.rs` `preflight_sequential` | `runtime::tests::a_plan_that_reads_the_session_output_is_refused_at_bind` | RED (`a plan that reads the session output must not bind`): the plan binds, and its `t01 PostFader` reads the Output's never-written arena slot. The other 98 lib tests stay GREEN. |
