@@ -1929,11 +1929,13 @@ impl Runtime {
             } => {
                 let population = *lanes;
                 let width = chain.width().lanes() as usize;
-                // execute scatters exactly the final slot's output members. Observed direct
-                // and alias outputs cannot be redirected by scatter_target; extra readers
-                // and sends still consume that unchanged scatter. A folded lane's scatter goes
-                // to the epilogue instead, which leaves the resident words untouched: they are
-                // what its post-matrix observers read (issue #885).
+                // execute scatters exactly the final slot's output members. A redirected
+                // member's output is its consumer's buffer, which holds those scattered words
+                // until the consumer's later unit, so a planar read here is the same words
+                // redirected or not (issue #886); extra readers and sends decline the redirect
+                // and consume the unchanged scatter. A folded lane's scatter goes to the
+                // epilogue instead, which leaves the resident words untouched: they are what its
+                // post-matrix observers read (issue #885).
                 let eligible = population > 0
                     && population <= width
                     && !members.is_empty()
@@ -3674,6 +3676,27 @@ pub fn test_only_set_route_fold_declined(declined: bool) {
     ROUTE_FOLD_DECLINED.with(|slot| slot.set(declined));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Issue #886's unredirected oracle: the same plan bound with every scatter redirect declined,
+    /// which is the path an observer of a chain's last slot forced before that issue. Bind-time
+    /// only; render never reads it.
+    static SCATTER_REDIRECT_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Decline (`true`) or restore (`false`) every scatter redirect for every later bind on this
+/// thread.
+///
+/// The unredirected oracle for a direct-scatter test (issue #886), on the pattern of
+/// [`test_only_set_route_fold_declined`]: read once per bind, in `build_sequential`, where the
+/// redirects are decided and before any unit is built; render never reads it. Callers restore
+/// `false` after the bind they meant to decline. Test-only in this crate: exporting it for another
+/// crate's tests would take a `test-support` re-export from `lib.rs`.
+#[cfg(test)]
+fn test_only_set_scatter_redirect_declined(declined: bool) {
+    SCATTER_REDIRECT_DECLINED.with(|slot| slot.set(declined));
+}
+
 /// Prepared before caller-owned processors, observers, banks or sources move. Emission consumes
 /// this exact schedule and its owned fold configurations; it never replans route retirement.
 pub(crate) struct SequentialPlan {
@@ -3927,24 +3950,25 @@ pub(crate) fn build_sequential(
     let retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map_or_else(Default::default, |fold| fold.retired.clone());
-    // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
-    // the clauses are about what is bound to a node rather than about the program.
+    // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
+    // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
+    // last slot reads the redirected buffer (see `scatter_target`).
     //
     // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
     // and a folded lane has no scatter to point anywhere -- its tile goes to the epilogue and its
     // consumer no longer runs. Excluding it keeps the two counters honest as well as the code:
     // `bank_scatter_redirects` reports the lanes that still relocate a scatter, not the lanes the
     // fold made the question moot for.
-    let redirects: Vec<ScatterRedirect> = scatter_redirects(
-        program,
-        spec,
-        &parts.membership,
-        &parts.observers,
-        &run_units,
-    )
-    .into_iter()
-    .filter(|(run, _, _)| !folded_runs.contains(run))
-    .collect();
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
+        .into_iter()
+        .filter(|(run, _, _)| !folded_runs.contains(run))
+        .collect();
+    #[cfg(test)]
+    let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
+        Vec::new()
+    } else {
+        redirects
+    };
     let mut split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
 
     // Serialized scalar fader/matrix pairing is decided while both original owners and the
@@ -4440,10 +4464,6 @@ type ScatterRedirect = (usize, usize, usize);
 ///   incompatibility, so this is where they are kept apart.
 /// * **Not the session output.** The host copies the session output out of its buffer after the
 ///   last unit; leaving it stale would silence the render.
-/// * **No observer, and no observed alias, on the producer.** After the redirect the last slot's
-///   own buffer is never written, so anything that reads it reads the previous block. That is the
-///   same pair of clauses `chains_into` carries, keyed the same way -- `parts.observers` is keyed
-///   by node, so the alias check names the elided stage node and not the producing one.
 /// * **Nothing between the scatter and the consumer names the consumer's buffer.** This is the one
 ///   clause with no counterpart on the gather side, and it is the load-bearing one. The scatter now
 ///   writes the consumer's buffer at the *chain's* position, which is earlier -- often much
@@ -4460,9 +4480,7 @@ type ScatterRedirect = (usize, usize, usize);
 ///   hoisted it past the consumer would be the #169 defect the bank window already forbids.
 fn scatter_redirects(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
     bank_membership: &BankMembership,
-    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     run_units: &[(Vec<Membership>, Vec<usize>)],
 ) -> Vec<ScatterRedirect> {
     let (readers, first_producer) = op_dataflow(program);
@@ -4483,9 +4501,7 @@ fn scatter_redirects(
                 producer,
                 scatter_target(
                     program,
-                    spec,
                     bank_membership,
-                    observers,
                     &readers,
                     &first_producer,
                     ops,
@@ -4527,10 +4543,6 @@ fn scatter_redirects(
 ///   is_reusable`
 /// * **the consumer is not a bank member** -> `misaligned_lane_sets_decline_the_merge` and two
 ///   others
-/// * **no observed alias** ->
-///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`
-/// * **no observer on the producer** ->
-///   `a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect`
 /// * **nothing in between names the buffer** -> seven session-level tests, including the fixture's
 ///   own `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`, *and* --
 ///   for the scan's **end boundary**, which none of those seven pin --
@@ -4573,14 +4585,29 @@ fn scatter_redirects(
 /// about what the consumer's buffer holds by the time its observers run, so there is nothing there
 /// for one to see.
 ///
+/// Nor, since issue #886, are the **producer's** observers -- bound to the last slot's own node, or
+/// through a `program::Tap` to a stage boundary elided onto its buffer. Both used to decline, on the
+/// reasoning that the last slot's own buffer goes unwritten after the redirect; but no observer
+/// reads that buffer. Every one of them reads the chain's final output, and is dispatched from the
+/// last slot's own `RuntimeOp`, whose `output` [`apply_scatter_redirects`] repoints at the
+/// consumer's buffer. Both dispatchers (`Runtime::observe_unit`, `observe_active_entry`) run them
+/// straight after the chain's unit: after its scatter wrote that buffer, and before the consumer's
+/// unit -- later by construction -- rewrites it in place. Each is first offered the chain's resident
+/// final lane (`BankChain::final_output_lane`, the words the scatter transposed), and one that
+/// declines it reads the member's output, which is the consumer's buffer holding those same words;
+/// [`scatter_redirects`]' in-between clause keeps that slot the scatter's alone until the consumer
+/// runs. So an observer of the chain's final output publishes the same bits whether the lane
+/// redirects or not -- `a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_\
+/// for_bit` holds it to that, and restoring either clause reddens
+/// `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A stage boundary *inside* a
+/// chain is not this function's question: `chains_into` still declines the merge across an
+/// observed one, unchanged.
+///
 /// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
 /// for what each clause is defending.
-#[allow(clippy::too_many_arguments)]
 fn scatter_target(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
     membership: &BankMembership,
-    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
     run: &[usize],
@@ -4604,18 +4631,6 @@ fn scatter_target(
         return None;
     }
     if membership.contains_key(&consumer_op.node) {
-        return None;
-    }
-    let node = &spec.nodes[producer_op.node as usize].id;
-    if observers.contains_key(node) {
-        return None;
-    }
-    if program
-        .taps
-        .iter()
-        .filter(|tap| tap.after_op as usize == producer)
-        .any(|tap| observers.contains_key(&spec.nodes[tap.node as usize].id))
-    {
         return None;
     }
     let target = consumer_op.output;
@@ -4657,13 +4672,14 @@ fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::
 /// both sides of the model/runtime pair -- the same correspondence #194 established on the gather
 /// side.
 ///
-/// Returns `producer op -> consumer op` for every admitted lane. A program-level fixture binds no
-/// observers, which is why the two observer clauses take an empty map here: they are covered by
-/// the session-level tests in the graph compiler, and this eval covers the rest.
+/// Returns `producer op -> consumer op` for every admitted lane. Every clause is a question about
+/// the lowered program and the bank membership, so this eval drives all of them. `_spec` keeps the
+/// corpus's call site unchanged: the only clauses that named a node were the two observer clauses
+/// issue #886 removed, and the program-level fixture bound no observers to ask them about anyway.
 #[cfg(test)]
 pub(crate) fn scatter_redirects_over_program(
     program: &ExecutionProgram,
-    spec: &GraphSpec,
+    _spec: &GraphSpec,
     lanes: &BTreeMap<u32, (usize, usize)>,
     runs: &[Vec<Vec<usize>>],
 ) -> BTreeMap<usize, usize> {
@@ -4671,7 +4687,6 @@ pub(crate) fn scatter_redirects_over_program(
         .iter()
         .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
         .collect();
-    let observers = BTreeMap::new();
     // `build_sequential` builds this shape from `units_of`; here it is built from the model's runs,
     // so the only thing that differs between the two sides is which copy of the clauses answers.
     // A plain unit carries an empty membership list, which is what marks it as not a bank.
@@ -4688,7 +4703,7 @@ pub(crate) fn scatter_redirects_over_program(
             (membership, run.iter().flatten().copied().collect())
         })
         .collect();
-    scatter_redirects(program, spec, &bank_membership, &observers, &run_units)
+    scatter_redirects(program, &bank_membership, &run_units)
         .into_iter()
         .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
         .collect()
@@ -4855,12 +4870,13 @@ fn plain_route_gains(
 /// Whether anything can *see* the buffer op `index` writes other than by reading it as an input,
 /// leaving out observers bound to a node `served` says the caller reaches some other way.
 ///
-/// Two ways, and they are the pair [`chains_into`] and [`scatter_target`] already carry: an
-/// observer bound to the producing node, and an observer bound to an elided node whose alias
-/// resolves to this op's buffer (`program::Tap`). `parts.observers` is keyed by node, so the second
-/// has to name the alias node rather than the producing one. `served` is asked about the node an
-/// observer is bound to, never about the op: the alias and the producer are one buffer, but only
-/// the node says which boundary the observer declared.
+/// Two ways, and they are the pair [`chains_into`] carries (as [`scatter_target`] did until issue
+/// #886; a redirected lane's observers read the redirected buffer): an observer bound to the
+/// producing node, and an observer bound to an elided node whose alias resolves to this op's
+/// buffer (`program::Tap`). `parts.observers` is keyed by node, so the second has to name the
+/// alias node rather than the producing one. `served` is asked about the node an observer is bound
+/// to, never about the op: the alias and the producer are one buffer, but only the node says which
+/// boundary the observer declared.
 fn observed(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -8146,13 +8162,24 @@ mod tests {
         frames: u32,
         /// The stage every bank member -- each chain's last slot -- sits at.
         stage: TrackStage,
-        /// One meter on every track's last slot.
+        /// Meters on every track, at the stages `meter_at` names.
         metered: bool,
         accepts_resident: bool,
         /// Bind through the controlled-activation catalog and activate every meter.
         controlled: bool,
         /// Bind with the route fold declined: the path this plan took before issue #885.
         fold_declined: bool,
+        /// Issue #886: an elided `PostSimd1` boundary after each member -- a later tap on the
+        /// chain's last slot, which reads that slot's buffer.
+        alias: bool,
+        /// Issue #886: a bound scalar `PostFader` op between the member (or its alias) and the
+        /// route, so no fold is possible and the member's consumer is a plain op.
+        fader: bool,
+        /// The stages each track is metered at, one meter per stage; empty is `stage` alone.
+        meter_at: &'static [TrackStage],
+        /// Bind with every scatter redirect declined: the path a metered last slot took before
+        /// issue #886.
+        scatter_declined: bool,
     }
 
     impl FoldFixture {
@@ -8166,11 +8193,31 @@ mod tests {
                 accepts_resident: true,
                 controlled: false,
                 fold_declined: false,
+                alias: false,
+                fader: false,
+                meter_at: &[],
+                scatter_declined: false,
+            }
+        }
+
+        /// Issue #886's shape: `Input -> PostInputBuiltins (bank) -> PostSimd1 (elided) ->
+        /// PostFader (bound) -> Route -> Output`, with a meter on the last slot's own node and one
+        /// on its later tap. `PostInputBuiltins` is dedicated storage (`program::is_dedicated`), so
+        /// the fader cannot run in place on it and the chain's scatter is redirected into the
+        /// fader's buffer.
+        const fn scattered(width: BankWidth, tracks: usize, frames: u32) -> Self {
+            Self {
+                stage: TrackStage::PostInputBuiltins,
+                alias: true,
+                fader: true,
+                meter_at: &[TrackStage::PostInputBuiltins, TrackStage::PostSimd1],
+                ..Self::metered(width, tracks, frames)
             }
         }
     }
 
-    /// `Input -> <stage> (one builtin bank per cohort of width) -> Route -> Output`, per track.
+    /// `Input -> <stage> (one builtin bank per cohort of width) -> Route -> Output`, per track,
+    /// with issue #886's optional elided boundary and bound fader between the member and the route.
     ///
     /// Every route has its own non-trivial 2x2, so the master's association order is visible in
     /// its bits. Cohorts are the tracks in order, so the chains' render order is the reduction's
@@ -8193,6 +8240,14 @@ mod tests {
             .collect();
         let members: Vec<_> = (0..tracks)
             .map(|track| stage_node(track, fixture.stage))
+            .collect();
+        let aliases: Vec<_> = (0..tracks)
+            .filter(|_| fixture.alias)
+            .map(|track| stage_node(track, TrackStage::PostSimd1))
+            .collect();
+        let faders: Vec<_> = (0..tracks)
+            .filter(|_| fixture.fader)
+            .map(|track| stage_node(track, TrackStage::PostFader))
             .collect();
         let routes: Vec<_> = (0..tracks)
             .map(|track| GraphNodeId::Route {
@@ -8223,11 +8278,25 @@ mod tests {
                 &inputs[track],
                 &members[track],
             ));
+            let mut upstream = &members[track];
+            for boundary in [aliases.get(track), faders.get(track)]
+                .into_iter()
+                .flatten()
+            {
+                edges.push(edge(
+                    GraphEdgeId::TrackMain {
+                        target: boundary.clone(),
+                    },
+                    upstream,
+                    boundary,
+                ));
+                upstream = boundary;
+            }
             edges.push(edge(
                 GraphEdgeId::RouteSource {
                     route_id: route_id.clone(),
                 },
-                &members[track],
+                upstream,
                 &routes[track],
             ));
             edges.push(edge(
@@ -8237,7 +8306,12 @@ mod tests {
             ));
         }
         edges.sort_by(|left, right| left.id.cmp(&right.id));
-        let levels = [&inputs, &members, &routes, &vec![output.clone()]];
+        let outputs = vec![output.clone()];
+        let levels: Vec<&Vec<GraphNodeId>> =
+            [&inputs, &members, &aliases, &faders, &routes, &outputs]
+                .into_iter()
+                .filter(|level| !level.is_empty())
+                .collect();
         let schedule: Vec<_> = levels
             .iter()
             .flat_map(|level| level.iter().cloned())
@@ -8273,6 +8347,7 @@ mod tests {
             .collect();
         let mut required_bindings = inputs.clone();
         required_bindings.extend(members.iter().cloned());
+        required_bindings.extend(faders.iter().cloned());
         required_bindings.push(output.clone());
         let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
             plan_id: 885,
@@ -8349,13 +8424,24 @@ mod tests {
                 GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(track as u32)))
             })
             .collect();
+        nodes.extend(
+            faders
+                .iter()
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(ScalarTilt))),
+        );
         nodes.push(GraphNodeBinding::identity(output));
-        let observed: Vec<(GraphNodeId, u64)> = members
-            .iter()
-            .enumerate()
-            .filter(|_| fixture.metered)
-            .map(|(track, node)| (node.clone(), track as u64 + 1))
-            .collect();
+        let meter_at = if fixture.meter_at.is_empty() {
+            &[fixture.stage][..]
+        } else {
+            fixture.meter_at
+        };
+        let mut observed: Vec<(GraphNodeId, u64)> = Vec::new();
+        for track in (0..tracks).filter(|_| fixture.metered) {
+            for (meter, stage) in meter_at.iter().enumerate() {
+                let handle = (track * meter_at.len() + meter) as u64 + 1;
+                observed.push((stage_node(track, *stage), handle));
+            }
+        }
         let observers = observed
             .iter()
             .map(|(node, handle)| {
@@ -8377,6 +8463,7 @@ mod tests {
             observers,
         };
         test_only_set_route_fold_declined(fixture.fold_declined);
+        test_only_set_scatter_redirect_declined(fixture.scatter_declined);
         let bound = if fixture.controlled {
             let (plan, mut controller) = plan
                 .bind_with_observation_activation(
@@ -8398,6 +8485,7 @@ mod tests {
             )
         };
         test_only_set_route_fold_declined(false);
+        test_only_set_scatter_redirect_declined(false);
         bound
     }
 
@@ -8936,5 +9024,304 @@ mod tests {
             oracle,
             "the folded plan's master is the unfolded plan's bits"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #886: the direct scatter stays armed when the chain's final output is observed.
+    // -----------------------------------------------------------------------------------------
+
+    /// `[scatter redirects, route folds]` of `fixture`'s bound plan.
+    fn scatter_shape(fixture: FoldFixture) -> [u64; 2] {
+        let published = Published::default();
+        let (plan, _controller) = fold_fixture(fixture, &published);
+        assert!(
+            published.lock().unwrap().is_empty(),
+            "binding renders nothing"
+        );
+        [plan.bank_scatter_redirects(), plan.bank_route_folds()]
+    }
+
+    /// Gate 1 of issue #886: a full bank metered at its last slot's own node and at that slot's
+    /// later tap binds with every lane's scatter pointed at its consumer's buffer.
+    ///
+    /// The shape is the one the direct scatter exists for: a dedicated last slot
+    /// (`PostInputBuiltins`) whose sole reader is a plain op that cannot run in place on it -- a
+    /// bound fader, so the route fold is not possible either. A post-matrix meter cannot be this
+    /// test's subject: a `PostMatrix` last slot is never dedicated storage and feeds only routes,
+    /// which are not dedicated either, so its sole reader already runs in place on its buffer and
+    /// `scatter_target` has nothing to redirect, metered or not (the last arm below).
+    ///
+    /// Arms: both meters, each alone, the controlled catalog, observers that decline the resident
+    /// view, and a meter on the consumer's own node (never a clause) all keep every lane
+    /// redirected; the test-only switch gate 2's oracle uses declines every lane. The last two
+    /// arms are how the direct scatter composes with issue #885's fold on the route-consumer
+    /// shape: unmetered, the fold takes every lane and leaves no scatter to redirect; metered at a
+    /// boundary the fold does not excuse, the fold declines and the direct scatter takes every lane
+    /// instead. No lane is ever both.
+    ///
+    /// Red mutations: restore the producer-node clause in `scatter_target` -- the arms metered at
+    /// the last slot's own node report zero redirects; restore the alias clause -- the arms metered
+    /// at the later tap do. Neither declines the consumer's-node arm.
+    #[test]
+    fn an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed() {
+        for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
+            let lanes = tracks as u64;
+            let metered = FoldFixture::scattered(width, tracks, 13);
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    metered: false,
+                    ..metered
+                }),
+                [lanes, 0],
+                "{width:?}: unmetered, every lane's scatter lands in its fader"
+            );
+            for (name, fixture) in [
+                ("the last slot and its later tap", metered),
+                (
+                    "the last slot's own node",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostInputBuiltins],
+                        ..metered
+                    },
+                ),
+                (
+                    "the later tap alone",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostSimd1],
+                        ..metered
+                    },
+                ),
+                (
+                    "the controlled catalog",
+                    FoldFixture {
+                        controlled: true,
+                        ..metered
+                    },
+                ),
+                (
+                    "observers declining the resident view",
+                    FoldFixture {
+                        accepts_resident: false,
+                        ..metered
+                    },
+                ),
+                (
+                    "the consumer's own node",
+                    FoldFixture {
+                        meter_at: &[TrackStage::PostFader],
+                        ..metered
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    scatter_shape(fixture),
+                    [lanes, 0],
+                    "{width:?}: a meter at {name} keeps every lane redirected"
+                );
+            }
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    scatter_declined: true,
+                    ..metered
+                }),
+                [0, 0],
+                "{width:?}: the oracle's switch declines every redirect"
+            );
+            let routed = FoldFixture {
+                fader: false,
+                ..metered
+            };
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    metered: false,
+                    ..routed
+                }),
+                [0, lanes],
+                "{width:?}: unmetered, the fold takes every lane and no scatter is left to redirect"
+            );
+            assert_eq!(
+                scatter_shape(routed),
+                [lanes, 0],
+                "{width:?}: a meter the fold does not excuse declines it, and the direct scatter \
+                 takes every lane instead"
+            );
+            // Issue #885's shape, for the record: a post-matrix last slot's route runs in place
+            // on its buffer, so there is no scatter to redirect with or without the fold.
+            assert_eq!(
+                scatter_shape(FoldFixture {
+                    fold_declined: true,
+                    ..FoldFixture::metered(width, tracks, 13)
+                }),
+                [0, 0],
+                "{width:?}: a post-matrix last slot has no redirect to keep"
+            );
+        }
+    }
+
+    /// Gate 2 of issue #886: the redirected, metered plan renders the master and publishes every
+    /// meter frame bit for bit as the same plan with the direct scatter declined -- the path a
+    /// metered last slot took before.
+    ///
+    /// The control arm is that plan with every observer declining the resident view, so each frame
+    /// is the words the unredirected chain really scattered into the last slot's own buffer. (The
+    /// same unredirected plan with resident-reading meters is checked equal to it first.) Every
+    /// candidate redirects exactly the lanes the unmetered plan does, and differs from the control
+    /// in where the scatter lands and in the observer path only:
+    ///
+    /// * meters reading the resident view (the production shape; no planar acquisition at all);
+    /// * observers that decline the resident view and read the member's output -- after the
+    ///   redirect, the consumer's buffer, read after the chain's unit and before the fader's;
+    /// * the test-only switch that withdraws the resident offer;
+    /// * both of the above through the controlled-activation dispatcher (`observe_one`).
+    ///
+    /// Each track carries two meters: one on the last slot's own node and one on its later tap
+    /// (the elided `PostSimd1`), so both kinds of producer observer the two removed clauses
+    /// declined are read in every block. Consumers: the bound fader (no fold is possible) and the
+    /// route (the fold declines for the non-post-matrix meters, and the oracle for "the lanes the
+    /// unmetered plan redirects" is then the unmetered plan with the fold declined). Shapes: a full
+    /// W4 bank, a full W8 bank, two full W4 cohorts, and a W4 strip of six whose second cohort is
+    /// partial -- frame counts off the lane width, so the transposes' tails are exercised.
+    ///
+    /// Red mutations: scatter into the consumer but leave the member's `output` on the last slot's
+    /// own buffer -- the declining arms publish other words and the master is unchanged; move the
+    /// redirected member's observers onto the consumer's op, so they run after it -- every arm's
+    /// frames change (its counts first); hand the resident view the wrong lane -- the resident
+    /// arms (and the unredirected resident control) publish other words.
+    #[test]
+    fn a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit() {
+        const BLOCKS: u64 = 6;
+        for (width, tracks, frames) in [
+            (BankWidth::Four, 4, 13),
+            (BankWidth::Eight, 8, 13),
+            (BankWidth::Four, 8, 16),
+            (BankWidth::Four, 6, 5),
+        ] {
+            let scattered = FoldFixture::scattered(width, tracks, frames);
+            for (consumer, metered) in [
+                ("fader", scattered),
+                (
+                    "route",
+                    FoldFixture {
+                        fader: false,
+                        ..scattered
+                    },
+                ),
+            ] {
+                let shape = format!("{width:?}/{tracks}/{consumer}");
+                let run = |fixture: FoldFixture, resident_disabled: bool| {
+                    let published = Published::default();
+                    let (mut plan, _controller) = fold_fixture(fixture, &published);
+                    let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
+                    test_only_meter_input_reset(resident_disabled);
+                    let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
+                    let counts = test_only_meter_input_counts();
+                    test_only_meter_input_reset(false);
+                    let frames = published.lock().unwrap().clone();
+                    (bound, master, frames, counts)
+                };
+                let redirected = scatter_shape(FoldFixture {
+                    metered: false,
+                    fold_declined: true,
+                    ..metered
+                })[0];
+                assert!(redirected > 0, "{shape}: the shape must redirect something");
+                let meters = (tracks * metered.meter_at.len()) as u64;
+                let offers = meters * BLOCKS;
+                let planar = tracks as u64 * BLOCKS;
+                let (control_bound, control_master, control_frames, control_counts) = run(
+                    FoldFixture {
+                        scatter_declined: true,
+                        accepts_resident: false,
+                        ..metered
+                    },
+                    false,
+                );
+                assert_eq!(
+                    control_bound,
+                    [0, 0],
+                    "{shape}: the control neither redirects nor folds"
+                );
+                assert_eq!(
+                    control_counts,
+                    [planar, offers, 0],
+                    "{shape}: control counts"
+                );
+                assert_eq!(
+                    control_frames.len(),
+                    offers as usize,
+                    "{shape}: one frame per meter per block"
+                );
+                assert!(
+                    control_frames.iter().all(|frame| frame
+                        .left
+                        .iter()
+                        .chain(&frame.right)
+                        .any(|word| *word != 0)),
+                    "{shape}: every meter frame carries audio"
+                );
+                assert!(control_master.iter().any(|word| *word != 0));
+                let (_, resident_master, resident_frames, resident_counts) = run(
+                    FoldFixture {
+                        scatter_declined: true,
+                        ..metered
+                    },
+                    false,
+                );
+                assert_eq!(resident_counts, [0, offers, offers]);
+                assert_eq!(resident_master, control_master);
+                assert_eq!(resident_frames, control_frames);
+                for (name, fixture, resident_disabled, expected_counts) in [
+                    ("resident meters", metered, false, [0, offers, offers]),
+                    (
+                        "declining observers",
+                        FoldFixture {
+                            accepts_resident: false,
+                            ..metered
+                        },
+                        false,
+                        [planar, offers, 0],
+                    ),
+                    ("resident offer withdrawn", metered, true, [planar, 0, 0]),
+                    (
+                        "controlled resident meters",
+                        FoldFixture {
+                            controlled: true,
+                            ..metered
+                        },
+                        false,
+                        [0, offers, offers],
+                    ),
+                    (
+                        "controlled declining observers",
+                        FoldFixture {
+                            controlled: true,
+                            accepts_resident: false,
+                            ..metered
+                        },
+                        false,
+                        [planar, offers, 0],
+                    ),
+                ] {
+                    let (bound, master, frames, counts) = run(fixture, resident_disabled);
+                    assert_eq!(
+                        bound,
+                        [redirected, 0],
+                        "{shape}/{name}: the unmetered plan's redirects, and no fold"
+                    );
+                    assert_eq!(
+                        counts, expected_counts,
+                        "{shape}/{name}: [planar, offered, accepted]"
+                    );
+                    assert_eq!(
+                        master, control_master,
+                        "{shape}/{name}: the redirected master is the unredirected master's bits"
+                    );
+                    assert_eq!(
+                        frames, control_frames,
+                        "{shape}/{name}: every meter frame is the unredirected plan's"
+                    );
+                }
+            }
+        }
     }
 }
