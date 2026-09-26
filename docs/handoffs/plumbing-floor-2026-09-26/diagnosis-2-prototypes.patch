@@ -1,0 +1,1855 @@
+diff --git a/crates/graph/src/lib.rs b/crates/graph/src/lib.rs
+index 336bae88..e7bcb660 100644
+--- a/crates/graph/src/lib.rs
++++ b/crates/graph/src/lib.rs
+@@ -35,7 +35,7 @@ pub use runtime::{
+     test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
+     test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
+     test_only_source_plane_counts, test_only_source_plane_reset,
+-    test_only_split_pair_table_witness,
++    test_only_split_pair_table_witness, test_only_set_experiment,
+ };
+ 
+ #[cfg(any(test, feature = "test-support"))]
+@@ -1826,6 +1826,18 @@ pub trait GraphPreparedSourceSetDriver: Send {
+     fn played_planes(&self, _claim_index: usize) -> Option<(&[f32], &[f32])> {
+         None
+     }
++    /// DIAGNOSIS-2 throwaway: `claims`' planes into `out`, `silence` on `None`, one dyn call.
++    #[doc(hidden)]
++    fn diag_played_planes_into<'a>(
++        &'a self,
++        claims: &[u32],
++        out: &mut [(&'a [f32], &'a [f32])],
++        silence: (&'a [f32], &'a [f32]),
++    ) {
++        for (slot, &claim) in out.iter_mut().zip(claims) {
++            *slot = self.played_planes(claim as usize).unwrap_or(silence);
++        }
++    }
+ }
+ 
+ /// The source set as a bank's gather (issue #918) and the Output op's fused reduction (issue #927)
+@@ -1835,6 +1847,14 @@ pub(crate) trait GraphSourcePlanes {
+     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
+     /// checks.
+     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])>;
++    /// DIAGNOSIS-2 throwaway: every claim of `claims` at once, `silence` on `None`.
++    #[cfg(any(test, feature = "test-support"))]
++    fn test_only_played_planes_many<'a>(
++        &'a self,
++        claims: &[u32],
++        out: &mut [(&'a [f32], &'a [f32])],
++        silence: (&'a [f32], &'a [f32]),
++    );
+ }
+ 
+ /// A graph-owned, coordinator-only source-set capability.
+@@ -1937,6 +1957,38 @@ impl GraphSourcePlanes for GraphPreparedSourceSet {
+             .played_planes(claim_index)
+             .filter(|(left, right)| left.len() == quantum && right.len() == quantum)
+     }
++
++    #[cfg(any(test, feature = "test-support"))]
++    fn test_only_played_planes_many<'a>(
++        &'a self,
++        claims: &[u32],
++        out: &mut [(&'a [f32], &'a [f32])],
++        silence: (&'a [f32], &'a [f32]),
++    ) {
++        let quantum = self.envelope.quantum.0 as usize;
++        let count = self.claims.len();
++        if runtime::test_only_experiment() & 2048 != 0 {
++            self.driver.diag_played_planes_into(claims, out, silence);
++            for (slot, &claim) in out.iter_mut().zip(claims) {
++                if claim as usize >= count || slot.0.len() != quantum || slot.1.len() != quantum {
++                    *slot = silence;
++                }
++            }
++            return;
++        }
++        let driver = &*self.driver;
++        for (slot, &claim) in out.iter_mut().zip(claims) {
++            let claim = claim as usize;
++            *slot = if claim < count {
++                driver
++                    .played_planes(claim)
++                    .filter(|(left, right)| left.len() == quantum && right.len() == quantum)
++                    .unwrap_or(silence)
++            } else {
++                silence
++            };
++        }
++    }
+ }
+ // REALTIME_POLICY_END
+ 
+@@ -2237,6 +2289,11 @@ struct GraphExecutor {
+     /// into the arena. A claim bound in place (issue #918, `Runtime::source_in_place`) is not
+     /// here: its bank reads the played block instead.
+     source_input_buffers: Box<[(usize, u32)]>,
++    /// DIAGNOSIS-2 throwaway: the units that are not inert.
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_active: Box<[u32]>,
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_fold: Option<(Box<[u32]>, u32)>,
+ }
+ 
+ /// Same retained executor owner with the split-table field removed from its embedded runtime.
+@@ -2248,6 +2305,10 @@ struct GraphExecutorWithoutSplitPairTable {
+     sample_rate_hz: u32,
+     source_set: Option<GraphPreparedSourceSet>,
+     source_input_buffers: Box<[(usize, u32)]>,
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_active: Box<[u32]>,
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_fold: Option<(Box<[u32]>, u32)>,
+ }
+ 
+ /// Same retained executor owner with observation activation state removed from its embedded
+@@ -2259,6 +2320,10 @@ struct GraphExecutorWithoutObservationActivation {
+     sample_rate_hz: u32,
+     source_set: Option<GraphPreparedSourceSet>,
+     source_input_buffers: Box<[(usize, u32)]>,
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_active: Box<[u32]>,
++    #[cfg(any(test, feature = "test-support"))]
++    test_only_fold: Option<(Box<[u32]>, u32)>,
+ }
+ 
+ pub(crate) fn observation_runtime_layout() -> Option<(u64, u64)> {
+@@ -2392,11 +2457,22 @@ impl GraphExecutor {
+             .copied()
+             .filter(|&(claim, buffer)| !runtime.source_in_place(claim, buffer))
+             .collect();
++        #[cfg(any(test, feature = "test-support"))]
++        let test_only_active = (0..runtime.units.len())
++            .filter(|&unit| !runtime.test_only_unit_inert(unit))
++            .map(|unit| unit as u32)
++            .collect();
++        #[cfg(any(test, feature = "test-support"))]
++        let test_only_fold = runtime.test_only_fold_positions();
+         Self {
+             runtime,
+             sample_rate_hz,
+             source_set,
+             source_input_buffers,
++            #[cfg(any(test, feature = "test-support"))]
++            test_only_active,
++            #[cfg(any(test, feature = "test-support"))]
++            test_only_fold,
+         }
+     }
+ 
+@@ -2470,6 +2546,10 @@ impl PreparedPlanExecutor for GraphExecutor {
+             sample_rate_hz: _,
+             source_set,
+             source_input_buffers,
++            #[cfg(any(test, feature = "test-support"))]
++            test_only_active,
++            #[cfg(any(test, feature = "test-support"))]
++            test_only_fold,
+         } = self;
+         #[cfg(any(test, feature = "test-support"))]
+         let mut probe = test_only_phase_profile::Probe::start();
+@@ -2515,14 +2595,60 @@ impl PreparedPlanExecutor for GraphExecutor {
+         // `&mut`, so none can run while a unit borrows a plane; the next `begin_block` is the
+         // next render's.
+         let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
+-        for unit in 0..runtime.units.len() {
++        #[cfg(any(test, feature = "test-support"))]
++        let flags = runtime::test_only_experiment();
++        #[cfg(any(test, feature = "test-support"))]
++        let skip_inert = flags & 1 != 0;
++        #[cfg(any(test, feature = "test-support"))]
++        let listed = flags & 512 != 0;
++        #[cfg(any(test, feature = "test-support"))]
++        let count = if listed { test_only_active.len() } else { runtime.units.len() };
++        #[cfg(not(any(test, feature = "test-support")))]
++        let count = runtime.units.len();
++        for position in 0..count {
++            #[cfg(any(test, feature = "test-support"))]
++            let unit = if listed { test_only_active[position] as usize } else { position };
++            #[cfg(not(any(test, feature = "test-support")))]
++            let unit = position;
++            #[cfg(any(test, feature = "test-support"))]
++            if skip_inert && runtime.test_only_unit_inert(unit) {
++                continue;
++            }
+             #[cfg(any(test, feature = "test-support"))]
+             if let Some(probe) = probe.as_mut() {
+                 probe.unit(runtime.test_only_unit_phase(unit));
+             }
+-            if let Err(error) =
+-                runtime.execute(unit, time.absolute_sample, host.reborrow(), sources)
++            #[cfg(any(test, feature = "test-support"))]
++            let fast = if flags & 8192 != 0
++                && let Some((positions, scratch)) = test_only_fold.as_ref()
+             {
++                if Some(unit) == runtime.test_only_output_unit() {
++                    continue;
++                }
++                let position = positions[unit];
++                if position != u32::MAX {
++                    Some(runtime.test_only_bound_fold(
++                        unit,
++                        position as usize,
++                        *scratch,
++                        time.absolute_sample,
++                        &mut host,
++                    ))
++                } else {
++                    None
++                }
++            } else if flags & 4096 != 0 {
++                runtime.test_only_execute_bound_fast(unit, time.absolute_sample)
++            } else {
++                None
++            };
++            #[cfg(not(any(test, feature = "test-support")))]
++            let fast: Option<Result<(), RenderError>> = None;
++            let executed = match fast {
++                Some(result) => result,
++                None => runtime.execute(unit, time.absolute_sample, host.reborrow(), sources),
++            };
++            if let Err(error) = executed {
+                 runtime.invalidate_observers_after_failure(time.absolute_sample);
+                 host.silence();
+                 #[cfg(any(test, feature = "test-support"))]
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index 60b9edb7..3139f1bb 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -729,6 +729,119 @@ fn route_reduce<L: Lane>(
+         return false;
+     }
+     let vectored = frames - frames % L::WIDTH;
++    #[cfg(any(test, feature = "test-support"))]
++    {
++        let flags = test_only_experiment();
++        if flags & 64 != 0 {
++            for _ in 0..8 {
++                for (position, &buffer) in inputs.iter().enumerate() {
++                    core::hint::black_box(sources.input(lease, position, buffer));
++                }
++            }
++        }
++        if flags & 1024 != 0 {
++            // Groups of eight: resolve (one set call per group on the source path), then the
++            // tight pair kernel over the group; the first pair of the first group stores.
++            let mut group_start = 0;
++            let mut first = true;
++            while group_start < inputs.len() {
++                let end = (group_start + 8).min(inputs.len());
++                // Keep groups even so pairs never straddle groups, except the last.
++                let end = if end < inputs.len() && (end - group_start) % 2 == 1 { end - 1 } else { end };
++                let mut group: [(&[f32], &[f32]); 8] = [(&[], &[]); 8];
++                let slots = &mut group[..end - group_start];
++                if !sources.claims.is_empty()
++                    && let Some(planes) = sources.planes
++                {
++                    planes.test_only_played_planes_many(
++                        &sources.claims[group_start..end],
++                        slots,
++                        lease.read_stereo(ARENA_SILENCE_BUFFER),
++                    );
++                    for (offset, slot) in slots.iter_mut().enumerate() {
++                        if sources.claims[group_start + offset] == NO_SOURCE_CLAIM {
++                            *slot = lease.read_stereo(inputs[group_start + offset]);
++                        }
++                    }
++                } else {
++                    for (offset, slot) in slots.iter_mut().enumerate() {
++                        *slot = lease.read_stereo(inputs[group_start + offset]);
++                    }
++                }
++                if !test_only_route_group_tight::<L>(
++                    slots,
++                    &routes[group_start..end],
++                    left,
++                    right,
++                    first,
++                ) {
++                    return false;
++                }
++                first = false;
++                group_start = end;
++            }
++            return true;
++        }
++        if flags & (2 | 4 | 8 | 128 | 256) != 0 && inputs.len() <= 128 {
++            let mut resolved: [(&[f32], &[f32]); 128] = [(&[], &[]); 128];
++            if flags & 256 != 0
++                && !sources.claims.is_empty()
++                && let Some(planes) = sources.planes
++            {
++                // One dyn call into the set per block; the set calls its driver per claim.
++                planes.test_only_played_planes_many(
++                    sources.claims,
++                    &mut resolved[..inputs.len()],
++                    lease.read_stereo(ARENA_SILENCE_BUFFER),
++                );
++                for (position, &buffer) in inputs.iter().enumerate() {
++                    if sources.claims[position] == NO_SOURCE_CLAIM {
++                        resolved[position] = lease.read_stereo(buffer);
++                    }
++                }
++            } else {
++                for (position, &buffer) in inputs.iter().enumerate() {
++                    resolved[position] = sources.input(lease, position, buffer);
++                }
++            }
++            let resolved = &resolved[..inputs.len()];
++            if flags & 128 != 0 {
++                return test_only_route_pairs_tight::<L>(resolved, routes, left, right);
++            }
++            if flags & 4 != 0 && frames % (4 * L::WIDTH) == 0 {
++                return test_only_route_tiled::<L, 4>(resolved, routes, left, right);
++            }
++            if flags & 8 != 0 && frames % (2 * L::WIDTH) == 0 {
++                return test_only_route_tiled::<L, 2>(resolved, routes, left, right);
++            }
++            for (index, (pair, table)) in resolved.chunks(2).zip(routes.chunks(2)).enumerate() {
++                let initial_store = index == 0;
++                let ok = match (pair, table) {
++                    (&[a, b], &[ra, rb]) => test_only_route_pair_resolved::<L, 2>(
++                        [a, b],
++                        &[ra, rb],
++                        left,
++                        right,
++                        vectored,
++                        initial_store,
++                    ),
++                    (&[a], &[ra]) => test_only_route_pair_resolved::<L, 1>(
++                        [a],
++                        &[ra],
++                        left,
++                        right,
++                        vectored,
++                        initial_store,
++                    ),
++                    _ => false,
++                };
++                if !ok {
++                    return false;
++                }
++            }
++            return true;
++        }
++    }
+     for (index, (pair, table)) in inputs.chunks(2).zip(routes.chunks(2)).enumerate() {
+         let initial_store = index == 0;
+         let first = 2 * index;
+@@ -825,6 +938,250 @@ fn route_pair<L: Lane, const G: usize>(
+         ))
+ }
+ 
++/// DIAGNOSIS-2 throwaway: `route_pair` over already-resolved planes.
++#[cfg(any(test, feature = "test-support"))]
++#[inline(always)]
++fn test_only_route_pair_resolved<L: Lane, const G: usize>(
++    planes: [(&[f32], &[f32]); G],
++    table: &[[f32; 4]; G],
++    left: &mut [f32],
++    right: &mut [f32],
++    vectored: usize,
++    initial_store: bool,
++) -> bool {
++    let lefts = planes.map(|(left, _)| left);
++    let rights = planes.map(|(_, right)| right);
++    let frames = left.len();
++    if vectored > frames
++        || right.len() != frames
++        || lefts
++            .iter()
++            .chain(rights.iter())
++            .any(|plane| plane.len() != frames)
++    {
++        return false;
++    }
++    let (left_vectors, left_tail) = left.split_at_mut(vectored);
++    let (right_vectors, right_tail) = right.split_at_mut(vectored);
++    route_run::<L, G>(
++        left_vectors,
++        right_vectors,
++        lefts.map(|plane| &plane[..vectored]),
++        rights.map(|plane| &plane[..vectored]),
++        table,
++        initial_store,
++    ) && (left_tail.is_empty()
++        || route_tail(
++            left_tail,
++            right_tail,
++            &lefts.map(|plane| &plane[vectored..]),
++            &rights.map(|plane| &plane[vectored..]),
++            table,
++            initial_store,
++        ))
++}
++
++/// DIAGNOSIS-2 throwaway: the pair kernel over a resolved, length-checked table, one zip of
++/// `chunks_exact` iterators per pair and no per-chunk exhaustion test.
++#[cfg(any(test, feature = "test-support"))]
++#[inline(never)]
++fn test_only_route_pairs_tight<L: Lane>(
++    planes: &[(&[f32], &[f32])],
++    routes: &[[f32; 4]],
++    left: &mut [f32],
++    right: &mut [f32],
++) -> bool {
++    let frames = left.len();
++    if frames % L::WIDTH != 0
++        || right.len() != frames
++        || planes.len() != routes.len()
++        || planes.len() < 2
++        || planes
++            .iter()
++            .any(|(l, r)| l.len() != frames || r.len() != frames)
++    {
++        return false;
++    }
++    let mut pairs = planes.chunks_exact(2).zip(routes.chunks_exact(2));
++    let Some((first_pair, first_routes)) = pairs.next() else {
++        return false;
++    };
++    {
++        let c0 = first_routes[0].map(L::splat);
++        let c1 = first_routes[1].map(L::splat);
++        let (a, b) = (first_pair[0], first_pair[1]);
++        for (((ol, or), (al, ar)), (bl, br)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++            .zip(b.0.chunks_exact(L::WIDTH).zip(b.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            let (m1l, m1r) = mix_chunk(&c1, bl, br);
++            m0l.add(m1l).store(ol);
++            m0r.add(m1r).store(or);
++        }
++    }
++    for (pair, table) in pairs {
++        let c0 = table[0].map(L::splat);
++        let c1 = table[1].map(L::splat);
++        let (a, b) = (pair[0], pair[1]);
++        for (((ol, or), (al, ar)), (bl, br)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++            .zip(b.0.chunks_exact(L::WIDTH).zip(b.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            let (m1l, m1r) = mix_chunk(&c1, bl, br);
++            L::load(ol).add(m0l).add(m1l).store(ol);
++            L::load(or).add(m0r).add(m1r).store(or);
++        }
++    }
++    if planes.len() % 2 == 1 {
++        let (a, route) = (planes[planes.len() - 1], routes[routes.len() - 1]);
++        let c0 = route.map(L::splat);
++        for ((ol, or), (al, ar)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            L::load(ol).add(m0l).store(ol);
++            L::load(or).add(m0r).store(or);
++        }
++    }
++    true
++}
++
++/// DIAGNOSIS-2 throwaway: [`test_only_route_pairs_tight`] over one group, storing on the first
++/// pair only when `initial`.
++#[cfg(any(test, feature = "test-support"))]
++#[inline(never)]
++fn test_only_route_group_tight<L: Lane>(
++    planes: &[(&[f32], &[f32])],
++    routes: &[[f32; 4]],
++    left: &mut [f32],
++    right: &mut [f32],
++    initial: bool,
++) -> bool {
++    let frames = left.len();
++    if frames % L::WIDTH != 0
++        || right.len() != frames
++        || planes.len() != routes.len()
++        || planes.is_empty()
++        || (initial && planes.len() < 2)
++        || planes
++            .iter()
++            .any(|(l, r)| l.len() != frames || r.len() != frames)
++    {
++        return false;
++    }
++    let mut pairs = planes.chunks_exact(2).zip(routes.chunks_exact(2));
++    if initial {
++        let Some((first_pair, first_routes)) = pairs.next() else {
++            return false;
++        };
++        let c0 = first_routes[0].map(L::splat);
++        let c1 = first_routes[1].map(L::splat);
++        let (a, b) = (first_pair[0], first_pair[1]);
++        for (((ol, or), (al, ar)), (bl, br)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++            .zip(b.0.chunks_exact(L::WIDTH).zip(b.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            let (m1l, m1r) = mix_chunk(&c1, bl, br);
++            m0l.add(m1l).store(ol);
++            m0r.add(m1r).store(or);
++        }
++    }
++    for (pair, table) in pairs {
++        let c0 = table[0].map(L::splat);
++        let c1 = table[1].map(L::splat);
++        let (a, b) = (pair[0], pair[1]);
++        for (((ol, or), (al, ar)), (bl, br)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++            .zip(b.0.chunks_exact(L::WIDTH).zip(b.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            let (m1l, m1r) = mix_chunk(&c1, bl, br);
++            L::load(ol).add(m0l).add(m1l).store(ol);
++            L::load(or).add(m0r).add(m1r).store(or);
++        }
++    }
++    if planes.len() % 2 == 1 {
++        let (a, route) = (planes[planes.len() - 1], routes[routes.len() - 1]);
++        let c0 = route.map(L::splat);
++        for ((ol, or), (al, ar)) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++            .zip(a.0.chunks_exact(L::WIDTH).zip(a.1.chunks_exact(L::WIDTH)))
++        {
++            let (m0l, m0r) = mix_chunk(&c0, al, ar);
++            L::load(ol).add(m0l).store(ol);
++            L::load(or).add(m0r).store(or);
++        }
++    }
++    true
++}
++
++/// DIAGNOSIS-2 throwaway: frame-tiled fused route+reduce. `T` chunks of both planes stay in
++/// registers across every input; input 0's mix is the value, each later input's mix is added in
++/// edge order; one store per chunk per plane.
++#[cfg(any(test, feature = "test-support"))]
++#[inline(never)]
++fn test_only_route_tiled<L: Lane, const T: usize>(
++    planes: &[(&[f32], &[f32])],
++    routes: &[[f32; 4]],
++    left: &mut [f32],
++    right: &mut [f32],
++) -> bool {
++    let frames = left.len();
++    let tile = T * L::WIDTH;
++    if frames % tile != 0
++        || right.len() != frames
++        || planes.len() != routes.len()
++        || planes.is_empty()
++        || planes
++            .iter()
++            .any(|(l, r)| l.len() != frames || r.len() != frames)
++    {
++        return false;
++    }
++    let mut base = 0;
++    while base < frames {
++        let mut acc_l = [L::zero(); T];
++        let mut acc_r = [L::zero(); T];
++        let ((first_l, first_r), first_route) = (planes[0], &routes[0]);
++        let c = first_route.map(L::splat);
++        let (fl, fr) = (&first_l[base..base + tile], &first_r[base..base + tile]);
++        for k in 0..T {
++            let (ml, mr) = mix_chunk(&c, &fl[k * L::WIDTH..], &fr[k * L::WIDTH..]);
++            acc_l[k] = ml;
++            acc_r[k] = mr;
++        }
++        for ((l, r), route) in planes[1..].iter().zip(&routes[1..]) {
++            let c = route.map(L::splat);
++            let (l, r) = (&l[base..base + tile], &r[base..base + tile]);
++            for k in 0..T {
++                let (ml, mr) = mix_chunk(&c, &l[k * L::WIDTH..], &r[k * L::WIDTH..]);
++                acc_l[k] = acc_l[k].add(ml);
++                acc_r[k] = acc_r[k].add(mr);
++            }
++        }
++        for k in 0..T {
++            acc_l[k].store(&mut left[base + k * L::WIDTH..]);
++            acc_r[k].store(&mut right[base + k * L::WIDTH..]);
++        }
++        base += tile;
++    }
++    true
++}
++
+ /// The tail frames of one pair (or lone input) at `f32`: [`route_run::<f32, G>`](route_run), the
+ /// same body the vector frames run, in a function of its own.
+ ///
+@@ -2738,6 +3095,107 @@ impl Runtime {
+     /// The phase a unit's time is charged to by `crate::test_only_phase_profile`.
+     #[cfg(any(test, feature = "test-support"))]
+     #[inline]
++    /// DIAGNOSIS-2 throwaway.
++    pub(crate) fn test_only_output_unit(&self) -> Option<usize> {
++        self.output_unit
++    }
++
++    /// DIAGNOSIS-2 throwaway: for each unit, the Output input position its bound processor
++    /// feeds (`u32::MAX` if none), and one scratch buffer every such processor writes into.
++    pub(crate) fn test_only_fold_positions(&self) -> Option<(Box<[u32]>, u32)> {
++        let output = self.output_unit?;
++        let RuntimeUnit::Op(master) = &self.units[output] else {
++            return None;
++        };
++        if self.output_routes.is_empty() || !self.output_sources.is_empty() {
++            return None;
++        }
++        let mut positions = vec![u32::MAX; self.units.len()];
++        let mut scratch = None;
++        let mut next = 0usize;
++        for (index, unit) in self.units.iter().enumerate() {
++            let RuntimeUnit::Op(op) = unit else { continue };
++            if !matches!(op.kind, NodeKind::Bound(_)) || !op.inputs.is_empty() {
++                continue;
++            }
++            let position = master.inputs.iter().position(|&b| b == op.output)?;
++            // Class A needs the fold in edge order: bound units must come in position order.
++            if position != next {
++                return None;
++            }
++            next += 1;
++            positions[index] = position as u32;
++            scratch.get_or_insert(op.output);
++        }
++        (next == master.inputs.len()).then(|| (positions.into_boxed_slice(), scratch.unwrap_or(0)))
++    }
++
++    /// DIAGNOSIS-2 throwaway: run bound unit `index` into `scratch`, then fold `scratch` through
++    /// route `position` into the host planes (store when `position == 0`).
++    pub(crate) fn test_only_bound_fold(
++        &mut self,
++        index: usize,
++        position: usize,
++        scratch: u32,
++        first_sample: u64,
++        host: &mut HostMaster<'_>,
++    ) -> Result<(), RenderError> {
++        let RuntimeUnit::Op(op) = &mut self.units[index] else {
++            return Err(RenderError::InvalidEnvelope);
++        };
++        let NodeKind::Bound(processor) = &mut op.kind else {
++            return Err(RenderError::InvalidEnvelope);
++        };
++        {
++            let (left, right) = self.lease.write_stereo(scratch);
++            processor.process(GraphBindingBlock {
++                left,
++                right,
++                first_sample,
++            })?;
++        }
++        let (in_left, in_right) = self.lease.read_stereo(scratch);
++        let (left, right) = host.planes_mut();
++        let route = self.output_routes[position];
++        if route_run::<FrameLane, 1>(left, right, [in_left], [in_right], &[route], position == 0) {
++            Ok(())
++        } else {
++            Err(RenderError::InvalidEnvelope)
++        }
++    }
++
++    /// DIAGNOSIS-2 throwaway: the minimal dispatch of a plain bound unit with no graph inputs.
++    #[inline]
++    pub(crate) fn test_only_execute_bound_fast(
++        &mut self,
++        index: usize,
++        first_sample: u64,
++    ) -> Option<Result<(), RenderError>> {
++        let RuntimeUnit::Op(op) = &mut self.units[index] else {
++            return None;
++        };
++        if !op.inputs.is_empty() || !op.staged.is_empty() || op.split_pair.is_some() {
++            return None;
++        }
++        let NodeKind::Bound(processor) = &mut op.kind else {
++            return None;
++        };
++        let (left, right) = self.lease.write_stereo(op.output);
++        Some(processor.process(GraphBindingBlock {
++            left,
++            right,
++            first_sample,
++        }))
++    }
++
++    /// DIAGNOSIS-2 throwaway: a plain source-input unit that does nothing when dispatched.
++    pub(crate) fn test_only_unit_inert(&self, index: usize) -> bool {
++        self.output_unit != Some(index)
++            && !self.identity[index].observed
++            && matches!(&self.units[index], RuntimeUnit::Op(op)
++                if matches!(op.kind, NodeKind::SourceInput) && op.observers.is_empty())
++    }
++
+     pub(crate) fn test_only_unit_phase(&self, index: usize) -> usize {
+         use crate::test_only_phase_profile::{
+             BANK, BOUND, IDENTITY_ALIAS, IDENTITY_COPY, OTHER_OP, OUTPUT, ROUTE,
+@@ -3402,8 +3860,15 @@ fn execute_op(
+                 // refused shape cannot occur for an admitted fold; were it to, the error path
+                 // silences the host planes rather than play a partial sum.
+                 let (left, right) = host.planes_mut();
+-                if !route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right) {
+-                    return Err(RenderError::InvalidEnvelope);
++                #[cfg(any(test, feature = "test-support"))]
++                let repeats = if test_only_experiment() & 16 != 0 { 8 } else { 1 };
++                #[cfg(not(any(test, feature = "test-support")))]
++                let repeats = 1;
++                for _ in 0..repeats {
++                    if !route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right)
++                    {
++                        return Err(RenderError::InvalidEnvelope);
++                    }
+                 }
+             }
+         }
+@@ -5000,6 +5465,20 @@ thread_local! {
+     static SOURCE_IN_PLACE_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+     /// `[claims copied into the arena, reads from a played block, reads of silence]`.
+     static SOURCE_PLANE_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
++    /// DIAGNOSIS-2 throwaway experiment flags.
++    static EXPERIMENT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
++}
++
++/// DIAGNOSIS-2 throwaway: set experiment flags.
++#[cfg(any(test, feature = "test-support"))]
++#[doc(hidden)]
++pub fn test_only_set_experiment(flags: u32) {
++    EXPERIMENT.with(|slot| slot.set(flags));
++}
++
++#[cfg(any(test, feature = "test-support"))]
++pub(crate) fn test_only_experiment() -> u32 {
++    EXPERIMENT.with(std::cell::Cell::get)
+ }
+ 
+ /// Decline (`true`) or restore (`false`) the in-place source read for every later bind on this
+diff --git a/tools/console-workload/src/lib.rs b/tools/console-workload/src/lib.rs
+index abd16759..fbbc5f2a 100644
+--- a/tools/console-workload/src/lib.rs
++++ b/tools/console-workload/src/lib.rs
+@@ -826,6 +826,8 @@ pub struct RenderFailed;
+ pub struct SessionRuntime {
+     plan: PreparedRenderPlan,
+     output: Vec<f32>,
++    /// DIAGNOSIS-2 throwaway: where the rendered planes start in `output`.
++    output_start: usize,
+     /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
+     meter_consumers: Vec<MeterConsumer>,
+     controls: Vec<EffectControlProducer>,
+@@ -1094,12 +1096,18 @@ impl SessionRuntime {
+         plan.force_mono_collapse_off(workload.collapse_forced_off());
+         let mut runtime = Self {
+             plan,
+-            output: vec![0.0; QUANTUM * 2],
++            output: vec![0.0; QUANTUM * 2 + 32],
++            output_start: 0,
+             meter_consumers,
+             controls,
+             observations,
+             structural_symmetry: builtins_compiler::session_structural_symmetry(&session),
+         };
++        if let Ok(value) = std::env::var("DIAG2_OUT_MOD64") {
++            let want: usize = value.parse().expect("DIAG2_OUT_MOD64 bytes");
++            let base = runtime.output.as_ptr() as usize;
++            runtime.output_start = ((want + 128 - base % 64) % 64) / 4;
++        }
+         if config.observation == ObservationArm::Armed {
+             runtime.arm_observation();
+         }
+@@ -1506,8 +1514,13 @@ impl SessionRuntime {
+             .render(
+                 RenderIo {
+                     input: None,
+-                    output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+-                        .map_err(|_| RenderFailed)?,
++                    output: PlanarBufferMut::try_new(
++                        &mut self.output[self.output_start..self.output_start + 2 * QUANTUM],
++                        2,
++                        QUANTUM,
++                        QUANTUM,
++                    )
++                    .map_err(|_| RenderFailed)?,
+                 },
+                 RenderTime {
+                     absolute_sample: observation * QUANTUM as u64,
+@@ -1517,9 +1530,14 @@ impl SessionRuntime {
+             .map_err(|_| RenderFailed)
+     }
+ 
++    /// DIAGNOSIS-2 throwaway.
++    pub fn diag_output_address(&self) -> usize {
++        self.output[self.output_start..].as_ptr() as usize
++    }
++
+     /// Folds this block's rendered output into a digest. Outside the clock, always.
+     pub fn hash_output(&self, hash: &mut Sha256Sink) {
+-        for value in &self.output {
++        for value in &self.output[self.output_start..self.output_start + 2 * QUANTUM] {
+             hash.update(value.to_bits().to_le_bytes());
+         }
+     }
+@@ -1811,6 +1829,8 @@ fn source_binding(
+ struct FrozenSourceDriver {
+     /// Claim `i`'s `(left, right)` block, one allocation for the whole set.
+     claims: Box<[FrozenGraphSource]>,
++    /// DIAGNOSIS-2 throwaway: the same words at a controlled alignment, and where they start.
++    aligned: Option<(Box<[f32]>, usize)>,
+ }
+ 
+ impl FrozenSourceDriver {
+@@ -1826,7 +1846,7 @@ impl FrozenSourceDriver {
+         source: &SourceSignal,
+         mappings: &[(usize, usize)],
+     ) -> Self {
+-        let claims = claims
++        let claims: Box<[FrozenGraphSource]> = claims
+             .iter()
+             .map(|claim| match &claim.node {
+                 GraphNodeId::TrackStage {
+@@ -1836,7 +1856,29 @@ impl FrozenSourceDriver {
+                 node => panic!("a source claim must name a track input, not {node:?}"),
+             })
+             .collect();
+-        Self { claims }
++        let aligned = std::env::var("DIAG2_CLAIM_MOD64").ok().map(|value| {
++            let want: usize = value.parse().expect("DIAG2_CLAIM_MOD64 bytes");
++            let mut storage = vec![0.0_f32; claims.len() * 2 * QUANTUM + 32].into_boxed_slice();
++            let base = storage.as_ptr() as usize;
++            let start = ((want + 128 - base % 64) % 64) / 4;
++            for (index, claim) in claims.iter().enumerate() {
++                let at = start + index * 2 * QUANTUM;
++                storage[at..at + QUANTUM].copy_from_slice(&claim.left);
++                storage[at + QUANTUM..at + 2 * QUANTUM].copy_from_slice(&claim.right);
++            }
++            (storage, start)
++        });
++        if std::env::var_os("DIAG2_PRINT").is_some() {
++            eprintln!(
++                "DIAG2 driver claims at {:#x} (mod 64 = {}); aligned copy mod 64 = {:?}",
++                claims.as_ptr() as usize,
++                claims.as_ptr() as usize % 64,
++                aligned
++                    .as_ref()
++                    .map(|(storage, start)| (storage[*start..].as_ptr() as usize) % 64)
++            );
++        }
++        Self { claims, aligned }
+     }
+ 
+     /// The set's engine-owned bytes: the one boxed slice of frozen planes.
+@@ -1893,8 +1935,26 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
+         true
+     }
+ 
++    fn diag_played_planes_into<'a>(
++        &'a self,
++        claims: &[u32],
++        out: &mut [(&'a [f32], &'a [f32])],
++        silence: (&'a [f32], &'a [f32]),
++    ) {
++        for (slot, &claim) in out.iter_mut().zip(claims) {
++            *slot = self.played_planes(claim as usize).unwrap_or(silence);
++        }
++    }
++
+     /// Lends claim `claim_index`'s frozen block in place: the words `copy_track_input` copies.
+     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
++        if let Some((storage, start)) = &self.aligned {
++            if claim_index >= self.claims.len() {
++                return None;
++            }
++            let at = start + claim_index * 2 * QUANTUM;
++            return Some((&storage[at..at + QUANTUM], &storage[at + QUANTUM..at + 2 * QUANTUM]));
++        }
+         self.claims
+             .get(claim_index)
+             .map(|claim| (&claim.left[..], &claim.right[..]))
+diff --git a/tools/console-workload/tests/plumbing_diag2.rs b/tools/console-workload/tests/plumbing_diag2.rs
+new file mode 100644
+index 00000000..4f408aa5
+--- /dev/null
++++ b/tools/console-workload/tests/plumbing_diag2.rs
+@@ -0,0 +1,968 @@
++//! Plumbing-floor diagnosis 2 harness (docs/handoffs/plumbing-floor-2026-09-26/DIAGNOSIS-2.md).
++//!
++//! Throwaway measurement harness, ignored by default. Run pinned:
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 taskset -c 31 cargo test --release -p console-workload \
++//!     --test plumbing_diag2 -- --ignored --nocapture --test-threads 1
++//! ```
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use bench_support::digest::Sha256Sink;
++use console_workload::{PlanConfig, QUANTUM, SessionRuntime, Workload, source_block};
++use graph::test_only_phase_profile as profile;
++use lane::{Lane, Simd8};
++
++const WARMUP_BLOCKS: u64 = 512;
++const PROFILED_BLOCKS: u64 = 4000;
++const REPEATS: usize = 3;
++const TRACKS: usize = 64;
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 200_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++fn probe_cost_ns() -> f64 {
++    let mut deltas: Vec<u64> = (0..20_000)
++        .map(|_| {
++            let a = Instant::now();
++            let b = Instant::now();
++            b.duration_since(a).as_nanos() as u64
++        })
++        .collect();
++    deltas.sort_unstable();
++    deltas[deltas.len() / 2] as f64
++}
++
++const PHASE_SHORT: [&str; profile::COUNT] = [
++    "enter", "source", "bound", "route", "output", "id-copy", "id-alias", "other(no-op)", "bank",
++    "exit",
++];
++
++fn pct(sorted: &[u64], per_mille: usize) -> u64 {
++    bench_support::stats::per_mille(sorted, per_mille)
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn rows() {
++    let hz = core_hz();
++    let probe_ns = probe_cost_ns();
++    println!("core clock {:.3} GHz; Instant pair {probe_ns:.1} ns", hz / 1e9);
++    let cyc = |ns: f64| ns * hz / 1e9;
++    for workload in [
++        Workload::SixtyFourTrackPlumbingOnly,
++        Workload::SixtyFourTrackPlumbingRing,
++    ] {
++        println!("=== {}", workload.kind());
++        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
++        println!("units {}", runtime.unit_eligibility().len());
++        let mut observation = 0_u64;
++        profile::enable(false);
++        for _ in 0..WARMUP_BLOCKS {
++            runtime.render(observation).expect("warmup");
++            observation += 1;
++        }
++        for repeat in 0..REPEATS {
++            // Tight loop, one Instant pair per block.
++            let mut samples = Vec::with_capacity(PROFILED_BLOCKS as usize);
++            for _ in 0..PROFILED_BLOCKS {
++                let start = Instant::now();
++                let result = runtime.render(observation);
++                let elapsed = start.elapsed().as_nanos() as u64;
++                result.expect("block");
++                observation += 1;
++                samples.push(elapsed);
++            }
++            samples.sort_unstable();
++            let p50 = pct(&samples, 500);
++            println!(
++                "r{repeat} tight:  min {} p50 {p50} p95 {} ns  = {:.0} cycles p50",
++                samples[0],
++                pct(&samples, 950),
++                cyc(p50 as f64)
++            );
++            // Bench-shaped loop: timing::timed + SHA-256 of the output between blocks.
++            let mut samples = Vec::with_capacity(1000);
++            let mut sink = Sha256Sink::new();
++            for _ in 0..1000 {
++                let (ns, result) =
++                    bench_support::timing::timed(|| runtime.render(observation));
++                result.expect("block");
++                runtime.hash_output(&mut sink);
++                observation += 1;
++                samples.push(ns);
++            }
++            black_box(sink.finish_hex());
++            samples.sort_unstable();
++            let p50 = pct(&samples, 500);
++            println!(
++                "r{repeat} bench:  min {} p50 {p50} p95 {} ns  = {:.0} cycles p50",
++                samples[0],
++                pct(&samples, 950),
++                cyc(p50 as f64)
++            );
++            // Probes on.
++            profile::enable(true);
++            profile::reset();
++            let start = Instant::now();
++            for _ in 0..PROFILED_BLOCKS {
++                runtime.render(observation).expect("block");
++                observation += 1;
++            }
++            let total = start.elapsed().as_nanos() as f64 / PROFILED_BLOCKS as f64;
++            profile::enable(false);
++            let (nanos, blocks, probes) = profile::snapshot();
++            if repeat == 0 {
++                let runs: Vec<String> = profile::runs()
++                    .iter()
++                    .filter(|(k, u)| *k < profile::COUNT && *u > 0)
++                    .map(|(k, u)| format!("{u} x {}", PHASE_SHORT[*k]))
++                    .collect();
++                println!("runs: {}", runs.join(", "));
++            }
++            let mut line = format!(
++                "r{repeat} probes: mean {total:.0} ns, {:.1} probes/block;",
++                probes as f64 / blocks as f64
++            );
++            for (index, name) in PHASE_SHORT.iter().enumerate() {
++                let ns = nanos[index] as f64 / blocks as f64;
++                if ns > 0.0 {
++                    line += &format!(" {name} {ns:.1} ns ({:.0} cyc)", cyc(ns));
++                }
++            }
++            println!("{line}");
++        }
++    }
++}
++
++/// Throwaway in-engine experiments (flags in `graph::test_only_set_experiment`): bit 0 skips the
++/// inert source-input units, bit 1 resolves every Output input once before the pair loop, bit 2
++/// swaps the pair kernel for the frame-tiled T=4 kernel, bit 3 for T=2.
++#[test]
++#[ignore = "measurement harness"]
++fn experiments() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let cyc = |ns: f64| ns * hz / 1e9;
++    for workload in [
++        Workload::SixtyFourTrackPlumbingOnly,
++        Workload::SixtyFourTrackPlumbingRing,
++    ] {
++        println!("=== {}", workload.kind());
++        let digest_of = |flags: u32| {
++            graph::test_only_set_experiment(flags);
++            let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
++            let mut sink = Sha256Sink::new();
++            for block in 0..64 {
++                runtime.render(block).expect("block");
++                runtime.hash_output(&mut sink);
++            }
++            graph::test_only_set_experiment(0);
++            sink.finish_hex()
++        };
++        let base = digest_of(0);
++        const FLAGS: [u32; 8] = [0, 512, 512 | 1024, 512 | 1024 | 2048, 4096, 4096 | 1024, 8192, 512 | 1024 | 2048 | 16];
++        for flags in FLAGS {
++            assert_eq!(digest_of(flags), base, "flags {flags} moved a bit");
++        }
++        // Several runtimes alive at once, so each sits at different addresses; flags are read per
++        // block, so every flag is measured on the same runtime (same addresses).
++        let mut runtimes: Vec<SessionRuntime> = (0..4)
++            .map(|_| SessionRuntime::build(workload, PlanConfig::BASELINE))
++            .collect();
++        let mut observation = 0_u64;
++        for (index, runtime) in runtimes.iter_mut().enumerate() {
++            let mut line = format!(
++                "runtime {index} (output mod 64 = {}):",
++                runtime.diag_output_address() % 64
++            );
++            let mut phases = String::new();
++            for flags in FLAGS {
++                graph::test_only_set_experiment(flags);
++                for _ in 0..256 {
++                    runtime.render(observation).expect("warmup");
++                    observation += 1;
++                }
++                let mut samples = Vec::with_capacity(PROFILED_BLOCKS as usize);
++                for _ in 0..PROFILED_BLOCKS {
++                    let start = Instant::now();
++                    let result = runtime.render(observation);
++                    let elapsed = start.elapsed().as_nanos() as u64;
++                    result.expect("block");
++                    observation += 1;
++                    samples.push(elapsed);
++                }
++                samples.sort_unstable();
++                line += &format!(" f{flags}={:.0}", cyc(pct(&samples, 500) as f64));
++                if index == 0 {
++                    profile::enable(true);
++                    profile::reset();
++                    for _ in 0..PROFILED_BLOCKS {
++                        runtime.render(observation).expect("block");
++                        observation += 1;
++                    }
++                    profile::enable(false);
++                    let (nanos, blocks, _) = profile::snapshot();
++                    phases += &format!("\n    f{flags}:");
++                    for (kind, name) in PHASE_SHORT.iter().enumerate() {
++                        let ns = nanos[kind] as f64 / blocks as f64;
++                        if ns > 0.0 {
++                            phases += &format!(" {name} {:.0}", cyc(ns));
++                        }
++                    }
++                }
++                graph::test_only_set_experiment(0);
++            }
++            println!("{line} (p50 cycles){phases}");
++        }
++    }
++}
++
++/// One configuration (alignment set by env vars at build), both rows, flags 0 and 1: p50 cycles
++/// and the output phase.
++#[test]
++#[ignore = "measurement harness"]
++fn one_config() {
++    let hz = 3.70e9;
++    let cyc = |ns: f64| ns * hz / 1e9;
++    let mut line = String::new();
++    for workload in [
++        Workload::SixtyFourTrackPlumbingOnly,
++        Workload::SixtyFourTrackPlumbingRing,
++    ] {
++        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
++        line += &format!(
++            "{} out%64={}:",
++            if workload == Workload::SixtyFourTrackPlumbingOnly { "bound" } else { "ring" },
++            runtime.diag_output_address() % 64
++        );
++        let mut observation = 0_u64;
++        for flags in [0u32, 1] {
++            graph::test_only_set_experiment(flags);
++            for _ in 0..WARMUP_BLOCKS {
++                runtime.render(observation).expect("warmup");
++                observation += 1;
++            }
++            let mut p50s = Vec::new();
++            for _ in 0..3 {
++                let mut samples = Vec::with_capacity(PROFILED_BLOCKS as usize);
++                for _ in 0..PROFILED_BLOCKS {
++                    let start = Instant::now();
++                    let result = runtime.render(observation);
++                    let elapsed = start.elapsed().as_nanos() as u64;
++                    result.expect("block");
++                    observation += 1;
++                    samples.push(elapsed);
++                }
++                samples.sort_unstable();
++                p50s.push(pct(&samples, 500));
++            }
++            p50s.sort_unstable();
++            profile::enable(true);
++            profile::reset();
++            for _ in 0..PROFILED_BLOCKS {
++                runtime.render(observation).expect("block");
++                observation += 1;
++            }
++            profile::enable(false);
++            let (nanos, blocks, _) = profile::snapshot();
++            let output = nanos[profile::OUTPUT] as f64 / blocks as f64;
++            line += &format!(
++                " f{flags} p50 {:.0} (output {:.0})",
++                cyc(p50s[1] as f64),
++                cyc(output)
++            );
++            graph::test_only_set_experiment(0);
++        }
++        line += " | ";
++    }
++    println!("RESULT {line}");
++}
++
++// ---------------------------------------------------------------------------------------------
++// Memory hierarchy probes.
++// ---------------------------------------------------------------------------------------------
++
++#[inline(never)]
++fn sum_stream(buffer: &[f32]) -> f32 {
++    let mut acc = [Simd8::zero(); 8];
++    for chunk in buffer.chunks_exact(64) {
++        for (j, a) in acc.iter_mut().enumerate() {
++            *a = a.add(Simd8::load(&chunk[8 * j..]));
++        }
++    }
++    let mut out = [0.0_f32; 8];
++    let mut total = Simd8::zero();
++    for a in acc {
++        total = total.add(a);
++    }
++    total.store(&mut out);
++    out.iter().sum()
++}
++
++/// Throughput of a 1:1 `vmulps`:`vaddps` stream with 12 independent chains (6 of each).
++#[inline(never)]
++fn fp_mix(iterations: u64) -> f32 {
++    let m = Simd8::splat(black_box(1.000_000_1));
++    let d = Simd8::splat(black_box(1.0e-30));
++    let mut a = [Simd8::splat(black_box(1.0)); 12];
++    for _ in 0..iterations {
++        for pair in a.chunks_exact_mut(2) {
++            pair[0] = pair[0].mul(m);
++            pair[1] = pair[1].add(d);
++        }
++    }
++    let mut total = Simd8::zero();
++    for v in a {
++        total = total.add(v);
++    }
++    let mut out = [0.0_f32; 8];
++    total.store(&mut out);
++    out[0]
++}
++
++/// Throughput of `vaddps` alone, 12 chains.
++#[inline(never)]
++fn fp_add(iterations: u64) -> f32 {
++    let d = Simd8::splat(black_box(1.0e-30));
++    let mut a = [Simd8::splat(black_box(1.0)); 12];
++    for _ in 0..iterations {
++        for v in &mut a {
++            *v = v.add(d);
++        }
++    }
++    let mut total = Simd8::zero();
++    for v in a {
++        total = total.add(v);
++    }
++    let mut out = [0.0_f32; 8];
++    total.store(&mut out);
++    out[0]
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn fp_throughput() {
++    let hz = core_hz();
++    const N: u64 = 20_000_000;
++    let t = Instant::now();
++    black_box(fp_mix(black_box(N)));
++    let mix = t.elapsed().as_secs_f64();
++    let t = Instant::now();
++    black_box(fp_add(black_box(N)));
++    let add = t.elapsed().as_secs_f64();
++    println!(
++        "core clock {:.3} GHz; mul:add 1:1 {:.3} vector ops/cycle; add alone {:.3} vector ops/cycle",
++        hz / 1e9,
++        (12 * N) as f64 / (mix * hz),
++        (12 * N) as f64 / (add * hz)
++    );
++}
++
++#[inline(never)]
++fn copy_stream(dst: &mut [f32], src: &[f32]) {
++    dst.copy_from_slice(src);
++}
++
++fn time_min(batches: usize, per_batch: usize, mut body: impl FnMut()) -> f64 {
++    let mut best = f64::MAX;
++    for _ in 0..batches {
++        let start = Instant::now();
++        for _ in 0..per_batch {
++            body();
++        }
++        best = best.min(start.elapsed().as_nanos() as f64 / per_batch as f64);
++    }
++    best
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn memory() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    for kib in [8usize, 16, 24, 32, 48, 64, 128, 256, 384] {
++        let words = kib * 1024 / 4;
++        let buffer: Vec<f32> = (0..words).map(|i| (i % 7) as f32).collect();
++        let ns = time_min(30, 200, || {
++            black_box(sum_stream(black_box(&buffer)));
++        });
++        let cycles = ns * hz / 1e9;
++        println!(
++            "read {kib:>4} KiB: {ns:>9.1} ns {cycles:>9.0} cycles {:>6.1} B/cycle",
++            (kib * 1024) as f64 / cycles
++        );
++    }
++    for kib in [16usize, 64] {
++        let words = kib * 1024 / 4;
++        let src: Vec<f32> = (0..words).map(|i| (i % 7) as f32).collect();
++        let mut dst = vec![0.0_f32; words];
++        let ns = time_min(30, 200, || {
++            copy_stream(black_box(&mut dst), black_box(&src));
++        });
++        let cycles = ns * hz / 1e9;
++        println!(
++            "copy {kib:>4} KiB: {ns:>9.1} ns {cycles:>9.0} cycles {:>6.1} B/cycle (read side)",
++            (kib * 1024) as f64 / cycles
++        );
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Kernel candidates over the ring row's layout.
++// ---------------------------------------------------------------------------------------------
++
++type Planes = ([f32; QUANTUM], [f32; QUANTUM]);
++
++fn coefficients() -> Vec<[f32; 4]> {
++    let unit = |seed: u32| -> f32 {
++        let hashed = seed.wrapping_mul(2_654_435_761).rotate_left(13) ^ 0x9E37_79B9;
++        (hashed >> 8) as f32 / (1u32 << 24) as f32
++    };
++    (0..TRACKS)
++        .map(|track| {
++            let t = track as u32;
++            [
++                0.5 + 0.4 * unit(4 * t),
++                0.2 * unit(4 * t + 1) - 0.1,
++                0.2 * unit(4 * t + 2) - 0.1,
++                0.5 + 0.4 * unit(4 * t + 3),
++            ]
++        })
++        .collect()
++}
++
++fn sources() -> Box<[Planes]> {
++    (0..TRACKS)
++        .map(|track| {
++            let block = source_block(track, false);
++            let mut left = [0.0; QUANTUM];
++            let mut right = [0.0; QUANTUM];
++            left.copy_from_slice(&block[..QUANTUM]);
++            right.copy_from_slice(&block[QUANTUM..]);
++            (left, right)
++        })
++        .collect()
++}
++
++/// Reference: `mix2x2_block` then left-to-right sum, scalar.
++fn reference(inputs: &[&Planes], coefficients: &[[f32; 4]]) -> ([f32; QUANTUM], [f32; QUANTUM]) {
++    let mut left = [0.0_f32; QUANTUM];
++    let mut right = [0.0_f32; QUANTUM];
++    for frame in 0..QUANTUM {
++        for (index, (planes, c)) in inputs.iter().zip(coefficients).enumerate() {
++            let (l, r) = (planes.0[frame], planes.1[frame]);
++            let [ll, lr, rl, rr] = *c;
++            let ml = lr * r + ll * l;
++            let mr = rr * r + rl * l;
++            if index == 0 {
++                left[frame] = ml;
++                right[frame] = mr;
++            } else {
++                left[frame] += ml;
++                right[frame] += mr;
++            }
++        }
++    }
++    (left, right)
++}
++
++#[inline(always)]
++fn mix(c: &[Simd8; 4], l: Simd8, r: Simd8) -> (Simd8, Simd8) {
++    let [ll, lr, rl, rr] = *c;
++    (lr.fma(r, ll.mul(l)), rr.fma(r, rl.mul(l)))
++}
++
++/// Today's shape: pairs, hoisted splats, running sum stored and reloaded per pair.
++#[inline(never)]
++fn pairs(inputs: &[&Planes], coefficients: &[[f32; 4]], left: &mut [f32; QUANTUM], right: &mut [f32; QUANTUM]) {
++    for (pair, (group, table)) in inputs.chunks_exact(2).zip(coefficients.chunks_exact(2)).enumerate() {
++        let c0 = table[0].map(Simd8::splat);
++        let c1 = table[1].map(Simd8::splat);
++        let (a, b) = (group[0], group[1]);
++        for k in 0..QUANTUM / 8 {
++            let at = 8 * k;
++            let (m0l, m0r) = mix(&c0, Simd8::load(&a.0[at..]), Simd8::load(&a.1[at..]));
++            let (m1l, m1r) = mix(&c1, Simd8::load(&b.0[at..]), Simd8::load(&b.1[at..]));
++            let (sl, sr) = if pair == 0 {
++                (m0l, m0r)
++            } else {
++                (Simd8::load(&left[at..]).add(m0l), Simd8::load(&right[at..]).add(m0r))
++            };
++            sl.add(m1l).store(&mut left[at..]);
++            sr.add(m1r).store(&mut right[at..]);
++        }
++    }
++}
++
++/// Frame-tiled: `T` chunks of both planes held in registers across every input; the first input
++/// stores its mix as the value, every later one adds, in edge order. No master re-pass.
++/// Coefficients are pre-splatted in memory (one `[Simd8; 4]` per input).
++#[inline(never)]
++fn tiled<const T: usize>(
++    inputs: &[&Planes],
++    splats: &[[Simd8; 4]],
++    left: &mut [f32; QUANTUM],
++    right: &mut [f32; QUANTUM],
++) {
++    for tile in 0..QUANTUM / (8 * T) {
++        let base = tile * 8 * T;
++        let mut acc_l = [Simd8::zero(); T];
++        let mut acc_r = [Simd8::zero(); T];
++        let first = inputs[0];
++        for k in 0..T {
++            let at = base + 8 * k;
++            let (ml, mr) = mix(&splats[0], Simd8::load(&first.0[at..]), Simd8::load(&first.1[at..]));
++            acc_l[k] = ml;
++            acc_r[k] = mr;
++        }
++        for (planes, c) in inputs[1..].iter().zip(&splats[1..]) {
++            for k in 0..T {
++                let at = base + 8 * k;
++                let (ml, mr) = mix(c, Simd8::load(&planes.0[at..]), Simd8::load(&planes.1[at..]));
++                acc_l[k] = acc_l[k].add(ml);
++                acc_r[k] = acc_r[k].add(mr);
++            }
++        }
++        for k in 0..T {
++            let at = base + 8 * k;
++            acc_l[k].store(&mut left[at..]);
++            acc_r[k].store(&mut right[at..]);
++        }
++    }
++}
++
++/// Frame-tiled with the coefficients broadcast from the `[f32; 4]` table per input per tile.
++#[inline(never)]
++fn tiled_broadcast<const T: usize>(
++    inputs: &[&Planes],
++    coefficients: &[[f32; 4]],
++    left: &mut [f32; QUANTUM],
++    right: &mut [f32; QUANTUM],
++) {
++    for tile in 0..QUANTUM / (8 * T) {
++        let base = tile * 8 * T;
++        let mut acc_l = [Simd8::zero(); T];
++        let mut acc_r = [Simd8::zero(); T];
++        let first = inputs[0];
++        let c = coefficients[0].map(Simd8::splat);
++        for k in 0..T {
++            let at = base + 8 * k;
++            let (ml, mr) = mix(&c, Simd8::load(&first.0[at..]), Simd8::load(&first.1[at..]));
++            acc_l[k] = ml;
++            acc_r[k] = mr;
++        }
++        for (planes, c) in inputs[1..].iter().zip(&coefficients[1..]) {
++            let c = c.map(Simd8::splat);
++            for k in 0..T {
++                let at = base + 8 * k;
++                let (ml, mr) = mix(&c, Simd8::load(&planes.0[at..]), Simd8::load(&planes.1[at..]));
++                acc_l[k] = acc_l[k].add(ml);
++                acc_r[k] = acc_r[k].add(mr);
++            }
++        }
++        for k in 0..T {
++            let at = base + 8 * k;
++            acc_l[k].store(&mut left[at..]);
++            acc_r[k].store(&mut right[at..]);
++        }
++    }
++}
++
++fn same(a: &[f32; QUANTUM], b: &[f32; QUANTUM]) -> bool {
++    a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn kernels() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let sources = sources();
++    let coefficients = coefficients();
++    let splats: Vec<[Simd8; 4]> = coefficients.iter().map(|c| c.map(Simd8::splat)).collect();
++    let l2_inputs: Vec<&Planes> = sources.iter().collect();
++    // L1-resident arm: 16 distinct tracks (16 KiB) read four times; same arithmetic.
++    let l1_inputs: Vec<&Planes> = (0..TRACKS).map(|t| &sources[t % 16]).collect();
++    let mut left = [0.0_f32; QUANTUM];
++    let mut right = [0.0_f32; QUANTUM];
++    for (name, inputs) in [("L2 (64 distinct)", &l2_inputs), ("L1 (16 distinct)", &l1_inputs)] {
++        let (rl, rr) = reference(inputs, &coefficients);
++        pairs(inputs, &coefficients, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "pairs bits");
++        tiled::<1>(inputs, &splats, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "tiled1 bits");
++        tiled::<2>(inputs, &splats, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "tiled2 bits");
++        tiled::<4>(inputs, &splats, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "tiled4 bits");
++        tiled_broadcast::<2>(inputs, &coefficients, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "tiled_broadcast2 bits");
++        tiled_broadcast::<4>(inputs, &coefficients, &mut left, &mut right);
++        assert!(same(&left, &rl) && same(&right, &rr), "tiled_broadcast4 bits");
++        println!("{name}: every candidate bit-identical to the scalar mix-then-sum reference");
++    }
++    for repeat in 0..REPEATS {
++        println!("repeat {repeat}");
++        for (name, inputs) in [("L2", &l2_inputs), ("L1", &l1_inputs)] {
++            let report = |kernel: &str, ns: f64| {
++                println!("  {name} {kernel:<24} {ns:>8.1} ns {:>7.0} cycles", ns * hz / 1e9);
++            };
++            report(
++                "pairs (today)",
++                time_min(30, 200, || pairs(black_box(inputs), &coefficients, &mut left, &mut right)),
++            );
++            report(
++                "tiled T=1 splat-table",
++                time_min(30, 200, || tiled::<1>(black_box(inputs), &splats, &mut left, &mut right)),
++            );
++            report(
++                "tiled T=2 splat-table",
++                time_min(30, 200, || tiled::<2>(black_box(inputs), &splats, &mut left, &mut right)),
++            );
++            report(
++                "tiled T=4 splat-table",
++                time_min(30, 200, || tiled::<4>(black_box(inputs), &splats, &mut left, &mut right)),
++            );
++            report(
++                "tiled T=2 broadcast",
++                time_min(30, 200, || {
++                    tiled_broadcast::<2>(black_box(inputs), &coefficients, &mut left, &mut right)
++                }),
++            );
++            report(
++                "tiled T=4 broadcast",
++                time_min(30, 200, || {
++                    tiled_broadcast::<4>(black_box(inputs), &coefficients, &mut left, &mut right)
++                }),
++            );
++        }
++    }
++    black_box((&left, &right));
++}
++
++// ---------------------------------------------------------------------------------------------
++// Verbatim copy of the engine's fused Output reduction (crates/graph/src/runtime.rs), with the
++// arena replaced by a trait object that serves each input's planes.
++// ---------------------------------------------------------------------------------------------
++
++trait PlaneSource {
++    fn planes(&self, position: usize) -> (&[f32], &[f32]);
++}
++
++struct DriverLike {
++    claims: Box<[Planes]>,
++}
++
++impl PlaneSource for DriverLike {
++    fn planes(&self, position: usize) -> (&[f32], &[f32]) {
++        let claim = &self.claims[position];
++        (&claim.0[..], &claim.1[..])
++    }
++}
++
++#[inline(never)]
++fn v_route_reduce<L: Lane>(
++    source: &dyn PlaneSource,
++    inputs: usize,
++    routes: &[[f32; 4]],
++    left: &mut [f32],
++    right: &mut [f32],
++) -> bool {
++    let frames = left.len();
++    if inputs != routes.len() || inputs < 2 || right.len() != frames {
++        return false;
++    }
++    let vectored = frames - frames % L::WIDTH;
++    let positions: Vec<usize> = (0..inputs).collect();
++    for (index, (pair, table)) in positions.chunks(2).zip(routes.chunks(2)).enumerate() {
++        let initial_store = index == 0;
++        let reduced = match (pair, table) {
++            (&[a, b], &[ra, rb]) => {
++                v_route_pair::<L, 2>(source, [a, b], &[ra, rb], left, right, vectored, initial_store)
++            }
++            (&[a], &[ra]) => {
++                v_route_pair::<L, 1>(source, [a], &[ra], left, right, vectored, initial_store)
++            }
++            _ => false,
++        };
++        if !reduced {
++            return false;
++        }
++    }
++    true
++}
++
++#[inline(always)]
++fn v_route_pair<L: Lane, const G: usize>(
++    source: &dyn PlaneSource,
++    ids: [usize; G],
++    table: &[[f32; 4]; G],
++    left: &mut [f32],
++    right: &mut [f32],
++    vectored: usize,
++    initial_store: bool,
++) -> bool {
++    let planes: [(&[f32], &[f32]); G] = core::array::from_fn(|member| source.planes(ids[member]));
++    let lefts = planes.map(|(left, _)| left);
++    let rights = planes.map(|(_, right)| right);
++    let frames = left.len();
++    if vectored > frames
++        || right.len() != frames
++        || lefts
++            .iter()
++            .chain(rights.iter())
++            .any(|plane| plane.len() != frames)
++    {
++        return false;
++    }
++    let (left_vectors, _left_tail) = left.split_at_mut(vectored);
++    let (right_vectors, _right_tail) = right.split_at_mut(vectored);
++    v_route_run::<L, G>(
++        left_vectors,
++        right_vectors,
++        lefts.map(|plane| &plane[..vectored]),
++        rights.map(|plane| &plane[..vectored]),
++        table,
++        initial_store,
++    )
++}
++
++#[inline(always)]
++fn v_route_run<L: Lane, const G: usize>(
++    left: &mut [f32],
++    right: &mut [f32],
++    lefts: [&[f32]; G],
++    rights: [&[f32]; G],
++    table: &[[f32; 4]; G],
++    initial_store: bool,
++) -> bool {
++    let coefficients = table.map(|route| route.map(L::splat));
++    let mut left_chunks = lefts.map(|plane| plane.chunks_exact(L::WIDTH));
++    let mut right_chunks = rights.map(|plane| plane.chunks_exact(L::WIDTH));
++    let outputs = left
++        .chunks_exact_mut(L::WIDTH)
++        .zip(right.chunks_exact_mut(L::WIDTH));
++    if initial_store {
++        let (Some((first, rest)), Some((first_left, rest_left)), Some((first_right, rest_right))) = (
++            coefficients.split_first(),
++            left_chunks.split_first_mut(),
++            right_chunks.split_first_mut(),
++        ) else {
++            return false;
++        };
++        for (out_left, out_right) in outputs {
++            let Some(acc) = first_left
++                .next()
++                .zip(first_right.next())
++                .map(|(l, r)| v_mix_chunk(first, l, r))
++                .and_then(|acc| v_add_mixed_chunks(acc, rest, rest_left, rest_right))
++            else {
++                return false;
++            };
++            acc.0.store(out_left);
++            acc.1.store(out_right);
++        }
++    } else {
++        for (out_left, out_right) in outputs {
++            let running = (L::load(out_left), L::load(out_right));
++            let Some(acc) =
++                v_add_mixed_chunks(running, &coefficients, &mut left_chunks, &mut right_chunks)
++            else {
++                return false;
++            };
++            acc.0.store(out_left);
++            acc.1.store(out_right);
++        }
++    }
++    true
++}
++
++#[inline(always)]
++fn v_mix_chunk<L: Lane>([ll, lr, rl, rr]: &[L; 4], left: &[f32], right: &[f32]) -> (L, L) {
++    let (l, r) = (L::load(left), L::load(right));
++    (lr.fma(r, ll.mul(l)), rr.fma(r, rl.mul(l)))
++}
++
++#[inline(always)]
++fn v_add_mixed_chunks<L: Lane>(
++    mut acc: (L, L),
++    coefficients: &[[L; 4]],
++    lefts: &mut [core::slice::ChunksExact<'_, f32>],
++    rights: &mut [core::slice::ChunksExact<'_, f32>],
++) -> Option<(L, L)> {
++    for ((route, left), right) in coefficients.iter().zip(lefts).zip(rights) {
++        let (mixed_left, mixed_right) = v_mix_chunk(route, left.next()?, right.next()?);
++        acc = (acc.0.add(mixed_left), acc.1.add(mixed_right));
++    }
++    Some(acc)
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn verbatim() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let coefficients = coefficients();
++    for trial in 0..6 {
++        // Fresh allocations per trial, so alignment varies as the engine's does.
++        let pad: Vec<u8> = vec![0; 16 * trial + 1];
++        let driver = DriverLike { claims: sources() };
++        let mut output = vec![0.0_f32; 2 * QUANTUM];
++        let inputs: Vec<&Planes> = driver.claims.iter().collect();
++        let (rl, rr) = reference(&inputs, &coefficients);
++        {
++            let (left, right) = output.split_at_mut(QUANTUM);
++            assert!(v_route_reduce::<Simd8>(&driver, TRACKS, &coefficients, left, right));
++            assert!(left.iter().zip(&rl).all(|(a, b)| a.to_bits() == b.to_bits()));
++            assert!(right.iter().zip(&rr).all(|(a, b)| a.to_bits() == b.to_bits()));
++        }
++        let v = time_min(30, 200, || {
++            let (left, right) = output.split_at_mut(QUANTUM);
++            v_route_reduce::<Simd8>(black_box(&driver), TRACKS, &coefficients, left, right);
++        });
++        let mut l = [0.0; QUANTUM];
++        let mut r = [0.0; QUANTUM];
++        let p = time_min(30, 200, || pairs(black_box(&inputs), &coefficients, &mut l, &mut r));
++        println!(
++            "trial {trial}: claims mod 64 = {:>2}, output mod 64 = {:>2}: verbatim {:>6.0} cycles, replica pairs {:>6.0} cycles",
++            driver.claims.as_ptr() as usize % 64,
++            output.as_ptr() as usize % 64,
++            v * hz / 1e9,
++            p * hz / 1e9
++        );
++        black_box(pad);
++    }
++}
++
++/// Alignment probe: the input block and the output planes at controlled offsets modulo 64 bytes.
++#[test]
++#[ignore = "measurement harness"]
++fn alignment() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let coefficients = coefficients();
++    let reference_sources = sources();
++    let reference_inputs: Vec<&Planes> = reference_sources.iter().collect();
++    let (rl, rr) = reference(&reference_inputs, &coefficients);
++    let words_per_track = 2 * QUANTUM;
++    // Backing store: 64-byte aligned via over-allocation of `Simd8`-sized cells is not available
++    // without unsafe, so over-allocate f32 and pick the start index by address.
++    let mut backing = vec![0.0_f32; TRACKS * words_per_track + 64];
++    let mut out_backing = vec![0.0_f32; 2 * QUANTUM + 64];
++    for in_mis in [0usize, 4, 16, 32, 48] {
++        for out_mis in [0usize, 16, 32] {
++            let b = backing.as_ptr() as usize;
++            let start = ((64 - b % 64) % 64 + in_mis) / 4;
++            let region = &mut backing[start..start + TRACKS * words_per_track];
++            for (track, source) in reference_sources.iter().enumerate() {
++                region[track * words_per_track..track * words_per_track + QUANTUM]
++                    .copy_from_slice(&source.0);
++                region[track * words_per_track + QUANTUM..(track + 1) * words_per_track]
++                    .copy_from_slice(&source.1);
++            }
++            let region = &backing[start..start + TRACKS * words_per_track];
++            let inputs: Vec<&Planes> = (0..TRACKS)
++                .map(|track| {
++                    let slice = &region[track * words_per_track..(track + 1) * words_per_track];
++                    // SAFETY-free reinterpretation is not possible; copy through a view type.
++                    let planes: &[f32; 2 * QUANTUM] = slice.try_into().unwrap();
++                    // `Planes` is two `[f32; QUANTUM]` back to back: same layout as `[f32; 256]`.
++                    let planes: &Planes = unsafe_free_view(planes);
++                    planes
++                })
++                .collect();
++            let ob = out_backing.as_ptr() as usize;
++            let ostart = ((64 - ob % 64) % 64 + out_mis) / 4;
++            let (head, tail) = out_backing[ostart..].split_at_mut(QUANTUM);
++            let left: &mut [f32; QUANTUM] = head.try_into().unwrap();
++            let right: &mut [f32; QUANTUM] = (&mut tail[..QUANTUM]).try_into().unwrap();
++            pairs(&inputs, &coefficients, left, right);
++            assert!(same(left, &rl) && same(right, &rr));
++            let p = time_min(30, 200, || pairs(black_box(&inputs), &coefficients, left, right));
++            let t = time_min(30, 200, || {
++                tiled_broadcast::<4>(black_box(&inputs), &coefficients, left, right)
++            });
++            let r = time_min(30, 200, || {
++                black_box(sum_stream(black_box(region)));
++            });
++            println!(
++                "  input base mod 64 = {in_mis:>2}, output mod 64 = {out_mis:>2}: pairs {:>6.0}  tiled4-bc {:>6.0}  pure 64 KiB read {:>6.0} cycles",
++                p * hz / 1e9,
++                t * hz / 1e9,
++                r * hz / 1e9
++            );
++        }
++    }
++}
++
++/// Views a `[f32; 256]` as `Planes` without unsafe: both are 256 contiguous `f32`.
++fn unsafe_free_view(block: &[f32; 2 * QUANTUM]) -> &Planes {
++    // `Planes` = `([f32; 128], [f32; 128])`; tuple layout is not guaranteed, so use a leaked,
++    // identically-addressed reference only when the layouts match; fall back to panicking.
++    let planes: &Planes = bytemuck_like(block);
++    planes
++}
++
++fn bytemuck_like(block: &[f32; 2 * QUANTUM]) -> &Planes {
++    #[allow(unsafe_code)]
++    // SAFETY: throwaway harness; `([f32; 128], [f32; 128])` has size 1024 and align 4, and the
++    // assertion below checks the two halves land where `[f32; 256]` puts them.
++    let planes: &Planes = unsafe { &*(block as *const [f32; 2 * QUANTUM]).cast::<Planes>() };
++    assert_eq!(planes.0.as_ptr(), block.as_ptr());
++    assert_eq!(planes.1.as_ptr(), block[QUANTUM..].as_ptr());
++    planes
++}
++
++/// 4K-aliasing probe: the same kernels with the two output planes placed at a controlled offset,
++/// modulo 4 KiB, from the input block.
++#[test]
++#[ignore = "measurement harness"]
++fn aliasing() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let sources = sources();
++    let coefficients = coefficients();
++    let inputs: Vec<&Planes> = sources.iter().collect();
++    let (rl, rr) = reference(&inputs, &coefficients);
++    let base = sources.as_ptr() as usize;
++    println!("input block at {:#x} (mod 4096 = {})", base, base % 4096);
++    let mut arena = vec![0.0_f32; 4 * 4096];
++    for delta in [0usize, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 3584, 4000] {
++        let arena_base = arena.as_ptr() as usize;
++        let want = (base + delta) % 4096;
++        let offset_bytes = (want + 4096 - arena_base % 4096) % 4096;
++        let start = offset_bytes / 4;
++        let (head, tail) = arena[start..].split_at_mut(QUANTUM);
++        let left: &mut [f32; QUANTUM] = head.try_into().unwrap();
++        let right: &mut [f32; QUANTUM] = (&mut tail[..QUANTUM]).try_into().unwrap();
++        pairs(&inputs, &coefficients, left, right);
++        assert!(same(left, &rl) && same(right, &rr));
++        let p = time_min(30, 200, || pairs(black_box(&inputs), &coefficients, left, right));
++        let t = time_min(30, 200, || {
++            tiled_broadcast::<4>(black_box(&inputs), &coefficients, left, right)
++        });
++        println!(
++            "  output at input+{delta:>4} mod 4096: pairs {:>6.0} cycles  tiled4-broadcast {:>6.0} cycles",
++            p * hz / 1e9,
++            t * hz / 1e9
++        );
++    }
++}
