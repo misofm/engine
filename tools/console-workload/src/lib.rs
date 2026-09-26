@@ -2033,8 +2033,9 @@ mod tests {
         let claims = u64::from(Workload::SixtyFourTrackPlumbingRing.tracks());
         assert_eq!(
             ring_planes,
-            [claims * BLOCKS, 0, 0],
-            "pre-#927: every claim copied every block, none read in place"
+            [0, claims * BLOCKS, 0],
+            "#927: every claim is read in place by the fused Output every block, none copied \
+             (the pre-#927 pin was every claim copied, none in place)"
         );
         assert_eq!(
             (bound_forbidden, ring_forbidden),
