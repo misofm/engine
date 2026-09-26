@@ -91,6 +91,13 @@
 //! Both records carry a class-A statement asserted in-run: observing a console must not change
 //! what the console renders, so every arm of both measurements must produce byte-identical output.
 //!
+//! That statement cannot say whether the metered plan is the *same shape* as the unmetered one: the
+//! route fold and the scatter redirect render the bits of the path they replace, so a meters-on arm
+//! that stopped folding would pass it and charge the lost fold to metering. `console_meters`
+//! therefore states each arm's `bank_route_folds` and `bank_scatter_redirects` (issue #914), read
+//! once per arm after the warm-up, and the validator requires the two arms to agree and every
+//! route of the console to fold.
+//!
 //! # The automation-active row (`console_automation`)
 //!
 //! Every session row above renders with automation **cleared**: `console_model` empties the
@@ -736,6 +743,9 @@ const OBSERVATION_CONFIGS: [PlanConfig; 3] = [
 /// console plan built by `SessionRuntime::build` from one `console_model`, so two arms differ in
 /// exactly the one `PlanConfig` field that separates them and in nothing else.
 struct FacilityMeasurement {
+    /// Timed observations per arm. [`OBSERVATIONS`] in every run the runner launches; the record
+    /// states this rather than the constant, so a shortened run cannot pass for the frozen one.
+    observations: usize,
     ns_per_block: Vec<Vec<u64>>,
     digests: Vec<String>,
     audit: audit::AuditSnapshot,
@@ -744,10 +754,21 @@ struct FacilityMeasurement {
     observation_lanes: usize,
     observation_taps: usize,
     published_windows: Vec<u64>,
+    /// Per arm, in `configs` order, the plan's `bank_route_folds` (issue #914).
+    bank_route_folds: Vec<u64>,
+    /// Per arm, in `configs` order, the plan's `bank_scatter_redirects` (issue #914).
+    bank_scatter_redirects: Vec<u64>,
 }
 
 impl FacilityMeasurement {
     fn run(configs: &[PlanConfig]) -> Self {
+        Self::run_for(configs, OBSERVATIONS)
+    }
+
+    /// [`FacilityMeasurement::run`] over `observations` timed rounds. Only the unit test below
+    /// passes anything but [`OBSERVATIONS`], and the record it produces says so in its
+    /// `observations` field, which the validator pins to the frozen count.
+    fn run_for(configs: &[PlanConfig], observations: usize) -> Self {
         let mut arms: Vec<SessionRuntime> = configs
             .iter()
             .map(|config| SessionRuntime::build(FACILITY_WORKLOAD, *config))
@@ -764,15 +785,28 @@ impl FacilityMeasurement {
             arm.drain_meters();
         }
 
+        // Issue #914: the plan-shape counters, read once per arm, here -- after the warm-up and
+        // before the audit is armed, so outside every clock. Both are fixed at bind, and both
+        // optimisations they count render the same bits as the path they replace, so no digest and
+        // no timing can say whether either fired; only these can. They are recorded rather than
+        // asserted in-run: an arm that stopped folding is a finding the record must carry intact
+        // and the validator must refuse, not a reason to lose the record.
+        let bank_route_folds: Vec<u64> =
+            arms.iter().map(SessionRuntime::bank_route_folds).collect();
+        let bank_scatter_redirects: Vec<u64> = arms
+            .iter()
+            .map(SessionRuntime::bank_scatter_redirects)
+            .collect();
+
         let mut samples: Vec<Vec<u64>> = configs
             .iter()
-            .map(|_| Vec::with_capacity(OBSERVATIONS))
+            .map(|_| Vec::with_capacity(observations))
             .collect();
         let mut render_errors = 0_u64;
         let mut meter_frames = 0_u64;
         audit::warm_up();
         audit::reset();
-        for observation in 0..OBSERVATIONS as u64 {
+        for observation in 0..observations as u64 {
             for (index, arm) in arms.iter_mut().enumerate() {
                 let (elapsed_ns, result) = timing::timed(|| arm.render(observation));
                 if result.is_err() {
@@ -814,6 +848,7 @@ impl FacilityMeasurement {
             );
         }
         Self {
+            observations,
             ns_per_block: samples,
             digests,
             audit: snapshot,
@@ -822,6 +857,8 @@ impl FacilityMeasurement {
             observation_lanes,
             observation_taps,
             published_windows,
+            bank_route_folds,
+            bank_scatter_redirects,
         }
     }
 
@@ -848,6 +885,9 @@ impl FacilityMeasurement {
                 "\"paired_delta_median_ns\":{delta},",
                 "\"meters_off_output_sha256\":\"{od}\",\"meters_on_output_sha256\":\"{nd}\",",
                 "\"bit_identity\":\"meters_off == meters_on, asserted in-run\",",
+                "\"meters_off_bank_route_folds\":{off_folds},\"meters_on_bank_route_folds\":{on_folds},",
+                "\"meters_off_bank_scatter_redirects\":{off_redirects},",
+                "\"meters_on_bank_scatter_redirects\":{on_redirects},",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
                 "{metadata}",
                 "\"descriptive_only\":true,",
@@ -860,7 +900,7 @@ impl FacilityMeasurement {
             tracks = FACILITY_WORKLOAD.tracks(),
             round = round,
             backend = backend_name(backend),
-            obs = OBSERVATIONS,
+            obs = self.observations,
             streams = FACILITY_WORKLOAD.tracks(),
             window = WINDOW_BLOCKS,
             frames = self.meter_frames,
@@ -873,6 +913,10 @@ impl FacilityMeasurement {
             delta = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]),
             od = self.digests[0],
             nd = self.digests[1],
+            off_folds = self.bank_route_folds[0],
+            on_folds = self.bank_route_folds[1],
+            off_redirects = self.bank_scatter_redirects[0],
+            on_redirects = self.bank_scatter_redirects[1],
             errors = self.render_errors,
             forbidden = self.audit.total(),
             metadata = metadata.record_fields(),
@@ -930,7 +974,7 @@ impl FacilityMeasurement {
             tracks = FACILITY_WORKLOAD.tracks(),
             round = round,
             backend = backend_name(backend),
-            obs = OBSERVATIONS,
+            obs = self.observations,
             arm0 = ObservationArm::Absent.name(),
             arm1 = ObservationArm::Unarmed.name(),
             arm2 = ObservationArm::Armed.name(),
@@ -1717,5 +1761,69 @@ fn backend_name(backend: Backend) -> &'static str {
         Backend::Scalar => "Scalar",
         Backend::Simd4 => "Simd4",
         Backend::Simd8 => "Simd8",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Timed observations in the short run: two meter windows, so the meters-on arm publishes.
+    const SHORT_RUN_OBSERVATIONS: usize = 8;
+
+    /// Issue #914: the `console_meters` record states both arms' fold and redirect counters, and
+    /// on the sixty-four-track console the metered arm folds every route the unmetered arm folds.
+    ///
+    /// A short run of the real subject -- the same two `SessionRuntime` arms, the same warm-up, the
+    /// same counter read, eight timed observations instead of a thousand -- so the record it prints
+    /// is a descriptive `console_meters` record with the four counters populated
+    /// (`cargo test -p bench the_meters_record -- --nocapture`). Its timings are not to be read, and
+    /// its `observations` field says eight, which the validator refuses as a frozen measurement.
+    ///
+    /// Red mutations: emit `self.bank_scatter_redirects[1]` as `meters_on_bank_route_folds`, or
+    /// misspell one of the four keys in the format string -- the per-key check fails; read the
+    /// arms' `bank_scatter_redirects` into `bank_route_folds` -- the fold assertion fails; emit
+    /// `OBSERVATIONS` rather than `self.observations` -- the shortened-run check fails.
+    #[test]
+    fn the_meters_record_carries_each_arms_fold_and_redirect_counters() {
+        let meters = FacilityMeasurement::run_for(&METER_CONFIGS, SHORT_RUN_OBSERVATIONS);
+        let tracks = u64::from(FACILITY_WORKLOAD.tracks());
+        assert_eq!(
+            meters.bank_route_folds,
+            [tracks, tracks],
+            "every route of the console folds, unmetered and metered alike (the #885 contract)"
+        );
+        assert_eq!(
+            meters.bank_scatter_redirects[1], meters.bank_scatter_redirects[0],
+            "a post-matrix meter moves no scatter redirect (the #886 contract)"
+        );
+        let record = meters.meters_record(1, Backend::current(), Metadata::gather());
+        println!("{record}");
+        for (key, value) in [
+            ("meters_off_bank_route_folds", meters.bank_route_folds[0]),
+            ("meters_on_bank_route_folds", meters.bank_route_folds[1]),
+            (
+                "meters_off_bank_scatter_redirects",
+                meters.bank_scatter_redirects[0],
+            ),
+            (
+                "meters_on_bank_scatter_redirects",
+                meters.bank_scatter_redirects[1],
+            ),
+        ] {
+            assert_eq!(
+                record.matches(&format!("\"{key}\":")).count(),
+                1,
+                "{key} must appear exactly once"
+            );
+            assert!(
+                record.contains(&format!("\"{key}\":{value},")),
+                "{key} must carry {value}"
+            );
+        }
+        assert!(
+            record.contains(&format!("\"observations\":{SHORT_RUN_OBSERVATIONS},")),
+            "a shortened run must say it was shortened"
+        );
     }
 }

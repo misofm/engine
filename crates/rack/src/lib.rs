@@ -1405,6 +1405,84 @@ impl<'a> FoldCohort<'a> {
     }
 }
 
+/// The resident AoSoA block of a full bank whose **every** lane folds, offered whole to
+/// [`BankMembers::fold_resident`] before the scatter transposes a single word (issue #915).
+///
+/// The cohort is always lanes `0..lanes()` in ascending order ([`Self::lane_ids`]): the same lanes,
+/// in the same order, that the staged path's [`FoldCohort`] names for the same bank, which is the
+/// order a scatter-accumulate into a destination several lanes share associates in. Both planes
+/// hold exactly `frames() * lanes()` words, frame-major, and a lane's sample at frame `f` is at
+/// `f * lanes() + lane` -- the layout every [`BankStage`] saw.
+///
+/// It is a shared view: an implementor reads the resident words and writes only its own
+/// destination. The chain's staging block is not part of it, so accepting the offer is what keeps
+/// the staging block from being written at all.
+#[derive(Clone, Copy)]
+pub struct ResidentFoldCohort<'a> {
+    left: &'a [f32],
+    right: &'a [f32],
+    width: BankWidth,
+    frames: usize,
+}
+
+impl<'a> ResidentFoldCohort<'a> {
+    /// Checks the whole shape once, the way [`FoldCohort::new`] does: at least one frame, and each
+    /// plane exactly `frames * width.lanes()` words.
+    ///
+    /// # Errors
+    ///
+    /// [`RackError::Overflow`] if `frames * width.lanes()` does not fit a `usize`;
+    /// [`RackError::Shape`] for a zero frame count or a plane of any other length.
+    pub fn new(
+        left: &'a [f32],
+        right: &'a [f32],
+        width: BankWidth,
+        frames: usize,
+    ) -> Result<Self, RackError> {
+        let words = frames
+            .checked_mul(width.lanes() as usize)
+            .ok_or(RackError::Overflow)?;
+        if frames == 0 || left.len() != words || right.len() != words {
+            return Err(RackError::Shape);
+        }
+        Ok(Self {
+            left,
+            right,
+            width,
+            frames,
+        })
+    }
+
+    /// The resident left plane, `frames() * lanes()` words.
+    #[must_use]
+    pub fn left(&self) -> &'a [f32] {
+        self.left
+    }
+    /// The resident right plane, `frames() * lanes()` words.
+    #[must_use]
+    pub fn right(&self) -> &'a [f32] {
+        self.right
+    }
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+    /// `W`: the bank's lane count, which is also the cohort's size.
+    #[must_use]
+    pub const fn lanes(&self) -> usize {
+        self.width.lanes() as usize
+    }
+    /// The cohort in accumulation order: every lane of the bank, ascending.
+    #[must_use]
+    pub const fn lane_ids(&self) -> core::ops::Range<usize> {
+        0..self.lanes()
+    }
+    #[must_use]
+    pub const fn frames(&self) -> usize {
+        self.frames
+    }
+}
+
 /// Per-lane planar views a chain gathers from and scatters to. `lane < lanes` always.
 pub trait BankMembers {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
@@ -1509,6 +1587,22 @@ pub trait BankMembers {
                 &mut cohort.right[start..start + cohort.frames],
             );
         }
+    }
+
+    /// Fold a whole full bank **straight from its resident block**, or decline (issue #915).
+    ///
+    /// Offered by the tiled scatter only when every lane of the bank folds, and before it writes
+    /// anything: before the transpose into the staging block, before [`Self::fold_cohort`], before
+    /// any plane. Returning `true` asserts the implementor has finished every lane's fold -- the
+    /// same work the staged path would hand [`Self::fold_cohort`] over the same words, in the same
+    /// lane order -- and the chain then writes neither its staging block nor any lane's plane.
+    /// Returning `false` asserts the implementor wrote **nothing**, and the chain takes the staged
+    /// path exactly as if the offer had never been made.
+    ///
+    /// The default declines, which keeps every provider without a fused form on the staged path.
+    fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+        let _ = cohort;
+        false
     }
 }
 
@@ -2005,6 +2099,8 @@ impl BankChain {
     /// An armed lane's planar tile is still produced -- the transpose is the one the scatter was
     /// going to do anyway -- but it lands in this chain's staging block and is handed over rather
     /// than copied into the lane's own buffer, which is left holding the previous block's words.
+    /// (A full bank whose every lane is armed first offers its resident block to
+    /// [`BankMembers::fold_resident`]; when that is accepted the tile never lands anywhere.)
     /// Passing an all-`false` mask disarms the chain back to the byte-for-byte scatter it had
     /// before, and to its zero-cost path.
     ///
@@ -2595,7 +2691,8 @@ impl BankChain {
     /// A folded lane (see [`BankChain::arm_fold`]) takes the same transpose and then goes to
     /// [`BankMembers::fold_plane`] instead of to its own plane. On the per-lane scalar path that
     /// means transposing into this chain's staging block first, which is the one thing arming
-    /// costs a partial bank; the tiled path already lands there.
+    /// costs a partial bank; the tiled path already lands there -- unless every lane folds and the
+    /// members accept the resident block instead ([`BankMembers::fold_resident`], issue #915).
     fn scatter<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
         if self.full_bank {
             match self.scratch.width {
@@ -2714,6 +2811,25 @@ impl BankChain {
                 }
                 return;
             }
+        }
+        // Issue #915: a bank whose every lane folds is offered its resident block whole, before
+        // anything is written. The test is every lane of `0..W`, not `all_active_folded` below:
+        // `full_bank` makes the two agree today, but only this form guarantees the cohort is
+        // exactly lanes `0..W` in order -- the lanes, in the order, the staged `FoldCohort` below
+        // would name -- and that no lane is left needing a `plane_mut` copy. An accepted offer
+        // finishes the fold; the staging block and every plane stay unwritten. A declined one
+        // wrote nothing, and the staged path below runs as it always has.
+        if self.fold.len() == W
+            && self.fold.iter().all(|folded| *folded)
+            && let Ok(cohort) = ResidentFoldCohort::new(
+                &self.scratch.left[..frames_used * W],
+                &self.scratch.right[..frames_used * W],
+                self.scratch.width,
+                frames_used,
+            )
+            && members.fold_resident(cohort)
+        {
+            return;
         }
         let tiled = (frames_used / W) * W;
         tile_scatter(
@@ -5050,6 +5166,259 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One recorded [`BankMembers::fold_resident`] offer: `(lanes, frames, lane ids, left bits,
+    /// right bits)`.
+    type ResidentOffer = (usize, usize, Vec<usize>, Vec<u32>, Vec<u32>);
+
+    /// [`PlanesWithFold`] plus the resident offer (issue #915): records every offer's shape and
+    /// words, then accepts or declines it. Accepting does nothing else, so anything the chain
+    /// writes after an accepted offer is the chain's own doing.
+    struct ResidentProvider {
+        inner: PlanesWithFold,
+        accept: bool,
+        /// Every offer, in call order.
+        offers: Vec<ResidentOffer>,
+    }
+    impl BankMembers for ResidentProvider {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.inner.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.inner.plane_mut(lane)
+        }
+        fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+            self.inner.fold_plane(lane, left, right);
+        }
+        fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+            self.inner.fold_cohort(cohort);
+        }
+        fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+            self.offers.push((
+                cohort.lanes(),
+                cohort.frames(),
+                cohort.lane_ids().collect(),
+                cohort.left().iter().map(|word| word.to_bits()).collect(),
+                cohort.right().iter().map(|word| word.to_bits()).collect(),
+            ));
+            self.accept
+        }
+    }
+
+    /// Issue #915, the rack half of gate 1: a full bank whose every lane folds offers its resident
+    /// block **before** it writes anything, and an accepted offer leaves the staging block and
+    /// every plane unwritten.
+    ///
+    /// Claims, each at both widths and every tiled frame shape (ragged tails and the no-whole-tile
+    /// shape included), with hostile words through a stage that makes lanes distinguishable:
+    ///
+    /// 1. **The offer is the scatter's own words.** The unarmed run's planar output is the oracle:
+    ///    the offered block, read as lane `k` frame `f` at `f * W + k`, must be it bit for bit, for
+    ///    lanes `0..W` in order and exactly `frames` frames.
+    /// 2. **Accepted, nothing else is written.** The staging block keeps a NaN pattern written
+    ///    before the run -- the observable proof that the transpose into it never ran -- no plane is
+    ///    written, and neither `fold_plane` nor `fold_cohort` is called.
+    /// 3. **Declined, the staged path runs exactly as before.** After one offer the chain renders
+    ///    what a provider that never overrides `fold_resident` renders, through one `fold_cohort`
+    ///    over lanes `0..W`, and the staging block now holds the scatter's words.
+    /// 4. **Offered only to a fully folded full bank.** A mixed mask, an unarmed chain and a partial
+    ///    bank are never offered the block.
+    #[test]
+    fn a_fully_folded_full_bank_offers_its_resident_block_before_writing_staging() {
+        const STAGING_LEFT: u32 = 0x7fc0_3915;
+        const STAGING_RIGHT: u32 = 0x7fc0_3916;
+        let mut state = 0x5eed_0915_abcd_0001_u64;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for frames in frame_shapes(lanes) {
+                let source = hostile_planes(lanes, frames, &mut state);
+                let provider = |accept: bool| ResidentProvider {
+                    inner: PlanesWithFold {
+                        planes: source.clone(),
+                        gains: (0..lanes).map(|lane| 0.5 + lane as f32).collect(),
+                        bus_left: vec![0.0; frames as usize],
+                        bus_right: vec![0.0; frames as usize],
+                        taken: Vec::new(),
+                        trace: Vec::new(),
+                        cohorts: Vec::new(),
+                    },
+                    accept,
+                    offers: Vec::new(),
+                };
+                let chain = |active: &[bool], fold: Option<&[bool]>| {
+                    let mut chain = BankChain::new(
+                        AoSoaScratch::new(width, 128).expect("scratch"),
+                        active.to_vec().into_boxed_slice(),
+                        vec![slot(active.to_vec(), Box::new(ScaleByLane))],
+                    )
+                    .expect("chain");
+                    if let Some(fold) = fold {
+                        chain
+                            .arm_fold(fold.to_vec().into_boxed_slice())
+                            .expect("arm");
+                    }
+                    chain.staging_left.fill(f32::from_bits(STAGING_LEFT));
+                    chain.staging_right.fill(f32::from_bits(STAGING_RIGHT));
+                    chain
+                };
+                let all = vec![true; lanes];
+                let what = format!("{lanes} lanes, {frames} frames");
+
+                // The oracle: the words the unarmed scatter hands every lane.
+                let mut oracle = source.clone();
+                chain(&all, None)
+                    .run(&mut oracle, frames, 0)
+                    .expect("unarmed run");
+
+                // (1) + (2): accepted.
+                let mut folded = chain(&all, Some(&all));
+                let mut accepted = provider(true);
+                folded.run(&mut accepted, frames, 0).expect("accepted run");
+                assert_eq!(accepted.offers.len(), 1, "{what}: one offer per block");
+                let (offered_lanes, offered_frames, ids, left, right) = &accepted.offers[0];
+                assert_eq!(*offered_lanes, lanes, "{what}");
+                assert_eq!(*offered_frames, frames as usize, "{what}");
+                assert_eq!(*ids, (0..lanes).collect::<Vec<_>>(), "{what}: lane order");
+                assert_eq!(
+                    left.len(),
+                    frames as usize * lanes,
+                    "{what}: exactly the used words"
+                );
+                assert_eq!(
+                    right.len(),
+                    frames as usize * lanes,
+                    "{what}: exactly the used words"
+                );
+                for lane in 0..lanes {
+                    for frame in 0..frames as usize {
+                        assert_eq!(
+                            left[frame * lanes + lane],
+                            oracle.left[lane][frame].to_bits(),
+                            "{what}: offered left lane={lane} frame={frame}"
+                        );
+                        assert_eq!(
+                            right[frame * lanes + lane],
+                            oracle.right[lane][frame].to_bits(),
+                            "{what}: offered right lane={lane} frame={frame}"
+                        );
+                    }
+                }
+                assert!(
+                    folded
+                        .staging_left
+                        .iter()
+                        .all(|word| word.to_bits() == STAGING_LEFT),
+                    "{what}: an accepted offer must leave the left staging block unwritten"
+                );
+                assert!(
+                    folded
+                        .staging_right
+                        .iter()
+                        .all(|word| word.to_bits() == STAGING_RIGHT),
+                    "{what}: an accepted offer must leave the right staging block unwritten"
+                );
+                assert!(
+                    accepted.inner.trace.is_empty(),
+                    "{what}: no plane, no fold_plane"
+                );
+                assert!(accepted.inner.cohorts.is_empty(), "{what}: no fold_cohort");
+                assert_planes_bit_equal(&accepted.inner.planes, &source, &what);
+                assert_eq!(folded.transposes(), 1, "{what}: still one round trip");
+
+                // (3): declined, against a provider that never overrides `fold_resident`.
+                let mut declining_chain = chain(&all, Some(&all));
+                let mut declined = provider(false);
+                declining_chain
+                    .run(&mut declined, frames, 0)
+                    .expect("declined run");
+                let mut default_chain = chain(&all, Some(&all));
+                let mut default = provider(false).inner;
+                default_chain
+                    .run(&mut default, frames, 0)
+                    .expect("default run");
+                assert_eq!(declined.offers.len(), 1, "{what}: offered, then declined");
+                assert_eq!(declined.inner.cohorts, vec![(0..lanes).collect::<Vec<_>>()]);
+                assert_eq!(declined.inner.trace, default.trace, "{what}");
+                assert_eq!(declined.inner.taken, default.taken, "{what}");
+                let bits = |words: &[f32]| words.iter().map(|w| w.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&declined.inner.bus_left), bits(&default.bus_left));
+                assert_eq!(bits(&declined.inner.bus_right), bits(&default.bus_right));
+                assert_planes_bit_equal(&declined.inner.planes, &default.planes, &what);
+                // The staged path transposed into staging and `fold_plane` then scaled each lane's
+                // tile there in place, so staging now holds the scatter's words times the gain.
+                let stride = 128;
+                for lane in 0..lanes {
+                    let gain = 0.5 + lane as f32;
+                    for frame in 0..frames as usize {
+                        assert_eq!(
+                            declining_chain.staging_left[lane * stride + frame].to_bits(),
+                            (oracle.left[lane][frame] * gain).to_bits(),
+                            "{what}: a declined offer takes the staged transpose"
+                        );
+                        assert_eq!(
+                            declining_chain.staging_right[lane * stride + frame].to_bits(),
+                            (oracle.right[lane][frame] * gain).to_bits(),
+                            "{what}: a declined offer takes the staged transpose"
+                        );
+                    }
+                }
+
+                // (4): never offered to anything but a fully folded full bank.
+                let mut mixed_mask = all.clone();
+                mixed_mask[1] = false;
+                let mut partial = all.clone();
+                partial[lanes - 1] = false;
+                for (active, fold, case) in [
+                    (&all, Some(&mixed_mask), "mixed mask"),
+                    (&all, None, "unarmed"),
+                    (&partial, Some(&partial), "partial bank"),
+                ] {
+                    let mut unoffered = provider(true);
+                    chain(active, fold.map(Vec::as_slice))
+                        .run(&mut unoffered, frames, 0)
+                        .expect("unoffered run");
+                    assert!(unoffered.offers.is_empty(), "{what}: {case} was offered");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_fold_cohort_constructor_rejects_every_invalid_shape() {
+        let left = [1.0_f32; 16];
+        let right = [-1.0_f32; 16];
+        for (width, frames) in [(BankWidth::Four, 4), (BankWidth::Eight, 2)] {
+            let cohort =
+                ResidentFoldCohort::new(&left, &right, width, frames).expect("exact shape");
+            assert_eq!(cohort.width(), width);
+            assert_eq!(cohort.lanes(), width.lanes() as usize);
+            assert_eq!(cohort.frames(), frames);
+            assert_eq!(cohort.lane_ids(), 0..width.lanes() as usize);
+            assert_eq!(cohort.left().len(), 16);
+            assert_eq!(cohort.right().len(), 16);
+            // A plane one word short or one word long, on either side.
+            assert!(matches!(
+                ResidentFoldCohort::new(&left[..15], &right, width, frames),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                ResidentFoldCohort::new(&left, &right[..15], width, frames),
+                Err(RackError::Shape)
+            ));
+            assert!(matches!(
+                ResidentFoldCohort::new(&left, &right, width, frames - 1),
+                Err(RackError::Shape)
+            ));
+        }
+        assert!(matches!(
+            ResidentFoldCohort::new(&[], &[], BankWidth::Four, 0),
+            Err(RackError::Shape)
+        ));
+        assert!(matches!(
+            ResidentFoldCohort::new(&left, &right, BankWidth::Eight, usize::MAX),
+            Err(RackError::Overflow)
+        ));
     }
 
     #[test]
