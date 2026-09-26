@@ -53,11 +53,12 @@ use effect_contract::{
     ChannelSymmetryWitness, EffectControlRecord, ParameterChannel, PreparedEffectTarget,
 };
 use engine::realtime::{
-    PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
+    PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
 };
 use graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
-    TrackStage,
+    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphPreparedSourceSet,
+    GraphPreparedSourceSetDriver, GraphRuntimeBindings, GraphRuntimeProcessor,
+    GraphSourceInputClaim, GraphSourceSetResourceReport, TrackStage,
 };
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
 use lane::Backend;
@@ -235,11 +236,35 @@ pub enum Workload {
     /// `dispatch_only`, which is 22 lane-ops of spec-required arithmetic wearing the name of a
     /// floor.
     ///
-    /// It is also the one row in the set that binds **no bank chain at all**, which is why the
-    /// chain-shape gates name it explicitly instead of iterating over it: with no builtin banks
+    /// It is also the one row in [`WORKLOADS`] that binds **no bank chain at all**, which is why
+    /// the chain-shape gates name it explicitly instead of iterating over it: with no builtin banks
     /// there is nothing for a route to fold into, and a fold count of zero here is the correct
-    /// answer rather than a regression.
+    /// answer rather than a regression. Its driver-fed twin, [`Self::SixtyFourTrackPlumbingRing`],
+    /// binds none either.
     SixtyFourTrackPlumbingOnly,
+    /// The overhead floor row fed the way a host feeds a session: through a prepared source set
+    /// instead of a bound processor (issue #928).
+    ///
+    /// The same builtins-less session as [`Self::SixtyFourTrackPlumbingOnly`], compiled through
+    /// the same path, with the same frozen tone. The difference is how its sixty-four
+    /// `TrackStage::Input` nodes are fed. Every other row binds each of them to
+    /// `FrozenGraphSource`, a host processor the executor dispatches once per track per block to
+    /// copy a frozen block into the arena. A host that plays stems binds a prepared source set
+    /// instead: the executor asks its driver for every claim's block before the unit loop
+    /// (`copy_track_input`), or reads a claim's played planes in place where the graph binds it so
+    /// (`played_planes`, issue #918). This row is fed through such a driver, `FrozenSourceDriver`,
+    /// so it is the row a change to that feed can move -- reading plain-strip sources in place
+    /// (issue #927) -- and the bound-feed row cannot.
+    ///
+    /// It sits beside the plumbing row rather than refeeding it: the plumbing row is the floor of
+    /// the whole table (`tools/bench/src/floor.rs`) and the paired benchmark arms compare it across
+    /// commits, so changing its feed would move a sealed number for a reason that is not an engine
+    /// change. Both rows copy the same frozen words, honouring the same channel mapping, so they
+    /// render the same bits; a digest difference between them is a harness defect, never a
+    /// finding.
+    ///
+    /// Not in [`WORKLOADS`]: see [`DRIVER_FED_WORKLOADS`].
+    SixtyFourTrackPlumbingRing,
     /// Decomposition: every rack emptied and every input builtin asked for its identity, with the
     /// fixture's **real** fader and pan values left as written.
     ///
@@ -314,6 +339,41 @@ impl Workload {
     pub const fn collapse_forced_off(self) -> bool {
         matches!(self, Self::SixtyFourTrackConsoleMonoDual)
     }
+
+    /// How this row's track inputs reach the graph, named in the record as `source_feed`.
+    ///
+    /// [`SourceFeed::PlayedPlanes`] for exactly one row, the driver-fed plumbing row; every other
+    /// row binds a `FrozenGraphSource` processor per track input.
+    #[must_use]
+    pub const fn source_feed(self) -> SourceFeed {
+        match self {
+            Self::SixtyFourTrackPlumbingRing => SourceFeed::PlayedPlanes,
+            _ => SourceFeed::Bound,
+        }
+    }
+}
+
+/// How a row's track inputs reach the graph (issue #928).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceFeed {
+    /// Every `TrackStage::Input` is bound to a `FrozenGraphSource` processor: one dispatched unit
+    /// per track per block, which copies the track's frozen block into its arena buffer.
+    Bound,
+    /// The inputs are claimed by a prepared source set whose driver copies each claim's block on
+    /// request and lends its played planes in place: the production feed, over the same frozen
+    /// blocks.
+    PlayedPlanes,
+}
+
+impl SourceFeed {
+    /// The record-side name of this feed.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::PlayedPlanes => "played_planes",
+        }
+    }
 }
 
 /// The standing session workloads, in the order their records are emitted.
@@ -339,6 +399,20 @@ pub const WORKLOADS: [Workload; 16] = [
     Workload::SixtyFourTrackConsoleMonoDual,
     Workload::SixtyFourTrackConsoleHalfMono,
 ];
+
+/// The session rows the native bench emits after [`WORKLOADS`]: the rows whose track inputs are
+/// claimed by a prepared source set rather than bound to a processor (issue #928).
+///
+/// Kept out of [`WORKLOADS`] on purpose. That array is the wasm console arm's address space --
+/// the guest prepares a row by its index (`miso_console_prepare(index)`), the wasm host iterates
+/// it, and the wasm arm's validator pins its sixteen kinds -- so a row appended there would change
+/// what that arm measures and break its next capture. This row exists to measure the native
+/// source feed, and carrying it into the wasm arm is that arm's own change.
+///
+/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What they state of every
+/// row -- no bank collapse, no transition, and for a bankless row no bank, no transpose and no
+/// fold -- is asserted of this row beside its bound twin by this crate's own test of the pair.
+pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackPlumbingRing];
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -426,6 +500,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
             Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
             Self::SixtyFourTrackPlumbingOnly => "sixty_four_track_plumbing_only",
+            Self::SixtyFourTrackPlumbingRing => "sixty_four_track_plumbing_ring",
             Self::SixtyFourTrackGainPanOnly => "sixty_four_track_gain_pan_only",
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
@@ -482,7 +557,11 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
-            Self::SixtyFourTrackPlumbingOnly => Strip::PlumbingOnly,
+            // The driver-fed twin takes the same strip edit and the same builtins-less compile;
+            // only how `build_full` binds its track inputs differs (`Workload::source_feed`).
+            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => {
+                Strip::PlumbingOnly
+            }
             Self::SixtyFourTrackGainPanOnly => Strip::GainPan,
             Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
             _ => Strip::AsWritten,
@@ -500,8 +579,9 @@ impl Workload {
             Self::SixtyFourTrackDispatchOnly => "identity",
             Self::SixtyFourTrackConsoleLegacy | Self::SixtyFourTrackEqCompSimd1 => "eq+compressor",
             // Nothing of the strip is prepared on this row -- not even the input stage -- so the
-            // vocabulary needs a word that is not "builtins" and not an effect list.
-            Self::SixtyFourTrackPlumbingOnly => "plumbing",
+            // vocabulary needs a word that is not "builtins" and not an effect list. The feed is
+            // not strip content; the record names it separately, as `source_feed`.
+            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => "plumbing",
             Self::SixtyFourTrackGainPanOnly => "gain+pan",
             _ => "eq+compressor+limiter",
         }
@@ -530,7 +610,7 @@ impl Workload {
             // with no rack effect *and* no builtin binding. It is a distinct layout rather than an
             // empty `builtins` one, because the difference between it and the `builtins` rows is
             // exactly what the row measures.
-            Self::SixtyFourTrackPlumbingOnly => "plumbing",
+            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => "plumbing",
             // The retired layout: two one-slot chains, one per rack.
             Self::SixtyFourTrackConsoleLegacy => "simd1:eq,dynamic:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
@@ -886,20 +966,78 @@ impl SessionRuntime {
             .unwrap_or_else(|_| panic!("{}: builtins-less console graph", workload.kind()));
             let graph = compiled.graph;
             let envelope = graph.envelope;
-            let nodes = graph
-                .required_bindings
-                .iter()
-                .map(|node| source_binding(node, silent, &source, &mappings))
-                .collect();
-            let plan = graph
-                .bind(GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers: Vec::new(),
-                })
-                .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
+            let plan = match workload.source_feed() {
+                SourceFeed::Bound => {
+                    let nodes = graph
+                        .required_bindings
+                        .iter()
+                        .map(|node| source_binding(node, silent, &source, &mappings))
+                        .collect();
+                    graph
+                        .bind(GraphRuntimeBindings {
+                            envelope,
+                            nodes,
+                            observers: Vec::new(),
+                        })
+                        .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()))
+                }
+                // Issue #928: the same plan, its track inputs claimed by a prepared source set
+                // instead of bound to processors -- the shape `host-core` binds a session in
+                // (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`). That entry
+                // belongs to the builtins artifact, and this path prepares no builtins, so the
+                // plan's own `bind_with_source_set` is called: it is what
+                // `into_bound_with_source_set` delegates to once the artifact has appended its
+                // private builtin bindings, and here there are none to append. Every node that is
+                // not a track input is acknowledged by the same `source_binding` the bound feed
+                // uses, so the feed is the only thing the two rows bind differently.
+                SourceFeed::PlayedPlanes => {
+                    let mut claims: Vec<GraphSourceInputClaim> = graph
+                        .required_bindings
+                        .iter()
+                        .filter(|node| is_track_input(node))
+                        .map(|node| GraphSourceInputClaim { node: node.clone() })
+                        .collect();
+                    // The set requires its claims strictly ascending, and the driver serves claim
+                    // `i` as the `i`-th of them.
+                    claims.sort_unstable();
+                    let driver = FrozenSourceDriver::new(&claims, silent, &source, &mappings);
+                    let resources = driver.resource_report();
+                    let source_set =
+                        GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
+                    let nodes = graph
+                        .required_bindings
+                        .iter()
+                        .filter(|node| !is_track_input(node))
+                        .map(|node| source_binding(node, silent, &source, &mappings))
+                        .collect();
+                    graph
+                        .bind_with_source_set(
+                            GraphRuntimeBindings {
+                                envelope,
+                                nodes,
+                                observers: Vec::new(),
+                            },
+                            source_set,
+                        )
+                        .unwrap_or_else(|failure| {
+                            panic!(
+                                "{}: driver-fed console graph bindings: {}",
+                                workload.kind(),
+                                failure.code
+                            )
+                        })
+                }
+            };
             (plan, Vec::new())
         } else {
+            // Only the builtins-less path binds a source set. A driver-fed row that reached this
+            // branch would silently render the bound feed under the other feed's name.
+            assert_eq!(
+                workload.source_feed(),
+                SourceFeed::Bound,
+                "{}: a driver-fed row must take the builtins-less path",
+                workload.kind()
+            );
             let builtins =
                 builtins_compiler::prepare_session_builtins(&session, &meters, builtin_caps())
                     .expect("prepared console builtins");
@@ -1595,6 +1733,43 @@ fn channel_mappings(model: &SessionModel) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// One track input's frozen block, from its track id: the words both feeds serve for that track.
+///
+/// The one place a track id becomes samples. The bound feed wraps the result in a processor
+/// ([`source_binding`]) and the driver-fed row serves it from a source set
+/// ([`FrozenSourceDriver`]), so the two feeds cannot disagree about which block, or which channel
+/// mapping, a track reads.
+fn frozen_track_source(
+    track_id: &str,
+    silent: bool,
+    source: &SourceSignal,
+    mappings: &[(usize, usize)],
+) -> FrozenGraphSource {
+    let track = track_id
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .unwrap_or(0);
+    let block = source
+        .block(track, silent)
+        .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
+    let mapping = mappings
+        .get(track)
+        .copied()
+        .unwrap_or_else(|| panic!("the model must declare a source mapping for track {track}"));
+    FrozenGraphSource::from_block(&block, mapping)
+}
+
+/// Whether `node` is a track's input stage: the nodes a source set may claim.
+fn is_track_input(node: &GraphNodeId) -> bool {
+    matches!(
+        node,
+        GraphNodeId::TrackStage {
+            stage: TrackStage::Input,
+            ..
+        }
+    )
+}
+
 fn source_binding(
     node: &GraphNodeId,
     silent: bool,
@@ -1606,23 +1781,403 @@ fn source_binding(
         stage: TrackStage::Input,
     } = node
     {
-        let id = track_id.as_str();
-        let track = id
-            .trim_start_matches(|c: char| !c.is_ascii_digit())
-            .parse()
-            .unwrap_or(0);
-        let block = source
-            .block(track, silent)
-            .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
-        let mapping = mappings
-            .get(track)
-            .copied()
-            .unwrap_or_else(|| panic!("the model must declare a source mapping for track {track}"));
         GraphNodeBinding::new(
             node.clone(),
-            Box::new(FrozenGraphSource::from_block(&block, mapping)),
+            Box::new(frozen_track_source(
+                track_id.as_str(),
+                silent,
+                source,
+                mappings,
+            )),
         )
     } else {
         GraphNodeBinding::identity(node.clone())
+    }
+}
+
+/// A prepared source set's driver over the benchmark's frozen blocks (issue #928).
+///
+/// The production feed on the benchmark's input. A host binds a session's track inputs to a
+/// source set whose driver plays a block per quantum; this one plays the same frozen block every
+/// quantum, as the bound feed's processor copies the same block every quantum. It holds one
+/// `FrozenGraphSource` per claim, in claim order, each built by [`frozen_track_source`] -- the
+/// function the bound feed's processors are built by -- so claim `i` carries exactly the words the
+/// bound feed would copy for that track, channel mapping included.
+///
+/// It offers the graph both ways to read a claim: `copy_track_input` copies the claim's block into
+/// the arena buffer the executor hands it, and `played_planes` lends the same words in place.
+/// Which one a claim takes is decided by the graph at bind (the lent-claims path of issue #918),
+/// not by this driver.
+struct FrozenSourceDriver {
+    /// Claim `i`'s `(left, right)` block, one allocation for the whole set.
+    claims: Box<[FrozenGraphSource]>,
+}
+
+impl FrozenSourceDriver {
+    /// One frozen block per claim, in the order `claims` lists them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a claim names anything but a track input: a source set may claim nothing else,
+    /// and the graph would refuse the set at bind anyway.
+    fn new(
+        claims: &[GraphSourceInputClaim],
+        silent: bool,
+        source: &SourceSignal,
+        mappings: &[(usize, usize)],
+    ) -> Self {
+        let claims = claims
+            .iter()
+            .map(|claim| match &claim.node {
+                GraphNodeId::TrackStage {
+                    track_id,
+                    stage: TrackStage::Input,
+                } => frozen_track_source(track_id.as_str(), silent, source, mappings),
+                node => panic!("a source claim must name a track input, not {node:?}"),
+            })
+            .collect();
+        Self { claims }
+    }
+
+    /// The set's engine-owned bytes: the one boxed slice of frozen planes.
+    ///
+    /// Charged as overhead (source-plane storage) and not as PCM already charged by the session
+    /// declaration, because no session declaration charges the benchmark's frozen tone.
+    fn resource_report(&self) -> GraphSourceSetResourceReport {
+        let bytes = core::mem::size_of_val(&*self.claims) as u64;
+        GraphSourceSetResourceReport {
+            pcm_payload_already_charged_bytes: 0,
+            overhead_bytes: bytes,
+            total_engine_owned_bytes: bytes,
+            largest_allocation_bytes: bytes,
+        }
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+// The five methods below run on the render thread: no allocation, lock, syscall or panic path.
+impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
+    fn claim_count(&self) -> usize {
+        self.claims.len()
+    }
+
+    /// Nothing to play: the block is frozen. A frame count other than the quantum the planes
+    /// were built at is refused rather than served short.
+    fn begin_block(&mut self, _first_sample: u64, frames: u32) -> Result<(), RenderError> {
+        if usize::try_from(frames) == Ok(QUANTUM) {
+            Ok(())
+        } else {
+            Err(RenderError::InvalidEnvelope)
+        }
+    }
+
+    /// Copies claim `claim_index`'s frozen block into the destinations the executor hands it.
+    fn copy_track_input(
+        &mut self,
+        claim_index: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), RenderError> {
+        let Some(claim) = self.claims.get(claim_index) else {
+            return Err(RenderError::InvalidEnvelope);
+        };
+        if left.len() != QUANTUM || right.len() != QUANTUM {
+            return Err(RenderError::InvalidEnvelope);
+        }
+        left.copy_from_slice(&claim.left);
+        right.copy_from_slice(&claim.right);
+        Ok(())
+    }
+
+    fn provides_played_planes(&self) -> bool {
+        true
+    }
+
+    /// Lends claim `claim_index`'s frozen block in place: the words `copy_track_input` copies.
+    fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
+        self.claims
+            .get(claim_index)
+            .map(|claim| (&claim.left[..], &claim.right[..]))
+    }
+}
+// REALTIME_POLICY_END
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::realtime::audit;
+
+    /// The row facts a record states, less the feed: what the two plumbing rows must share.
+    fn stated_facts(workload: Workload) -> (u32, &'static str, bool, &'static str, &'static str) {
+        (
+            workload.tracks(),
+            workload.fixture_id(),
+            workload.synthetic(),
+            workload.strip_content(),
+            workload.strip_layout(),
+        )
+    }
+
+    /// Issue #928: the driver-fed row is the plumbing row in every stated fact but its feed, and
+    /// it is the only driver-fed row.
+    #[test]
+    fn the_driver_fed_row_states_the_plumbing_rows_facts_and_its_own_feed() {
+        let bound = Workload::SixtyFourTrackPlumbingOnly;
+        let ring = Workload::SixtyFourTrackPlumbingRing;
+        assert_eq!(ring.kind(), "sixty_four_track_plumbing_ring");
+        assert_eq!(stated_facts(ring), stated_facts(bound));
+        assert_eq!(ring.input_signal(), bound.input_signal());
+        assert_eq!(ring.warmup_blocks(), bound.warmup_blocks());
+        assert!(ring.strip() == Strip::PlumbingOnly && bound.strip() == Strip::PlumbingOnly);
+        assert!(!ring.collapse_forced_off());
+        assert_eq!(ring.source_feed().name(), "played_planes");
+        assert_eq!(bound.source_feed().name(), "bound");
+        for workload in WORKLOADS {
+            assert_eq!(
+                workload.source_feed(),
+                SourceFeed::Bound,
+                "{}",
+                workload.kind()
+            );
+        }
+        assert!(
+            DRIVER_FED_WORKLOADS == [ring],
+            "the driver-fed row is the only one"
+        );
+        let mut kinds: Vec<&str> = WORKLOADS
+            .iter()
+            .chain(DRIVER_FED_WORKLOADS.iter())
+            .map(|workload| workload.kind())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), WORKLOADS.len() + DRIVER_FED_WORKLOADS.len());
+    }
+
+    /// Issue #928 gate 1: the driver-fed plumbing row renders the bound-feed row's bits.
+    ///
+    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree to the byte: the two
+    /// rows are one session and one frozen tone, and the feed is the only thing bound differently.
+    /// Beside the digest, the facts the `tests/` census states of every row in `WORKLOADS`, which
+    /// the driver-fed row is not in: a bankless plan binds no bank chain, transposes nothing,
+    /// folds no route, never collapses and never transitions.
+    ///
+    /// The source-plane counts (`graph::test_only_source_plane_counts`, `[claims copied into the
+    /// arena, gathers served from a played block, gathers served silence]`) are the statement of
+    /// which feed ran. The bound row has no source set and counts nothing. The driver-fed row's
+    /// sixty-four claims are all on the copy today, because only a bank's gather reads a played
+    /// block in place (issue #918) and this plan has no bank: sixty-four copies per block and no
+    /// in-place read. **This pin is the pre-#927 value.** Reading plain-strip sources in place
+    /// moves it to `[0, 64 * BLOCKS, 0]`, and that brief moves the pin.
+    ///
+    /// Every render runs under the realtime audit, and the audited allocator aborts the process on
+    /// an allocation inside a render scope, so zero forbidden operations is the driver's five
+    /// methods and the source-set loop around them staying allocation-, lock- and syscall-free.
+    #[test]
+    fn the_driver_fed_plumbing_row_renders_the_bound_rows_bits() {
+        const BLOCKS: u64 = 64;
+        let run = |workload: Workload| {
+            let mut runtime = SessionRuntime::new(workload);
+            let mut digest = Sha256Sink::new();
+            let mut audible = false;
+            graph::test_only_source_plane_reset();
+            audit::warm_up();
+            audit::reset();
+            for block in 0..BLOCKS {
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut digest);
+                audible |= runtime.output.iter().any(|word| *word != 0.0);
+            }
+            let forbidden = audit::snapshot().total();
+            let planes = graph::test_only_source_plane_counts();
+            (runtime, digest.finish_hex(), audible, forbidden, planes)
+        };
+        let (bound, bound_digest, bound_audible, bound_forbidden, bound_planes) =
+            run(Workload::SixtyFourTrackPlumbingOnly);
+        let (ring, ring_digest, ring_audible, ring_forbidden, ring_planes) =
+            run(Workload::SixtyFourTrackPlumbingRing);
+
+        assert!(
+            bound_audible && ring_audible,
+            "both rows must render the tone, or their equality says nothing"
+        );
+        assert_eq!(
+            ring_digest, bound_digest,
+            "the driver-fed row must render the bound-feed row's bits: a difference is a harness \
+             defect, never a finding"
+        );
+        for (name, runtime) in [("bound", &bound), ("driver-fed", &ring)] {
+            assert_eq!(runtime.bank_shape(), [0, 0], "{name}: no bank chain");
+            assert_eq!(runtime.bank_transposes(), 0, "{name}: no transpose");
+            assert_eq!(
+                runtime.bank_route_folds(),
+                0,
+                "{name}: no epilogue to fold into"
+            );
+            assert_eq!(
+                runtime.bank_collapse_counters(),
+                [0, 0],
+                "{name}: no collapse"
+            );
+            assert_eq!(
+                runtime.bank_collapse_transitions(),
+                [0, 0, 0],
+                "{name}: no transition"
+            );
+        }
+        assert_eq!(
+            bound_planes,
+            [0, 0, 0],
+            "the bound feed binds no source set"
+        );
+        let claims = u64::from(Workload::SixtyFourTrackPlumbingRing.tracks());
+        assert_eq!(
+            ring_planes,
+            [claims * BLOCKS, 0, 0],
+            "pre-#927: every claim copied every block, none read in place"
+        );
+        assert_eq!(
+            (bound_forbidden, ring_forbidden),
+            (0, 0),
+            "no forbidden operation on either render path"
+        );
+    }
+
+    /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
+    /// exactly the words `copy_track_input` copies, claim by claim, and both are the claimed
+    /// track's frozen block through that track's declared channel mapping.
+    ///
+    /// Run over the half-mono model, whose even tracks map `(0, 0)` and odd tracks `(0, 1)`, so a
+    /// driver that ignored the mapping, or served one claim another track's block, fails here even
+    /// though the stereo plumbing fixture could not show it. The expectation is computed from the
+    /// model's track *position* and `source_block`, not through `frozen_track_source`, so it is not
+    /// the driver checked against itself.
+    #[test]
+    fn the_frozen_source_driver_lends_the_words_it_copies() {
+        let model = console_model(Workload::SixtyFourTrackConsoleHalfMono);
+        let mappings = channel_mappings(&model);
+        let mut claims: Vec<GraphSourceInputClaim> = model
+            .tracks
+            .iter()
+            .map(|track| GraphSourceInputClaim {
+                node: GraphNodeId::TrackStage {
+                    track_id: graph::StableGraphId::parse(track.id.as_str()).expect("track id"),
+                    stage: TrackStage::Input,
+                },
+            })
+            .collect();
+        claims.sort_unstable();
+        let mut driver = FrozenSourceDriver::new(&claims, false, &SourceSignal::Local, &mappings);
+        let count = claims.len();
+        let report = driver.resource_report();
+        assert_eq!(
+            report.total_engine_owned_bytes,
+            (count * SOURCE_BLOCK_VALUES * core::mem::size_of::<f32>()) as u64
+        );
+        assert_eq!(
+            report.pcm_payload_already_charged_bytes + report.overhead_bytes,
+            report.total_engine_owned_bytes
+        );
+
+        // Everything the scope writes is allocated before it opens.
+        let mut copied = vec![0.0_f32; count * SOURCE_BLOCK_VALUES];
+        let mut lent = vec![f32::NAN; count * SOURCE_BLOCK_VALUES];
+        let mut copy_ok = vec![false; count];
+        let mut lent_lengths = vec![(0, 0); count];
+        let (mut short_left, mut short_right) = ([0.0_f32; QUANTUM - 1], [0.0_f32; QUANTUM - 1]);
+        let (mut spare_left, mut spare_right) = ([0.0_f32; QUANTUM], [0.0_f32; QUANTUM]);
+        let mut facts = [false; 7];
+        audit::warm_up();
+        audit::reset();
+        audit::in_render_scope(|| {
+            facts[0] = driver.claim_count() == count;
+            facts[1] = driver.provides_played_planes();
+            facts[2] = driver.begin_block(0, QUANTUM as u32).is_ok();
+            facts[3] = driver.begin_block(0, QUANTUM as u32 / 2).is_err();
+            for claim in 0..count {
+                let (left, right) = copied[claim * SOURCE_BLOCK_VALUES..][..SOURCE_BLOCK_VALUES]
+                    .split_at_mut(QUANTUM);
+                copy_ok[claim] = driver.copy_track_input(claim, left, right).is_ok();
+                if let Some((left, right)) = driver.played_planes(claim) {
+                    lent_lengths[claim] = (left.len(), right.len());
+                    if left.len() == QUANTUM && right.len() == QUANTUM {
+                        let (lent_left, lent_right) = lent[claim * SOURCE_BLOCK_VALUES..]
+                            [..SOURCE_BLOCK_VALUES]
+                            .split_at_mut(QUANTUM);
+                        lent_left.copy_from_slice(left);
+                        lent_right.copy_from_slice(right);
+                    }
+                }
+            }
+            facts[4] = driver
+                .copy_track_input(count, &mut spare_left, &mut spare_right)
+                .is_err();
+            facts[5] = driver.played_planes(count).is_none();
+            facts[6] = driver
+                .copy_track_input(0, &mut short_left, &mut short_right)
+                .is_err();
+        });
+        assert_eq!(
+            audit::snapshot().total(),
+            0,
+            "the driver's methods did something forbidden on the render thread"
+        );
+        assert_eq!(
+            facts, [true; 7],
+            "[claim count, lends, quantum admitted, half quantum refused, claim past the end not \
+             copied, not lent, short destination refused]"
+        );
+        assert!(copy_ok.iter().all(|ok| *ok), "every claim copies");
+        assert!(
+            lent_lengths
+                .iter()
+                .all(|lengths| *lengths == (QUANTUM, QUANTUM)),
+            "every claim lends one quantum per plane"
+        );
+        assert_eq!(copied, lent, "a lent plane is the plane the copy writes");
+
+        let mut mono_claims = 0;
+        for (claim, entry) in claims.iter().enumerate() {
+            let GraphNodeId::TrackStage { track_id, .. } = &entry.node else {
+                unreachable!("every claim is a track input");
+            };
+            let position = model
+                .tracks
+                .iter()
+                .position(|track| track.id.as_str() == track_id.as_str())
+                .expect("the claimed track is in the model");
+            let block = source_block(position, false);
+            let (left_channel, right_channel) = mappings[position];
+            let words = &copied[claim * SOURCE_BLOCK_VALUES..][..SOURCE_BLOCK_VALUES];
+            assert_eq!(
+                &words[..QUANTUM],
+                &block[left_channel * QUANTUM..][..QUANTUM],
+                "{track_id:?}: left plane"
+            );
+            assert_eq!(
+                &words[QUANTUM..],
+                &block[right_channel * QUANTUM..][..QUANTUM],
+                "{track_id:?}: right plane"
+            );
+            if left_channel == right_channel {
+                mono_claims += 1;
+                assert_eq!(
+                    words[..QUANTUM],
+                    words[QUANTUM..],
+                    "{track_id:?}: one source"
+                );
+            } else {
+                assert_ne!(
+                    words[..QUANTUM],
+                    words[QUANTUM..],
+                    "{track_id:?}: two sources"
+                );
+            }
+        }
+        assert_eq!(
+            mono_claims,
+            count / 2,
+            "the half-mono model maps half its tracks mono"
+        );
     }
 }
