@@ -200,11 +200,12 @@ Implementer: attempt 1, branch `codex/936-skip-inert-source-inputs`. The impleme
 4. **Policy-script gap.** `check-realtime-policy.sh` misses `.collect::<...>()` (turbofish) in a
    marked region (936-7). The counting-allocator tests catch it. The gap is not fixed here because
    the script is outside the brief's paths. It is a candidate for a tooling issue.
-5. **Stale unchecked fixture.** `fixtures/graph/v1/direct-route.resources.json` records
-   `graph_metadata_bytes: 5336`. This change adds 180 B to that fixture's estimate (9 emitted ops x
-   20 B). Nothing gates that file: `check-graph-determinism.sh` compares only the fingerprint, and
-   #698 records that the checked-in `graph_fixture --check` corpus is already stale. It was not
-   regenerated, because it is outside the brief's paths.
+5. **Already-stale unchecked fixture** (corrected in attempt 2, after Sol's finding 3).
+   `fixtures/graph/v1/direct-route.resources.json` was stale before this issue: it records
+   `graph_metadata_bytes: 5336`, while the generator gave 5,868 on `64b155d0`. This change moves
+   the generated value by a further 180 B, to 6,048 (9 emitted ops x 20 B). Nothing gates that file:
+   `check-graph-determinism.sh` compares only the fingerprint, and `graph_fixture --check` runs
+   nowhere. Per Sol's ruling it is not regenerated here; it is tracked as #947.
 6. **Public surface.** `GraphRuntimeMetadataResourceEstimate`, a public struct with public fields,
    gains two fields. No workspace code builds it with a literal (the workspace clippy passes). No
    public trait changed. The new test-only functions are `#[doc(hidden)]` and exist only with
@@ -327,3 +328,52 @@ test red, and that test is outside the brief's authorized paths.
 The coordinator authorizes `crates/capi/tests/resource_lifecycle.rs`. The implementer re-pins it
 as described in finding 1, corrects deviation 5, and re-runs the `test-debug-a` command in full.
 No production change is needed.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, on `0eee137d` (Sol's attempt 1 verdict). The scope was amended by the
+coordinator's issue comment of 2026-09-26: `crates/capi/tests/resource_lifecycle.rs` is
+authorized. No production change was made. Nothing was pushed, and no timed benchmark was run.
+
+### The blocking finding: the capi resource re-pin
+
+`crates/capi/tests/resource_lifecycle.rs` restates the two #936 tables as independent primitives,
+following the file's own convention (#470, #779, #816):
+
+- **`executor_table_rows()`:** `bytes::<u32>(82)` and `bytes::<(usize, u32)>(82)`, asserted to be
+  `(328, 1_312)`. That is the fixture's 82 emitted ops, the same count #470's reservation uses, at
+  one entry per op.
+- **`frozen_scratch_report`:** each of the three single-plan graph figures
+  (`graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes`, `graph_metadata_bytes`) adds
+  `executor_table_bytes` = 1,640. A comment derives it: 82 x 4 + 82 x 16. The largest allocation
+  does not move, because 1,312 is below the 49,167 graph metadata row.
+- **`graph_owners()`:** two appended rows, the executor dispatched-unit table reservation and the
+  executor copied-claim table reservation. They are appended so the positional
+  `graph_rows[5..13]` oracle stands. `primitive_replacement_oracle`'s effective-owner authority
+  takes `+ 2 * executor_table_bytes`, so omitting either row, or miscounting it by one byte, is
+  refused.
+- **The double-live pin:** `external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps`
+  asserts `executor_table_bytes == 1_640`, and `oracle.graph` takes `+ 2 * executor_table_bytes` =
+  +3,280.
+
+**Discrimination.** With `crates/graph/src/{lib,runtime}.rs` put back to `64b155d0` and the new
+pins kept, the test goes red on exactly those rows. The live report gives 54,763 / 235,528 /
+235,528 against the pinned 56,403 / 237,168 / 237,168: exactly 1,640 on each of the three graph
+figures, with every other field equal. On the branch it is green, 4 of 4.
+
+### Other findings
+
+- **Finding 3:** deviation 5 of the attempt-1 evidence is corrected in place. The fixture was
+  already stale, and this issue moves it by a further 180 B. It is not regenerated (#947).
+- **Findings 2 and 4:** the browser expected-resources rows are left to the batch boundary, and
+  `hosts/host-web/tests/browser-v1/expected.json` is untouched. The policy-script gap is a tooling
+  successor.
+
+### Gates re-run on this tree
+
+| check | command | result |
+|---|---|---|
+| CI `test-debug-a` | the job's exact `cargo test --locked --workspace --all-targets --exclude ... --features builtins-compiler/test-support,source/test-support,graph/test-support,engine/realtime-audit` (`qualification.yml:476`), plus `--no-fail-fast`; then `cargo run --locked -p host-native` | PASS: exit 0, 108 test binaries and doctests, 1,471 passed, 0 failed, 10 ignored; the host smoke passes |
+| focused suites | `cargo test --locked` for `-p graph`, `-p graph --features test-support`, `-p graph-compiler`, `-p console-workload`, `-p host-core` and `-p capi` | PASS: 117, 124, 92, 36 (2 ignored), 174 (2 ignored) and 36 passed; none failed |
+| lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| policy | `scripts/check-realtime-policy.sh`, `scripts/check-graph-policy.sh`, `scripts/check-graph-determinism.sh` | PASS: 54 regions; PASS; 100/100 |
