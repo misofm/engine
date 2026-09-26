@@ -402,3 +402,32 @@ place, not charged to a resource row, like `output_routes` and `source_plane_of_
   `UnitIdentity::source_lanes` `:2162` (`:1888`). Each cited function and behaviour was as
   described. The brief's `DRAFTS/PLAN.md` is `docs/handoffs/plumbing-floor-2026-09-26/PLAN.md` on
   this tree.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `50b6a656` through `46d1a62f` on base
+`169a2486`. No blocking findings. The reported #918 corner was reproduced on a scratch copy with
+the committed `DeadClaim` fixture reordered: the in-place arm's host planes equal the same plan
+without the dead claim word for word and the copy oracle's do not, so the copy path is the wrong
+arm (it hoists every input write to the top of the block in claim order, valid only while the
+colouring never puts two claims on one slot). It is not reachable from a compiled Session V1:
+claims are required sorted by `GraphNodeId`, level 0 is popped in node-ID order, and every Input
+precedes every input-less submix, so claim order equals schedule order and the later copy is the
+live one; on `main` the only production driver lends, so production always takes the correct arm.
+#927's clause (e) covers the Output reader's exposure exactly; #918's bank clause keeps the
+hand-built exposure. Successor filed as #932 (refuse at bind two claims mapped to one buffer).
+Verified: `op_dataflow` runs on the program where the retired route is still an op, so
+`readers == [route]` is independent of retirement; `sources` is a shared borrow across the unit
+loop and the Output unit runs last; `read_stereo` is the base's two reads; the silence buffer is
+unwritable; gate 1 poisons every slot before every block and pins the underrun counts; the wasm
+kernel was rebuilt and `route_reduce<f32x4>` is still 44 vector / 0 scalar with `route_pair`
+inlined. Five mutations re-applied and reverted, red as recorded. Reviewer-run gates, all green:
+`cargo test -p graph` (both configurations), `-p source --all-features`, `-p host-core
+--all-features`, `-p console-workload`, `-p capi`, fmt, graph clippy, determinism (100/100),
+graph and realtime policy.
+
+Correction to the evidence's "Not done, and risks": a compiled plan never reaches the shared-slot
+hazard (the ordering argument above), not only "with an input no op reads"; the base in-place arm
+binds exactly the mode set the variant rendered, so the base arm is correct by the same
+measurement. Not re-verified: `cargo test -p graph-compiler` and `-p builtins-compiler`,
+workspace-wide clippy, the pre-change digests on the base runtime.
