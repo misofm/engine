@@ -182,7 +182,7 @@ pub fn node_index(spec: &GraphSpec, id: &GraphNodeId) -> Option<NodeIndex> {
 /// These three are the *internal* rack boundaries. They are never effects, never bank members and
 /// never appear in `required_bindings`, so nothing can bind a processor to them; their only role
 /// is to be a stable observation and send-tap point. `Input` is the source node and always keeps
-/// its op. The three builtin stages ([`is_builtin_stage`]) keep theirs only when the plan lists
+/// its op. The three builtin stages (`is_builtin_stage`) keep theirs only when the plan lists
 /// them as bindable: since issue #925 an unlisted one is an alias exactly like these three.
 const fn is_alias_candidate(node: &GraphNodeId) -> bool {
     matches!(
@@ -446,7 +446,7 @@ struct Lifetime {
 /// nodes of this spec are ignored -- a stale id can only widen a window, never unsound one.
 ///
 /// `bindable` is the plan's `required_bindings`: the nodes a host (or the builtins artifact) will
-/// bind. It decides one thing, whether a builtin stage ([`is_builtin_stage`]) keeps its op. A
+/// bind. It decides one thing, whether a builtin stage (`is_builtin_stage`) keeps its op. A
 /// listed stage always does -- a processor bound to it must run -- and an unlisted one is elided
 /// into an alias like a rack boundary (issue #925). Ids that are not nodes of this spec are
 /// ignored; bind-time validation is what refuses them.
