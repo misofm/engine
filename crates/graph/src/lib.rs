@@ -1345,6 +1345,11 @@ impl PreparedGraphPlan {
     /// member lists are among those fields, because a bank's window constrains what colouring may
     /// share; before that they were not, which is why attaching banks used to be able to leave
     /// `program` untouched.
+    ///
+    /// Since #925 `required_bindings` is one of them too: a builtin stage the plan does not list
+    /// has nothing to bind, and lowers as an alias (`program::is_builtin_stage`). It is the plan's
+    /// own field, so the program `program()` reports and the one bind derives cannot disagree
+    /// about it either.
     fn lower_from_current_fields(&self) -> Option<program::ExecutionProgram> {
         program::lower(
             &self.spec,
@@ -1352,6 +1357,7 @@ impl PreparedGraphPlan {
             &self.dependency_levels,
             &self.inserted_delays,
             &bank_member_nodes(&self.banks, &self.builtin_banks),
+            &self.required_bindings,
         )
         .ok()
     }
@@ -1366,8 +1372,10 @@ impl PreparedGraphPlan {
         let program = self.lower_from_current_fields()?;
         // A node the lowering elided has no op, so a processor bound to it would never run. The
         // compiler never asks for one -- the three internal rack boundaries are not bindable
-        // (`program::is_alias_candidate`) -- and a hand-built plan that does is rejected here
-        // rather than silently dropping the binding.
+        // (`program::is_alias_candidate`), and a builtin stage is elided only when it is *not*
+        // listed (`program::is_builtin_stage`, #925), so a listed one always keeps its op -- and a
+        // hand-built plan that lists a rack boundary is rejected here rather than silently
+        // dropping the binding.
         let elided_binding = self.required_bindings.iter().any(|node| {
             program::node_index(&self.spec, node)
                 .is_some_and(|index| program.node_op[index as usize].is_none())
@@ -5720,17 +5728,25 @@ mod tests {
             }
             // `PostFader` scales in place, so the buffer the three internal boundaries alias is
             // rewritten by the very next op: a tap that fires late reads the scaled value.
+            //
+            // The other two builtin stages are listed and acknowledged with the identity, which
+            // is what keeps their ops: since issue #925 an unlisted builtin stage is an alias
+            // too, and this fixture is about the three rack boundaries alone.
             let bindings = vec![
                 GraphNodeBinding::new(
                     node(TrackStage::Input),
                     Box::new(SeededSource { state: 0x51ED_0007 }),
                 ),
+                GraphNodeBinding::identity(node(TrackStage::PostInputBuiltins)),
                 GraphNodeBinding::new(node(TrackStage::PostFader), Box::new(Scale(0.375))),
+                GraphNodeBinding::identity(node(TrackStage::PostMatrix)),
                 GraphNodeBinding::new(output.clone(), Box::new(Noop)),
             ];
             let required = vec![
                 node(TrackStage::Input),
+                node(TrackStage::PostInputBuiltins),
                 node(TrackStage::PostFader),
+                node(TrackStage::PostMatrix),
                 output.clone(),
             ];
             let levels = levels_for(&nodes, &edges);
