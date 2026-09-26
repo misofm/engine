@@ -288,3 +288,21 @@ comparison, not the mode table, is what the row proves red.
 | 918-10b | both of the above: one input that is the buffer or a staged copy of it | `graph/src/runtime.rs` `gathers_only` | gate 1 | RED (`compensated: Some(3) ... block 0 (Full)`): the member stages the poisoned slot through its compensation delay |
 | 918-11 | the set lends any plane of any index (no claim or length check) | `graph/src/lib.rs` `GraphSourcePlanes for GraphPreparedSourceSet` | `tests::a_source_set_lends_only_quantum_planes_of_its_own_claims` | RED (`a short plane is refused`) |
 | 918-12 | the unit loop is handed no source planes (`sources = None`) | `graph/src/lib.rs` `GraphExecutor::render` | gate 1, gate 3, gate 2 | RED on all three: every in-place gather reads its poisoned or zero slot |
+
+## Issue #925 — identity-bound builtin stages of a builtins-less plan lower as aliases
+
+Each row was applied alone to `0973b805`, the three suites below were run with `--no-fail-fast`,
+and the file was restored with `git checkout`. Suites: `cargo test -p graph --lib` (103 tests),
+`cargo test -p graph-compiler --lib` (73), `cargo test -p console-workload --test chain_shape` (23).
+Gate 1 is `tests::identity_bound_builtin_stages_alias_without_moving_a_bit`; gate 2 is
+`program::tests::unlisted_builtin_stages_lower_as_aliases` with graph-compiler
+`builtins_replace_only_the_three_internal_track_bindings`; gate 3 is console-workload
+`the_plumbing_row_is_input_route_output_and_renders_the_base_bits`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 925-1 | elide the three builtin stages whatever the bindable set says (`is_alias_candidate(id) \|\| is_builtin_stage(id)`) | `graph/src/program.rs` `lower_with` | the three suites | RED everywhere a stage is listed: graph 31 of 103 (gate 2 `PostInputBuiltins listed`: the listed stage lost its op; gate 1's listed arm; E9; every builtin-bank test, whose members `lowered()` now refuses as elided bindings), graph-compiler 23 of 73, chain_shape 22 of 23 (every with-builtins workload fails to bind: `sixty_four_track_console: console graph bindings`). Only the builtins-less plumbing test survives. |
+| 925-2 | keep the post-input stage out of the alias predicate because it is dedicated (`is_builtin_stage(id) && !is_dedicated(id) && !listed[index]`): the dedicated stage keeps its op while the other two alias | `graph/src/program.rs` `lower_with` | the three suites | RED: gate 1 op count (`left: 10, right: 7`), gate 2 (`Input, PostInputBuiltins, Route, Output`), graph-compiler `builtins_replace_only_the_three_internal_track_bindings` and `the_merged_span_hold_costs_the_input_slots_with_and_without_builtins` (builtins-less arm), gate 3 (unit count). Every other test GREEN. |
+| 925-3 | alias only `PostMatrix` (`is_builtin_stage` names one stage) | `graph/src/program.rs` `is_builtin_stage` | the three suites | RED: gate 1 op count (`left: 13, right: 7`), gate 2 (`Input, PostInputBuiltins, PostFader, Route, Output`), the same two graph-compiler tests, gate 3. Every other test GREEN. |
+| 925-4 | `lower_from_current_fields` hands `lower` an empty bindable set instead of `required_bindings` | `graph/src/lib.rs` `lower_from_current_fields` | the three suites | RED: graph 21 (E9, gate 1's listed arm, every builtin-bank plan: its members are listed and now elided, so bind refuses them), graph-compiler 23, chain_shape 22 of 23. The seam, not only the predicate, is what keeps a listed stage's op. |
+| 925-5 | the builtins-less compile keeps listing the three stages (`=> true`) | `graph-compiler/src/compile.rs` `required_bindings` | the three suites | RED: graph-compiler `accepted_session_compiles_binds_and_renders_direct_route` (`required_bindings.len()`), `builtins_replace_only_the_three_internal_track_bindings` (the builtins-less op list), the merged-span test's builtins-less arm, and gate 3 (321 units). graph GREEN (no compiler there): the compile change is what moves the row. |
