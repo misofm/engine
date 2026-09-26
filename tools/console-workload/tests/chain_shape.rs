@@ -881,8 +881,11 @@ fn the_plumbing_row_binds_no_strip_at_all() {
 /// instead of two identity copies and a dispatch that computed nothing. The row's units fall from
 /// 321 (`64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output`) to 129 (`64 bound,
 /// 64 route, 1 output`), and the census from `[257, 321]` to `[65, 129]`: the 192 identity units
-/// it loses were all eligible, vacuously. Class A: the digest over 64 blocks is pinned at the
-/// value the base commit of #925 (`3c93469d`) renders, before any of this existed.
+/// it loses were all eligible, vacuously. With #926 merged the 64 route units are retired into
+/// the Output op's reduction too, so the row is `64 bound, 1 output`: 65 units, census
+/// `[1, 65]` (the bound host processors decline the symmetry witness; only the Output op is
+/// eligible). Class A: the digest over 64 blocks is pinned at the value the base commit of #925
+/// (`3c93469d`) renders, before any of this existed.
 #[test]
 fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
     const BASE_DIGEST: &str = "57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800";
@@ -898,11 +901,12 @@ fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
     let rows = runtime.unit_eligibility();
     assert_eq!(
         rows.len(),
-        129,
-        "64 bound inputs, 64 routes and the output: no identity-stage unit is left"
+        65,
+        "64 bound inputs and the output: no identity-stage unit is left (#925) and every route \
+         is retired into the Output reduction (#926)"
     );
     assert!(rows.iter().all(|row| !row.banked && row.lanes() == 1));
-    assert_eq!(runtime.symmetry_counters(), [65, 129]);
+    assert_eq!(runtime.symmetry_counters(), [1, 65]);
 }
 
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
