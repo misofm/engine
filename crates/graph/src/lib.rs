@@ -1828,8 +1828,9 @@ pub trait GraphPreparedSourceSetDriver: Send {
     }
 }
 
-/// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
-/// the planes `begin_block` played, handed to [`runtime::Runtime::execute`] after the copy loop.
+/// The source set as a bank's gather (issue #918) and the Output op's fused reduction (issue #927)
+/// see it during the unit loop: a shared view of the planes `begin_block` played, handed to
+/// [`runtime::Runtime::execute`] after the copy loop.
 pub(crate) trait GraphSourcePlanes {
     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
     /// checks.
@@ -1925,8 +1926,8 @@ impl GraphPreparedSourceSet {
 impl GraphSourcePlanes for GraphPreparedSourceSet {
     /// The same claim-index check `copy_track_input` makes, then the driver's planes, each held to
     /// the quantum `copy_track_input` holds its destinations to. A plane of any other length is a
-    /// driver fault; it is refused as `None`, which the gather serves as silence, rather than
-    /// handed to a gather that would index past it.
+    /// driver fault; it is refused as `None`, which the reader serves as silence, rather than
+    /// handed to a reader that would index past it.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
         if claim_index >= self.claims.len() {
             return None;
@@ -2355,10 +2356,11 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
-        // that lends its played planes offers any, and `build_sequential` decides which of them
-        // are bound in place. `test_only_set_source_in_place_declined` offers none, which binds
-        // the path every claim took before the issue.
+        // Issue #918: the claims a bank's gather, or the Output op's fused reduction (issue #927),
+        // may read in place, in claim order. Only a driver that lends its played planes offers
+        // any, and `build_sequential` decides which of them are bound in place.
+        // `test_only_set_source_in_place_declined` offers none, which binds the path every claim
+        // took before issue #918.
         let lent_claims: Vec<GraphNodeId> = source_set
             .as_ref()
             .filter(|set| set.driver.provides_played_planes())
@@ -2492,8 +2494,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(error);
             }
-            // A claim bound in place is not in this list: its bank's gather reads the played
-            // block's planes (issue #918).
+            // A claim bound in place is not in this list: its bank's gather (issue #918) or the
+            // Output op's fused reduction (issue #927) reads the played block's planes.
             for &(claim, buffer) in source_input_buffers.iter() {
                 #[cfg(any(test, feature = "test-support"))]
                 runtime::test_only_count_source_copy();
