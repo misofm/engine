@@ -2330,6 +2330,33 @@ impl Runtime {
     }
 
     /// Apply admitted activation snapshots and reset the block-local dispatch cursor.
+    /// The phase a unit's time is charged to by `crate::test_only_phase_profile`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[inline]
+    pub(crate) fn test_only_unit_phase(&self, index: usize) -> usize {
+        use crate::test_only_phase_profile::{
+            BANK, BOUND, IDENTITY_ALIAS, IDENTITY_COPY, OTHER_OP, OUTPUT, ROUTE,
+        };
+        if self.output_unit == Some(index) {
+            return OUTPUT;
+        }
+        match &self.units[index] {
+            RuntimeUnit::Op(op) => match (&op.kind, &*op.inputs) {
+                (NodeKind::Bound(_), _) => BOUND,
+                (NodeKind::Route(_), _) => ROUTE,
+                (NodeKind::Identity, [single]) if op.split_pair.is_none() => {
+                    if *single == op.output {
+                        IDENTITY_ALIAS
+                    } else {
+                        IDENTITY_COPY
+                    }
+                }
+                _ => OTHER_OP,
+            },
+            RuntimeUnit::Bank { .. } => BANK,
+        }
+    }
+
     pub(crate) fn begin_observation_block(&mut self, first_sample: u64) {
         self.observation_cursor = 0;
         self.observation_failure_invalidated = false;

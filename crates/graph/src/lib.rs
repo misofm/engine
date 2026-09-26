@@ -41,6 +41,159 @@ pub use runtime::{
 #[doc(hidden)]
 pub use observation_activation::test_only_observation_transition_entries;
 
+/// Phase-level timing of [`GraphExecutor::render`] for the plumbing-floor diagnosis
+/// (`.github/ISSUE_SPECS/DRAFTS/PLAN.md`). Test builds only: nothing here exists in a production
+/// build, and a `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
+/// thread-local read per block and nothing per unit.
+///
+/// The clock is `std::time::Instant` (the vDSO monotonic clock), because `crates/graph` may not
+/// carry the `unsafe` block `_rdtsc` needs. A probe is taken only where the *kind* of unit
+/// changes, so a block whose units are grouped by kind costs a handful of probes rather than one
+/// per unit; the harness measures the probe cost and states it beside the numbers.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_only_phase_profile {
+    use core::cell::Cell;
+    use std::time::Instant;
+
+    /// Render entry to the first source work: the host planes' shape check and
+    /// `begin_observation_block`.
+    pub const ENTER: usize = 0;
+    /// The source set's `begin_block` and the `copy_track_input` loop (empty when the plan binds
+    /// no source set, as the console rows do).
+    pub const SOURCE: usize = 1;
+    /// Plain units whose op is a host-bound processor (`NodeKind::Bound`): on the console rows,
+    /// the sixty-four `FrozenGraphSource` copies.
+    pub const BOUND: usize = 2;
+    /// Plain units whose op is a route (`NodeKind::Route`).
+    pub const ROUTE: usize = 3;
+    /// The session Output op's unit.
+    pub const OUTPUT: usize = 4;
+    /// A plain identity unit with one input that is not in place: `reduce_plane`'s copy arm.
+    pub const IDENTITY_COPY: usize = 5;
+    /// A plain identity unit in place over its one input: dispatch and nothing else.
+    pub const IDENTITY_ALIAS: usize = 6;
+    /// Any other plain unit.
+    pub const OTHER_OP: usize = 7;
+    /// A bank unit.
+    pub const BANK: usize = 8;
+    /// The unit loop's end to the return (on the pre-#916 tree, the end-of-block master copy).
+    pub const EXIT: usize = 9;
+    pub const COUNT: usize = 10;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        static NANOS: Cell<[u64; COUNT]> = const { Cell::new([0; COUNT]) };
+        static BLOCKS: Cell<u64> = const { Cell::new(0) };
+        static PROBES: Cell<u64> = const { Cell::new(0) };
+        static RUNS: Cell<[(usize, u64); RUNS_CAPACITY]> =
+            const { Cell::new([(COUNT, 0); RUNS_CAPACITY]) };
+    }
+
+    /// Runs of same-kind units recorded from the first profiled block, `(kind, units)`.
+    pub const RUNS_CAPACITY: usize = 16;
+
+    /// The unit-kind runs of the first block profiled since the last reset, in schedule order;
+    /// `(COUNT, 0)` marks unused entries.
+    #[must_use]
+    pub fn runs() -> [(usize, u64); RUNS_CAPACITY] {
+        RUNS.with(Cell::get)
+    }
+
+    /// Switch the probes on or off for this thread. Off, `render` reads one thread-local per
+    /// block and nothing else.
+    pub fn enable(enabled: bool) {
+        ENABLED.with(|value| value.set(enabled));
+    }
+
+    /// Zero the accumulators.
+    pub fn reset() {
+        NANOS.with(|value| value.set([0; COUNT]));
+        BLOCKS.with(|value| value.set(0));
+        PROBES.with(|value| value.set(0));
+        RUNS.with(|value| value.set([(COUNT, 0); RUNS_CAPACITY]));
+    }
+
+    /// `(nanoseconds per phase, blocks profiled, probes taken)` since the last reset.
+    #[must_use]
+    pub fn snapshot() -> ([u64; COUNT], u64, u64) {
+        (
+            NANOS.with(Cell::get),
+            BLOCKS.with(Cell::get),
+            PROBES.with(Cell::get),
+        )
+    }
+
+    /// One block's running probe. `None` when disabled, so the hot path is one `Option` test.
+    pub(crate) struct Probe {
+        last: Instant,
+        phase: usize,
+        nanos: [u64; COUNT],
+        probes: u64,
+        runs: [(usize, u64); RUNS_CAPACITY],
+        run: usize,
+    }
+
+    impl Probe {
+        #[inline]
+        pub(crate) fn start() -> Option<Self> {
+            ENABLED.with(Cell::get).then(|| Self {
+                last: Instant::now(),
+                phase: ENTER,
+                nanos: [0; COUNT],
+                probes: 1,
+                runs: [(COUNT, 0); RUNS_CAPACITY],
+                run: 0,
+            })
+        }
+
+        /// Charge the time since the last probe to the current phase and make `next` current.
+        #[inline]
+        pub(crate) fn enter(&mut self, next: usize) {
+            let now = Instant::now();
+            self.nanos[self.phase] +=
+                u64::try_from(now.duration_since(self.last).as_nanos()).unwrap_or(u64::MAX);
+            self.last = now;
+            self.phase = next;
+            self.probes += 1;
+        }
+
+        /// Charge a unit of kind `kind`; a probe is taken only when the kind changes.
+        #[inline]
+        pub(crate) fn unit(&mut self, kind: usize) {
+            if kind != self.phase {
+                self.enter(kind);
+                if self.run < RUNS_CAPACITY && self.runs[self.run].1 != 0 {
+                    self.run += 1;
+                }
+                if self.run < RUNS_CAPACITY {
+                    self.runs[self.run].0 = kind;
+                }
+            }
+            if self.run < RUNS_CAPACITY {
+                self.runs[self.run].1 += 1;
+            }
+        }
+
+        #[inline]
+        pub(crate) fn finish(mut self) {
+            self.enter(COUNT - 1);
+            NANOS.with(|value| {
+                let mut total = value.get();
+                for (slot, nanos) in total.iter_mut().zip(self.nanos) {
+                    *slot += nanos;
+                }
+                value.set(total);
+            });
+            if BLOCKS.with(Cell::get) == 0 {
+                RUNS.with(|value| value.set(self.runs));
+            }
+            BLOCKS.with(|value| value.set(value.get() + 1));
+            PROBES.with(|value| value.set(value.get() + self.probes));
+        }
+    }
+}
+
 use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2299,6 +2452,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
         } = self;
+        #[cfg(any(test, feature = "test-support"))]
+        let mut probe = test_only_phase_profile::Probe::start();
         let (left, right) = output.stereo_planes_mut()?;
         let Some(mut host) = runtime::HostMaster::new(left, right, runtime.lease.frames()) else {
             return Err(RenderError::InvalidEnvelope);
@@ -2308,6 +2463,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         runtime.begin_observation_block(time.absolute_sample);
         let selective_observation = runtime.has_observation_activation();
         let active_observation = runtime.has_active_observation();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(probe) = probe.as_mut() {
+            probe.enter(test_only_phase_profile::SOURCE);
+        }
         let source_validity = if let Some(source_set) = source_set.as_mut() {
             if let Err(error) =
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
@@ -2338,6 +2497,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         // next render's.
         let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
         for unit in 0..runtime.units.len() {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(probe) = probe.as_mut() {
+                probe.unit(runtime.test_only_unit_phase(unit));
+            }
             if let Err(error) =
                 runtime.execute(unit, time.absolute_sample, host.reborrow(), sources)
             {
@@ -2385,6 +2548,10 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(probe) = probe {
+            probe.finish();
         }
         Ok(())
     }
