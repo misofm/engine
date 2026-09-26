@@ -377,3 +377,62 @@ figures, with every other field equal. On the branch it is green, 4 of 4.
 | focused suites | `cargo test --locked` for `-p graph`, `-p graph --features test-support`, `-p graph-compiler`, `-p console-workload`, `-p host-core` and `-p capi` | PASS: 117, 124, 92, 36 (2 ignored), 174 (2 ignored) and 36 passed; none failed |
 | lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
 | policy | `scripts/check-realtime-policy.sh`, `scripts/check-graph-policy.sh`, `scripts/check-graph-determinism.sh` | PASS: 54 regions; PASS; 100/100 |
+
+## Sol attempt 2 verdict: PASS
+
+Reviewer: Sol, attempt 2, on `80f7ec80`. Attempt 2 changes only
+`crates/capi/tests/resource_lifecycle.rs` and this spec. The coordinator authorized that file on
+the issue. No production code changed. Nothing was pushed, and no timed benchmark was run. Every
+mutation and revert below was undone with `git checkout`.
+
+### Findings
+
+None blocking.
+
+1. **The re-pin is derived, not copied.** `executor_table_rows()` restates both tables from their
+   entry types and the fixture's 82 emitted ops: `bytes::<u32>(82)` and
+   `bytes::<(usize, u32)>(82)`, asserted to be `(328, 1_312)`. 82 is the same count #470's
+   reservation uses. `frozen_scratch_report`, `primitive_replacement_oracle` and the double-live
+   pin all read these rows. Nothing is read back from `graph`, and no literal was taken from a
+   failing run.
+2. **The re-pin discriminates.**
+   - *Against the base tree:* with `crates/graph/src/{lib,runtime}.rs` put back to `64b155d0` and
+     the new pins kept, the test goes red. The report gives 54,763 / 235,528 / 235,528 against the
+     pinned 56,403 / 237,168 / 237,168, exactly 1,640 on each of the three graph figures.
+   - *Against a missing row:* with the "executor copied-claim table reservation" row dropped from
+     `graph_owners`, the test fails `double-live graph/model authority`.
+     `assert_effective_owner_mutations` also refuses the omission, or a one-byte miscount, of
+     either row.
+   - *Against the engine itself:* `oracle.graph` is the exact cap the double-live compile must
+     meet, and one byte below it must be refused. So the new rows are checked against the live
+     engine, not only against each other.
+   - *Positional check:* the rows are appended after the others, so the positional
+     `graph_rows[5..13]` check still holds at 49,167.
+3. **The largest allocation does not move.** The largest table charge is 1,312, below the 49,167
+   graph metadata row.
+4. **Scope.** Across the branch from `64b155d0`, only the attempt-1 paths, the amended
+   `crates/capi/tests/resource_lifecycle.rs` and this spec changed.
+   `hosts/host-web/tests/browser-v1/expected.json` is untouched and is due at the batch boundary.
+   Deviation 5 is corrected, and its fixture follow-up is #947 (open).
+
+### Gates re-run on `80f7ec80`
+
+- **CI `test-debug-a`:** the exact command from `qualification.yml:476`, with `--no-fail-fast`,
+  exits 0. It reports 109 result lines, 1,472 passed, 0 failed and 10 ignored. `cargo run -p
+  host-native` passes.
+- **Suites:** `cargo test -p capi` (32 + 4 passed), `-p console-workload` and `-p graph` without
+  features all pass.
+- **Lints:** `cargo fmt --all --check`, workspace `clippy --all-features -D warnings`, and
+  `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` all pass.
+- **Policy:** `check-realtime-policy.sh` passes (54 regions), as do `check-graph-policy.sh` and
+  `check-graph-determinism.sh` (100/100).
+
+The attempt-1 class-A, order and mutation findings stand, because the graph sources are unchanged
+since `3172be42`. No attempt-1 gate regressed.
+
+### Batch-boundary items that remain open
+
+- Re-pin the browser expected-resources rows in `hosts/host-web/tests/browser-v1/expected.json`.
+  They move by emitted ops x 12 B on wasm32.
+- Open a tooling issue for the realtime-policy script missing the `.collect::<` turbofish form.
+- #947: regenerate and gate the graph resource-report fixtures.
