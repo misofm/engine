@@ -628,12 +628,12 @@ fn reduce_group_into<L: Lane, const N: usize>(
 /// **Why the tail is outlined.** The frames that do not fill a vector run the same body at
 /// `L = f32`, as every D9 kernel finishes its tail, but in [`route_tail`]: a separate, non-generic,
 /// never-inlined function. Inlined here, LLVM unrolls the up-to-three `f32` tail frames of the
-/// `f32x4` instantiation into three scalar operations per vector one, and the AudioWorklet
-/// artifact gate (`scripts/check-web-audioworklet-callgraph.py`, rule 3) rejects any
-/// `wide::f32x4` instantiation whose scalar arithmetic is not strictly below its vector
-/// arithmetic. Issue #920's kernel failed it exactly that way (560 vector against 1,680 scalar).
-/// This function is itself never inlined, so its `f32x4` instantiation stays one named symbol
-/// that the gate inspects on every build; the call is once per block.
+/// wasm build's four-lane instantiation into three scalar operations per vector one, and the
+/// AudioWorklet artifact gate (`scripts/check-web-audioworklet-callgraph.py`, rule 3) rejects any
+/// function instantiated at the four-lane type whose scalar arithmetic is not strictly below its
+/// vector arithmetic. Issue #920's kernel failed it exactly that way (560 vector against 1,680
+/// scalar). This function is itself never inlined, so its four-lane instantiation stays one named
+/// symbol that the gate inspects on every build; the call is once per block.
 ///
 /// Both planes are formed in one pass per pair, because both mixes read both input planes: each
 /// input word is loaded once where the two-pass form would load it twice. Each output plane's
@@ -744,8 +744,13 @@ fn route_pair<L: Lane, const G: usize>(
 ///
 /// Non-generic and never inlined on purpose, and not for speed (it runs only when the quantum is
 /// not a multiple of the lane width): see [`route_reduce`], "Why the tail is outlined". Its `f32`
-/// arithmetic is therefore never counted against the `wide::f32x4` instantiation of the vector
-/// kernel, and it carries no `f32x4` arithmetic of its own.
+/// arithmetic is therefore never counted against the four-lane instantiation of the vector kernel.
+///
+/// A tail is shorter than every lane width, so a run as long as the widest lane (eight frames) is
+/// refused before any write. The bound is not a check of the caller: it is what stops LLVM from
+/// vectorising this function's loops. Without it, the wasm build vectorised both accumulate forms
+/// here (24 `f32x4` operations beside the scalar body); with it, the trip count is at most seven
+/// and the function carries no vector arithmetic at all.
 #[inline(never)]
 fn route_tail(
     left: &mut [f32],
