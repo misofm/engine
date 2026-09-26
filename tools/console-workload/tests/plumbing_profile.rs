@@ -38,11 +38,6 @@ const ARENA_BUFFERS: usize = TRACKS + 2;
 const REDUCE_GROUP: usize = 8;
 const FADD_LATENCY_CYCLES: f64 = 3.0;
 
-fn percentile(sorted: &[u64], p: f64) -> u64 {
-    let rank = ((p / 100.0) * sorted.len() as f64).ceil().max(1.0) as usize;
-    sorted[rank.min(sorted.len()) - 1]
-}
-
 /// Median cost of one `Instant::now()` pair, the unit of probe overhead.
 fn probe_cost_ns() -> f64 {
     let mut deltas: Vec<u64> = (0..20_000)
@@ -131,8 +126,8 @@ fn phase_profile() {
         }
         samples.sort_unstable();
         let min = samples[0];
-        let p50 = percentile(&samples, 50.0);
-        let p95 = percentile(&samples, 95.0);
+        let p50 = bench_support::stats::per_mille(&samples, 500);
+        let p95 = bench_support::stats::per_mille(&samples, 950);
         println!(
             "repeat {repeat}: probes off  min {min} ns  p50 {p50} ns  p95 {p95} ns  \
              (p50 = {:.0} cycles/block, {:.3} cycles/lane-sample)",
