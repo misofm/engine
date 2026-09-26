@@ -88,9 +88,12 @@ implemented (the measurement is the reason; a later host may re-measure).
    input over frames `{1, 3, 7, 13, 16, 64, 128}` and `output_route_folds() == 64`; the four
    declining shapes; console-workload digests folded vs declined over 64 blocks and the three
    chain-shape tests unchanged; the five red mutations plus one new: *hoist the whole table's
-   coefficients before the pair loop* must fail a new `MUTATIONS.md` row by the callgraph gate
-   below; `cargo test -p graph` both ways, `-p graph-compiler`, `-p console-workload`, the four
-   policy scripts).
+   coefficients before the pair loop* recorded as a `MUTATIONS.md` row (amended by Sol's
+   attempt-1 verdict: the callgraph gate cannot see a hoist, since rule 3 counts arithmetic
+   families and a hoist moves splats; the row is red on `check-realtime-policy.sh` and on the
+   allocation audit instead, and no automated gate sees a kernel that merely spills; only the
+   benchmark does); `cargo test -p graph` both ways, `-p graph-compiler`, `-p console-workload`,
+   the four policy scripts).
 6. **The AudioWorklet callgraph gate in the issue, not at the batch boundary:**
    `scripts/build-web-audioworklet.sh` then `scripts/check-web-audioworklet.sh` (rule 3 in
    `scripts/check-web-audioworklet-callgraph.py:352-359`) must accept the wasm instantiation of
@@ -428,3 +431,35 @@ at `:7150` and `:7251` (`:7081`, `:7173`). `HostMaster` `:324`, `REDUCE_GROUP` `
   #920 noted.
 - Not run: browser qualification and the pin (batch boundary), `-p bench`, `-p audit`, the
   paired console benchmark.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `da4a3f44`, `67649092`, `737d6bf1` and
+`0a54330c` on base `3c93469d`. No blocking findings. Bit identity read against the base kernels:
+`mix_chunk` is `mix2x2_block`'s two expressions operand for operand; the first pair stores
+`mix(in0)` then adds `mix(in1)`, later pairs reload the running sum and add in edge order, the
+lone last input is the same body at `G = 1`, and a planar `f32` store and reload is exact on every
+target, so pair boundaries and the base's group-of-eight boundaries are the same rounding chain;
+`Lane::fma` is unfused, so width cannot move a bit. The reviewer rebuilt the simd128 artifact
+(digest `018b7605...8f23`, equal to the implementer's) and counted with the gate's own parser:
+`route_reduce<f32x4>` 44 vector / 0 scalar, `route_tail` a separate non-generic symbol at 0 / 308,
+kernel shape 15 kernels, the render closure 8 functions, `check-web-audioworklet.sh` exit 0.
+The `route_tail` length bound is unreachable (the tail is `frames % L::WIDTH`) and its refusal
+matches `reduce_many_into`'s existing refuse-and-silence. Eligibility holds on the shape #925
+produces (`Input -> Route -> Output`): the fold asks nothing of the route's producer beyond
+`input_producers`. Five mutations re-applied and reverted, red as recorded; the tail-inlined
+mutation reproduces #920's failure mode at 44 / 176. Reviewer-run gates, all green: `cargo test -p
+graph` (both configurations), `-p console-workload`, `-p graph-compiler`, `-p host-core
+--all-features`, fmt, graph clippy, determinism (100/100), graph, realtime and lane policy.
+
+Recorded for the batch merge: #925's console test `the_plumbing_row_is_input_route_output_and_
+renders_the_base_bits` pins 129 units and `symmetry_counters` `[65, 129]`; with the 64 routes
+retired those become 65 and `[65, 65]` (or whatever the merged tree reports; the digest assertion
+is what matters and passes on the scratch merge). Recorded nits, no change: no automated gate can
+see a kernel that spills (only the benchmark can); the `route_tail` bound is a compiler-steering
+trick no gate pins (bits cannot move either way). Pre-existing, for a successor issue: the wasm
+callgraph reaches `__rust_dealloc` from `GraphExecutor::render` through
+`RealtimeObservationActivation::apply_candidate`'s drop of a `pending` snapshot that the
+ownership protocol keeps `None` on every render, so the path is dynamically dead but statically
+live. Not re-verified: the native assembly claims, the 560/1,680 reproduction on `da4a3f44`,
+mutations 926-2/3/5/6 and 926-9..17, workspace-wide clippy, `-p bench`, `-p audit`.
