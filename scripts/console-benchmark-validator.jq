@@ -1,14 +1,15 @@
-# Aggregate validator: sixteen session workloads, two hoist workloads, one meters arm, one
-# observation arm, one placement row-pair, one automation-active row and one mono row-pair, each in
-# rounds one and two -- forty-six records.
+# Aggregate validator: seventeen session workloads (sixteen bound-feed rows and the driver-fed
+# plumbing row, #928), two hoist workloads, one meters arm, one observation arm, one placement
+# row-pair, one automation-active row and one mono row-pair, each in rounds one and two --
+# forty-eight records.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 46 and
+(type == "array") and length == 48 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 32 and
+([.[] | select(.record == "console_session")] | length) == 34 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -20,11 +21,19 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_automation") | .workload_kind] | unique)
   == ["sixty_four_track_compressor_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 46 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 48 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
 (group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256) | unique | length == 1)) and
+# #928: the driver-fed plumbing row is the bound-feed plumbing row fed through a prepared source
+# set. The two feeds deliver the same frozen words, so the two rows render the same bits in both
+# rounds; a difference is a harness defect, never a finding, and the run is refused rather than
+# published with two numbers for two different computations.
+([.[] | select(.record == "console_session" and
+               (.workload_kind == "sixty_four_track_plumbing_only" or
+                .workload_kind == "sixty_four_track_plumbing_ring"))
+      | .output_sha256] | length == 4 and (unique | length) == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,

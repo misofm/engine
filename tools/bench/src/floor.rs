@@ -268,7 +268,13 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // route ops and a reduction over 64 separate buffers -- against the four lane-ops that
         // plumbing requires, so it is the worst standing in the table by a wide margin and that
         // gap is the dispatch job 3's fold removed from every banked row.
-        Workload::SixtyFourTrackPlumbingOnly => FloorRow {
+        //
+        // The driver-fed twin (issue #928) is the same session with its track inputs claimed by
+        // a prepared source set, so it requires the same arithmetic: moving a frozen block into
+        // the graph is a copy, not a lane-op, whichever feed does it. It is costed at this
+        // inventory, equal to the floor rather than below it, and it too names no control and is
+        // nobody's control -- the floor-of-the-table test stays anchored on the bound row.
+        Workload::SixtyFourTrackPlumbingOnly | Workload::SixtyFourTrackPlumbingRing => FloorRow {
             lane_ops: PLUMBING_LANE_OPS,
             width_factor: full,
             control: None,
@@ -378,12 +384,17 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
         OPS_PER_CYCLE, PLUMBING_LANE_OPS, floor_row, lane_samples_per_block,
     };
-    use console_workload::{WORKLOADS, Workload};
+    use console_workload::{DRIVER_FED_WORKLOADS, WORKLOADS, Workload};
+
+    /// Every session row the bench emits: [`WORKLOADS`], then the driver-fed rows.
+    fn session_rows() -> impl Iterator<Item = Workload> {
+        WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS)
+    }
 
     fn rust_floor_table() -> String {
         let mut keys = BTreeSet::new();
         let mut table = String::from("{");
-        for (index, workload) in WORKLOADS.into_iter().enumerate() {
+        for (index, workload) in session_rows().enumerate() {
             let key = workload.kind();
             assert!(keys.insert(key), "duplicate floor workload key: {key}");
             if index != 0 {
@@ -496,7 +507,7 @@ input as $rust |
 
     #[test]
     fn every_derived_row_names_its_ruling_and_composes_a_positive_floor() {
-        for workload in WORKLOADS {
+        for workload in session_rows() {
             let Some(row) = floor_row(workload) else {
                 assert!(matches!(workload, Workload::NineTrackBaseline));
                 continue;
@@ -513,7 +524,7 @@ input as $rust |
 
     #[test]
     fn a_control_row_is_always_cheaper_than_the_row_it_isolates() {
-        for workload in WORKLOADS {
+        for workload in session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
@@ -568,7 +579,7 @@ input as $rust |
     #[test]
     fn the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory() {
         let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
-        for workload in WORKLOADS {
+        for workload in session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
@@ -584,6 +595,44 @@ input as $rust |
         assert!(
             (identity.cycles_per_lane_sample() - gain_pan.cycles_per_lane_sample()).abs() < 1.0e-9
         );
+    }
+
+    /// The driver-fed plumbing row (issue #928) is costed at the plumbing inventory exactly, and it
+    /// isolates nothing.
+    ///
+    /// Equal to the floor, never below it: the floor-of-the-table test above holds with `>=`, and
+    /// this pins that the second row at that inventory is the plumbing row's arithmetic restated
+    /// -- same basis, same cycles -- rather than a new, cheaper inventory. And like the plumbing
+    /// row it names no control and nothing names it: a feed change is not an arithmetic change, so
+    /// a subtraction between the two feeds would publish a copy's cost as an isolate against a
+    /// floor that has no copy in it.
+    #[test]
+    fn the_driver_fed_plumbing_row_is_costed_at_the_plumbing_floor_and_isolates_nothing() {
+        let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
+        let ring = floor_row(Workload::SixtyFourTrackPlumbingRing).expect("a derived row");
+        assert_eq!(ring.basis, plumbing.basis);
+        assert_eq!(
+            ring.basis,
+            "docs/rulings/effect-floor-accounting.md: plumbing"
+        );
+        assert!(
+            (ring.cycles_per_lane_sample() - plumbing.cycles_per_lane_sample()).abs() < 1.0e-12
+        );
+        assert!(
+            (ring.cycles_per_lane_sample() - PLUMBING_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
+                .abs()
+                < 1.0e-12
+        );
+        assert!(ring.control.is_none());
+        for workload in session_rows() {
+            let control = floor_row(workload).and_then(|row| row.control);
+            assert!(
+                control != Some(Workload::SixtyFourTrackPlumbingRing)
+                    && control != Some(Workload::SixtyFourTrackPlumbingOnly),
+                "{} isolates against a plumbing row",
+                workload.kind()
+            );
+        }
     }
 
     /// The three mono rows are the standing console row's inventory, restated for their fixture.
