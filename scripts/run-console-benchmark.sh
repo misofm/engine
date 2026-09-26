@@ -271,7 +271,14 @@
 # otherwise.
 set -euo pipefail
 phase_directory=issue149
-if [[ "$#" == 1 ]]; then
+# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
+# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step
+# before it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64
+# characters, and like every arm it refuses to overwrite an existing record.
+if [[ "$#" == 2 && "$1" == --step ]]; then
+    [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
+    phase_directory="steps/$2"
+elif [[ "$#" == 1 ]]; then
     case "$1" in
         --phase2) phase_directory=issue149-phase2 ;;
         --phase3) phase_directory=issue149-phase3 ;;
@@ -321,10 +328,10 @@ if [[ "$#" == 1 ]]; then
         --copy-removal-without-920) phase_directory=copy-removal-without-920 ;;
         --plumbing-floor) phase_directory=plumbing-floor ;;
         --plumbing-floor-baseline) phase_directory=plumbing-floor-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline]\n' "$0" >&2; exit 2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline|--step NAME]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline|--step NAME]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

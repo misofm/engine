@@ -42,7 +42,14 @@
 # readings they carry, and why phase 3 gets no directory of its own.
 set -euo pipefail
 phase_directory=issue149
-if [[ "$#" == 1 ]]; then
+# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
+# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step
+# before it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64
+# characters, and like every arm it refuses to overwrite an existing record.
+if [[ "$#" == 2 && "$1" == --step ]]; then
+    [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
+    phase_directory="steps/$2"
+elif [[ "$#" == 1 ]]; then
     case "$1" in
         --phase2) phase_directory=issue149-phase2 ;;
         --phase3) phase_directory=issue149-phase3 ;;
