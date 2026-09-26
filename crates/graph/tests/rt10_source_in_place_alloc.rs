@@ -1,6 +1,9 @@
 //! Issue #918 gate 3: a banked source gather that reads the played transfer block in place
 //! allocates and frees nothing on the render path, across 1000 blocks, and renders the bits the
 //! same plan renders when its driver does not lend its planes (every claim copied).
+//!
+//! Issue #927: the same for a bankless plan, whose fused Output reduction reads each plain strip's
+//! claim in place.
 
 use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
 use effect_contract::{BankWidth, LatencySamples, TailSamples};
@@ -20,6 +23,10 @@ const LANES: usize = 4;
 const BLOCKS: u64 = 1_000;
 /// Every seventh block is an underrun: nothing is played, and the gather reads silence.
 const UNDERRUN_EVERY: u64 = 7;
+
+/// The allocator's mode is process-wide and both tests set and restore it, so they take turns
+/// (the pattern of `rt9_resident_bank_input_alloc.rs`).
+static ALLOCATOR_MODE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct RestoreMode(Mode);
 impl Drop for RestoreMode {
@@ -162,8 +169,14 @@ fn estimate() -> GraphResourceEstimate {
     }
 }
 
-/// `Input (claimed) -> PostInputBuiltins (one W4 builtin bank) -> Route -> Output` per lane.
-fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRenderPlan {
+/// `Input (claimed) -> PostInputBuiltins (one W4 builtin bank) -> Route -> Output` per lane, or,
+/// `bankless`, `Input (claimed) -> Route -> Output`: the plain strip whose route the Output fold
+/// retires (issue #926) and whose claim the fused reduction reads in place (issue #927).
+fn prepared_plan(
+    lend: bool,
+    bankless: bool,
+    calls: &Arc<Calls>,
+) -> engine::realtime::PreparedRenderPlan {
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES),
@@ -202,18 +215,23 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
     let mut edges = Vec::new();
     for lane in 0..LANES {
         let route_id = StableGraphId::parse(&format!("route{lane}")).expect("route id");
-        edges.push(edge(
-            GraphEdgeId::TrackMain {
-                target: members[lane].clone(),
-            },
-            &inputs[lane],
-            &members[lane],
-        ));
+        let route_source = if bankless {
+            &inputs[lane]
+        } else {
+            edges.push(edge(
+                GraphEdgeId::TrackMain {
+                    target: members[lane].clone(),
+                },
+                &inputs[lane],
+                &members[lane],
+            ));
+            &members[lane]
+        };
         edges.push(edge(
             GraphEdgeId::RouteSource {
                 route_id: route_id.clone(),
             },
-            &members[lane],
+            route_source,
             &routes[lane],
         ));
         edges.push(edge(
@@ -223,12 +241,16 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
         ));
     }
     edges.sort_by(|left, right| left.id.cmp(&right.id));
-    let levels = [
-        inputs.clone(),
-        members.clone(),
-        routes.clone(),
-        vec![output.clone()],
-    ];
+    let levels: Vec<Vec<GraphNodeId>> = if bankless {
+        vec![inputs.clone(), routes.clone(), vec![output.clone()]]
+    } else {
+        vec![
+            inputs.clone(),
+            members.clone(),
+            routes.clone(),
+            vec![output.clone()],
+        ]
+    };
     let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
     let mut nodes: Vec<_> = schedule
         .iter()
@@ -241,7 +263,9 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
         .collect();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
     let mut required = inputs.clone();
-    required.extend(members.iter().cloned());
+    if !bankless {
+        required.extend(members.iter().cloned());
+    }
     required.push(output.clone());
     let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
         plan_id: 918,
@@ -284,12 +308,16 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
         effect_controls: Vec::new(),
         effect_observations: Vec::new(),
         banks: Vec::new(),
-        builtin_banks: vec![GraphPreparedBuiltinBank {
-            backend: Backend::Simd4,
-            members: members.clone().into_boxed_slice(),
-            processor: Box::new(Tilt),
-            scratch: rack::AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
-        }],
+        builtin_banks: if bankless {
+            Vec::new()
+        } else {
+            vec![GraphPreparedBuiltinBank {
+                backend: Backend::Simd4,
+                members: members.clone().into_boxed_slice(),
+                processor: Box::new(Tilt),
+                scratch: rack::AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
+            }]
+        },
         observers: Vec::new(),
     });
     let source_set = GraphPreparedSourceSet::new(
@@ -348,6 +376,9 @@ fn render(plan: &mut engine::realtime::PreparedRenderPlan, masters: &mut [u32]) 
 
 #[test]
 fn an_in_place_source_gather_renders_the_copy_bits_and_allocates_nothing() {
+    let _mode_guard = ALLOCATOR_MODE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_installed();
     let _restore = RestoreMode(mode());
     set_mode(Mode::Count);
@@ -367,8 +398,8 @@ fn an_in_place_source_gather_renders_the_copy_bits_and_allocates_nothing() {
 
     let words = BLOCKS as usize * 2 * FRAMES as usize;
     let (lent_calls, copied_calls) = (Arc::new(Calls::default()), Arc::new(Calls::default()));
-    let mut lent = prepared_plan(true, &lent_calls);
-    let mut copied = prepared_plan(false, &copied_calls);
+    let mut lent = prepared_plan(true, false, &lent_calls);
+    let mut copied = prepared_plan(false, false, &copied_calls);
     let (mut lent_masters, mut copied_masters) = (vec![0_u32; words], vec![0_u32; words]);
 
     realtime::audit::reset();
@@ -394,6 +425,69 @@ fn an_in_place_source_gather_renders_the_copy_bits_and_allocates_nothing() {
         calls(&lent_calls),
         [0, BLOCKS * LANES as u64],
         "lent: no claim copied, every lane's gather borrowed its planes every block"
+    );
+    assert_eq!(
+        calls(&copied_calls),
+        [BLOCKS * LANES as u64, 0],
+        "not lent: every claim copied every block, no plane borrowed"
+    );
+}
+
+/// Issue #927: the bankless plan's fused Output reduction reads every claim in place, allocates
+/// and frees nothing across 1000 blocks (one in seven an underrun, read from the silence buffer),
+/// and renders the bits of the same plan whose driver does not lend (every claim copied). The
+/// driver's own call counts say which path each arm took.
+#[test]
+fn an_in_place_output_read_renders_the_copy_bits_and_allocates_nothing() {
+    let _mode_guard = ALLOCATOR_MODE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+
+    realtime::audit::warm_up();
+    realtime::audit::reset();
+    realtime::audit::in_render_scope(|| {
+        let probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        core::hint::black_box(&probe);
+        drop(probe);
+    });
+    let live = realtime::audit::snapshot();
+    assert!(
+        live.allocations > 0 && live.deallocations > 0,
+        "the audit counts allocations in render scope"
+    );
+
+    let words = BLOCKS as usize * 2 * FRAMES as usize;
+    let (lent_calls, copied_calls) = (Arc::new(Calls::default()), Arc::new(Calls::default()));
+    let mut lent = prepared_plan(true, true, &lent_calls);
+    let mut copied = prepared_plan(false, true, &copied_calls);
+    let (mut lent_masters, mut copied_masters) = (vec![0_u32; words], vec![0_u32; words]);
+
+    realtime::audit::reset();
+    render(&mut lent, &mut lent_masters);
+    let measured = realtime::audit::snapshot();
+    assert_eq!(
+        (measured.allocations, measured.deallocations),
+        (0, 0),
+        "{BLOCKS} in-place blocks allocate and free nothing"
+    );
+
+    render(&mut copied, &mut copied_masters);
+    assert_eq!(
+        lent_masters, copied_masters,
+        "the in-place Output read renders the copied plan's bits"
+    );
+    assert!(
+        lent_masters.iter().any(|word| *word != 0),
+        "the master carries audio"
+    );
+    let calls = |calls: &Calls| [calls.0[0].load(Relaxed), calls.0[1].load(Relaxed)];
+    assert_eq!(
+        calls(&lent_calls),
+        [0, BLOCKS * LANES as u64],
+        "lent: no claim copied, every Output input borrowed its planes every block"
     );
     assert_eq!(
         calls(&copied_calls),
