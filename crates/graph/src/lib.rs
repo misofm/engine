@@ -6005,8 +6005,10 @@ mod tests {
     /// Three tracks, each `Input -> seven stages -> Route -> Output`, the shape
     /// `GraphCompiler::compile` builds for a session with no effects. The input is hostile: signed
     /// zeros, subnormals and magnitudes over `2^-24 .. 2^25`, fresh every block. Every route
-    /// carries a hostile 2x2 and gain, and one coefficient is exactly `-0.0`, so a copy that
-    /// flipped a sign or flushed a subnormal would show. Class A is the claim: an identity copy
+    /// carries a hostile 2x2 and gain, and the hostile *input* carries signed zeros and
+    /// subnormals, which is what would expose a copy that flipped a sign or flushed a subnormal:
+    /// an identity op's only work is the byte copy in `reduce_plane`'s single-input arm, so the
+    /// alias holds the same words, `-0.0` included. Class A is the claim: an identity copy
     /// moves no bit and an in-place identity computes nothing, so removing them must leave every
     /// word where it was.
     ///

@@ -373,3 +373,34 @@ The paired console benchmark runs once at the batch boundary, and this table is 
 - The partial-listing arm of the random-graph test does not assert the arena bound
   `buffers <= ops`. That bound was written for the fully listed program, and fewer ops with PDC
   staging are not covered by its argument. The arm asserts dataflow and the op/alias structure.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `ba3b3a25` through `d2318d6c` on base
+`3c93469d`, including the coordinator's scope amendment and the #169 ruling. No blocking or
+should-fix findings. Contract, traced in code: no host, C-ABI or web path compiles builtins-less
+(`GraphCompiler::compile` has three non-test callers, two that never bind and console-workload,
+which binds by iterating `required_bindings`); host-core's single compile is
+`compile_with_builtins`, where all three stages are listed and the predicate collapses to
+`is_alias_candidate`, so every with-builtins program, arena and digest equals base by
+construction; live trim, polarity and filter retargets ride the builtins artifact's controls, so
+the D2 liveness ruling is untouched; a builtins-less meter at `PostMatrix` would become a `Tap` on
+the Input's buffer with bit-identical windows and `first_sample`, and the activation ordinal is
+re-derived at every bind. `required_bindings` has no reader in the resource estimate, the
+canonical form, the C ABI, the SDK or any fixture, and no fixture pinned the old 321-unit shape or
+the plumbing digest. Base numbers recovered on the branch through mutation 925-5: 321 units, the
+same digest, arena 193; branch 129 units, 192 / 129; the renamed merged-span test states the
+truth and #931 carries the with-builtins finding (256 / 193 at base and here). Four mutations
+re-applied and reverted with the evidence's counts. Reviewer-run gates, all green: fmt, `cargo
+test -p graph` (both configurations), `-p graph-compiler`, `-p console-workload`,
+`-p builtins-compiler --features test-support`, `-p host-core --all-features`, `-p audit`,
+`-p conformance`, `-p capi`, the two-crate clippy, determinism (100/100), graph and realtime
+policy, the browser expected-resources self-test.
+
+Three nits, recorded: the gate-1 doc said the `-0.0` route coefficient is what would expose a
+sign-flipping copy; it is the hostile input, since an identity op's only work is a byte copy
+(comment corrected in this commit); the spec's "will hit" note about the elided-binding refusal
+test was stale (that test pushes a rack boundary, still an alias candidate, and was rightly left
+alone); the fifteen with-builtins rows' measured equality to base is not reproducible from the
+checkpoint (the separate target directory was removed) and rests on the derivation above.
+Not re-verified: the descriptive profile table, `cargo test -p bench`, the workspace-wide clippy.
