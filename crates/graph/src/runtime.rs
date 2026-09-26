@@ -596,12 +596,13 @@ fn reduce_group_into<L: Lane, const N: usize>(
     accumulate_group::<L, N>(target, sources, initial_store)
 }
 
-/// The session Output op's reduction with each contributor's route fused in (issue #920).
+/// The session Output op's reduction with each contributor's route fused in, one **pair** of
+/// inputs at a time (issue #926; the fold's eligibility is issue #920's, [`output_route_fold`]).
 ///
 /// Input `i` is the buffer a plain route ran in place over, and `routes[i]` is that route's
-/// folded 2x2. The route op itself is retired at bind ([`output_route_fold`]), so the buffer holds
-/// the route's *input*. This computes, per frame and per plane, exactly the value the route op and
-/// then [`reduce_many_into`] computed:
+/// folded 2x2. The route op itself is retired at bind, so the buffer holds the route's *input*.
+/// This computes, per frame and per plane, exactly the value the route op and then
+/// [`reduce_many_into`] computed:
 ///
 /// * **The mix** is [`lane::kernels::mix2x2_block`]'s, operand for operand:
 ///   `left = lr.fma(r, ll.mul(l))` and `right = rr.fma(r, rl.mul(l))`, from the input's original
@@ -609,18 +610,41 @@ fn reduce_group_into<L: Lane, const N: usize>(
 ///   load move an `f32`'s bits unchanged, so taking the word from a register instead is the same
 ///   word. `Lane::fma` is two roundings on every backend, so the vector body and the `f32` tail
 ///   agree lane for lane, as they do in `mix2x2_block`.
-/// * **The sum** is [`reduce_many`]'s: groups of [`REDUCE_GROUP`] in edge order; the first group
-///   stores `mix(in0) + mix(in1) + ...` and every later group reloads the running sum from the
-///   host plane and keeps adding, left to right.
+/// * **The sum** is [`reduce_many`]'s one left-to-right chain, `((m0 + m1) + m2) + ...` in edge
+///   order. The first pair stores `m0 + m1`, with the first contributor taken as the value, so a
+///   `-0.0` survives (the fan-in is at least two, so the first pair is always whole); every later
+///   pair, the odd fan-in's lone last input included, reloads the running sum from the host plane
+///   and adds its `m_i` left to right. Where the chain is stored and reloaded does not matter: a store and a
+///   load move no bit, which is the argument [`reduce_many`] already makes for its group
+///   boundaries. So groups of two here and groups of [`REDUCE_GROUP`] there are the same chain.
 ///
-/// Both planes are formed in one pass per group, because both mixes read both input planes: each
+/// **Why pairs.** Each pair hoists its eight coefficients as splats before its chunk loop, and
+/// that loop keeps eight coefficients, two running sums, two loads and two temporaries live,
+/// fourteen of sixteen AVX2 registers. A group of four or eight spills its coefficients, and a
+/// per-chunk broadcast costs a load-port operation per coefficient per chunk; the pair was the
+/// fastest of every group size and coefficient policy measured (`docs/handoffs/plumbing-floor-
+/// 2026-09-26/PLAN.md`, table C). An odd fan-in's last input is the same body at `G = 1`.
+///
+/// **Why the tail is outlined.** The frames that do not fill a vector run the same body at
+/// `L = f32`, as every D9 kernel finishes its tail, but in [`route_tail`]: a separate, non-generic,
+/// never-inlined function. Inlined here, LLVM unrolls the up-to-three `f32` tail frames of the
+/// `f32x4` instantiation into three scalar operations per vector one, and the AudioWorklet
+/// artifact gate (`scripts/check-web-audioworklet-callgraph.py`, rule 3) rejects any
+/// `wide::f32x4` instantiation whose scalar arithmetic is not strictly below its vector
+/// arithmetic. Issue #920's kernel failed it exactly that way (560 vector against 1,680 scalar).
+/// This function is itself never inlined, so its `f32x4` instantiation stays one named symbol
+/// that the gate inspects on every build; the call is once per block.
+///
+/// Both planes are formed in one pass per pair, because both mixes read both input planes: each
 /// input word is loaded once where the two-pass form would load it twice. Each output plane's
-/// arithmetic does not depend on the other's, so the pass order changes no bit.
+/// arithmetic does not depend on the other's, so the pass order changes no bit. Within a pair,
+/// the vector frames run before the tail frames, and frames are independent, so each frame still
+/// sees the pairs in edge order.
 ///
-/// `false`, before the first write, for a table that does not match the inputs or a fan-in below
-/// two; `false` mid-reduction only for a group whose shape check fails, which the host-plane length
-/// check at `HostMaster::new` rules out. The caller turns `false` into an error.
-#[inline]
+/// `false`, before the first write, for a table that does not match the inputs, a fan-in below
+/// two, or host planes that are not `lease.frames()` words (which `HostMaster::new` already
+/// rules out). The caller turns `false` into an error.
+#[inline(never)]
 fn route_reduce<L: Lane>(
     lease: &ArenaLease,
     inputs: &[u32],
@@ -628,24 +652,36 @@ fn route_reduce<L: Lane>(
     left: &mut [f32],
     right: &mut [f32],
 ) -> bool {
-    if inputs.len() != routes.len() || inputs.len() < 2 {
+    let frames = lease.frames();
+    if inputs.len() != routes.len()
+        || inputs.len() < 2
+        || left.len() != frames
+        || right.len() != frames
+    {
         return false;
     }
-    for (index, (group, table)) in inputs
-        .chunks(REDUCE_GROUP)
-        .zip(routes.chunks(REDUCE_GROUP))
-        .enumerate()
-    {
+    let vectored = frames - frames % L::WIDTH;
+    for (index, (pair, table)) in inputs.chunks(2).zip(routes.chunks(2)).enumerate() {
         let initial_store = index == 0;
-        let reduced = match group.len() {
-            1 => route_group::<L, 1>(lease, group, table, left, right, initial_store),
-            2 => route_group::<L, 2>(lease, group, table, left, right, initial_store),
-            3 => route_group::<L, 3>(lease, group, table, left, right, initial_store),
-            4 => route_group::<L, 4>(lease, group, table, left, right, initial_store),
-            5 => route_group::<L, 5>(lease, group, table, left, right, initial_store),
-            6 => route_group::<L, 6>(lease, group, table, left, right, initial_store),
-            7 => route_group::<L, 7>(lease, group, table, left, right, initial_store),
-            8 => route_group::<L, 8>(lease, group, table, left, right, initial_store),
+        let reduced = match (pair, table) {
+            (&[first, second], &[first_route, second_route]) => route_pair::<L, 2>(
+                lease,
+                [first, second],
+                &[first_route, second_route],
+                left,
+                right,
+                vectored,
+                initial_store,
+            ),
+            (&[only], &[only_route]) => route_pair::<L, 1>(
+                lease,
+                [only],
+                &[only_route],
+                left,
+                right,
+                vectored,
+                initial_store,
+            ),
             _ => false,
         };
         if !reduced {
@@ -655,82 +691,118 @@ fn route_reduce<L: Lane>(
     true
 }
 
-/// One group of `N` consecutive routed inputs into both host planes: `2N` shared reads, one pass.
-#[inline]
-fn route_group<L: Lane, const N: usize>(
-    lease: &ArenaLease,
-    group: &[u32],
-    table: &[[f32; 4]],
-    left: &mut [f32],
-    right: &mut [f32],
-    initial_store: bool,
-) -> bool {
-    let (Ok(ids), Ok(table)) = (
-        <&[u32; N]>::try_from(group),
-        <&[[f32; 4]; N]>::try_from(table),
-    ) else {
-        return false;
-    };
-    let lefts = (*ids).map(|input| lease.read(0, input));
-    let rights = (*ids).map(|input| lease.read(1, input));
-    route_accumulate::<L, N>(left, right, lefts, rights, table, initial_store)
-}
-
-/// [`accumulate_group`] with a route in front of every source: the vector body at `L`, the frames
-/// that do not fill a vector at `L = f32`, and the one shape check before the first write.
+/// One pair of routed inputs (`G = 2`), or an odd fan-in's last input (`G = 1`), into both host
+/// planes: the vector frames at `L` here, then the tail frames, if any, in [`route_tail`].
+///
+/// Every input plane is `lease.frames()` words ([`ArenaLease::read`]), which [`route_reduce`] has
+/// checked the host planes against, so the shape check below never fails; it is what lets the
+/// slicing below compile without a bounds check.
 #[inline(always)]
-fn route_accumulate<L: Lane, const N: usize>(
+fn route_pair<L: Lane, const G: usize>(
+    lease: &ArenaLease,
+    ids: [u32; G],
+    table: &[[f32; 4]; G],
     left: &mut [f32],
     right: &mut [f32],
-    lefts: [&[f32]; N],
-    rights: [&[f32]; N],
-    table: &[[f32; 4]; N],
+    vectored: usize,
     initial_store: bool,
 ) -> bool {
+    let lefts = ids.map(|input| lease.read(0, input));
+    let rights = ids.map(|input| lease.read(1, input));
     let frames = left.len();
-    if right.len() != frames
+    if vectored > frames
+        || right.len() != frames
         || lefts
             .iter()
             .chain(rights.iter())
-            .any(|source| source.len() != frames)
+            .any(|plane| plane.len() != frames)
     {
         return false;
     }
-    let vectored = frames - frames % L::WIDTH;
     let (left_vectors, left_tail) = left.split_at_mut(vectored);
     let (right_vectors, right_tail) = right.split_at_mut(vectored);
-    route_run::<L, N>(
+    route_run::<L, G>(
         left_vectors,
         right_vectors,
-        lefts.map(|source| &source[..vectored]),
-        rights.map(|source| &source[..vectored]),
+        lefts.map(|plane| &plane[..vectored]),
+        rights.map(|plane| &plane[..vectored]),
         table,
         initial_store,
-    ) && route_run::<f32, N>(
-        left_tail,
-        right_tail,
-        lefts.map(|source| &source[vectored..]),
-        rights.map(|source| &source[vectored..]),
-        table,
-        initial_store,
-    )
+    ) && (left_tail.is_empty()
+        || route_tail(
+            left_tail,
+            right_tail,
+            &lefts.map(|plane| &plane[vectored..]),
+            &rights.map(|plane| &plane[vectored..]),
+            table,
+            initial_store,
+        ))
 }
 
-/// One width's share of [`route_accumulate`]. Every slice has one common length, a multiple of
-/// `L::WIDTH`. As in [`accumulate_run`], the store and accumulate forms are two loops, so each
-/// walks a fixed number of sources.
-#[inline(always)]
-fn route_run<L: Lane, const N: usize>(
+/// The tail frames of one pair (or lone input) at `f32`: [`route_run::<f32, G>`](route_run), the
+/// same body the vector frames run, in a function of its own.
+///
+/// Non-generic and never inlined on purpose, and not for speed (it runs only when the quantum is
+/// not a multiple of the lane width): see [`route_reduce`], "Why the tail is outlined". Its `f32`
+/// arithmetic is therefore never counted against the `wide::f32x4` instantiation of the vector
+/// kernel, and it carries no `f32x4` arithmetic of its own.
+#[inline(never)]
+fn route_tail(
     left: &mut [f32],
     right: &mut [f32],
-    lefts: [&[f32]; N],
-    rights: [&[f32]; N],
-    table: &[[f32; 4]; N],
+    lefts: &[&[f32]],
+    rights: &[&[f32]],
+    table: &[[f32; 4]],
+    initial_store: bool,
+) -> bool {
+    if left.len() >= <lane::Simd8 as Lane>::WIDTH {
+        return false;
+    }
+    match (lefts, rights, table) {
+        (
+            &[first_left, second_left],
+            &[first_right, second_right],
+            &[first_route, second_route],
+        ) => route_run::<f32, 2>(
+            left,
+            right,
+            [first_left, second_left],
+            [first_right, second_right],
+            &[first_route, second_route],
+            initial_store,
+        ),
+        (&[only_left], &[only_right], &[only_route]) => route_run::<f32, 1>(
+            left,
+            right,
+            [only_left],
+            [only_right],
+            &[only_route],
+            initial_store,
+        ),
+        _ => false,
+    }
+}
+
+/// One width's share of one pair: every slice has one common length, a multiple of `L::WIDTH`.
+///
+/// The pair's coefficients are splatted once, before the loop: eight for a pair, four for a lone
+/// input. The pair's four input planes and the two host planes are then walked together by
+/// `chunks_exact(L::WIDTH)` in one loop. Per chunk: the first pair's value is `mix(in0)`, a later
+/// pair's is `load(out) + mix(in0)`; then `+ mix(in1)`; then the store. As in
+/// [`accumulate_run`], the store and accumulate forms are two loops, so neither branches per
+/// chunk.
+#[inline(always)]
+fn route_run<L: Lane, const G: usize>(
+    left: &mut [f32],
+    right: &mut [f32],
+    lefts: [&[f32]; G],
+    rights: [&[f32]; G],
+    table: &[[f32; 4]; G],
     initial_store: bool,
 ) -> bool {
     let coefficients = table.map(|route| route.map(L::splat));
-    let mut left_chunks = lefts.map(|source| source.chunks_exact(L::WIDTH));
-    let mut right_chunks = rights.map(|source| source.chunks_exact(L::WIDTH));
+    let mut left_chunks = lefts.map(|plane| plane.chunks_exact(L::WIDTH));
+    let mut right_chunks = rights.map(|plane| plane.chunks_exact(L::WIDTH));
     let outputs = left
         .chunks_exact_mut(L::WIDTH)
         .zip(right.chunks_exact_mut(L::WIDTH));
@@ -2185,7 +2257,7 @@ pub(crate) struct Runtime {
     /// mode each claim gets and why the rest keep the copy.
     source_plane_of_buffer: Box<[u32]>,
     /// One folded 2x2 per input of the Output op, in its edge order, when this bind retired every
-    /// route that feeds it and fused them into its reduction ([`route_reduce`], issue #920).
+    /// route that feeds it and fused them into its reduction ([`route_reduce`], issue #926).
     /// Empty otherwise, and then the Output op reduces as every other op does. Only the Output
     /// unit reads it: [`output_route_fold`] admits no other master.
     output_routes: Box<[[f32; 4]]>,
@@ -2358,7 +2430,7 @@ impl Runtime {
         self.folds
     }
 
-    /// Routes this bind retired into the session Output op's fused reduction (issue #920): one
+    /// Routes this bind retired into the session Output op's fused reduction (issue #926): one
     /// per input of that op when the fold was admitted, zero otherwise.
     #[cfg(test)]
     pub(crate) fn output_route_folds(&self) -> u64 {
@@ -2420,7 +2492,7 @@ impl Runtime {
             output_unit.is_none_or(|unit| matches!(units.get(unit), Some(RuntimeUnit::Op(_)))),
             "the session Output op is a plain unit of its own"
         );
-        // Issue #920: a route table is the Output op's, and it names one route per input of a
+        // Issue #926: a route table is the Output op's, and it names one route per input of a
         // plain identity reduction. `output_route_fold` admitted exactly that shape at preflight.
         debug_assert!(
             output_routes.is_empty()
@@ -2669,7 +2741,7 @@ impl Runtime {
             RuntimeUnit::Op(op) => {
                 let output = *output_unit == Some(index);
                 let host = output.then_some(host);
-                // Issue #920: only the Output op carries a route table; every other op reduces.
+                // Issue #926: only the Output op carries a route table; every other op reduces.
                 let routes: &[[f32; 4]] = if output { output_routes } else { &[] };
                 execute_op(
                     op,
@@ -3135,7 +3207,7 @@ fn observe_active_entry(
 /// op's input, not its output.
 ///
 /// `routes` is empty for every op but the session Output op, and empty for that op too unless the
-/// bind retired every route that feeds it (issue #920, [`output_route_fold`]). When it is not
+/// bind retired every route that feeds it (issue #926, [`output_route_fold`]). When it is not
 /// empty, entry `i` is the folded 2x2 of the route whose in-place buffer is `op.inputs[i]`, and
 /// the reduction is [`route_reduce`]: each route's `mix2x2_block` taken in registers on the way
 /// into the sum, rather than as a store pass of its own before it.
@@ -3205,7 +3277,7 @@ fn execute_op(
                 reduce_plane_into(lease, 1, output, right, &op.inputs);
             }
             Some(host) => {
-                // Issue #920: the retired routes' mixes, fused into the Output's reduction. A
+                // Issue #926: the retired routes' mixes, fused into the Output's reduction. A
                 // refused shape cannot occur for an admitted fold; were it to, the error path
                 // silences the host planes rather than play a partial sum.
                 let (left, right) = host.planes_mut();
@@ -4762,7 +4834,7 @@ pub fn test_only_set_scatter_redirect_declined(declined: bool) {
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// Issue #920's unfused oracle: the same plan bound with the Output route fold declined, so
+    /// Issue #926's unfused oracle: the same plan bound with the Output route fold declined, so
     /// every route op runs and the Output op reduces their outputs. Bind-time only; render never
     /// reads it.
     static OUTPUT_ROUTE_FOLD_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4771,7 +4843,7 @@ thread_local! {
 /// Decline (`true`) or restore (`false`) the Output route fold for every later bind on this
 /// thread.
 ///
-/// The unfused oracle for an Output-fold test (issue #920), on the pattern of
+/// The unfused oracle for an Output-fold test (issue #926), on the pattern of
 /// [`test_only_set_route_fold_declined`]: read once per bind, in `preflight_sequential`, before
 /// any owner moves; render never reads it, and it does not exist without `test-support`. Callers
 /// restore `false` after the bind they meant to decline.
@@ -4871,7 +4943,7 @@ pub(crate) struct SequentialPlan {
     /// The session Output node's op, whose storage is the host's planes (issue #916). Checked by
     /// `validate_fold_installation` to be a plain unit of its own.
     output_op: Option<usize>,
-    /// The routes retired into that op's fused reduction, and their table (issue #920).
+    /// The routes retired into that op's fused reduction, and their table (issue #926).
     output_fold: Option<OutputRouteFold>,
 }
 
@@ -4936,7 +5008,7 @@ pub(crate) fn preflight_sequential(
     let output_op = Some(output_op);
     #[cfg(test)]
     let output_op = output_op.filter(|_| !HOST_MASTER_DECLINED.with(std::cell::Cell::get));
-    // Issue #920: the fused kernel writes the host's planes, so it needs the Output unit. The
+    // Issue #926: the fused kernel writes the host's planes, so it needs the Output unit. The
     // arena oracle of #916 has none and keeps every route op.
     let output_fold = output_op
         .and_then(|master| output_route_fold(program, &plan.spec, &metadata, &run_units, master));
@@ -4982,7 +5054,7 @@ fn validate_fold_installation(
     output_op: Option<usize>,
     output_fold: Option<OutputRouteFold>,
 ) -> Result<SequentialPlan, &'static str> {
-    // Issue #920: the Output fold is admitted on a bankless plan only and the chain fold on a
+    // Issue #926: the Output fold is admitted on a bankless plan only and the chain fold on a
     // banked one, so the two never meet. The table is also only ever the Output op's.
     if output_fold.is_some() && (fold.is_some() || output_op.is_none()) {
         return Err("graph.route_fold.master");
@@ -5215,7 +5287,7 @@ pub(crate) fn build_sequential(
         .as_ref()
         .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
         .unwrap_or_default();
-    // Both folds' retired routes: a chain fold's (issue #218) and the Output fold's (issue #920).
+    // Both folds' retired routes: a chain fold's (issue #218) and the Output fold's (issue #926).
     // A retired route emits no unit, and every pass below that pairs or redirects ops skips it.
     let mut retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
@@ -6700,7 +6772,7 @@ fn route_fold(
     })
 }
 
-/// What [`output_route_fold`] admitted (issue #920): the route ops the session Output op's fused
+/// What [`output_route_fold`] admitted (issue #926): the route ops the session Output op's fused
 /// reduction absorbs, and one folded 2x2 per input of that op in its edge order.
 struct OutputRouteFold {
     /// Route ops that are not built into units at all. Their mixes run inside
@@ -6712,7 +6784,8 @@ struct OutputRouteFold {
 }
 
 /// Retire every plain route that feeds the session Output op, and fuse their mixes into its
-/// reduction (issue #920).
+/// reduction (issue #926). The clauses are issue #920's, which designed this fold and never landed;
+/// #926 kept them unchanged and replaced only the kernel.
 ///
 /// The shape this replaces is the plumbing row's: one route op per track, each a whole stereo
 /// block of `mix2x2_block` stored over a buffer it runs in place on, then the Output op's
@@ -6765,7 +6838,7 @@ struct OutputRouteFold {
 ///   output, an input, a sidechain or a staging slot -- and any mention declines. The clauses
 ///   above already rule a mention out: a write would need the live buffer's slot, which the
 ///   colouring owns through the Output op, and a read is a second reader. So no test can make
-///   this scan fire (`crates/graph/tests/MUTATIONS.md` row 920-11); it is the belt to that brace,
+///   this scan fire (`crates/graph/tests/MUTATIONS.md` row 926-14); it is the belt to that brace,
 ///   as [`route_fold`]'s in-between scan is. The other retired routes are scanned too: each names
 ///   only its own buffer, which is live at the same time and so is a different slot.
 /// * **Each `R` feeds exactly one input position.** A route read twice has two readers.
@@ -13836,7 +13909,7 @@ mod tests {
         }
     }
 
-    // Issue #920: in-place routes folded into the session Output op's reduction.
+    // Issue #926: in-place routes fused into the session Output op's reduction, in pairs.
     // -----------------------------------------------------------------------------------------
 
     /// One `route_reduce` case against the two production ops it replaces, at one width.
@@ -13939,23 +14012,69 @@ mod tests {
         }
     }
 
-    /// Issue #920's kernel: the fused reduction is each route op's `mix2x2_block` then the
+    /// Issue #926's kernel: the fused reduction is each route op's `mix2x2_block` then the
     /// Output's reduction, bit for bit, at every lane width.
     ///
     /// Hostile words (signed zeros, subnormals, magnitudes over `2^-24 .. 2^25`) and a hostile 2x2
-    /// per route; `frames` with and without ragged tails at both widths; fan-in two to nineteen
-    /// (every group length, one to three groups) and sixty-four; and a signed-zero case whose
-    /// master must stay `-0.0`. The width is free because `Lane::fma` is two roundings on every
+    /// per route; `frames` with and without ragged tails at both widths, so the outlined
+    /// `route_tail` runs for every pair shape; fan-in two to nineteen (one to nine pairs, and every
+    /// odd fan-in's lone last input) and sixty-four (thirty-two pairs, the plumbing row's); and a
+    /// signed-zero case whose master must stay `-0.0`. The oracle reduces in groups of eight and
+    /// the candidate in pairs, so every fan-in above two also checks that moving the store/reload
+    /// boundary moves no bit. The width is free because `Lane::fma` is two roundings on every
     /// backend, and the oracle's route ops run at `FrameLane` whatever the candidate's width.
     ///
-    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #920): reverse the accumulation,
-    /// seed the first group from `+0.0`, mix the running sum instead of the input, swap the
-    /// coefficient roles, store in every group.
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #926): reverse the accumulation,
+    /// seed the first pair from `+0.0`, mix the running sum instead of the input, swap the
+    /// coefficient roles, store in every pair, skip an odd fan-in's lone last input.
     #[test]
     fn a_route_reduction_is_the_route_ops_and_the_reduction_bit_for_bit() {
         assert_route_reduce_is_the_route_ops_and_the_reduction::<f32>();
         assert_route_reduce_is_the_route_ops_and_the_reduction::<lane::Simd4>();
         assert_route_reduce_is_the_route_ops_and_the_reduction::<lane::Simd8>();
+    }
+
+    /// Issue #926: `route_tail` takes a tail and nothing longer. A run as long as the widest lane
+    /// is refused before any write, and one frame shorter runs. The bound is what keeps the
+    /// compiler from vectorising the outlined tail (see `route_reduce`, "Why the tail is
+    /// outlined"), so the refusal is pinned here rather than left to the artifact gate alone.
+    #[test]
+    fn a_route_tail_refuses_a_run_as_long_as_the_widest_lane() {
+        let widest = <lane::Simd8 as Lane>::WIDTH;
+        let pad = f32::from_bits(HOST_PAD);
+        let plane = vec![0.5_f32; widest];
+        let identity = [1.0_f32, 0.0, 0.0, 1.0];
+        for (frames, runs) in [(widest, false), (widest - 1, true)] {
+            let input = &plane[..frames];
+            for pair in [&[input, input][..], &[input][..]] {
+                let (mut left, mut right) = (vec![pad; frames], vec![pad; frames]);
+                assert_eq!(
+                    route_tail(
+                        &mut left,
+                        &mut right,
+                        pair,
+                        pair,
+                        &[identity; 2][..pair.len()],
+                        true
+                    ),
+                    runs,
+                    "{frames} frames, {} inputs",
+                    pair.len()
+                );
+                let expected = if runs {
+                    (0.5 * pair.len() as f32).to_bits()
+                } else {
+                    HOST_PAD
+                };
+                assert!(
+                    left.iter()
+                        .chain(&right)
+                        .all(|word| word.to_bits() == expected),
+                    "{frames} frames, {} inputs: a refused run writes nothing",
+                    pair.len()
+                );
+            }
+        }
     }
 
     /// Per track and per block: hostile words ([`hostile_sample`]), or one signed zero per plane
@@ -13980,7 +14099,7 @@ mod tests {
         }
     }
 
-    /// Which issue #920 plan to bind: `fan_in` tracks, each `Input -> Route -> Output`, with the
+    /// Which issue #926 plan to bind: `fan_in` tracks, each `Input -> Route -> Output`, with the
     /// shape's one change.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum RoutedShape {
@@ -14412,8 +14531,8 @@ mod tests {
         executor
     }
 
-    /// Gates 1 and 2 of issue #920: the fused Output reduction renders the route ops' and the
-    /// reduction's own bits, and every declining shape declines.
+    /// Gates 1 and 2 of issue #926 (issue #920's, reused): the fused Output reduction renders the
+    /// route ops' and the reduction's own bits, and every declining shape declines.
     ///
     /// Each case binds one plan twice -- as bound, and with the fold declined through
     /// `test_only_set_output_route_fold_declined` -- and renders eight blocks of each through the
@@ -14424,7 +14543,8 @@ mod tests {
     /// observer window is the oracle's.
     ///
     /// Shapes: every [`RoutedShape`], `frames` in `{1, 3, 7, 13, 16, 64, 128}`, fan-in sixty-four
-    /// (eight full groups), and also two and nine (a lone second group) for the admitted shapes.
+    /// (thirty-two pairs), and also two (one pair) and nine (four pairs and a lone last input) for
+    /// the admitted shapes.
     /// Hostile words and a hostile 2x2 per route, except on the signed-zero shapes, whose data is
     /// chosen so that the declined clause's hazard reaches the master's sign bit;
     /// [`RoutedShape::NegativeZero`] must keep `-0.0`. Each declining shape declines on its own
@@ -14432,9 +14552,9 @@ mod tests {
     /// on the master's delayed input, both submix shapes on the plain-route clause, the shared
     /// input on the in-place clause and the late reader on sole readership.
     ///
-    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #920): the five kernel rows, each
-    /// red here as well as in the kernel test, and one row per declining clause, each red here on
-    /// the host planes or an observer window with the fold-count assertions removed.
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #926): the kernel rows, each red
+    /// here as well as in the kernel test, and one row per declining clause, each red here on the
+    /// host planes or an observer window with the fold-count assertions removed.
     #[test]
     fn an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit() {
         const BLOCKS: u64 = 8;

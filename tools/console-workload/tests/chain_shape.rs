@@ -964,13 +964,14 @@ fn the_folded_master_is_the_reductions_own_bits() {
     }
 }
 
-/// Issue #920: the plumbing row's routes fold into the Output op's reduction, and the fused
-/// reduction renders the route ops' and the reduction's own bits.
+/// Issue #926: the plumbing row's routes fuse into the Output op's reduction, and the fused
+/// reduction renders the route ops' and the reduction's own bits; no other row takes the fold.
 ///
 /// The plumbing row binds no bank, so issue #218's chain fold has no epilogue to fold into, and
 /// each track's route op was a dispatched `mix2x2_block` store pass over its in-place buffer, which
-/// the Output's reduction then loaded back. Issue #920 retires those sixty-four route ops and
-/// applies each route's 2x2 inside the reduction, as it loads the buffer.
+/// the Output's reduction then loaded back. Issue #926 retires those sixty-four route ops and
+/// applies each route's 2x2 inside the reduction, a pair of tracks at a time, as it loads the
+/// buffers (the eligibility is issue #920's, which never landed).
 ///
 /// The oracle is the same row bound with that fold declined
 /// (`graph::test_only_set_output_route_fold_declined`, read once at bind). Its route ops run and
@@ -982,6 +983,11 @@ fn the_folded_master_is_the_reductions_own_bits() {
 /// census. Then the bank shape, which the fold must not move (`the_plumbing_row_binds_no_strip_at_all`
 /// pins `[0, 0]`), and the chain-fold count, which stays zero
 /// (`every_standing_workload_folds_one_route_per_track`). Then the digests over `BLOCKS` blocks.
+///
+/// Last, the fold's reach: every other standing workload binds a bank, so the fold declines on
+/// its no-bank clause and must read zero there. The engine's plan trait carries no Output-fold
+/// count, so zero is read the same way sixty-four is, off the unit census: declining the fold
+/// must leave every other row's census exactly as it is.
 #[test]
 fn the_plumbing_rows_output_fold_is_the_route_ops_own_bits() {
     let digest = |runtime: &mut SessionRuntime| {
@@ -1012,6 +1018,18 @@ fn the_plumbing_rows_output_fold_is_the_route_ops_own_bits() {
         folded, declined,
         "the fused Output reduction is not the route ops' and the reduction's bits"
     );
+    for other in WORKLOADS.into_iter().filter(|other| *other != workload) {
+        let as_bound = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
+        graph::test_only_set_output_route_fold_declined(true);
+        let declined = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
+        graph::test_only_set_output_route_fold_declined(false);
+        assert_eq!(
+            as_bound,
+            declined,
+            "{} must not take the Output route fold: it binds a bank",
+            other.kind()
+        );
+    }
 }
 
 /// The collapse fires on every cohort of the mono row, on half the half-mono row's, and on nothing

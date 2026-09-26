@@ -2390,7 +2390,7 @@ impl GraphExecutor {
         }
     }
 
-    /// Routes this bind retired into the session Output op's fused reduction (issue #920). A
+    /// Routes this bind retired into the session Output op's fused reduction (issue #926). A
     /// count, like `bank_route_folds`: the fold renders the same bits, so only a count can say
     /// whether it fired.
     #[cfg(test)]
