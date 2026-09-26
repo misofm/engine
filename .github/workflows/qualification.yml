@@ -657,7 +657,7 @@ jobs:
           for field, expected in {
               "minute_frames": 2880000, "multi_hour_frames": 518400000,
               "minute_file_bytes": 11520044, "multi_hour_file_bytes": 2073600044,
-              "layout_entries": 16, "layout_total_bytes": 5896,
+              "layout_entries": 16, "layout_total_bytes": 6472,
               "timed_benchmark_invocations": 0,
           }.items():
               if integer(source[field], field, source_path) != expected:
