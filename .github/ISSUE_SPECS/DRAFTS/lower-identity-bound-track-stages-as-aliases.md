@@ -1,7 +1,8 @@
 # Lower identity-bound track stages as aliases
 
-**Owner ruling required** (a lowering shape; see "Decision" below). Drafted from the measured
-breakdown in `DRAFTS/PLAN.md`, Part 2, table A.
+**Ruled** (coordinator, final): option 1, keyed on `required_bindings` at compile time, no new
+struct field; see "Decision" below. Drafted from the measured breakdown in `DRAFTS/PLAN.md`,
+Part 2, table A.
 
 ## Product outcome
 
@@ -12,7 +13,7 @@ acknowledges with `GraphNodeBinding::identity`, and each is lowered as a plain i
 reads a dedicated buffer, so its op copies again; `PostMatrix` is in place and does nothing but
 dispatch. On `sixty_four_track_plumbing_only` that is 192 of the block's 321 units and 20,600 of
 its 37,500 cycles (55 %): three copies of every track's block per block, and 192 dispatches of
-about 65 cycles that compute nothing. Lower the three stages of a builtins-less plan as aliases,
+about 57 cycles net that compute nothing. Lower the three stages of a builtins-less plan as aliases,
 exactly as the three rack boundaries already are: no op, no buffer, no unit. The track's route
 then runs in place over the Input's own buffer. Class A: an identity copy moves no bit and an
 in-place identity computes nothing, so the rendered words are the same words.
@@ -22,9 +23,11 @@ in-place identity computes nothing, so the rendered words are the same words.
 - `crates/graph-compiler/src/compile.rs:803-816`: `required_bindings` of the builtins-less
   `compile` (`:139`) lists `Input | PostInputBuiltins | PostFader | PostMatrix` and `Output`.
 - `crates/graph/src/program.rs:186-194` `is_alias_candidate`: only
-  `PostSimd1 | PostDynamic | PostSimd2PreFader`; `:630-637` elides an alias candidate with one
-  main input, no sidechain and no delay, and `:640-655` resolves reads through the alias chain.
-- `program.rs:226-231` `is_dedicated`: `PostInputBuiltins` by kind, `Output` by kind; `:691-700`
+  `PostSimd1 | PostDynamic | PostSimd2PreFader`; `:610-617` elides an alias candidate with one
+  main input, no sidechain and no delay, and `:619-633` resolves reads through the alias chain.
+  Its comment at `:180-186` ("The other four stages ... are all bindable and keep their ops") is
+  what this issue changes.
+- `program.rs:226-231` `is_dedicated`: `PostInputBuiltins` by kind, `Output` by kind; `:716-720`
   in place iff sole undelayed reader **and** neither end is dedicated. So the `PostInputBuiltins`
   identity op copies (its output is dedicated), the `PostFader` identity op copies (its input is
   dedicated), the `PostMatrix` identity op is in place.
@@ -40,67 +43,84 @@ in-place identity computes nothing, so the rendered words are the same words.
 - Measured (`DRAFTS/PLAN.md` table A): identity-copy units 128 x 129 cycles = 16,534; identity-
   alias units 64 x 63 = 4,060; the copy itself is 66 cycles per unit (table C), the rest dispatch.
 
-## Decision: two mechanisms, one to be ruled on
+## Decision: option 1, keyed on `required_bindings` (ruled)
 
-**Option 1 (compile-time, pure fields -- recommended).** `PreparedGraphPlanParts` (`lib.rs:1562`)
-gains `builtins_attached: bool`; `compile_with_builtins` (`compile.rs:68`) sets it, `compile`
-(`:139`) clears it and drops the three stages from `required_bindings`. `program::lower`
-(`program.rs:507`) takes the flag and, when it is clear, treats
-`PostInputBuiltins | PostFader | PostMatrix` as alias candidates under the same three conditions
-as `is_alias_candidate`. `lowered()`'s elided-binding refusal stays as it is and becomes the
-guard: a plan with builtins attached still lowers the three as ops, and a red mutation that
-elides them unconditionally fails every with-builtins bind. Consequence to rule on: **a
-builtins-less plan has no bindable builtin stages**; a host cannot supply its own fader or matrix
-processor there (no host does today).
+**The mechanism (no new field).** `compile` (`crates/graph-compiler/src/compile.rs:139`) drops
+`PostInputBuiltins | PostFader | PostMatrix` from `required_bindings` (`:803-816`) when
+`prepared_builtins.is_none()` (`:148`); `compile_with_builtins` (`:68`) is untouched.
+`program::lower` (`crates/graph/src/program.rs:507`) takes the bindable set as `&[GraphNodeId]`
+-- already `self.required_bindings` at the one call site, `lower_from_current_fields`
+(`crates/graph/src/lib.rs:1195`) -- and the alias predicate becomes
+`is_alias_candidate(id) || (is_builtin_stage(id) && !bindable.contains(id))`, where
+`is_builtin_stage` is the three stages. A hand-built plan that lists `PostFader` keeps its op (the
+test at `lib.rs:5728` still binds `Scale` there), and `lowered()`'s elided-binding refusal
+(`:1212-1222`) stays meaningful: a listed stage is never elided, an unlisted one never bound.
 
-**Option 2 (bind-time).** Keep `required_bindings`; `bind` (`lib.rs:1267`) passes the set of
-nodes bound through `GraphNodeBinding::identity` (`processor: None`, `:1794`) into a bind-time
-`lower`, which treats an identity-bound builtin stage as an alias candidate; `lowered()` accepts an
-identity binding on an elided node. Keeps the door open for host processors on builtin stages at
-the price of `program()` (the pre-bind description) and the bound program legitimately differing.
+**Why this and not the others (recorded for the implementer).**
+- A `builtins_attached` field on `PreparedGraphPlanParts` (`lib.rs:1562`) breaks 24 constructors
+  in 11 files outside the authorized paths; the bindable set is already a field of the plan.
+- Every host compiles through `compile_with_builtins` (`crates/host-core/src/prepare.rs:1195`),
+  where the three stages are compiler-owned bindings that keep their ops; nothing changes for
+  any with-builtins plan. Attaching builtins later is a new compile and a plan swap, never a
+  retarget of a builtins-less stage, so the D2 liveness ruling is untouched.
+- Option 2 (bind-time lowering keyed on identity bindings, `processor: None` at `lib.rs:1814`)
+  would make `program()` and the bound program differ, against #99 F2's derive-once-and-gate
+  contract.
+- The no-ruling alternative (keep the three ops, un-dedicate an identity-bound
+  `PostInputBuiltins`) removes the two copies (about 8,400 cycles) and leaves 192 dead dispatches
+  (about 11,000).
+- Consequence: **a builtins-less plan has no bindable builtin stages**; a host cannot supply its
+  own fader or matrix processor there (no host does today).
 
-**Alternative without a ruling (smaller).** Keep the three ops; make `is_dedicated` false for a
-`PostInputBuiltins` of a builtins-less plan (same flag as option 1) so all three run in place.
-Removes the two copies (about 8,400 cycles), keeps the 192 dispatches (about 12,200).
+## Smallest closable slice
 
-## Smallest closable slice (option 1)
+Authorized paths: `crates/graph-compiler/src/compile.rs` (`required_bindings` only),
+`crates/graph/src/program.rs` (`lower`'s parameter, the alias predicate, the comment at
+`:180-186`), `crates/graph/src/lib.rs` (`lower_from_current_fields`, `lowered`'s comment), their
+tests, `crates/graph/src/program/tests.rs`, `tools/console-workload/tests/chain_shape.rs` (one new
+test), `tools/console-workload/src/lib.rs:869-873` (comment only),
+`docs/rulings/effect-floor-accounting.md:500-502` (one clause), and this spec.
 
-Authorized paths: `crates/graph-compiler/src/compile.rs` (`required_bindings`, the parts flag),
-`crates/graph/src/program.rs` (`lower`'s parameter and the alias predicate), `crates/graph/src/lib.rs`
-(`PreparedGraphPlanParts`, `lower_from_current_fields`), their tests, `crates/graph/src/program/tests.rs`,
-`tools/console-workload/tests/chain_shape.rs` (one new test), and this spec.
-
-1. The parts flag and the `required_bindings` change in `compile.rs`.
-2. `lower(spec, schedule, levels, delays, bank_members, builtins_attached)`; the alias predicate
-   `is_alias_candidate(id) || (!builtins_attached && is_builtin_stage(id))`, where
-   `is_builtin_stage` is the three stages. Nothing else in `lower` changes: the existing alias
-   machinery (elision, `reads_of` resolution, taps for observers) does the rest.
-3. Tests, below.
+1. The `required_bindings` change in `compile.rs` (`:803-816`, conditional on
+   `prepared_builtins.is_none()`).
+2. `lower(spec, schedule, levels, delays, bank_members, bindable)` with the predicate above.
+   Nothing else in `lower` changes: the existing alias machinery (elision `:610-617`, `reads_of`
+   resolution `:619-633`, taps for observers) does the rest.
+3. Correct the three statements this issue falsifies or makes true: `program.rs:180-186` ("The
+   other four stages ... keep their ops" -- false after this issue: they keep their ops only when
+   listed as bindable); `docs/rulings/effect-floor-accounting.md:500-502` and
+   `tools/console-workload/src/lib.rs:869-873` (both claim "every `TrackStage` lowers to an elided
+   alias" on the plumbing row -- false today, true after this issue; say so with the date).
+   #885's recorded clarification "a `PostMatrix` node is never elided" becomes builtins-plans-only;
+   note it in the spec's evidence, not in #885's body.
+4. Tests, below.
 
 ## Non-goals
 
 No change to a with-builtins plan (every standing console row but the plumbing row), to
 `is_dedicated` for bank members or effects, to the Output node's dedication (#916), or to the
-route fold. Option 2 and the alternative are not implemented unless the ruling picks them.
+route fold. Option 2 and the no-ruling alternative are not implemented.
 
 ## Objective gates
 
 1. Graph test: a three-track builtins-less plan with hostile input (signed zeros, subnormals,
    magnitudes `2^-24..2^25`, exact `-0.0` on one route coefficient) renders bit-identical output
-   over 16 blocks with the flag clear and with a test-only override that lowers the old shape; the
-   lowered program with the flag clear has exactly `2 x tracks + 1` ops and no dedicated buffer
-   but the Output's.
+   over 16 blocks with the three stages unlisted and with them listed (the old shape; bound to
+   the identity); the lowered program with them unlisted has exactly `2 x tracks + 1` ops and no
+   dedicated buffer but the Output's.
 2. Graph test: with builtins attached the three stages still lower as ops (pin the op count of an
-   existing with-builtins fixture), and a plan that lists a builtin stage in `required_bindings`
-   while the flag is clear is refused by `lowered()` (the existing elided-binding refusal).
+   existing with-builtins fixture); a plan whose `required_bindings` omits a builtin stage lowers
+   it as an alias, and one that lists it keeps the op (the `lib.rs:5728` `Scale`-on-`PostFader`
+   test is the standing instance and must not move).
 3. console-workload: `sixty_four_track_plumbing_only` digest over 64 blocks unchanged from the
-   base commit's (compare against the seam-declined arm in-test as `the_folded_master_is_the_
-   reductions_own_bits` does); a new test pins the row's unit census at `129` and its bank shape
-   at `[0, 0]`; `the_plumbing_row_binds_no_strip_at_all`,
+   base commit's (pin the base digest in-test, as the copy-removal records pin
+   `38ebb48908b62b9770ac7df1a8f6f2427bfd15eb849429219f8705a3926084c3`); a new test pins the row's
+   `unit_eligibility().len() == 129` (rows are per unit, `lib.rs:2623`) and its bank shape at
+   `[0, 0]`; `the_plumbing_row_binds_no_strip_at_all`,
    `every_standing_workload_folds_one_route_per_track` and the mono census `[65, 129]` unchanged.
 4. Red mutations in `crates/graph/tests/MUTATIONS.md`: elide the three stages unconditionally
-   (gate 2 fails); keep `PostInputBuiltins` dedicated while aliasing it (the lowering must reject
-   or gate 1's op count fails); alias only `PostMatrix` (gate 1's op count fails).
+   (gate 2's listed case and every with-builtins bind fail); keep `PostInputBuiltins` dedicated
+   while aliasing it (gate 1's op count fails); alias only `PostMatrix` (gate 1's op count fails).
 5. `cargo test -p graph` (with and without `test-support`), `-p graph-compiler`,
    `-p console-workload`, `-p host-core`; `scripts/check-graph-determinism.sh`,
    `check-graph-policy.sh`, `check-realtime-policy.sh`.
@@ -137,8 +157,9 @@ be in place over the Input's buffer).
 ## What the implementer will hit
 
 - `lowered()`'s comment (`lib.rs:1213-1217`) says the compiler never asks for a binding on an
-  alias candidate; after this issue that is true only when the flag is clear, so the comment and
-  the test at `lib.rs:5661-5670` (an elided binding is refused) need the flag in their fixtures.
+  alias candidate; after this issue an unlisted builtin stage is an alias candidate too, so the
+  comment and the test at `lib.rs:5661-5670` (an elided binding is refused) need the bindable set
+  in their fixtures.
 - The plumbing row's `unit_eligibility()` census shrinks from 321 to 129 rows; grep
   `tools/console-workload/tests/` for any pinned unit count on that row before running gate 3.
 - `program/tests.rs` builds `lower` directly; every call site gains the flag.

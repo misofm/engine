@@ -1,9 +1,11 @@
 # Fuse in-place routes into the Output reduction in pairs
 
 Supersedes #920 (withheld: its `route_run::<L, 8>` kernel hoisted 32 splatted coefficients and
-sixteen iterators into one loop, failed the AudioWorklet callgraph gate with vector 560 against
-scalar 1,680 arithmetic, and did not move the row). The eligibility half of #920 stands; the
-kernel is re-shaped from the measurement in `DRAFTS/PLAN.md`, Part 2, table C.
+sixteen iterators into one loop, and its wasm instantiation failed the AudioWorklet callgraph
+gate's rule 3 with vector 560 against scalar 1,680 arithmetic because its same-body `f32` tail
+was unrolled inside the `f32x4` instantiation; it did not move the row). The eligibility half of
+#920 stands; the kernel is re-shaped from the measurement in `DRAFTS/PLAN.md`, Part 2, table C,
+and its tail is outlined.
 
 ## Product outcome
 
@@ -28,8 +30,14 @@ every group size.
 - `runtime.rs:534-600`: the Output op reduces through `reduce_plane_into` -> `reduce_many_into`
   (groups of `REDUCE_GROUP = 8`, `:385`) -> `reduce_group_into::<L, N>` -> `accumulate_group` /
   `accumulate_run` (`:451`, `:480`): the first group stores, later groups reload `target`.
-- `program.rs:691-700`: a plain route with a single undelayed sole-read input is lowered in place
+- `program.rs:716-720`: a plain route with a single undelayed sole-read input is lowered in place
   over that buffer, which stays coloured until its last reader, the Output op.
+- `scripts/check-web-audioworklet-callgraph.py:352-359` (rule 3): every function matching
+  `4wide6f32x[48]` that carries `f32x4` arithmetic must have strictly more vector than scalar
+  arithmetic. A spill emits no `f32.mul`/`f32.add`; an unrolled width-4 scalar tail emits three
+  per vector op. Reviewer's scratch simd128 builds: pair kernel with a same-body tail 30 vector /
+  90 scalar (fails); #920's group of eight 168 / 624; pair kernel with the tail outlined into a
+  non-generic `#[inline(never)]` function 30 / 0 (passes).
 - #920's branch `origin/codex/920-fold-routes-into-output-reduction`, `runtime.rs:6427`
   `output_route_fold` (bind-time eligibility: Output op, `NodeKind::Identity`, no sidechain, no
   split pair, no delayed input, not a bank member, fan-in >= 2; every producer a `plain_route_gains`
@@ -58,8 +66,12 @@ Authorized paths: `crates/graph/src/runtime.rs`, `crates/graph/src/lib.rs` (seam
    coefficients as `L::splat`, walks the pair's four planes and the two master planes by
    `chunks_exact(L::WIDTH)` in one loop, and per chunk computes `mix` of input 0
    (`value = mix(in0)` on the first pair, `L::load(out).add(mix(in0))` after), adds `mix(in1)`,
-   stores; tail frames at `L = f32` by the same body. No `REDUCE_GROUP` chunking, no
-   per-pair `match` on group length beyond the 2/1 tail.
+   stores. No `REDUCE_GROUP` chunking, no per-pair `match` on group length beyond the 2/1
+   tail. The tail frames are handled by a separate non-generic `#[inline(never)]` function at
+   `f32` (the same body via `route_run::<f32, G>`), never inlined into the `L`-generic kernel:
+   the AudioWorklet gate's rule 3 counts scalar `f32` arithmetic inside any `wide::f32x4`
+   instantiation, and a same-body tail unrolled three times is 3x the vector count (measured in
+   `DRAFTS/PLAN.md`; #920's 560/1,680 was this, not a spill).
 3. Write through the Output's `HostMaster` planes (`runtime.rs:324`), read the arena through
    `lease.read` (shared).
 
@@ -80,9 +92,13 @@ implemented (the measurement is the reason; a later host may re-measure).
    below; `cargo test -p graph` both ways, `-p graph-compiler`, `-p console-workload`, the four
    policy scripts).
 6. **The AudioWorklet callgraph gate in the issue, not at the batch boundary:**
-   `scripts/build-web-audioworklet.sh` then `scripts/check-web-audioworklet.sh` (roster in
-   `scripts/check-web-audioworklet-callgraph.py`) must accept the wasm instantiation of the fused
-   kernel. This is the gate #920 failed; passing it is a closing condition of this issue.
+   `scripts/build-web-audioworklet.sh` then `scripts/check-web-audioworklet.sh` (rule 3 in
+   `scripts/check-web-audioworklet-callgraph.py:352-359`) must accept the wasm instantiation of
+   the fused kernel. This is the gate #920 failed; passing it is a closing condition of this
+   issue. Local pre-check before the full gate: `wasm-objdump -d` on the built artifact, count
+   `f32x4.{mul,add,sub,div}` against `f32.{mul,add,sub,div}` in every function whose name matches
+   `4wide6f32x4` and contains `route`; vector must exceed scalar in each, and the outlined tail
+   must appear as its own non-generic function with no `f32x4` arithmetic.
 7. The harness `tools/console-workload/tests/plumbing_profile.rs::phase_profile` shows the row's
    `route` phase at zero units and the unit schedule ending in `1 x output` (descriptive, recorded
    in the spec's evidence, not a timing claim).
@@ -134,3 +150,8 @@ its producer's buffer either way.
   rather than a special case, so the tail is covered by gate 1's fan-in shapes.
 - `chunks_exact` on six slices in one loop is what LLVM must keep in registers: 8 coefficient
   splats + 2 accumulators + 2 loads + 2 temporaries = 14 of 16 `ymm`. Do not add a third input.
+- The tail must be a **separate, non-generic, `#[inline(never)]`** function. Writing it as the
+  vector body "at `L = f32`" inside the generic kernel (the pattern every D9 kernel uses natively)
+  is exactly what rule 3 rejects on wasm: LLVM unrolls the width-4 scalar tail inside the `f32x4`
+  instantiation and the scalar count triples the vector count. Native code is indifferent; the
+  wasm artifact is not.

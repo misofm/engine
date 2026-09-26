@@ -1,7 +1,8 @@
 # Read plain-strip sources in place from the played transfer block
 
-Drafted from `DRAFTS/PLAN.md`, Part 2. Depends on drafts A and B. Carries an **owner question**
-on benchmark fidelity (below).
+Drafted from `DRAFTS/PLAN.md`, Part 2. Depends on drafts A and B; the row it can move is the one
+draft D adds (`sixty_four_track_plumbing_ring`); `sixty_four_track_plumbing_only` is not refed
+(coordinator ruling).
 
 ## Product outcome
 
@@ -43,7 +44,10 @@ kernel input selection, `execute`'s Op arm), `crates/graph/src/lib.rs` (none exp
    `source_plane_of_buffer[buffer] = claim`.
 2. `execute`: pass `sources` to the Op arm when the unit is `output_unit`; the fused kernel forms
    each input's planes as `sources.played_planes(claim)` when
-   `source_plane_of_buffer[buffer] != NO_SOURCE_CLAIM`, else `lease.read`.
+   `source_plane_of_buffer[buffer] != NO_SOURCE_CLAIM`, else `lease.read`. **Underrun rule:** on
+   `played_planes(claim) == None` the kernel reads the arena's silence buffer
+   (`ARENA_SILENCE_BUFFER`), exactly as `ArenaMembers::plane` (`runtime.rs:1526`) does for a bank
+   lane, which is the `+0.0` block `copy_track_input` would have written.
 3. `source_in_place` answers true for such a claim, so the copy loop skips it.
 
 ## Non-goals
@@ -55,31 +59,36 @@ or to a claim with any other reader (a send, an observer tap, a delayed edge): t
 
 1. Graph test with a driver that offers played planes: a 64-claim plan with in-place routes into
    the Output, hostile input, frames `{1, 7, 16, 128}`: host planes bit-identical to the same plan
-   with `test_only_set_source_in_place_declined(true)` over 8 blocks; `test_only_source_copy`
-   counts 0 with the table on and 64 with it off; `output_route_folds() == 64` both ways.
+   with `test_only_set_source_in_place_declined(true)` over 8 blocks;
+   `test_only_source_plane_counts()` (`runtime.rs:4567`, `[u64; 3]`) shows 64 in-place reads and
+   0 copies per block with the table on and the reverse with it off; `output_route_folds() == 64`
+   both ways.
 2. Declining shapes: a claim with a send tap reader, a claim under a delayed edge, a claim read by
    a submix: copied (count 1 each), output identical.
-3. Red mutations: read `lease.read` for an admitted claim after skipping its copy (stale words:
-   gate 1 fails on block 2); admit a claim with two readers (gate 2).
-4. `cargo test -p graph` both ways, `-p source`, `-p host-core`; `scripts/check-graph-determinism.sh`,
+3. Underrun: a driver that answers `None` for one claim on block 3 renders that block bit-identical
+   to the declined arm (whose `copy_track_input` wrote `+0.0`), with the silence buffer read and no
+   copy counted.
+4. Red mutations: read `lease.read` for an admitted claim after skipping its copy (stale words:
+   gate 1 fails on block 2); admit a claim with two readers (gate 2); read the claim's stale arena
+   buffer instead of the silence buffer on `None` (gate 3).
+5. `cargo test -p graph` both ways, `-p source`, `-p host-core`; `scripts/check-graph-determinism.sh`,
    `check-graph-policy.sh`, `check-realtime-policy.sh`.
 
 ## Console benchmark rows
 
-None today: every console row binds `FrozenGraphSource` processors, not a source set, so neither
-#918 nor this issue can show on them. **Owner question:** should `sixty_four_track_plumbing_only`
-feed its sources through a `GraphSourceDriver` that offers played planes (a `FrozenSourceDriver`
-beside `FrozenGraphSource` in `tools/console-workload/src/lib.rs`, digest pinned equal across the
-two feeds)? Then the row measures the production feed, its `bound` phase (8,025 cycles) becomes
-the copy loop, and this issue removes that loop. "In place" has no meaning for a bound processor:
-`GraphRuntimeProcessor::process` is write-only into the block it is handed, so the frozen
-processor's copy *is* its contract.
+`sixty_four_track_plumbing_ring` only (draft D's row: the same session fed through a
+`FrozenSourceDriver` that lends played planes; its `source set` phase is the copy loop this issue
+removes). `sixty_four_track_plumbing_only` binds `FrozenGraphSource` processors, not a source set,
+so neither #918 nor this issue can show on it, and by ruling it is not refed. "In place" has no
+meaning for a bound processor: `GraphRuntimeProcessor::process` is write-only into the block it
+is handed, so the frozen processor's copy *is* its contract.
 
 ## Dependencies
 
 After "Lower identity-bound track stages as aliases" and "Fuse in-place routes into the Output
 reduction in pairs" (forced: the kernel that reads the played planes is B's). After #917/#918
-(merged).
+(merged). "Add a driver-fed plumbing row to the console benchmark" must be merged for the
+batch-boundary measurement to show it.
 
 ## Standing rules for the implementer
 
