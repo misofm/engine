@@ -5868,9 +5868,10 @@ struct SourcePlanes {
 ///   producer overwrites the copied words, and the Output op then reads what it wrote. The fused
 ///   reduction must read exactly the words the copy leaves there, so such a claim keeps the copy.
 ///   The graph compiler puts every input in the first dependency level, ahead of every other node
-///   of that level by node order, so this never fires on a compiled plan; a hand-built plan need
-///   not. (b) has the same exposure and no such clause: it is issue #918's, which this issue does
-///   not change.
+///   of that level by node order, so on a compiled plan only an earlier input can have used the
+///   slot, and only one with no reader at all, which frees its slot at once; a hand-built plan may
+///   schedule an input anywhere. (b) has the same exposure and no such clause: it is issue #918's,
+///   which this issue does not change.
 ///
 /// The table is keyed by the physical arena buffer, and the colouring hands a retired input's slot
 /// to later ops (a route, the Output, another cohort's member, which a later bank may gather; and a
