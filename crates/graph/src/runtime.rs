@@ -2697,6 +2697,32 @@ impl Runtime {
             .is_some_and(|tabled| usize::try_from(*tabled).ok() == Some(claim))
     }
 
+    /// Whether unit `index` does no work at render, so the executor need not dispatch it (issue
+    /// #936). True exactly when the unit is a plain op of kind `NodeKind::SourceInput`, the op
+    /// holds no observer, the unit's identity is not `observed`, and it is not the session Output
+    /// op.
+    ///
+    /// Such a unit is a claimed track input: the source set's copy loop already wrote its buffer,
+    /// or a bank's gather or the Output op's fused reduction reads its claim in place, so
+    /// `execute_op` returns before it touches memory and `observe_unit` returns on `observed ==
+    /// false`. With no observer it has no activation entry either, so skipping it leaves the
+    /// selective-observation cursor in step. Everything else is active: a delayed claim
+    /// (`NodeKind::TrackDelay`, whose line runs in place over the input), every bank, split pair
+    /// and other kind. Read once, at bind, by `GraphExecutor::new`; an index past the units is
+    /// active.
+    pub(crate) fn unit_inert(&self, index: usize) -> bool {
+        self.output_unit != Some(index)
+            && self
+                .identity
+                .get(index)
+                .is_some_and(|identity| !identity.observed)
+            && matches!(
+                self.units.get(index),
+                Some(RuntimeUnit::Op(op))
+                    if matches!(op.kind, NodeKind::SourceInput) && op.observers.is_empty()
+            )
+    }
+
     // REALTIME_POLICY_BEGIN
     /// The audio of one buffer, for the source set to fill.
     pub(crate) fn buffer_mut(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
@@ -7911,6 +7937,9 @@ mod tests {
 
     #[test]
     fn rt9_resident_entry_has_one_guarded_production_caller_and_control() {
+        /// The render loop's header since issue #936: the dispatched units, in unit order.
+        const RENDER_LOOP_HEADER: &str =
+            "for unit in active_units.iter().map(|&unit| unit as usize) {";
         fn valid(runtime: &str, graph: &str, rack: &str) -> bool {
             let production = |source: &str| {
                 source
@@ -7941,9 +7970,10 @@ mod tests {
                 return false;
             };
             // Issue #916 removed the end-of-block copy the loop body used to end at; the loop is
-            // now the last thing in the render region.
+            // now the last thing in the render region. Issue #936 moved its header from every
+            // unit to the bind-time table of the units that do work.
             let Some(loop_body) = render
-                .split("for unit in 0..runtime.units.len() {")
+                .split(RENDER_LOOP_HEADER)
                 .nth(1)
                 .and_then(|body| body.split(concat!("// REALTIME_POLICY_", "END")).next())
             else {
@@ -8020,6 +8050,20 @@ mod tests {
         assert!(
             !valid(runtime, &second, rack),
             "second-production-call control"
+        );
+        assert_eq!(
+            graph.matches(RENDER_LOOP_HEADER).count(),
+            1,
+            "the pinned header is the render loop's own"
+        );
+        let every_unit = graph.replacen(
+            RENDER_LOOP_HEADER,
+            "for unit in 0..runtime.units.len() {",
+            1,
+        );
+        assert!(
+            !valid(runtime, &every_unit, rack),
+            "the pin follows the dispatched-unit table (the pre-#936 header is refused)"
         );
     }
 
@@ -15871,6 +15915,300 @@ mod tests {
             if shape != RingShape::Plain {
                 let _ = assert_ring_shape_at_every_quantum(shape);
             }
+        }
+    }
+
+    /// Issue #936: the blocks each of its ring gates renders, [`RING_SCRIPT`] twice over.
+    const INERT_BLOCKS: u64 = 16;
+
+    /// Each issue #936 shape's in-place arm as the executor rendered it before the issue: FNV-1a
+    /// ([`ring_fnv`]) over the [`RingRun::digest`] of [`INERT_BLOCKS`] blocks at each of
+    /// [`RING_FRAMES`], recorded by this fixture ([`render_ring_blocks`]'s bind, poison and render)
+    /// compiled against the base tree (`64b155d0`), whose render loop dispatched every unit. The
+    /// two observed shapes meter the same words, so their digests agree.
+    const INERT_PRE_CHANGE: [(RingShape, u64); 4] = [
+        (RingShape::Plain, 0xce6b_3a3d_4996_8c67),
+        (RingShape::ObservedInput, 0x1f14_9a39_d035_ceea),
+        (RingShape::ObservedAlias, 0x1f14_9a39_d035_ceea),
+        (RingShape::TrackDelayed, 0xe8b0_890e_a031_f463),
+    ];
+
+    /// What one issue #936 arm bound and rendered.
+    struct InertRun {
+        /// The executor's dispatched-unit table.
+        active: Vec<u32>,
+        /// The census: every unit bind emitted, dispatched or not.
+        units: usize,
+        /// The unit of track `K`'s ([`RING_SPECIAL`]) input op.
+        special: usize,
+        /// The session Output op's unit.
+        output: usize,
+        /// Units the render loop dispatched, per block ([`crate::test_only_unit_dispatches`]).
+        dispatches: Vec<u64>,
+        /// Every host word and meter frame, as [`render_ring_shape`] records them.
+        run: RingRun,
+    }
+
+    /// Bind `shape` as production binds it (every claim it may read in place, in place) and
+    /// render [`INERT_BLOCKS`] blocks of [`RING_SCRIPT`] into host planes of stride `frames + 3`,
+    /// poisoning every claim's arena slot before each block, as [`render_ring_shape`] does.
+    ///
+    /// Beside the bits: which units bind tabled for dispatch and how many the loop dispatched in
+    /// each block. Every unit left out of the table must be one [`Runtime::unit_inert`] names, and
+    /// every such unit a plain, unobserved `SourceInput` op.
+    fn render_ring_blocks(shape: RingShape, frames: u32) -> InertRun {
+        let case = format!("{shape:?}, {frames} frames");
+        let published = Published::default();
+        let (plan, bindings, source_set) = ring_output_parts(shape, frames, &published);
+        let slots = ring_slots(&plan, shape.claims());
+        let (mut executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        let runtime = &executor.runtime;
+        let active: Vec<u32> = executor.active_units.to_vec();
+        let units = runtime.units.len();
+        for unit in 0..units {
+            let dispatched = active.contains(&(unit as u32));
+            assert_eq!(
+                dispatched,
+                !runtime.unit_inert(unit),
+                "{case}: unit {unit} is tabled iff it is not inert"
+            );
+            if !dispatched {
+                assert!(
+                    matches!(
+                        &runtime.units[unit],
+                        RuntimeUnit::Op(op) if matches!(op.kind, NodeKind::SourceInput)
+                            && op.observers.is_empty()
+                    ) && !runtime.identity[unit].observed
+                        && runtime.output_unit != Some(unit),
+                    "{case}: skipped unit {unit} is a plain unobserved source input"
+                );
+            }
+        }
+        assert!(
+            active.windows(2).all(|pair| pair[0] < pair[1]),
+            "{case}: the table is in unit order"
+        );
+        let special = (0..units)
+            .find(|unit| {
+                matches!(
+                    &runtime.units[*unit],
+                    RuntimeUnit::Op(op) if op.output == slots[RING_SPECIAL]
+                        && matches!(op.kind, NodeKind::SourceInput | NodeKind::TrackDelay { .. })
+                )
+            })
+            .expect("track K's input unit");
+        let output = runtime.output_unit.expect("the Output unit");
+        let frames = frames as usize;
+        let stride = frames + 3;
+        let mut hosts = Vec::new();
+        let mut dispatches = Vec::new();
+        for block in 0..INERT_BLOCKS {
+            for slot in &slots {
+                let (left, right) = executor.runtime.buffer_mut(*slot);
+                left.fill(f32::from_bits(RING_SLOT_POISON[0]));
+                right.fill(f32::from_bits(RING_SLOT_POISON[1]));
+            }
+            let mut storage = vec![f32::from_bits(HOST_PAD); 2 * stride];
+            crate::test_only_unit_dispatch_reset();
+            render_host(
+                &mut executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, frames, stride)
+                    .expect("host output"),
+                block * frames as u64,
+            )
+            .expect("render");
+            dispatches.push(crate::test_only_unit_dispatches());
+            hosts.push(storage.iter().map(|word| word.to_bits()).collect());
+        }
+        let meters = published.lock().unwrap().clone();
+        InertRun {
+            active,
+            units,
+            special,
+            output,
+            dispatches,
+            run: RingRun {
+                hosts,
+                meters,
+                in_place: Vec::new(),
+                counts: Vec::new(),
+                folds: 0,
+                output_claims: Vec::new(),
+            },
+        }
+    }
+
+    /// [`render_ring_blocks`] at every quantum of [`RING_FRAMES`], with the facts every issue #936
+    /// shape shares: sixty-five units bound; the table is exactly `dispatched`, a function of the
+    /// run's `(special, output)` units; the loop dispatches exactly the table every block; every
+    /// meter published every block; and the combined digest is the one [`INERT_PRE_CHANGE`]
+    /// recorded on the base tree.
+    fn assert_inert_shape(
+        shape: RingShape,
+        dispatched: fn(usize, usize) -> Vec<u32>,
+        meters_per_block: usize,
+    ) -> Vec<InertRun> {
+        let mut combined = 0xcbf2_9ce4_8422_2325_u64;
+        let runs: Vec<_> = RING_FRAMES
+            .iter()
+            .map(|&frames| {
+                let case = format!("{shape:?}, {frames} frames");
+                let run = render_ring_blocks(shape, frames);
+                assert_eq!(run.units, RING_TRACKS + 1, "{case}: the census");
+                assert_eq!(
+                    run.active,
+                    dispatched(run.special, run.output),
+                    "{case}: the dispatched-unit table"
+                );
+                assert_eq!(
+                    run.dispatches,
+                    vec![run.active.len() as u64; INERT_BLOCKS as usize],
+                    "{case}: units dispatched per block"
+                );
+                assert_eq!(
+                    run.run.meters.len(),
+                    meters_per_block * INERT_BLOCKS as usize,
+                    "{case}: every meter published every block"
+                );
+                combined = ring_fnv(combined, run.run.digest());
+                run
+            })
+            .collect();
+        let pre_change = INERT_PRE_CHANGE
+            .iter()
+            .find(|(recorded, _)| *recorded == shape)
+            .map(|(_, digest)| *digest);
+        assert_eq!(
+            Some(combined),
+            pre_change,
+            "{shape:?}: every host word and meter frame is the pre-change executor's"
+        );
+        runs
+    }
+
+    /// Issue #936 on the console's ring shape: sixty-four tracks `Input -> Route -> Output`, every
+    /// claim read in place by the fused Output ([`RingShape::Plain`]), frames `{1, 7, 16, 128}`,
+    /// sixteen blocks of [`RING_SCRIPT`] with every claim's slot poisoned before each.
+    ///
+    /// Sixty-four of the sixty-five units are plain unobserved source inputs, which bind leaves
+    /// out of the dispatched-unit table: the loop dispatches the Output op alone, once per block.
+    /// Every host word and both Output meters' every window are the base tree's
+    /// ([`INERT_PRE_CHANGE`]).
+    ///
+    /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issue #936.
+    #[test]
+    fn an_unobserved_source_input_is_not_dispatched_and_moves_no_bit() {
+        for run in assert_inert_shape(RingShape::Plain, |_, output| vec![output as u32], 2) {
+            assert_eq!(run.output, RING_TRACKS, "the Output op is the last unit");
+        }
+    }
+
+    /// Gate 2 of issue #936: a meter at one claim's `Input` boundary keeps that claim's unit
+    /// dispatched, and it meters what it metered before the issue.
+    ///
+    /// [`RingShape::ObservedInput`] meters track `K`'s input directly, and
+    /// [`RingShape::ObservedAlias`] meters `K`'s `PostFader`, an elided stage whose observer bind
+    /// folds into the input op's. Either way `K`'s input op holds an observer and its unit is
+    /// `observed`, so the table is `K`'s unit and the Output op's, both dispatched every block;
+    /// the other sixty-three inputs are skipped. Over sixteen blocks at frames `{1, 7, 16, 128}`,
+    /// the `K` meter publishes every block, and every meter window and host word is the base
+    /// tree's ([`INERT_PRE_CHANGE`]).
+    ///
+    /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issue #936.
+    #[test]
+    fn an_observed_source_input_stays_dispatched_and_meters_the_base_values() {
+        for shape in [RingShape::ObservedInput, RingShape::ObservedAlias] {
+            for run in assert_inert_shape(
+                shape,
+                |special, output| vec![special as u32, output as u32],
+                3,
+            ) {
+                let observed = run
+                    .run
+                    .meters
+                    .iter()
+                    .filter(|frame| frame.handle == 1)
+                    .count();
+                assert_eq!(
+                    observed, INERT_BLOCKS as usize,
+                    "{shape:?}: the input meter published every block"
+                );
+            }
+        }
+    }
+
+    /// Gate 3 of issue #936: a claim delayed at its input (`NodeKind::TrackDelay`, the claim's
+    /// declared alignment, whose line runs in place over the input's buffer) is not inert: its
+    /// unit is dispatched every block, and the plan renders the base tree's bits.
+    ///
+    /// [`RingShape::TrackDelayed`] delays track `K`'s input by `(3, 5)` samples, so `K`'s claim
+    /// keeps the copy and its delay line runs over the copied words. The table is `K`'s
+    /// `TrackDelay` unit and the Output op's; over sixteen blocks at frames `{1, 7, 16, 128}` every
+    /// host word and meter window is the base tree's ([`INERT_PRE_CHANGE`]).
+    ///
+    /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issue #936.
+    #[test]
+    fn a_delayed_claim_stays_dispatched_and_renders_the_base_bits() {
+        let published = Published::default();
+        let (plan, bindings, source_set) =
+            ring_output_parts(RingShape::TrackDelayed, 16, &published);
+        let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        let delayed: Vec<usize> = (0..executor.runtime.units.len())
+            .filter(|unit| {
+                matches!(
+                    &executor.runtime.units[*unit],
+                    RuntimeUnit::Op(op) if matches!(op.kind, NodeKind::TrackDelay { .. })
+                )
+            })
+            .collect();
+        assert_eq!(delayed.len(), 1, "one delayed claim");
+        for run in assert_inert_shape(
+            RingShape::TrackDelayed,
+            |special, output| vec![special as u32, output as u32],
+            2,
+        ) {
+            assert_eq!(
+                run.special, delayed[0],
+                "K's input unit is its TrackDelay op"
+            );
+        }
+    }
+
+    /// Gate 5 of issue #936, on the ring plan: the runtime metadata estimate charges each of the
+    /// executor's two bind-sized tables at one entry per emitted op, and the tables bound on the
+    /// ring plan fit, whether its claims are read in place (none copied) or all copied
+    /// (`test_only_set_source_in_place_declined`).
+    #[test]
+    fn the_metadata_charge_covers_the_ring_plans_executor_tables() {
+        for declined in [false, true] {
+            let published = Published::default();
+            let (plan, bindings, source_set) = ring_output_parts(RingShape::Plain, 16, &published);
+            let emitted = plan.spec.nodes.len() as u64;
+            let charge = crate::GraphRuntimeMetadataResourceEstimate::checked_for(emitted)
+                .expect("runtime metadata charge");
+            test_only_set_source_in_place_declined(declined);
+            let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+            test_only_set_source_in_place_declined(false);
+            let active = (executor.active_units.len() * core::mem::size_of::<u32>()) as u64;
+            let copied =
+                (executor.source_input_buffers.len() * core::mem::size_of::<(usize, u32)>()) as u64;
+            assert_eq!(
+                crate::test_only_executor_table_bytes(),
+                [active, copied],
+                "declined {declined}: the bind witness is the executor's own tables"
+            );
+            assert_eq!(
+                executor.source_input_buffers.len(),
+                if declined { RING_TRACKS } else { 0 },
+                "declined {declined}: copied claims"
+            );
+            assert!(
+                active <= charge.active_unit_table_bytes
+                    && copied <= charge.source_input_table_bytes,
+                "declined {declined}: the charge ({}, {}) covers the tables ({active}, {copied})",
+                charge.active_unit_table_bytes,
+                charge.source_input_table_bytes
+            );
         }
     }
 

@@ -421,6 +421,13 @@ pub struct GraphScalarSplitRuntimeResourceEstimate {
 /// single safe per-emitted-op charge for mixed graphs. The corresponding containing allocation is
 /// bounded by the larger current `RuntimeUnit`/`RuntimeOp` layout multiplied by the same
 /// emitted-op bound. The inline slot is charged once, never once as an op and again as a unit.
+///
+/// The executor also retains two boxed tables it sizes at bind (issue #936): the indices of the
+/// units its render loop dispatches, and the `(claim, arena buffer)` rows of the source claims
+/// its copy loop fills. Their lengths are decided at bind, after this estimate is admitted, so
+/// each is charged at its bound: one entry per emitted op. A dispatched unit is a unit, and a unit
+/// holds at least one op; a copied claim names a distinct graph node, which lowers to at most one
+/// op.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphRuntimeMetadataResourceEstimate {
     pub emitted_op_count: u64,
@@ -445,6 +452,12 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     pub response_binding_string_bytes: u64,
     /// Largest individual cloned identity allocation.
     pub largest_response_binding_string_bytes: u64,
+    /// The executor's boxed table of dispatched unit indices (one `u32` each), charged at one
+    /// entry per emitted op (issue #936).
+    pub active_unit_table_bytes: u64,
+    /// The executor's boxed table of the source claims its copy loop fills (one
+    /// `(usize, u32)` row each), charged at one entry per emitted op (issue #936).
+    pub source_input_table_bytes: u64,
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
@@ -484,12 +497,18 @@ impl GraphRuntimeMetadataResourceEstimate {
                 .expect("response binding layout fits u64");
         let response_binding_table_bytes =
             response_binding_entry_bytes.checked_mul(response_binding_count)?;
+        let (active_unit_entry_bytes, source_input_entry_bytes) = executor_table_entry_bytes();
+        let active_unit_table_bytes = active_unit_entry_bytes.checked_mul(emitted_op_count)?;
+        let source_input_table_bytes = source_input_entry_bytes.checked_mul(emitted_op_count)?;
         let total_bytes = runtime_field_bytes
             .checked_add(emitted_op_delta_bytes)?
             .checked_add(observation_runtime_state_bytes)?;
         let total_bytes = total_bytes
             .checked_add(response_binding_table_bytes)?
             .checked_add(response_binding_string_bytes)?;
+        let total_bytes = total_bytes
+            .checked_add(active_unit_table_bytes)?
+            .checked_add(source_input_table_bytes)?;
         Some(Self {
             emitted_op_count,
             runtime_field_bytes,
@@ -504,12 +523,16 @@ impl GraphRuntimeMetadataResourceEstimate {
             response_binding_table_bytes,
             response_binding_string_bytes,
             largest_response_binding_string_bytes,
+            active_unit_table_bytes,
+            source_input_table_bytes,
             total_bytes,
             largest_allocation_bytes: runtime_owner_allocation_bytes
                 .max(runtime_op_containing_bytes)
                 .max(runtime_unit_containing_bytes)
                 .max(response_binding_table_bytes)
-                .max(largest_response_binding_string_bytes),
+                .max(largest_response_binding_string_bytes)
+                .max(active_unit_table_bytes)
+                .max(source_input_table_bytes),
         })
     }
 }
@@ -2237,6 +2260,80 @@ struct GraphExecutor {
     /// into the arena. A claim bound in place (issue #918, `Runtime::source_in_place`) is not
     /// here: its bank reads the played block instead.
     source_input_buffers: Box<[(usize, u32)]>,
+    /// Issue #936: the units the render loop dispatches, ascending. Every unit is here but an
+    /// inert one ([`runtime::Runtime::unit_inert`]): a plain source input that nothing observes,
+    /// whose `execute` and `observe_unit` would both return before touching anything. Built once
+    /// at bind; the inert units stay in `runtime.units`, so the census, `unit_eligibility` and
+    /// every walk over the units still see them.
+    active_units: Box<[u32]>,
+}
+
+/// Bytes of one entry of each executor table sized at bind (issue #936): `(active_units,
+/// source_input_buffers)`.
+fn executor_table_entry_bytes() -> (u64, u64) {
+    (
+        u64::try_from(core::mem::size_of::<u32>()).expect("active unit entry fits u64"),
+        u64::try_from(core::mem::size_of::<(usize, u32)>()).expect("source input entry fits u64"),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Issue #936: units the render loop dispatched on this thread, over the blocks that
+    /// completed, since the last reset.
+    static UNIT_DISPATCHES: Cell<u64> = const { Cell::new(0) };
+    /// Issue #936: `[active_units, source_input_buffers]` byte lengths of the executor most
+    /// recently bound on this thread.
+    static EXECUTOR_TABLE_BYTES: Cell<[u64; 2]> = const { Cell::new([0; 2]) };
+}
+
+/// One completed block's dispatch count: one thread-local add per block, never one per unit.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_unit_dispatches(dispatched: u64) {
+    UNIT_DISPATCHES.with(|count| count.set(count.get().saturating_add(dispatched)));
+}
+
+/// Reset this thread's issue #936 dispatch count.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_unit_dispatch_reset() {
+    UNIT_DISPATCHES.with(|count| count.set(0));
+}
+
+/// Units the executor's render loop dispatched on this thread since the last reset, summed over
+/// the blocks that completed (issue #936). A plan that skips no unit dispatches every unit of its
+/// census once per block.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_unit_dispatches() -> u64 {
+    UNIT_DISPATCHES.with(Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_executor_tables(active_units: &[u32], source_input_buffers: &[(usize, u32)]) {
+    let bytes = |entries: usize, entry: usize| {
+        u64::try_from(entries.saturating_mul(entry)).unwrap_or(u64::MAX)
+    };
+    EXECUTOR_TABLE_BYTES.with(|tables| {
+        tables.set([
+            bytes(active_units.len(), core::mem::size_of::<u32>()),
+            bytes(
+                source_input_buffers.len(),
+                core::mem::size_of::<(usize, u32)>(),
+            ),
+        ]);
+    });
+}
+
+/// `[dispatched-unit table, copied-claim table]` byte lengths of the graph executor most recently
+/// bound on this thread (issue #936): what the runtime metadata estimate's
+/// `active_unit_table_bytes` and `source_input_table_bytes` charge for.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_executor_table_bytes() -> [u64; 2] {
+    EXECUTOR_TABLE_BYTES.with(Cell::get)
 }
 
 /// Same retained executor owner with the split-table field removed from its embedded runtime.
@@ -2248,6 +2345,7 @@ struct GraphExecutorWithoutSplitPairTable {
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
+    active_units: Box<[u32]>,
 }
 
 /// Same retained executor owner with observation activation state removed from its embedded
@@ -2259,6 +2357,7 @@ struct GraphExecutorWithoutObservationActivation {
     sample_rate_hz: u32,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
+    active_units: Box<[u32]>,
 }
 
 pub(crate) fn observation_runtime_layout() -> Option<(u64, u64)> {
@@ -2392,11 +2491,19 @@ impl GraphExecutor {
             .copied()
             .filter(|&(claim, buffer)| !runtime.source_in_place(claim, buffer))
             .collect();
+        // Issue #936: the render loop dispatches every unit but the inert ones, in unit order.
+        let active_units: Box<[u32]> = (0..runtime.units.len())
+            .filter(|&unit| !runtime.unit_inert(unit))
+            .map(|unit| u32::try_from(unit).expect("a unit index fits the op index width"))
+            .collect();
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_record_executor_tables(&active_units, &source_input_buffers);
         Self {
             runtime,
             sample_rate_hz,
             source_set,
             source_input_buffers,
+            active_units,
         }
     }
 
@@ -2470,6 +2577,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             sample_rate_hz: _,
             source_set,
             source_input_buffers,
+            active_units,
         } = self;
         #[cfg(any(test, feature = "test-support"))]
         let mut probe = test_only_phase_profile::Probe::start();
@@ -2515,7 +2623,16 @@ impl PreparedPlanExecutor for GraphExecutor {
         // `&mut`, so none can run while a unit borrows a plane; the next `begin_block` is the
         // next render's.
         let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
-        for unit in 0..runtime.units.len() {
+        // Issue #936: only the units bind found to do work. An inert unit's `execute` and
+        // `observe_unit` return at once and it has no activation entry, so skipping it moves no
+        // bit and leaves the observation cursor in step.
+        #[cfg(any(test, feature = "test-support"))]
+        let mut dispatched = 0_u64;
+        for unit in active_units.iter().map(|&unit| unit as usize) {
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                dispatched += 1;
+            }
             #[cfg(any(test, feature = "test-support"))]
             if let Some(probe) = probe.as_mut() {
                 probe.unit(runtime.test_only_unit_phase(unit));
@@ -2568,6 +2685,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 return Err(error);
             }
         }
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_count_unit_dispatches(dispatched);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(probe) = probe {
             probe.finish();
@@ -3072,15 +3191,38 @@ mod tests {
         );
         assert_eq!(resource.runtime_op_containing_bytes, op_size * emitted);
         assert_eq!(resource.runtime_unit_containing_bytes, unit_size * emitted);
+        // Issue #936: the executor's two bind-sized tables, each at one entry per emitted op.
+        let active_table = u64::try_from(core::mem::size_of::<u32>()).expect("entry") * emitted;
+        let source_table =
+            u64::try_from(core::mem::size_of::<(usize, u32)>()).expect("entry") * emitted;
+        assert_eq!(resource.active_unit_table_bytes, active_table);
+        assert_eq!(resource.source_input_table_bytes, source_table);
         assert_eq!(
             resource.total_bytes,
-            runtime_field + op_delta.max(unit_delta) * emitted + owner_state
+            runtime_field
+                + op_delta.max(unit_delta) * emitted
+                + owner_state
+                + active_table
+                + source_table
         );
         assert_eq!(
             resource.largest_allocation_bytes,
             executor_size
                 .max(op_size * emitted)
                 .max(unit_size * emitted)
+                .max(active_table)
+                .max(source_table)
+        );
+        // The executor's layout witnesses mirror every field but the one each removes, the two
+        // #936 tables included: the owner-level deltas are then exactly the runtime-level ones,
+        // and a table added to `GraphExecutor` alone would inflate both by its box.
+        assert_eq!(
+            executor_field, runtime_field,
+            "the split owner delta is the runtime field's alone"
+        );
+        assert_eq!(
+            owner_state, runtime_state,
+            "the observation owner delta is the runtime state's alone"
         );
 
         let mut estimate = empty_estimate();
