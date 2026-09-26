@@ -596,6 +596,72 @@ fn reduce_group_into<L: Lane, const N: usize>(
     accumulate_group::<L, N>(target, sources, initial_store)
 }
 
+/// Where the session Output op's fused reduction reads each of its inputs (issue #927): the arena
+/// buffer [`route_reduce`] names, or, for an input whose source claim is read **in place**, the
+/// source set's played planes for this block.
+///
+/// An input is read in place only when [`source_plane_table`] bound its claim there under clause
+/// (b'): the retired route over its buffer was the claim's only reader, so the fused reduction is
+/// the only read of the words the executor's copy loop would have written, and the loop skips the
+/// claim. The words are the copy's: the played block's on `Some`, and on `None` (underrun, end of
+/// region) the arena's silence buffer, which is the `+0.0` the copy fills an unplayed quantum with
+/// -- exactly what [`ArenaMembers::plane`] serves a bank's gather (issue #918).
+#[derive(Clone, Copy)]
+struct OutputSources<'a> {
+    /// `None` in a plan with no source set.
+    planes: Option<&'a dyn crate::GraphSourcePlanes>,
+    /// [`Runtime`]'s `output_sources`: empty, or one claim (or [`NO_SOURCE_CLAIM`]) per input of
+    /// the Output op, in its edge order. Selected by input **position**, never by buffer: see
+    /// [`source_plane_table`] for why a buffer does not identify a claim's value.
+    claims: &'a [u32],
+}
+
+impl<'a> OutputSources<'a> {
+    /// Every input from the arena: what every op but the session Output op is handed, and what the
+    /// Output op is handed in a plan that reads no input in place.
+    const NONE: Self = Self {
+        planes: None,
+        claims: &[],
+    };
+
+    /// Input `position`'s two planes: its claim's played planes, or the silence buffer on `None`,
+    /// if that input is read in place; otherwise arena buffer `buffer`, as before the issue. One
+    /// table read and one predictable branch per input per block; nothing is copied.
+    #[inline]
+    fn input<'b>(
+        self,
+        lease: &'b ArenaLease,
+        position: usize,
+        buffer: u32,
+    ) -> (&'b [f32], &'b [f32])
+    where
+        'a: 'b,
+    {
+        let claim = self
+            .claims
+            .get(position)
+            .copied()
+            .unwrap_or(NO_SOURCE_CLAIM);
+        if claim != NO_SOURCE_CLAIM
+            && let Some(planes) = self.planes
+        {
+            return match planes.played_planes(claim as usize) {
+                Some(played) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_count_source_plane(1);
+                    played
+                }
+                None => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_count_source_plane(2);
+                    lease.read_stereo(ARENA_SILENCE_BUFFER)
+                }
+            };
+        }
+        lease.read_stereo(buffer)
+    }
+}
+
 /// The session Output op's reduction with each contributor's route fused in, one **pair** of
 /// inputs at a time (issue #926; the fold's eligibility is issue #920's, [`output_route_fold`]).
 ///
@@ -649,12 +715,14 @@ fn route_reduce<L: Lane>(
     lease: &ArenaLease,
     inputs: &[u32],
     routes: &[[f32; 4]],
+    sources: OutputSources<'_>,
     left: &mut [f32],
     right: &mut [f32],
 ) -> bool {
     let frames = lease.frames();
     if inputs.len() != routes.len()
         || inputs.len() < 2
+        || (!sources.claims.is_empty() && sources.claims.len() != inputs.len())
         || left.len() != frames
         || right.len() != frames
     {
@@ -663,10 +731,13 @@ fn route_reduce<L: Lane>(
     let vectored = frames - frames % L::WIDTH;
     for (index, (pair, table)) in inputs.chunks(2).zip(routes.chunks(2)).enumerate() {
         let initial_store = index == 0;
+        let first = 2 * index;
         let reduced = match (pair, table) {
-            (&[first, second], &[first_route, second_route]) => route_pair::<L, 2>(
+            (&[first_input, second_input], &[first_route, second_route]) => route_pair::<L, 2>(
                 lease,
-                [first, second],
+                sources,
+                first,
+                [first_input, second_input],
                 &[first_route, second_route],
                 left,
                 right,
@@ -675,6 +746,8 @@ fn route_reduce<L: Lane>(
             ),
             (&[only], &[only_route]) => route_pair::<L, 1>(
                 lease,
+                sources,
+                first,
                 [only],
                 &[only_route],
                 left,
@@ -694,12 +767,23 @@ fn route_reduce<L: Lane>(
 /// One pair of routed inputs (`G = 2`), or an odd fan-in's last input (`G = 1`), into both host
 /// planes: the vector frames at `L` here, then the tail frames, if any, in [`route_tail`].
 ///
-/// Every input plane is `lease.frames()` words ([`ArenaLease::read`]), which [`route_reduce`] has
-/// checked the host planes against, so the shape check below never fails; it is what lets the
-/// slicing below compile without a bounds check.
+/// `first` is the pair's first input position, and each input's planes are what
+/// [`OutputSources::input`] serves for it: the arena buffer `ids` names, or its claim's played
+/// block (issue #927). Both are formed once per input per block, before any word is read, and
+/// every word the loops below read comes from them. Every input plane is `lease.frames()` words:
+/// [`ArenaLease::read`]'s, and a played plane is held to the quantum by the source set
+/// ([`crate::GraphSourcePlanes`]), which is the lease's frames. [`route_reduce`] has checked the
+/// host planes against it, so the shape check below never fails; it is what lets the slicing below
+/// compile without a bounds check.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pair's reads, its table and the host planes stay explicit parameters"
+)]
 #[inline(always)]
 fn route_pair<L: Lane, const G: usize>(
     lease: &ArenaLease,
+    sources: OutputSources<'_>,
+    first: usize,
     ids: [u32; G],
     table: &[[f32; 4]; G],
     left: &mut [f32],
@@ -707,8 +791,10 @@ fn route_pair<L: Lane, const G: usize>(
     vectored: usize,
     initial_store: bool,
 ) -> bool {
-    let lefts = ids.map(|input| lease.read(0, input));
-    let rights = ids.map(|input| lease.read(1, input));
+    let planes: [(&[f32], &[f32]); G] =
+        core::array::from_fn(|member| sources.input(lease, first + member, ids[member]));
+    let lefts = planes.map(|(left, _)| left);
+    let rights = planes.map(|(_, right)| right);
     let frames = left.len();
     if vectored > frames
         || right.len() != frames
@@ -2259,13 +2345,21 @@ pub(crate) struct Runtime {
     /// Issue #918: arena buffer -> the source claim a bank's gather reads **in place** from the
     /// played transfer block when it would read that buffer, or [`NO_SOURCE_CLAIM`]. Built at
     /// bind by [`source_plane_table`]; empty when no claim is bound in place. See there for the
-    /// mode each claim gets and why the rest keep the copy.
+    /// mode each claim gets and why the rest keep the copy. A claim the Output op reads in place
+    /// (issue #927, `output_sources`) is named here too, which is what makes the copy loop skip
+    /// it; the Output op itself never looks a buffer up here.
     source_plane_of_buffer: Box<[u32]>,
     /// One folded 2x2 per input of the Output op, in its edge order, when this bind retired every
     /// route that feeds it and fused them into its reduction ([`route_reduce`], issue #926).
     /// Empty otherwise, and then the Output op reduces as every other op does. Only the Output
     /// unit reads it: [`output_route_fold`] admits no other master.
     output_routes: Box<[[f32; 4]]>,
+    /// Issue #927: beside `output_routes`, one entry per input of the Output op, in the same edge
+    /// order: the source claim whose played block the fused reduction reads **in place** for that
+    /// input, or [`NO_SOURCE_CLAIM`] for an input read from the arena. Empty when no input is read
+    /// in place. Built at bind by [`source_plane_table`], clause (b'); only the Output unit reads
+    /// it ([`OutputSources`]).
+    output_sources: Box<[u32]>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2320,6 +2414,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     output_unit: Option<usize>,
     source_plane_of_buffer: Box<[u32]>,
     output_routes: Box<[[f32; 4]]>,
+    output_sources: Box<[u32]>,
 }
 
 /// Layout witness for the retained [`Runtime`] owner without observation activation state.
@@ -2344,6 +2439,7 @@ pub(crate) struct RuntimeWithoutObservationActivation {
     pub(crate) output_unit: Option<usize>,
     pub(crate) source_plane_of_buffer: Box<[u32]>,
     pub(crate) output_routes: Box<[[f32; 4]]>,
+    pub(crate) output_sources: Box<[u32]>,
 }
 
 pub(crate) fn observation_runtime_layout() -> Option<u64> {
@@ -2558,6 +2654,7 @@ impl Runtime {
             output_unit,
             source_plane_of_buffer: Box::default(),
             output_routes: output_routes.into_boxed_slice(),
+            output_sources: Box::default(),
         }
     }
 
@@ -2591,8 +2688,9 @@ impl Runtime {
         Ok(owners)
     }
 
-    /// Whether claim `claim`, whose input is arena buffer `buffer`, is bound in place (issue
-    /// #918): its bank gathers the played block, so the executor's copy loop skips it.
+    /// Whether claim `claim`, whose input is arena buffer `buffer`, is bound in place: its bank
+    /// gathers the played block (issue #918), or the Output op's fused reduction reads it (issue
+    /// #927), so the executor's copy loop skips it.
     pub(crate) fn source_in_place(&self, claim: usize, buffer: u32) -> bool {
         self.source_plane_of_buffer
             .get(buffer as usize)
@@ -2702,9 +2800,10 @@ impl Runtime {
     /// ([`FoldTarget::Output`]), which all run before it. Every other unit ignores it.
     ///
     /// `sources` is the source set's played planes for this block (issue #918), `None` in a plan
-    /// with no source set. Only a bank's gather reads it, and only on a lane its unit marks
-    /// (`UnitIdentity::source_lanes`) for a buffer [`Self::source_plane_of_buffer`] names; every
-    /// other read of the arena is unchanged.
+    /// with no source set. Two reads use it. A bank's gather, only on a lane its unit marks
+    /// (`UnitIdentity::source_lanes`) for a buffer [`Self::source_plane_of_buffer`] names. And the
+    /// Output op's fused reduction (issue #927), only for an input [`Self::output_sources`] names,
+    /// by position. Every other read of the arena is unchanged.
     pub(crate) fn execute(
         &mut self,
         index: usize,
@@ -2724,6 +2823,7 @@ impl Runtime {
             output_unit,
             source_plane_of_buffer,
             output_routes,
+            output_sources,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -2748,6 +2848,16 @@ impl Runtime {
                 let host = output.then_some(host);
                 // Issue #926: only the Output op carries a route table; every other op reduces.
                 let routes: &[[f32; 4]] = if output { output_routes } else { &[] };
+                // Issue #927: and only the Output op's fused reduction reads a source claim's
+                // played block, for the inputs `output_sources` names.
+                let sources = if output {
+                    OutputSources {
+                        planes: sources,
+                        claims: output_sources,
+                    }
+                } else {
+                    OutputSources::NONE
+                };
                 execute_op(
                     op,
                     lease,
@@ -2757,6 +2867,7 @@ impl Runtime {
                     first_sample,
                     host,
                     routes,
+                    sources,
                 )
             }
             RuntimeUnit::Bank {
@@ -2784,6 +2895,7 @@ impl Runtime {
                             first_sample,
                             None,
                             &[],
+                            OutputSources::NONE,
                         )?;
                         bank_inputs[lane] = member.output;
                     }
@@ -3215,7 +3327,10 @@ fn observe_active_entry(
 /// bind retired every route that feeds it (issue #926, [`output_route_fold`]). When it is not
 /// empty, entry `i` is the folded 2x2 of the route whose in-place buffer is `op.inputs[i]`, and
 /// the reduction is [`route_reduce`]: each route's `mix2x2_block` taken in registers on the way
-/// into the sum, rather than as a store pass of its own before it.
+/// into the sum, rather than as a store pass of its own before it. `sources` then says which of
+/// those inputs [`route_reduce`] reads from a source claim's played block instead of the arena
+/// (issue #927); it is [`OutputSources::NONE`] for every other op, and only `route_reduce` reads
+/// it.
 #[expect(
     clippy::too_many_arguments,
     reason = "the op's owners and its two optional Output-op storages stay explicit parameters"
@@ -3229,6 +3344,7 @@ fn execute_op(
     first_sample: u64,
     mut host: Option<HostMaster<'_>>,
     routes: &[[f32; 4]],
+    sources: OutputSources<'_>,
 ) -> Result<(), RenderError> {
     let output = op.output;
     if let NodeKind::TrackDelay { line, .. } = op.kind {
@@ -3286,7 +3402,7 @@ fn execute_op(
                 // refused shape cannot occur for an admitted fold; were it to, the error path
                 // silences the host planes rather than play a partial sum.
                 let (left, right) = host.planes_mut();
-                if !route_reduce::<FrameLane>(lease, &op.inputs, routes, left, right) {
+                if !route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right) {
                     return Err(RenderError::InvalidEnvelope);
                 }
             }
@@ -4882,16 +4998,17 @@ pub(crate) fn test_only_set_host_master_declined(declined: bool) {
 thread_local! {
     /// Issue #918's copy oracle. Bind-time only; render never reads it.
     static SOURCE_IN_PLACE_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// `[claims copied into the arena, gathers from a played block, gathers of silence]`.
+    /// `[claims copied into the arena, reads from a played block, reads of silence]`.
     static SOURCE_PLANE_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
 
-/// Decline (`true`) or restore (`false`) the in-place source gather for every later bind on this
-/// thread: issue #918's copy oracle, on the pattern of [`test_only_set_route_fold_declined`].
+/// Decline (`true`) or restore (`false`) the in-place source read for every later bind on this
+/// thread: issue #918's copy oracle, on the pattern of [`test_only_set_route_fold_declined`],
+/// which is issue #927's too.
 ///
 /// A plan bound declined binds every source claim on the copy, the path every claim took before
-/// the issue: the executor copies each claim's played block into its arena buffer and every
-/// gather reads the arena. The switch is read once per bind, in `GraphExecutor::new`; render never
+/// issue #918: the executor copies each claim's played block into its arena buffer, and every
+/// gather and the Output op's fused reduction read the arena. The switch is read once per bind, in `GraphExecutor::new`; render never
 /// reads it, and it does not exist without `test-support`. Callers restore `false` after the bind
 /// they meant to decline.
 #[cfg(any(test, feature = "test-support"))]
@@ -4912,9 +5029,10 @@ pub fn test_only_source_plane_reset() {
     SOURCE_PLANE_COUNTS.with(|counts| counts.set([0; 3]));
 }
 
-/// `[claims copied into the arena, gathers served from a played block, gathers served silence]`
-/// on this thread since the last reset: the mode counter that tells a claim bound in place from
-/// one still copied when both render the same bits.
+/// `[claims copied into the arena, reads served from a played block, reads served silence]` on
+/// this thread since the last reset, where a read is a bank gather's lane (issue #918) or an input
+/// of the Output op's fused reduction (issue #927): the mode counter that tells a claim bound in
+/// place from one still copied when both render the same bits.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]
@@ -5297,10 +5415,11 @@ pub(crate) fn build_sequential(
     let mut retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map_or_else(Default::default, |fold| fold.retired.clone());
-    let output_routes = output_fold.map_or_else(Vec::new, |output_fold| {
-        retired.extend(output_fold.retired);
-        output_fold.routes
-    });
+    let (output_routes, output_producers) =
+        output_fold.map_or_else(Default::default, |output_fold| {
+            retired.extend(output_fold.retired);
+            (output_fold.routes, output_fold.producers)
+        });
     // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
     // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
     // last slot reads the redirected buffer (see `scatter_target`).
@@ -5638,13 +5757,18 @@ pub(crate) fn build_sequential(
         .and_then(|op| op_slot.get(op).copied().flatten())
         .map(|(unit, _)| unit);
     // Issue #918: decided on the finished units, after every redirect has repointed its member.
-    let source_plane_of_buffer = source_plane_table(
+    // Issue #927: and on the Output fold's retired routes, whose inputs the fused reduction reads.
+    let SourcePlanes {
+        of_buffer: source_plane_of_buffer,
+        output: output_sources,
+    } = source_plane_table(
         program,
         spec,
         &units,
         &op_slot,
         &readers,
         source_claims,
+        &output_producers,
         &mut identity,
     );
     let mut runtime = Runtime::new_with_observation_activation(
@@ -5664,6 +5788,7 @@ pub(crate) fn build_sequential(
         output_routes,
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
+    runtime.output_sources = output_sources;
     runtime
 }
 
@@ -5685,48 +5810,92 @@ fn gathers_only(member: &RuntimeOp, buffer: u32) -> bool {
         && *member.inputs == [buffer]
 }
 
-/// Issue #918: which source claims a bank's gather reads **in place** from the played transfer
-/// block, as [`Runtime`]'s `source_plane_of_buffer` (arena buffer -> claim index, or
-/// [`NO_SOURCE_CLAIM`]). Every other claim keeps the copy.
+/// What [`source_plane_table`] bound in place, as the two tables the runtime keeps.
+struct SourcePlanes {
+    /// [`Runtime`]'s `source_plane_of_buffer`: arena buffer -> the claim bound in place there, or
+    /// [`NO_SOURCE_CLAIM`]. The executor's copy loop skips exactly the claims it names
+    /// ([`Runtime::source_in_place`]), and a bank's marked lane looks its buffer up in it.
+    of_buffer: Box<[u32]>,
+    /// [`Runtime`]'s `output_sources` (issue #927): one entry per input of the session Output
+    /// op's fused reduction, in its edge order, naming the claim that input reads from the played
+    /// block, or [`NO_SOURCE_CLAIM`] for an input read from the arena. Empty when no input is.
+    output: Box<[u32]>,
+}
+
+/// Which source claims are read **in place** from the played transfer block: by a bank's gather
+/// (issue #918), or by the session Output op's fused reduction (issue #927). Every other claim
+/// keeps the copy.
 ///
-/// A claim is bound in place, and the executor's copy loop skips it, only when nothing but a bank
-/// gather could ever read the words that copy writes. Each clause below is one way the copy is
-/// still needed, and the claim keeps it:
+/// A claim is bound in place, and the executor's copy loop skips it, only when nothing but one of
+/// those two reads could ever read the words that copy writes. Each clause below is one way the
+/// copy is still needed, and the claim keeps it:
 ///
 /// * **(a) The input op is a plain [`NodeKind::SourceInput`].** A delayed input
 ///   ([`NodeKind::TrackDelay`]) runs its delay line in place over the copied words, so the arena
 ///   buffer holds the aligned block rather than the played one, and a gather must read it there.
 ///   The only other op that could write the input's value is an in-place consumer, and (b) admits
 ///   one only when it is a bank member whose reduction is the `[own output]` no-op: it writes the
-///   buffer with its chain's scatter, after its own gather has read the input.
+///   buffer with its chain's scatter, after its own gather has read the input. (b') admits one
+///   only when it is a retired route, which does not run at all.
 /// * **(b) Every reader is a bank gather of exactly this buffer.** `op_dataflow`'s readers of the
 ///   input op are every op that reads its value: main inputs and sidechains, through elided aliases,
 ///   delayed or not. Each must be a first-slot member of a bank unit that reads this buffer and
 ///   nothing else and writes nothing before its chain gathers it ([`gathers_only`]), because
-///   [`ArenaMembers::plane`] is the only read that consults the table. A route, a submix, a
+///   [`ArenaMembers::plane`] is the only bank read that consults the table. A route, a submix, a
 ///   dynamic-rack or bound processor, the Output op, any other in-place consumer, a delayed (staged)
-///   or sidechain read all read the arena buffer itself, so they need the copy. A claim with no
-///   reader at all is bound in place too: nothing reads the copy.
+///   or sidechain read all read the arena buffer itself, so they need the copy, unless (b') admits
+///   the reader. A claim with no reader at all is bound in place too: nothing reads the copy.
+/// * **(b') Or its one reader is a route the Output fold retired (issue #927).** `readers` is
+///   exactly `[route]`, and `route` is `output_producers[i]`: the retired route that feeds input
+///   `i` of the session Output op ([`output_route_fold`]). That fold admitted `route` only as a
+///   plain route running in place over its one undelayed input, which is this claim's value, so
+///   the Output op's input `i` is this buffer; read by the Output op alone; unobserved, the aliases
+///   after it included; and with no unit between it and the Output op naming the buffer. Retired,
+///   `route` never runs, so the fused reduction ([`route_reduce`]) is the buffer's only read, and
+///   it reads input `i` from the played block instead ([`OutputSources`]). A claim whose route has
+///   a second reader beside it -- a send, a sidechain -- cannot be here: two readers keep the route
+///   from running in place, and the fold declines outright. Any other reader -- a submix, a bound
+///   stage, a delayed (staged) edge, a route that runs, or two of them -- reads the arena, so the
+///   claim keeps the copy.
 /// * **(c) No observer at the input stage.** An observer bound to the input node, or to an elided
 ///   alias of its buffer, is dispatched after the input op and reads `lease.read_stereo(op.output)`:
 ///   the copied words.
 /// * **(d) The driver lends its planes.** `source_claims` is empty unless
 ///   [`crate::GraphPreparedSourceSetDriver::provides_played_planes`] is `true`.
+/// * **(e) Under (b'), nothing scheduled before the input op names its buffer.** The copy fills the
+///   buffer before the first unit, but the input op, a no-op, sits at its own place in the
+///   schedule, and the colouring may give its slot to a value that dies before it. That value's
+///   producer overwrites the copied words, and the Output op then reads what it wrote. The fused
+///   reduction must read exactly the words the copy leaves there, so such a claim keeps the copy.
+///   The graph compiler puts every input in the first dependency level, ahead of every other node
+///   of that level by node order, so this never fires on a compiled plan; a hand-built plan need
+///   not. (b) has the same exposure and no such clause: it is issue #918's, which this issue does
+///   not change.
 ///
 /// The table is keyed by the physical arena buffer, and the colouring hands a retired input's slot
-/// to later ops (a route, the Output, another cohort's member, which a later bank may gather). So
-/// the key alone does not identify the claim's value, and the table is never consulted by key
-/// alone: each reader gather of (b) marks its lane in its unit's [`UnitIdentity::source_lanes`],
-/// and [`ArenaMembers::plane`] looks a buffer up only for a marked lane. Every other gather of the
-/// same slot reads the arena, as it always did.
+/// to later ops (a route, the Output, another cohort's member, which a later bank may gather; and a
+/// claim with no reader, which (b) binds in place, frees its slot at once). So the key alone does
+/// not identify the claim's value, and the table is never consulted by key alone. Each reader
+/// gather of (b) marks its lane in its unit's [`UnitIdentity::source_lanes`], and
+/// [`ArenaMembers::plane`] looks a buffer up only for a marked lane; every other gather of the same
+/// slot reads the arena, as it always did. The Output op of (b') never looks a buffer up at all:
+/// it reads input `i` from the claim `output[i]` names, and the table's entry for that claim is
+/// only what makes the copy loop skip it.
 ///
 /// Why the in-place words are the copy's: `op_dataflow`'s readers are every read of the claim's
-/// value, and by (b) they are the marked gathers. Under the copy the played block is in the buffer
-/// from before the first unit until the buffer's first write, and nothing writes it before those
-/// gathers read it: the input op is a no-op (a) and each reader's reduction only reads it (b). So a
-/// marked gather reads the same words from the block. A later read of the slot is a read of
-/// another value -- the reader's own scatter, or an op the slot was recoloured to -- and depends on
-/// the copied words no more than it did under the copy.
+/// value, and by (b) or (b') they are the marked gathers or the fused reduction. Under the copy the
+/// played block is in the buffer from before the first unit through the input op (under (b'), by
+/// (e)), and from the input op to the value's last reader the colouring gives the slot to nothing
+/// else, while nothing that reads the value writes it before those reads: the input op is a no-op
+/// (a), each gather's reduction only reads it (b), and the retired route does not run (b'). So a
+/// marked gather or the fused reduction reads the same words from the block, and on an unplayed
+/// quantum the silence buffer's `+0.0`, which is what the copy fills it with. A later read of the
+/// slot is a read of another value -- the reader's own scatter, or an op the slot was recoloured
+/// to -- and depends on the copied words no more than it did under the copy.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the bind-time facts the table is decided on stay explicit parameters"
+)]
 fn source_plane_table(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -5734,8 +5903,9 @@ fn source_plane_table(
     op_slot: &[Option<(usize, usize)>],
     readers: &[Vec<usize>],
     claims: &[GraphNodeId],
+    output_producers: &[usize],
     identity: &mut [UnitIdentity],
-) -> Box<[u32]> {
+) -> SourcePlanes {
     // The first-slot lane `(unit, lane)` an op runs as, and its bank's members. A lane beyond the
     // eighth could not be marked in `UnitIdentity::source_lanes`; no bank is that wide.
     let first_slot = |op: usize| -> Option<(usize, usize, &RuntimeOp)> {
@@ -5747,10 +5917,12 @@ fn source_plane_table(
             _ => None,
         }
     };
-    // `(claim, buffer)` of every claim clauses (a) to (c) admit, and the `(unit, lane)` of every
+    // `(claim, buffer)` of every claim clauses (a) to (e) admit, and the `(unit, lane)` of every
     // reader gather of those claims.
     let mut admitted: Vec<(u32, u32)> = Vec::new();
     let mut marked: Vec<(usize, usize)> = Vec::new();
+    let mut output = vec![NO_SOURCE_CLAIM; output_producers.len()];
+    let mut output_reads = false;
     for (claim, node) in claims.iter().enumerate() {
         let Ok(claim) = u32::try_from(claim) else {
             continue;
@@ -5790,6 +5962,18 @@ fn source_plane_table(
         if gathers.len() == readers[op].len() {
             admitted.push((claim, buffer));
             marked.extend(gathers);
+            continue;
+        }
+        // (b') and (e).
+        if let [reader] = readers[op].as_slice()
+            && let Some(input) = output_producers.iter().position(|route| route == reader)
+            && !program.ops[..op]
+                .iter()
+                .any(|earlier| op_names_buffer(program, earlier, program.ops[op].output))
+        {
+            admitted.push((claim, buffer));
+            output[input] = claim;
+            output_reads = true;
         }
     }
     // Mark each reader gather's lane, so only these lanes ever consult the table.
@@ -5798,7 +5982,10 @@ fn source_plane_table(
         .map(|(_, buffer)| *buffer as usize + 1)
         .max()
     else {
-        return Box::default();
+        return SourcePlanes {
+            of_buffer: Box::default(),
+            output: Box::default(),
+        };
     };
     let mut table = vec![NO_SOURCE_CLAIM; len];
     for (claim, buffer) in admitted {
@@ -5807,7 +5994,14 @@ fn source_plane_table(
     for (unit, lane) in marked {
         identity[unit].source_lanes |= 1 << lane;
     }
-    table.into_boxed_slice()
+    SourcePlanes {
+        of_buffer: table.into_boxed_slice(),
+        output: if output_reads {
+            output.into_boxed_slice()
+        } else {
+            Box::default()
+        },
+    }
 }
 
 fn response_owner_bindings(
@@ -6786,6 +6980,9 @@ struct OutputRouteFold {
     /// `routes[i]` is the folded 2x2 of the route whose in-place buffer is the Output op's input
     /// `i`: [`folded_route`], the constants `node_kind` would have handed that route op.
     routes: Vec<[f32; 4]>,
+    /// `producers[i]` is that route op itself: the retired route that feeds the Output op's input
+    /// `i`. Issue #927's [`source_plane_table`] reads it to find which input a source claim is.
+    producers: Vec<usize>,
 }
 
 /// Retire every plain route that feeds the session Output op, and fuse their mixes into its
@@ -6884,6 +7081,7 @@ fn output_route_fold(
     let master_run = run_of(master_op)?;
     let mut retired = std::collections::BTreeSet::new();
     let mut routes = Vec::with_capacity(inputs.len());
+    let mut retired_producers = Vec::with_capacity(inputs.len());
     for (input, producer) in inputs.iter().zip(&producers) {
         let route = (*producer)?;
         let route_op = &program.ops[route];
@@ -6918,8 +7116,13 @@ fn output_route_fold(
             return None;
         }
         routes.push(gains);
+        retired_producers.push(route);
     }
-    Some(OutputRouteFold { retired, routes })
+    Some(OutputRouteFold {
+        retired,
+        routes,
+        producers: retired_producers,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8225,6 +8428,7 @@ mod tests {
             0,
             None,
             &[],
+            OutputSources::NONE,
         )
         .expect("earlier fader");
         assert_eq!(
@@ -8236,7 +8440,8 @@ mod tests {
                 &mut [],
                 0,
                 None,
-                &[]
+                &[],
+                OutputSources::NONE,
             ),
             Err(RenderError::InvalidEnvelope)
         );
@@ -10134,7 +10339,18 @@ mod tests {
                 split_pair: None,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut lease, &mut [], &mut [], &mut [], 0, None, &[]).expect("op");
+            execute_op(
+                &mut op,
+                &mut lease,
+                &mut [],
+                &mut [],
+                &mut [],
+                0,
+                None,
+                &[],
+                OutputSources::NONE,
+            )
+            .expect("op");
             let (left, right) = lease.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
@@ -13976,7 +14192,14 @@ mod tests {
                     }
                     let (mut left, mut right) = (vec![pad; frames], vec![pad; frames]);
                     assert!(
-                        route_reduce::<L>(&lease, &inputs, &routes, &mut left, &mut right),
+                        route_reduce::<L>(
+                            &lease,
+                            &inputs,
+                            &routes,
+                            OutputSources::NONE,
+                            &mut left,
+                            &mut right
+                        ),
                         "{frames} frames, fan-in {fan_in}: an admitted shape reduces"
                     );
                     let case = format!(
@@ -14006,7 +14229,12 @@ mod tests {
         ] {
             let (mut left, mut right) = (vec![pad; 5], vec![pad; 5]);
             assert!(!route_reduce::<L>(
-                &lease, inputs, routes, &mut left, &mut right
+                &lease,
+                inputs,
+                routes,
+                OutputSources::NONE,
+                &mut left,
+                &mut right
             ));
             assert!(
                 left.iter()
@@ -14661,5 +14889,1105 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #927: a plain strip's source claim is read in place by the fused Output reduction.
+    // -----------------------------------------------------------------------------------------
+
+    /// What the claims of one issue #927 block hold, by block index.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RingBlock {
+        /// Every claim plays a whole quantum.
+        Full,
+        /// Every claim plays this many frames, then `+0.0` to the quantum (zeroed in place): a
+        /// short end-of-region block.
+        Short(usize),
+        /// Claim [`RING_UNDERRUN_CLAIM`]'s source played nothing; every other claim plays a whole
+        /// quantum. The production driver answers per source, so one claim can underrun alone.
+        ClaimUnderrun,
+        /// No claim plays.
+        Underrun,
+    }
+
+    /// The claim whose source underruns alone on a [`RingBlock::ClaimUnderrun`] block. It is a
+    /// plain track in every [`RingShape`], and its Output input is paired with an input read from
+    /// a played block in the plain shape.
+    const RING_UNDERRUN_CLAIM: usize = 9;
+
+    /// Issue #927's script: gate 3's one-claim underrun at block 3, a short block, and a block in
+    /// which nothing plays.
+    const RING_SCRIPT: [RingBlock; 8] = [
+        RingBlock::Full,
+        RingBlock::Full,
+        RingBlock::Full,
+        RingBlock::ClaimUnderrun,
+        RingBlock::Full,
+        RingBlock::Short(9),
+        RingBlock::Underrun,
+        RingBlock::Full,
+    ];
+
+    /// Whether `claim` plays in `block` of [`RING_SCRIPT`].
+    fn ring_plays(block: usize, claim: usize) -> bool {
+        match RING_SCRIPT[block % RING_SCRIPT.len()] {
+            RingBlock::Full | RingBlock::Short(_) => true,
+            RingBlock::ClaimUnderrun => claim != RING_UNDERRUN_CLAIM,
+            RingBlock::Underrun => false,
+        }
+    }
+
+    /// A fake source set with the production driver's contract, per claim: `begin_block` plays
+    /// one block of hostile words per channel ([`hostile_sample`]; tail zeroed in place on a short
+    /// block), `copy_track_input` copies a playing claim's `(left, right)` channels and fills a
+    /// silent one with `+0.0`, and `played_planes` lends a playing claim's channels, `None`
+    /// otherwise, until the next `begin_block`. A silent claim's channels keep the previous
+    /// block's words, so a read that ignored `None` would see them.
+    struct RingSource {
+        frames: usize,
+        /// Per claim, the `(left, right)` source channels. A mono claim names one channel twice.
+        mapping: Vec<[usize; 2]>,
+        /// `channels * frames` words: this block's played planes.
+        planes: Vec<f32>,
+        /// Per claim, whether it played this block.
+        played: Vec<bool>,
+    }
+
+    impl RingSource {
+        /// Claim `c` reads channels `(2c, 2c + 1)`, and every fifth claim `(2c, 2c)`.
+        fn new(frames: u32, claims: usize) -> Self {
+            let mapping: Vec<[usize; 2]> = (0..claims)
+                .map(|claim| {
+                    if claim % 5 == 4 {
+                        [2 * claim, 2 * claim]
+                    } else {
+                        [2 * claim, 2 * claim + 1]
+                    }
+                })
+                .collect();
+            Self {
+                frames: frames as usize,
+                planes: vec![0.0; 2 * claims * frames as usize],
+                played: vec![false; claims],
+                mapping,
+            }
+        }
+
+        fn channel(&self, channel: usize) -> &[f32] {
+            &self.planes[channel * self.frames..(channel + 1) * self.frames]
+        }
+    }
+
+    impl crate::GraphPreparedSourceSetDriver for RingSource {
+        fn claim_count(&self) -> usize {
+            self.mapping.len()
+        }
+
+        fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError> {
+            let block = (first_sample / u64::from(frames)) as usize;
+            for (claim, played) in self.played.iter_mut().enumerate() {
+                *played = ring_plays(block, claim);
+            }
+            let played = match RING_SCRIPT[block % RING_SCRIPT.len()] {
+                RingBlock::Underrun => return Ok(()),
+                RingBlock::Short(played) => played.min(self.frames),
+                RingBlock::Full | RingBlock::ClaimUnderrun => self.frames,
+            };
+            for (channel, plane) in self.planes.chunks_exact_mut(self.frames).enumerate() {
+                if self.mapping.iter().enumerate().any(|(claim, channels)| {
+                    channels.contains(&channel) && !ring_plays(block, claim)
+                }) {
+                    // A silent claim's channels keep last block's words.
+                    continue;
+                }
+                let mut state = 0x0927_u64 ^ ((channel as u64) << 32) ^ first_sample;
+                for word in &mut plane[..played] {
+                    *word = hostile_sample(&mut state);
+                }
+                plane[played..].fill(0.0);
+            }
+            Ok(())
+        }
+
+        fn copy_track_input(
+            &mut self,
+            claim: usize,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            let [left_channel, right_channel] = self.mapping[claim];
+            if self.played[claim] {
+                left.copy_from_slice(self.channel(left_channel));
+                right.copy_from_slice(self.channel(right_channel));
+            } else {
+                left.fill(0.0);
+                right.fill(0.0);
+            }
+            Ok(())
+        }
+
+        fn provides_played_planes(&self) -> bool {
+            true
+        }
+
+        fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+            let [left_channel, right_channel] = *self.mapping.get(claim)?;
+            self.played[claim].then(|| (self.channel(left_channel), self.channel(right_channel)))
+        }
+    }
+
+    /// The tracks of every issue #927 plan: `Input -> Route -> Output` each, sixty-four claims.
+    const RING_TRACKS: usize = 64;
+    /// The track each [`RingShape`] changes.
+    const RING_SPECIAL: usize = 5;
+
+    /// Which issue #927 plan to bind: [`RING_TRACKS`] tracks, each `Input -> Route -> Output`
+    /// with every input claimed by a [`RingSource`], and the shape's one change to track
+    /// [`RING_SPECIAL`] (`K`).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RingShape {
+        /// Every claim's only reader is its route, which the Output fold retires: all read in place.
+        Plain,
+        /// [`RingShape::Plain`] bound with the Output route fold declined: the Output op reduces the
+        /// route ops' outputs, so no input of it is a claim, and every claim keeps the copy.
+        FoldDeclined,
+        /// `K`'s input is delayed in place (`NodeKind::TrackDelay`, clause (a)).
+        TrackDelayed,
+        /// A meter on `K`'s `Input` (clause (c)).
+        ObservedInput,
+        /// A meter on `K`'s `PostFader`, an unlisted builtin stage and so an alias of the input's
+        /// buffer after the input op (clause (c), through the alias).
+        ObservedAlias,
+        /// `K`'s input also feeds a send route into a submix bus, whose own route feeds the Output.
+        /// `K`'s path runs through its bound `PostFader` (an identity), so `K`'s route stays plain
+        /// and in place and the fold holds: sixty-five inputs. `K` has two readers (clause (b')).
+        SendTap,
+        /// `K`'s edge into its bound `PostFader` carries a compensation delay: the fader stages the
+        /// input's buffer through its delay line (clause (b')).
+        DelayedEdge,
+        /// `K`'s input feeds a submix, whose route feeds the Output (clause (b')).
+        SubmixReader,
+        /// `K`'s edge into its own route carries a compensation delay: the route is staged, not in
+        /// place, so issue #926's fold declines outright and every claim keeps the copy.
+        RouteEdgeDelayed,
+        /// `K`'s input is scheduled after an empty submix whose slot it then takes: the submix's
+        /// `+0.0` overwrites the copied words before the Output reads them (clause (e)).
+        LateInput,
+        /// [`RingShape::SendTap`] plus a sixty-fifth claim with no reader, scheduled last among the
+        /// inputs: issue #918 binds it in place, and the colouring hands its freed slot to the
+        /// fader, whose buffer is then one of the Output's inputs. The Output must not read that
+        /// input by the buffer-keyed table.
+        DeadClaim,
+    }
+
+    impl RingShape {
+        const ALL: [Self; 11] = [
+            Self::Plain,
+            Self::FoldDeclined,
+            Self::TrackDelayed,
+            Self::ObservedInput,
+            Self::ObservedAlias,
+            Self::SendTap,
+            Self::DelayedEdge,
+            Self::SubmixReader,
+            Self::RouteEdgeDelayed,
+            Self::LateInput,
+            Self::DeadClaim,
+        ];
+
+        /// The Output fold's input count, or zero when it declines.
+        const fn folds(self) -> u64 {
+            match self {
+                Self::FoldDeclined | Self::RouteEdgeDelayed => 0,
+                Self::SendTap | Self::DeadClaim => RING_TRACKS as u64 + 1,
+                _ => RING_TRACKS as u64,
+            }
+        }
+
+        /// The claims issue #927 reads in place: every live claim but `K`, unless the fold declined.
+        fn output_reads(self) -> Vec<usize> {
+            match self {
+                Self::Plain => (0..RING_TRACKS).collect(),
+                Self::FoldDeclined | Self::RouteEdgeDelayed => Vec::new(),
+                _ => (0..RING_TRACKS)
+                    .filter(|track| *track != RING_SPECIAL)
+                    .collect(),
+            }
+        }
+
+        /// Every claim, the dead one included.
+        const fn claims(self) -> usize {
+            RING_TRACKS + matches!(self, Self::DeadClaim) as usize
+        }
+
+        /// The claims bound in place: issue #927's, and the dead claim, which issue #918 binds in
+        /// place because nothing reads it.
+        fn in_place(self) -> Vec<bool> {
+            let reads = self.output_reads();
+            (0..self.claims())
+                .map(|claim| reads.contains(&claim) || claim == RING_TRACKS)
+                .collect()
+        }
+    }
+
+    /// [`RingShape`]'s unbound plan, bindings and source set. Two meters on the Output in every
+    /// shape, and one on the observed stage.
+    fn ring_output_parts(
+        shape: RingShape,
+        frames: u32,
+        published: &Published,
+    ) -> (
+        crate::PreparedGraphPlan,
+        crate::GraphRuntimeBindings,
+        crate::GraphPreparedSourceSet,
+    ) {
+        let id = |text: String| crate::StableGraphId::parse(&text).expect("stable id");
+        let stage = |track: usize, stage| GraphNodeId::TrackStage {
+            track_id: id(format!("track{track:02}")),
+            stage,
+        };
+        let route_id = |name: String| id(name);
+        let route_node = |name: String| GraphNodeId::Route {
+            route_id: route_id(name),
+        };
+        let track_route = |track: usize| format!("route{track:02}");
+        let special = RING_SPECIAL;
+        let mut claimed: Vec<GraphNodeId> = (0..RING_TRACKS)
+            .map(|track| stage(track, TrackStage::Input))
+            .collect();
+        if shape == RingShape::DeadClaim {
+            claimed.push(stage(99, TrackStage::Input));
+        }
+        let output = GraphNodeId::Output {
+            output_id: id("main".to_owned()),
+        };
+        let fader = stage(special, TrackStage::PostFader);
+        let bus = GraphNodeId::Submix {
+            submix_id: id("bus".to_owned()),
+        };
+        let late = GraphNodeId::Submix {
+            submix_id: id("late".to_owned()),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue927".to_owned(),
+        };
+        let mut nodes: Vec<GraphNodeId> = claimed.clone();
+        nodes.push(output.clone());
+        let mut edges = Vec::new();
+        let mut routes: Vec<String> = Vec::new();
+        // One route `name` from `source` into `destination`.
+        let mut route = |name: String,
+                         source: &GraphNodeId,
+                         destination: &GraphNodeId,
+                         nodes: &mut Vec<GraphNodeId>,
+                         edges: &mut Vec<crate::GraphEdge>| {
+            let node = route_node(name.clone());
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id(name.clone()),
+                },
+                source,
+                &node,
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: route_id(name.clone()),
+                },
+                &node,
+                destination,
+            ));
+            nodes.push(node);
+            routes.push(name);
+        };
+        let bound_fader = matches!(
+            shape,
+            RingShape::SendTap | RingShape::DelayedEdge | RingShape::DeadClaim
+        );
+        for track in 0..RING_TRACKS {
+            let input = stage(track, TrackStage::Input);
+            if track != special {
+                route(track_route(track), &input, &output, &mut nodes, &mut edges);
+                continue;
+            }
+            match shape {
+                RingShape::ObservedAlias => {
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: fader.clone(),
+                        },
+                        &input,
+                        &fader,
+                    ));
+                    nodes.push(fader.clone());
+                    route(track_route(track), &fader, &output, &mut nodes, &mut edges);
+                }
+                _ if bound_fader => {
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: fader.clone(),
+                        },
+                        &input,
+                        &fader,
+                    ));
+                    nodes.push(fader.clone());
+                    route(track_route(track), &fader, &output, &mut nodes, &mut edges);
+                    if shape != RingShape::DelayedEdge {
+                        route("sendroute".to_owned(), &input, &bus, &mut nodes, &mut edges);
+                        route("busroute".to_owned(), &bus, &output, &mut nodes, &mut edges);
+                        nodes.push(bus.clone());
+                    }
+                }
+                RingShape::SubmixReader => {
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: bus.clone(),
+                        },
+                        &input,
+                        &bus,
+                    ));
+                    nodes.push(bus.clone());
+                    route("busroute".to_owned(), &bus, &output, &mut nodes, &mut edges);
+                }
+                _ => route(track_route(track), &input, &output, &mut nodes, &mut edges),
+            }
+        }
+        if shape == RingShape::LateInput {
+            nodes.push(late.clone());
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        // Levels by longest path, except that the late shape holds its empty submix at level one
+        // and track K's input at level two, after it.
+        let mut level: BTreeMap<GraphNodeId, usize> = nodes
+            .iter()
+            .map(|node| {
+                let floor = match shape {
+                    RingShape::LateInput if *node == late => 1,
+                    RingShape::LateInput if *node == stage(special, TrackStage::Input) => 2,
+                    _ => 0,
+                };
+                (node.clone(), floor)
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for edge in &edges {
+                let source = level[&edge.source.node];
+                let destination = level.get_mut(&edge.destination.node).expect("node");
+                if *destination <= source {
+                    *destination = source + 1;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let depth = level.values().copied().max().unwrap_or(0);
+        let levels: Vec<Vec<GraphNodeId>> = (0..=depth)
+            .map(|depth| {
+                level
+                    .iter()
+                    .filter(|(_, at)| **at == depth)
+                    .map(|(node, _)| node.clone())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|nodes| !nodes.is_empty())
+            .collect();
+        let schedule: Vec<GraphNodeId> = levels.iter().flatten().cloned().collect();
+        let mut spec_nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        spec_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(frames),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let inserted_delays = match shape {
+            RingShape::DelayedEdge => Some((
+                GraphEdgeId::TrackMain {
+                    target: fader.clone(),
+                },
+                4,
+            )),
+            RingShape::RouteEdgeDelayed => Some((
+                GraphEdgeId::RouteSource {
+                    route_id: route_id(track_route(special)),
+                },
+                3,
+            )),
+            _ => None,
+        }
+        .map(|(edge_id, samples)| crate::InsertedDelay {
+            node: GraphNodeId::CompensationDelay {
+                edge_id: Box::new(edge_id.clone()),
+            },
+            edge_id,
+            samples: effect_contract::LatencySamples(samples),
+        })
+        .into_iter()
+        .collect();
+        let mut state = 0x0927_0000_u64;
+        let prepared_routes = routes
+            .iter()
+            .map(|name| crate::PreparedRoute {
+                node: route_node(name.clone()),
+                transform: RouteTransform {
+                    gain: hostile_constant(&mut state),
+                    ll: hostile_constant(&mut state),
+                    lr: hostile_constant(&mut state),
+                    rl: hostile_constant(&mut state),
+                    rr: hostile_constant(&mut state),
+                },
+            })
+            .collect();
+        // Every claimed input, the Output, and every bound stage or submix.
+        let mut bound: Vec<GraphNodeId> = vec![output.clone()];
+        if bound_fader {
+            bound.push(fader.clone());
+        }
+        if nodes.contains(&bus) {
+            bound.push(bus.clone());
+        }
+        if shape == RingShape::LateInput {
+            bound.push(late.clone());
+        }
+        let mut required_bindings = claimed.clone();
+        required_bindings.extend(bound.iter().cloned());
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 927,
+            spec: GraphSpec {
+                nodes: spec_nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: nodes.clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays,
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings,
+            routes: prepared_routes,
+            track_delays: if shape == RingShape::TrackDelayed {
+                vec![crate::PreparedTrackDelay {
+                    node: stage(special, TrackStage::Input),
+                    left_samples: 3,
+                    right_samples: 5,
+                }]
+            } else {
+                Vec::new()
+            },
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let meter = |node: GraphNodeId, handle: u64| {
+            GraphNodeObserverBinding::new(
+                node,
+                handle,
+                Box::new(WordMeter {
+                    handle,
+                    accepts_resident: false,
+                    published: Arc::clone(published),
+                }),
+            )
+        };
+        let mut observers = vec![
+            meter(output.clone(), OUTPUT_METER_HANDLE),
+            meter(output, OUTPUT_METER_HANDLE + 1),
+        ];
+        match shape {
+            RingShape::ObservedInput => observers.push(meter(stage(special, TrackStage::Input), 1)),
+            RingShape::ObservedAlias => observers.push(meter(fader, 1)),
+            _ => {}
+        }
+        let source_set = crate::GraphPreparedSourceSet::new(
+            envelope,
+            claimed
+                .iter()
+                .map(|node| crate::GraphSourceInputClaim { node: node.clone() })
+                .collect(),
+            crate::GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(RingSource::new(frames, claimed.len())),
+        );
+        (
+            plan,
+            crate::GraphRuntimeBindings {
+                envelope,
+                nodes: bound.into_iter().map(GraphNodeBinding::identity).collect(),
+                observers,
+            },
+            source_set,
+        )
+    }
+
+    /// The quanta every issue #927 shape renders at.
+    const RING_FRAMES: [u32; 4] = [1, 7, 16, 128];
+
+    /// Each shape's declined arm as the executor rendered it before the issue: FNV-1a over the
+    /// [`RingRun::digest`] of the arm bound with every claim copied at each of [`RING_FRAMES`],
+    /// recorded by this fixture compiled against the base tree's `runtime.rs` (`169a2486`, where
+    /// the copy was the only path of a bankless plan). Equal pairs are expected: a declined fold
+    /// is issue #926's class A, the two observed shapes meter the same words, and the dead claim
+    /// contributes nothing.
+    const RING_PRE_CHANGE: [(RingShape, u64); 11] = [
+        (RingShape::Plain, 0xf2d8_ff22_1c55_f760),
+        (RingShape::FoldDeclined, 0xf2d8_ff22_1c55_f760),
+        (RingShape::TrackDelayed, 0x75f7_f01f_6f68_5c7e),
+        (RingShape::ObservedInput, 0xa855_aedb_d442_640e),
+        (RingShape::ObservedAlias, 0xa855_aedb_d442_640e),
+        (RingShape::SendTap, 0xfeac_93e4_a545_cd95),
+        (RingShape::DelayedEdge, 0xf6ae_27a3_c2f2_9571),
+        (RingShape::SubmixReader, 0xa8e2_329f_9960_1a18),
+        (RingShape::RouteEdgeDelayed, 0xb08a_7a66_19e1_9459),
+        (RingShape::LateInput, 0x98a4_f2f7_67bb_628b),
+        (RingShape::DeadClaim, 0xfeac_93e4_a545_cd95),
+    ];
+
+    /// One more `u64` into a running FNV-1a hash, byte by byte.
+    fn ring_fnv(hash: u64, value: u64) -> u64 {
+        value.to_le_bytes().iter().fold(hash, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// [`assert_ring_shape`] at every quantum of [`RING_FRAMES`], and the declined arm's digests
+    /// against [`RING_PRE_CHANGE`]. Returns each quantum's runs.
+    fn assert_ring_shape_at_every_quantum(shape: RingShape) -> Vec<(u32, RingRun, RingRun)> {
+        let mut combined = 0xcbf2_9ce4_8422_2325_u64;
+        let runs: Vec<_> = RING_FRAMES
+            .iter()
+            .map(|&frames| {
+                let (in_place, copy) = assert_ring_shape(shape, frames);
+                combined = ring_fnv(combined, copy.digest());
+                (frames, in_place, copy)
+            })
+            .collect();
+        let pre_change = RING_PRE_CHANGE
+            .iter()
+            .find(|(recorded, _)| *recorded == shape)
+            .map(|(_, digest)| *digest);
+        assert_eq!(
+            Some(combined),
+            pre_change,
+            "{shape:?}: the declined arm is the pre-change executor"
+        );
+        runs
+    }
+
+    /// Words no source path ever writes: every claim's arena slot holds these before a block.
+    const RING_SLOT_POISON: [u32; 2] = [0x7fc1_0927, 0x7fc2_0927];
+
+    /// What one issue #927 arm rendered and how it was bound: every block's host storage (padding
+    /// included), every published meter frame, each claim's mode (`true` in place), the
+    /// source-plane counts of each block (`[copies, played reads, silent reads]`), and the Output
+    /// route fold's input count.
+    struct RingRun {
+        hosts: Vec<Vec<u32>>,
+        meters: Vec<MeterFrame>,
+        in_place: Vec<bool>,
+        counts: Vec<[u64; 3]>,
+        folds: u64,
+        /// The claim each Output input reads in place, per input (`None` for the arena), when the
+        /// bind reads any.
+        output_claims: Vec<Option<usize>>,
+    }
+
+    impl RingRun {
+        /// FNV-1a over every host word and every meter frame, in render order.
+        fn digest(&self) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            let mut word = |value: u64| {
+                for byte in value.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            };
+            for host in &self.hosts {
+                host.iter().for_each(|bits| word(u64::from(*bits)));
+            }
+            for frame in &self.meters {
+                word(frame.handle);
+                word(frame.first_sample);
+                frame
+                    .left
+                    .iter()
+                    .chain(&frame.right)
+                    .chain(&frame.peak)
+                    .chain(&frame.energy)
+                    .for_each(|bits| word(u64::from(*bits)));
+            }
+            hash
+        }
+    }
+
+    /// The arena slot of every claimed input, in claim order.
+    fn ring_slots(plan: &crate::PreparedGraphPlan, claims: usize) -> Vec<u32> {
+        let program = plan.lowered().expect("lowered");
+        (0..claims)
+            .map(|claim| {
+                let track = if claim == RING_TRACKS { 99 } else { claim };
+                let node = GraphNodeId::TrackStage {
+                    track_id: crate::StableGraphId::parse(&format!("track{track:02}"))
+                        .expect("stable id"),
+                    stage: TrackStage::Input,
+                };
+                let index = crate::program::node_index(&plan.spec, &node).expect("input node");
+                program.node_buffer[index as usize].0 + ARENA_BASE
+            })
+            .collect()
+    }
+
+    /// Bind `shape` -- in place, or with `declined` every claim on the copy -- and render
+    /// [`RING_SCRIPT`] into host planes of stride `frames + 3`, poisoning every claim's arena slot
+    /// before each block, so a read of a slot the copy no longer fills shows in the bits.
+    fn render_ring_shape(shape: RingShape, frames: u32, declined: bool) -> RingRun {
+        let published = Published::default();
+        let (plan, bindings, source_set) = ring_output_parts(shape, frames, &published);
+        let slots = ring_slots(&plan, shape.claims());
+        test_only_set_source_in_place_declined(declined);
+        test_only_set_output_route_fold_declined(shape == RingShape::FoldDeclined);
+        let (mut executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        test_only_set_source_in_place_declined(false);
+        test_only_set_output_route_fold_declined(false);
+        let in_place = slots
+            .iter()
+            .enumerate()
+            .map(|(claim, slot)| executor.runtime.source_in_place(claim, *slot))
+            .collect();
+        let output_claims = executor
+            .runtime
+            .output_sources
+            .iter()
+            .map(|claim| (*claim != NO_SOURCE_CLAIM).then_some(*claim as usize))
+            .collect();
+        let frames = frames as usize;
+        let stride = frames + 3;
+        let mut hosts = Vec::new();
+        let mut counts = Vec::new();
+        for block in 0..RING_SCRIPT.len() as u64 {
+            for slot in &slots {
+                let (left, right) = executor.runtime.buffer_mut(*slot);
+                left.fill(f32::from_bits(RING_SLOT_POISON[0]));
+                right.fill(f32::from_bits(RING_SLOT_POISON[1]));
+            }
+            let mut storage = vec![f32::from_bits(HOST_PAD); 2 * stride];
+            test_only_source_plane_reset();
+            render_host(
+                &mut executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, frames, stride)
+                    .expect("host output"),
+                block * frames as u64,
+            )
+            .expect("render");
+            counts.push(test_only_source_plane_counts());
+            hosts.push(storage.iter().map(|word| word.to_bits()).collect());
+        }
+        let meters = published.lock().unwrap().clone();
+        RingRun {
+            hosts,
+            meters,
+            in_place,
+            counts,
+            folds: executor.output_route_folds(),
+            output_claims,
+        }
+    }
+
+    /// Whether `shape` builds the colouring hazard it is named for, on its lowered program: the
+    /// late input takes the empty submix's slot, and the dead claim's slot is an input of the
+    /// Output op. Shapes without a hazard answer `true`.
+    fn ring_hazard_is_built(shape: RingShape) -> bool {
+        let (plan, _, _) = ring_output_parts(shape, 16, &Published::default());
+        let program = plan.lowered().expect("lowered");
+        let buffer = |node: &GraphNodeId| {
+            let index = crate::program::node_index(&plan.spec, node).expect("node");
+            program.node_buffer[index as usize]
+        };
+        let id = |text: &str| crate::StableGraphId::parse(text).expect("stable id");
+        let input = |track: &str| GraphNodeId::TrackStage {
+            track_id: id(track),
+            stage: TrackStage::Input,
+        };
+        match shape {
+            RingShape::LateInput => {
+                buffer(&input(&format!("track{RING_SPECIAL:02}")))
+                    == buffer(&GraphNodeId::Submix {
+                        submix_id: id("late"),
+                    })
+            }
+            RingShape::DeadClaim => {
+                let output = output_op(&program, &plan.spec).expect("the Output op");
+                let dead = buffer(&input("track99"));
+                program
+                    .inputs_of(&program.ops[output])
+                    .iter()
+                    .any(|input| input.buffer == dead)
+            }
+            _ => true,
+        }
+    }
+
+    /// One issue #927 shape at one quantum: the in-place arm against the arm bound with
+    /// `test_only_set_source_in_place_declined`, which copies every claim as before the issue.
+    ///
+    /// * **The bound shape.** The Output fold's input count is the shape's on both arms. The mode
+    ///   table: in place exactly the claims the shape reads in place (and the dead claim, which
+    ///   issue #918 binds); every claim copied on the declined arm. The Output's per-input claims
+    ///   name exactly those claims on the in-place arm and nothing on the declined arm.
+    /// * **The bits.** Every block's host storage, padding included, bit for bit, with every
+    ///   claim's arena slot poisoned before the block; the padding untouched and every frame
+    ///   written; and every meter window.
+    /// * **The mode counter, per block.** The declined arm copies every claim and reads nothing in
+    ///   place. The in-place arm copies exactly the claims it does not read in place, and reads
+    ///   each claim it does from the played block when the claim plays and from the silence
+    ///   buffer when it does not.
+    fn assert_ring_shape(shape: RingShape, frames: u32) -> (RingRun, RingRun) {
+        let case = format!("{shape:?}, {frames} frames");
+        let in_place = render_ring_shape(shape, frames, false);
+        let copy = render_ring_shape(shape, frames, true);
+        assert_eq!(in_place.folds, shape.folds(), "{case}: Output route folds");
+        assert_eq!(
+            copy.folds,
+            shape.folds(),
+            "{case}: declined, Output route folds"
+        );
+        assert_eq!(
+            in_place.in_place,
+            shape.in_place(),
+            "{case}: the mode table"
+        );
+        assert_eq!(
+            copy.in_place,
+            vec![false; shape.claims()],
+            "{case}: declined, every claim is copied"
+        );
+        let reads = shape.output_reads();
+        let mut read = in_place
+            .output_claims
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        read.sort_unstable();
+        assert_eq!(read, reads, "{case}: the Output inputs read in place");
+        if !reads.is_empty() {
+            assert_eq!(
+                in_place.output_claims.len() as u64,
+                shape.folds(),
+                "{case}: one entry per Output input"
+            );
+        }
+        assert!(copy.output_claims.is_empty(), "{case}: declined, none");
+        let stride = frames as usize + 3;
+        let mut audible = false;
+        let copied = shape.in_place().iter().filter(|lent| !**lent).count() as u64;
+        for (block, (actual, expected)) in in_place.hosts.iter().zip(&copy.hosts).enumerate() {
+            assert_eq!(
+                actual, expected,
+                "{case}, block {block} ({:?}): the host planes are the copy arm's",
+                RING_SCRIPT[block]
+            );
+            for (index, word) in actual.iter().enumerate() {
+                let padding = index % stride >= frames as usize;
+                assert!(
+                    (*word == HOST_PAD) == padding,
+                    "{case}, block {block}: word {index} is padding iff untouched"
+                );
+                audible |= !padding && *word != 0 && *word != 0x8000_0000;
+            }
+            let played = reads
+                .iter()
+                .filter(|claim| ring_plays(block, **claim))
+                .count() as u64;
+            assert_eq!(
+                copy.counts[block],
+                [shape.claims() as u64, 0, 0],
+                "{case}, block {block}: declined [copies, played reads, silent reads]"
+            );
+            assert_eq!(
+                in_place.counts[block],
+                [copied, played, reads.len() as u64 - played],
+                "{case}, block {block}: in place [copies, played reads, silent reads]"
+            );
+        }
+        assert!(audible, "{case}: the master carries audio");
+        assert_eq!(
+            in_place.meters, copy.meters,
+            "{case}: every meter window is the copy arm's"
+        );
+        let observed = usize::from(matches!(
+            shape,
+            RingShape::ObservedInput | RingShape::ObservedAlias
+        ));
+        assert_eq!(
+            in_place.meters.len(),
+            (2 + observed) * RING_SCRIPT.len(),
+            "{case}: every meter published every block"
+        );
+        (in_place, copy)
+    }
+
+    /// Gates 1 and 3 of issue #927: a plain strip's source claim, whose only reader is the route
+    /// the Output fold retired, is read in place from the played block by the fused Output
+    /// reduction, and no rendered bit moves.
+    ///
+    /// Sixty-four tracks `Input -> Route -> Output`, each input claimed by a [`RingSource`] with
+    /// hostile words (signed zeros, subnormals, `2^-24 .. 2^25`) and a hostile 2x2 per route, every
+    /// fifth claim a mono mapping; frames `{1, 7, 16, 128}`; eight blocks of [`RING_SCRIPT`]. The
+    /// in-place arm against the same plan bound with `test_only_set_source_in_place_declined`
+    /// ([`assert_ring_shape`]): the host planes bit for bit with every claim's slot poisoned, and
+    /// `output_route_folds() == 64` both ways; per block, sixty-four in-place reads and no copy
+    /// in place, sixty-four copies and no in-place read declined.
+    ///
+    /// Gate 3, the underrun: at block 3 claim [`RING_UNDERRUN_CLAIM`]'s source played nothing,
+    /// so the declined arm's `copy_track_input` wrote `+0.0` into its slot; the in-place arm reads
+    /// the silence buffer for it (one silent read, sixty-three played, no copy) and renders the
+    /// same block. At block 6 no claim plays: sixty-four silent reads.
+    ///
+    /// The declined arm is the executor as it stood before the issue: its digests are the ones
+    /// [`RING_PRE_CHANGE`] recorded on the base tree.
+    ///
+    /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issue #927.
+    #[test]
+    fn a_plain_strip_source_is_read_in_place_by_the_fused_output_with_the_copy_bits() {
+        for (frames, in_place, copy) in assert_ring_shape_at_every_quantum(RingShape::Plain) {
+            assert_eq!(in_place.digest(), copy.digest(), "{frames} frames");
+            let tracks = RING_TRACKS as u64;
+            assert_eq!(in_place.counts[0], [0, tracks, 0], "a whole block");
+            assert_eq!(
+                in_place.counts[3],
+                [0, tracks - 1, 1],
+                "gate 3: one claim underran; its read is the silence buffer, and nothing is copied"
+            );
+            assert_eq!(in_place.counts[6], [0, 0, tracks], "no claim played");
+            assert_eq!(
+                copy.counts[3],
+                [tracks, 0, 0],
+                "declined, block 3 copies all"
+            );
+        }
+    }
+
+    /// Gate 2 of issue #927: a claim with any reader but the retired route keeps the copy, and
+    /// every other claim of the same plan is still read in place, with the copy arm's bits.
+    ///
+    /// Per [`RingShape`], at frames `{1, 7, 16, 128}` ([`assert_ring_shape`]): the brief's three --
+    /// a send tap reader ([`RingShape::SendTap`]), a delayed edge ([`RingShape::DelayedEdge`]) and a
+    /// submix reader ([`RingShape::SubmixReader`]) -- each copy track `K`'s claim alone (one copy
+    /// per block) while the other sixty-three are read in place. Then the other clauses: a
+    /// `TrackDelay` input (a), an observed input and an observed alias of it (c), and a late input
+    /// whose slot an earlier op overwrites (e), each copying `K` alone; a delay on `K`'s own route
+    /// edge and a declined Output fold, where no input is read in place at all because there is no
+    /// fused reduction to read it; and a dead claim whose slot the colouring hands to an Output
+    /// input, which is read from the arena because the Output selects by input position, never by
+    /// buffer. The two colouring shapes are checked to build their hazard, and every shape's
+    /// declined arm is the pre-change executor ([`RING_PRE_CHANGE`]).
+    #[test]
+    fn a_claim_with_another_reader_keeps_the_copy_and_the_copy_bits() {
+        for shape in RingShape::ALL {
+            assert!(
+                ring_hazard_is_built(shape),
+                "{shape:?}: the hazard is built"
+            );
+            if shape != RingShape::Plain {
+                let _ = assert_ring_shape_at_every_quantum(shape);
+            }
+        }
+    }
+
+    /// A [`crate::GraphSourcePlanes`] over owned planes: claim `c` lends `planes[c]`, or nothing.
+    struct LentPlanes(Vec<Option<(Vec<f32>, Vec<f32>)>>);
+
+    impl crate::GraphSourcePlanes for LentPlanes {
+        fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+            self.0
+                .get(claim)?
+                .as_ref()
+                .map(|(left, right)| (left.as_slice(), right.as_slice()))
+        }
+    }
+
+    /// One width's case of issue #927's kernel test: `route_reduce::<L>` reading some inputs from
+    /// lent planes (and some of those from the silence buffer) against the same reduction reading
+    /// every input from an arena that holds the words the copy would have written.
+    fn assert_route_reduce_reads_lent_inputs_as_the_copy<L: Lane>() {
+        let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        let mut state = 0x0927_u64 ^ L::WIDTH as u64;
+        let pad = f32::from_bits(HOST_PAD);
+        let poison = [
+            f32::from_bits(RING_SLOT_POISON[0]),
+            f32::from_bits(RING_SLOT_POISON[1]),
+        ];
+        for frames in [1, 3, 7, 8, 13, 16, 33, 64] {
+            for fan_in in [2_usize, 3, 5, 9, 64] {
+                // Buffer 0 is the silence buffer and buffer 1 the op's own (unused) output.
+                let inputs: Vec<u32> = (0..fan_in).map(|index| 2 + index as u32).collect();
+                let routes: Vec<[f32; 4]> = (0..fan_in)
+                    .map(|_| core::array::from_fn(|_| hostile_constant(&mut state)))
+                    .collect();
+                // Input `p` is lent unless `p % 3 == 1`, as claim `fan_in - 1 - p`; a lent input
+                // with `p % 7 == 5` is an underrun, which the copy writes as `+0.0`.
+                let lent = |position: usize| position % 3 != 1;
+                let silent = |position: usize| lent(position) && position % 7 == 5;
+                let mut oracle = stereo_lease(frames, 2 + fan_in);
+                let mut candidate = stereo_lease(frames, 2 + fan_in);
+                let mut lends: Vec<Option<(Vec<f32>, Vec<f32>)>> = vec![None; fan_in];
+                let mut claims = vec![NO_SOURCE_CLAIM; fan_in];
+                for (position, &input) in inputs.iter().enumerate() {
+                    let words: [Vec<f32>; 2] = core::array::from_fn(|_| {
+                        (0..frames).map(|_| hostile_sample(&mut state)).collect()
+                    });
+                    for plane in 0..2 {
+                        let copied = oracle.write(plane, input);
+                        if silent(position) {
+                            copied.fill(0.0);
+                        } else {
+                            copied.copy_from_slice(&words[plane]);
+                        }
+                        let slot = candidate.write(plane, input);
+                        if lent(position) {
+                            slot.fill(poison[plane]);
+                        } else {
+                            slot.copy_from_slice(&words[plane]);
+                        }
+                    }
+                    if lent(position) {
+                        let claim = fan_in - 1 - position;
+                        claims[position] = claim as u32;
+                        let [left, right] = words;
+                        lends[claim] = (!silent(position)).then_some((left, right));
+                    }
+                }
+                let lent_planes = LentPlanes(lends);
+                let sources = OutputSources {
+                    planes: Some(&lent_planes),
+                    claims: &claims,
+                };
+                let case = format!("width {}, {frames} frames, fan-in {fan_in}", L::WIDTH);
+                let (mut expected_left, mut expected_right) =
+                    (vec![pad; frames], vec![pad; frames]);
+                assert!(route_reduce::<L>(
+                    &oracle,
+                    &inputs,
+                    &routes,
+                    OutputSources::NONE,
+                    &mut expected_left,
+                    &mut expected_right
+                ));
+                let (mut left, mut right) = (vec![pad; frames], vec![pad; frames]);
+                test_only_source_plane_reset();
+                assert!(
+                    route_reduce::<L>(&candidate, &inputs, &routes, sources, &mut left, &mut right),
+                    "{case}: an admitted shape reduces"
+                );
+                let lent_count = (0..fan_in).filter(|position| lent(*position)).count() as u64;
+                let silent_count = (0..fan_in).filter(|position| silent(*position)).count() as u64;
+                assert_eq!(
+                    test_only_source_plane_counts(),
+                    [0, lent_count - silent_count, silent_count],
+                    "{case}: [copies, played reads, silent reads]"
+                );
+                assert_eq!(bits(&left), bits(&expected_left), "{case}: left");
+                assert_eq!(bits(&right), bits(&expected_right), "{case}: right");
+            }
+        }
+        // Refused before any write: a claim table that is neither empty nor one entry per input.
+        let lease = stereo_lease(5, 4);
+        let lent_planes = LentPlanes(Vec::new());
+        for claims in [&[NO_SOURCE_CLAIM][..], &[NO_SOURCE_CLAIM; 3][..]] {
+            let (mut left, mut right) = (vec![pad; 5], vec![pad; 5]);
+            assert!(!route_reduce::<L>(
+                &lease,
+                &[2, 3],
+                &[[1.0; 4]; 2],
+                OutputSources {
+                    planes: Some(&lent_planes),
+                    claims,
+                },
+                &mut left,
+                &mut right
+            ));
+            assert!(
+                left.iter()
+                    .chain(&right)
+                    .all(|word| word.to_bits() == HOST_PAD),
+                "a refused shape writes nothing"
+            );
+        }
+    }
+
+    /// Issue #927's kernel: an input read in place is read as the words the copy would have
+    /// written, at every lane width.
+    ///
+    /// Every third input is read from the arena and the rest from lent planes under a claim index
+    /// that is not the input's position, some of those lent inputs underrun (the kernel reads the
+    /// silence buffer, the copy writes `+0.0`), and every lent input's arena slot is poisoned, so
+    /// a read of the slot shows. Pairs therefore mix arena and lent inputs, and lent and silent
+    /// ones, including the odd fan-in's lone last input. Frames with ragged tails at both widths;
+    /// fan-in two to sixty-four. The oracle is the same reduction over an arena holding the copy's
+    /// words, which issue #926's kernel test pins to the route ops and the reduction. Also: a claim
+    /// table of the wrong length is refused before any write.
+    #[test]
+    fn a_route_reduction_reads_each_lent_input_as_the_copys_words() {
+        assert_route_reduce_reads_lent_inputs_as_the_copy::<f32>();
+        assert_route_reduce_reads_lent_inputs_as_the_copy::<lane::Simd4>();
+        assert_route_reduce_reads_lent_inputs_as_the_copy::<lane::Simd8>();
     }
 }
