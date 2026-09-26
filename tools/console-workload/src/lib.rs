@@ -817,6 +817,21 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderFailed;
 
+/// The session's output: the left plane then the right plane, `QUANTUM` words each, on a 64-byte
+/// boundary (issue #935).
+///
+/// It was a `Vec<f32>`, which lands on whatever 16-byte boundary the allocator returns. At 16 or
+/// 48 mod 64 half of the 32-byte loads and stores of the output split a cache line, so the same
+/// binary measured a different amount of work depending on where the heap put this buffer. A
+/// `QUANTUM`-word plane is a whole number of cache lines (asserted below), so aligning the buffer
+/// aligns both planes. Every reader still sees the `&[f32]` / `&mut [f32]` the `Vec` lent it.
+#[repr(C, align(64))]
+struct OutputPlanes([f32; QUANTUM * 2]);
+
+// `QUANTUM * 4` bytes is a multiple of 64, so a plane that starts a 64-byte line ends one: the
+// right plane of `OutputPlanes` and of `FrozenGraphSource` is aligned because the left one is.
+const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64));
+
 /// One prepared console arm: a real [`PreparedRenderPlan`] and the buffer it renders into.
 ///
 /// Built by [`SessionRuntime::build`] from a [`Workload`] and a [`PlanConfig`], through the
@@ -825,7 +840,8 @@ pub struct RenderFailed;
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
     plan: PreparedRenderPlan,
-    output: Vec<f32>,
+    /// Boxed so the render loop reads its planes through one stable, 64-byte-aligned pointer.
+    output: Box<OutputPlanes>,
     /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
     meter_consumers: Vec<MeterConsumer>,
     controls: Vec<EffectControlProducer>,
@@ -1094,7 +1110,7 @@ impl SessionRuntime {
         plan.force_mono_collapse_off(workload.collapse_forced_off());
         let mut runtime = Self {
             plan,
-            output: vec![0.0; QUANTUM * 2],
+            output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
             meter_consumers,
             controls,
             observations,
@@ -1506,7 +1522,7 @@ impl SessionRuntime {
             .render(
                 RenderIo {
                     input: None,
-                    output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+                    output: PlanarBufferMut::try_new(&mut self.output.0, 2, QUANTUM, QUANTUM)
                         .map_err(|_| RenderFailed)?,
                 },
                 RenderTime {
@@ -1519,7 +1535,7 @@ impl SessionRuntime {
 
     /// Folds this block's rendered output into a digest. Outside the clock, always.
     pub fn hash_output(&self, hash: &mut Sha256Sink) {
-        for value in &self.output {
+        for value in &self.output.0 {
             hash.update(value.to_bits().to_le_bytes());
         }
     }
@@ -1654,6 +1670,14 @@ impl SourceSignal {
 }
 
 /// Every track input is a frozen block per observation; nothing is decoded on the render path.
+///
+/// Aligned to 64 bytes (issue #935) so both planes start a cache line wherever the struct is
+/// boxed: the bound feed boxes one per track input ([`bound_track_source`]) and the driver-fed row
+/// one slice of them ([`FrozenSourceDriver`]). Unaligned, the allocator's 16-byte placement split
+/// half the 32-byte loads that copy or read these words, and moved the ring row's time between
+/// builds for no reason in the engine. `repr(C)` keeps `left` at offset 0 and `right` at
+/// `QUANTUM * 4`, a line multiple, and the size stays exactly the two planes: no padding.
+#[repr(C, align(64))]
 struct FrozenGraphSource {
     left: [f32; QUANTUM],
     right: [f32; QUANTUM],
@@ -1770,6 +1794,17 @@ fn is_track_input(node: &GraphNodeId) -> bool {
     )
 }
 
+/// The bound feed's processor for one track input: its frozen block, boxed at the 64-byte
+/// alignment [`FrozenGraphSource`] carries.
+fn bound_track_source(
+    track_id: &str,
+    silent: bool,
+    source: &SourceSignal,
+    mappings: &[(usize, usize)],
+) -> Box<FrozenGraphSource> {
+    Box::new(frozen_track_source(track_id, silent, source, mappings))
+}
+
 fn source_binding(
     node: &GraphNodeId,
     silent: bool,
@@ -1783,12 +1818,7 @@ fn source_binding(
     {
         GraphNodeBinding::new(
             node.clone(),
-            Box::new(frozen_track_source(
-                track_id.as_str(),
-                silent,
-                source,
-                mappings,
-            )),
+            bound_track_source(track_id.as_str(), silent, source, mappings),
         )
     } else {
         GraphNodeBinding::identity(node.clone())
@@ -1986,7 +2016,7 @@ mod tests {
             for block in 0..BLOCKS {
                 runtime.render(block).expect("console render");
                 runtime.hash_output(&mut digest);
-                audible |= runtime.output.iter().any(|word| *word != 0.0);
+                audible |= runtime.output.0.iter().any(|word| *word != 0.0);
             }
             let forbidden = audit::snapshot().total();
             let planes = graph::test_only_source_plane_counts();
@@ -2180,5 +2210,89 @@ mod tests {
             count / 2,
             "the half-mono model maps half its tracks mono"
         );
+    }
+
+    /// Issue #935 gate 2: every frozen block the harness serves, and both output planes, start a
+    /// 64-byte line.
+    ///
+    /// The ring row's claims are built by `FrozenSourceDriver::new`, the constructor `build_full`
+    /// calls, over that row's own track inputs, and each is read back through `played_planes`,
+    /// the accessor the graph reads a claim in place through. The bound row's blocks are built by
+    /// `bound_track_source`, the function `source_binding` boxes them with, and all sixty-four are
+    /// held at once so each is its own allocation rather than one reused slot. The output planes
+    /// are the two runtimes' own. Alignment follows from the types' layout, but every claim and
+    /// every track is checked anyway: at the allocator's 16-byte granularity one allocation in
+    /// four lands on a 64-byte boundary by luck.
+    #[test]
+    fn the_frozen_blocks_and_the_output_planes_start_a_cache_line() {
+        let aligned = |plane: &[f32]| (plane.as_ptr() as usize).is_multiple_of(64);
+        let plane_bytes = QUANTUM * core::mem::size_of::<f32>();
+        assert_eq!(core::mem::align_of::<FrozenGraphSource>(), 64);
+        assert_eq!(core::mem::offset_of!(FrozenGraphSource, right), plane_bytes);
+        assert_eq!(
+            core::mem::size_of::<FrozenGraphSource>(),
+            2 * plane_bytes,
+            "no padding: the driver's resource report is exactly the planes"
+        );
+        assert_eq!(core::mem::align_of::<OutputPlanes>(), 64);
+
+        let ring = Workload::SixtyFourTrackPlumbingRing;
+        let model = console_model(ring);
+        let mappings = channel_mappings(&model);
+        let mut claims: Vec<GraphSourceInputClaim> = model
+            .tracks
+            .iter()
+            .map(|track| GraphSourceInputClaim {
+                node: GraphNodeId::TrackStage {
+                    track_id: graph::StableGraphId::parse(track.id.as_str()).expect("track id"),
+                    stage: TrackStage::Input,
+                },
+            })
+            .collect();
+        claims.sort_unstable();
+        let driver = FrozenSourceDriver::new(&claims, false, &SourceSignal::Local, &mappings);
+        assert_eq!(driver.claim_count(), ring.tracks() as usize);
+        for claim in 0..driver.claim_count() {
+            let (left, right) = driver.played_planes(claim).expect("every claim lends");
+            assert!(
+                aligned(left) && aligned(right),
+                "ring claim {claim}: left {:p}, right {:p}",
+                left.as_ptr(),
+                right.as_ptr()
+            );
+        }
+
+        let bound = Workload::SixtyFourTrackPlumbingOnly;
+        let model = console_model(bound);
+        let mappings = channel_mappings(&model);
+        let blocks: Vec<Box<FrozenGraphSource>> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                bound_track_source(track.id.as_str(), false, &SourceSignal::Local, &mappings)
+            })
+            .collect();
+        assert_eq!(blocks.len(), bound.tracks() as usize);
+        for (track, block) in model.tracks.iter().zip(&blocks) {
+            assert!(
+                aligned(&block.left) && aligned(&block.right),
+                "bound {}: left {:p}, right {:p}",
+                track.id.as_str(),
+                block.left.as_ptr(),
+                block.right.as_ptr()
+            );
+        }
+
+        for workload in [bound, ring] {
+            let runtime = SessionRuntime::new(workload);
+            let (left, right) = runtime.output.0.split_at(QUANTUM);
+            assert!(
+                aligned(left) && aligned(right),
+                "{} output: left {:p}, right {:p}",
+                workload.kind(),
+                left.as_ptr(),
+                right.as_ptr()
+            );
+        }
     }
 }
