@@ -500,7 +500,13 @@ The row *below* it — `sixty_four_track_plumbing_only`, added by the strip roun
 that prepares nothing: `prepare_session_builtins` is never called for it, so the graph is built
 through `GraphCompiler::compile`, every `TrackStage` lowers to an elided alias, and no bank chain is
 bound at all (`[chains, slots] == [0, 0]`, and therefore no planar/AoSoA round-trip and no route
-fold — the chain-shape gate pins all three). Per lane-sample:
+fold — the chain-shape gate pins all three). *Correction, 2026-09-26 (issue #925):* the "elided
+alias" clause was false until #925. The builtins-less compile listed `PostInputBuiltins`,
+`PostFader` and `PostMatrix` as required bindings, the harness bound them to the identity, and each
+lowered to an identity op: two block copies and one do-nothing dispatch per track, 192 of the
+row's 321 units. Since #925 the builtins-less compile leaves them unbound and they lower as aliases,
+so the row's chain is `Input -> Route -> Output` (129 units) and the sentence holds. Per
+lane-sample:
 
 | stage | lane-ops |
 |---|---:|
@@ -525,8 +531,11 @@ thing this row has done so far.
 `gain_pan_only` binds eight bank chains, so issue #218's route fold fires on every one of its
 sixty-four lanes: its route and its share of the master reduction are an epilogue on a tile the
 chain has already transposed, and they cost almost nothing. `plumbing_only` binds **no chain at
-all**, so there is no epilogue to fold into: it pays sixty-four individually dispatched route ops
-and an unfolded reduction over sixty-four separate planar buffers. The two rows execute the same
+all**, so there is no epilogue to fold into. Until issue #926 it paid sixty-four individually
+dispatched route ops and an unfolded reduction over sixty-four separate planar buffers; since #926
+the route ops are retired into the Output op's reduction, which applies each track's 2x2 in
+registers as it loads that track's buffer, a pair of tracks at a time, so the row pays one
+reduction over sixty-four separate planar buffers and no route op. The two rows execute the same
 *arithmetic* plumbing and completely different *plans* for it.
 
 Subtracting the second from the first therefore removes the fold's saving as well as the plumbing's

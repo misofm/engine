@@ -800,22 +800,40 @@ impl GraphCompiler {
             nodes,
             edges,
         };
-        let required_bindings = schedule
-            .iter()
-            .filter(|node| {
-                matches!(
-                    node,
+        // The nodes the host must bind. `Input` and the session output always. The three builtin
+        // stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- only when builtins are being
+        // prepared (`compile_with_builtins`), where each is a compiler-owned binding the builtins
+        // artifact fills with a bank member or a scalar owner and keeps as an op.
+        //
+        // Issue #925: without builtins nothing owns them. Every host acknowledged them with
+        // `GraphNodeBinding::identity`, and each lowered to an identity op -- a copy out of the
+        // dedicated post-input stage, a second copy into the fader, and an in-place matrix that
+        // only dispatched. Leaving them out of the bindable set is what `program::lower` reads to
+        // elide them as aliases, exactly like the three rack boundaries: no op, no buffer, no
+        // unit, and the route reads the input's own buffer. An identity moves no bit, so the
+        // rendered words are the same words. The cost is that a builtins-less plan has no bindable
+        // builtin stage: a host cannot supply its own fader or matrix processor there.
+        let builtin_stages_bindable = prepared_builtins.is_some();
+        let required_bindings =
+            schedule
+                .iter()
+                .filter(|node| match node {
                     GraphNodeId::TrackStage {
-                        stage: TrackStage::Input
-                            | TrackStage::PostInputBuiltins
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                    | GraphNodeId::Output { .. } => true,
+                    GraphNodeId::TrackStage {
+                        stage:
+                            TrackStage::PostInputBuiltins
                             | TrackStage::PostFader
                             | TrackStage::PostMatrix,
                         ..
-                    } | GraphNodeId::Output { .. }
-                )
-            })
-            .cloned()
-            .collect();
+                    } => builtin_stages_bindable,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id,
             spec,

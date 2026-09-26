@@ -32,14 +32,168 @@ pub use runtime::{
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_completion_disabled,
-    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
-    test_only_set_source_in_place_declined, test_only_source_plane_counts,
-    test_only_source_plane_reset, test_only_split_pair_table_witness,
+    test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
+    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
+    test_only_source_plane_counts, test_only_source_plane_reset,
+    test_only_split_pair_table_witness,
 };
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use observation_activation::test_only_observation_transition_entries;
+
+/// Phase-level timing of `GraphExecutor::render` for the plumbing-floor diagnosis
+/// (`.github/ISSUE_SPECS/DRAFTS/PLAN.md`). Test builds only: nothing here exists in a production
+/// build, and a `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
+/// thread-local read per block and nothing per unit.
+///
+/// The clock is `std::time::Instant` (the vDSO monotonic clock), because `crates/graph` may not
+/// carry the `unsafe` block `_rdtsc` needs. A probe is taken only where the *kind* of unit
+/// changes, so a block whose units are grouped by kind costs a handful of probes rather than one
+/// per unit; the harness measures the probe cost and states it beside the numbers.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_only_phase_profile {
+    use core::cell::Cell;
+    use std::time::Instant;
+
+    /// Render entry to the first source work: the host planes' shape check and
+    /// `begin_observation_block`.
+    pub const ENTER: usize = 0;
+    /// The source set's `begin_block` and the `copy_track_input` loop (empty when the plan binds
+    /// no source set, as the console rows do).
+    pub const SOURCE: usize = 1;
+    /// Plain units whose op is a host-bound processor (`NodeKind::Bound`): on the console rows,
+    /// the sixty-four `FrozenGraphSource` copies.
+    pub const BOUND: usize = 2;
+    /// Plain units whose op is a route (`NodeKind::Route`).
+    pub const ROUTE: usize = 3;
+    /// The session Output op's unit.
+    pub const OUTPUT: usize = 4;
+    /// A plain identity unit with one input that is not in place: `reduce_plane`'s copy arm.
+    pub const IDENTITY_COPY: usize = 5;
+    /// A plain identity unit in place over its one input: dispatch and nothing else.
+    pub const IDENTITY_ALIAS: usize = 6;
+    /// Any other plain unit.
+    pub const OTHER_OP: usize = 7;
+    /// A bank unit.
+    pub const BANK: usize = 8;
+    /// The unit loop's end to the return (on the pre-#916 tree, the end-of-block master copy).
+    pub const EXIT: usize = 9;
+    pub const COUNT: usize = 10;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        static NANOS: Cell<[u64; COUNT]> = const { Cell::new([0; COUNT]) };
+        static BLOCKS: Cell<u64> = const { Cell::new(0) };
+        static PROBES: Cell<u64> = const { Cell::new(0) };
+        static RUNS: Cell<[(usize, u64); RUNS_CAPACITY]> =
+            const { Cell::new([(COUNT, 0); RUNS_CAPACITY]) };
+    }
+
+    /// Runs of same-kind units recorded from the first profiled block, `(kind, units)`.
+    pub const RUNS_CAPACITY: usize = 16;
+
+    /// The unit-kind runs of the first block profiled since the last reset, in schedule order;
+    /// `(COUNT, 0)` marks unused entries.
+    #[must_use]
+    pub fn runs() -> [(usize, u64); RUNS_CAPACITY] {
+        RUNS.with(Cell::get)
+    }
+
+    /// Switch the probes on or off for this thread. Off, `render` reads one thread-local per
+    /// block and nothing else.
+    pub fn enable(enabled: bool) {
+        ENABLED.with(|value| value.set(enabled));
+    }
+
+    /// Zero the accumulators.
+    pub fn reset() {
+        NANOS.with(|value| value.set([0; COUNT]));
+        BLOCKS.with(|value| value.set(0));
+        PROBES.with(|value| value.set(0));
+        RUNS.with(|value| value.set([(COUNT, 0); RUNS_CAPACITY]));
+    }
+
+    /// `(nanoseconds per phase, blocks profiled, probes taken)` since the last reset.
+    #[must_use]
+    pub fn snapshot() -> ([u64; COUNT], u64, u64) {
+        (
+            NANOS.with(Cell::get),
+            BLOCKS.with(Cell::get),
+            PROBES.with(Cell::get),
+        )
+    }
+
+    /// One block's running probe. `None` when disabled, so the hot path is one `Option` test.
+    pub(crate) struct Probe {
+        last: Instant,
+        phase: usize,
+        nanos: [u64; COUNT],
+        probes: u64,
+        runs: [(usize, u64); RUNS_CAPACITY],
+        run: usize,
+    }
+
+    impl Probe {
+        #[inline]
+        pub(crate) fn start() -> Option<Self> {
+            ENABLED.with(Cell::get).then(|| Self {
+                last: Instant::now(),
+                phase: ENTER,
+                nanos: [0; COUNT],
+                probes: 1,
+                runs: [(COUNT, 0); RUNS_CAPACITY],
+                run: 0,
+            })
+        }
+
+        /// Charge the time since the last probe to the current phase and make `next` current.
+        #[inline]
+        pub(crate) fn enter(&mut self, next: usize) {
+            let now = Instant::now();
+            self.nanos[self.phase] +=
+                u64::try_from(now.duration_since(self.last).as_nanos()).unwrap_or(u64::MAX);
+            self.last = now;
+            self.phase = next;
+            self.probes += 1;
+        }
+
+        /// Charge a unit of kind `kind`; a probe is taken only when the kind changes.
+        #[inline]
+        pub(crate) fn unit(&mut self, kind: usize) {
+            if kind != self.phase {
+                self.enter(kind);
+                if self.run < RUNS_CAPACITY && self.runs[self.run].1 != 0 {
+                    self.run += 1;
+                }
+                if self.run < RUNS_CAPACITY {
+                    self.runs[self.run].0 = kind;
+                }
+            }
+            if self.run < RUNS_CAPACITY {
+                self.runs[self.run].1 += 1;
+            }
+        }
+
+        #[inline]
+        pub(crate) fn finish(mut self) {
+            self.enter(COUNT - 1);
+            NANOS.with(|value| {
+                let mut total = value.get();
+                for (slot, nanos) in total.iter_mut().zip(self.nanos) {
+                    *slot += nanos;
+                }
+                value.set(total);
+            });
+            if BLOCKS.with(Cell::get) == 0 {
+                RUNS.with(|value| value.set(self.runs));
+            }
+            BLOCKS.with(|value| value.set(value.get() + 1));
+            PROBES.with(|value| value.set(value.get() + self.probes));
+        }
+    }
+}
 
 use core::cell::Cell;
 use std::any::Any;
@@ -1192,6 +1346,11 @@ impl PreparedGraphPlan {
     /// member lists are among those fields, because a bank's window constrains what colouring may
     /// share; before that they were not, which is why attaching banks used to be able to leave
     /// `program` untouched.
+    ///
+    /// Since #925 `required_bindings` is one of them too: a builtin stage the plan does not list
+    /// has nothing to bind, and lowers as an alias (`program::is_builtin_stage`). It is the plan's
+    /// own field, so the program `program()` reports and the one bind derives cannot disagree
+    /// about it either.
     fn lower_from_current_fields(&self) -> Option<program::ExecutionProgram> {
         program::lower(
             &self.spec,
@@ -1199,6 +1358,7 @@ impl PreparedGraphPlan {
             &self.dependency_levels,
             &self.inserted_delays,
             &bank_member_nodes(&self.banks, &self.builtin_banks),
+            &self.required_bindings,
         )
         .ok()
     }
@@ -1213,8 +1373,10 @@ impl PreparedGraphPlan {
         let program = self.lower_from_current_fields()?;
         // A node the lowering elided has no op, so a processor bound to it would never run. The
         // compiler never asks for one -- the three internal rack boundaries are not bindable
-        // (`program::is_alias_candidate`) -- and a hand-built plan that does is rejected here
-        // rather than silently dropping the binding.
+        // (`program::is_alias_candidate`), and a builtin stage is elided only when it is *not*
+        // listed (`program::is_builtin_stage`, #925), so a listed one always keeps its op -- and a
+        // hand-built plan that lists a rack boundary is rejected here rather than silently
+        // dropping the binding.
         let elided_binding = self.required_bindings.iter().any(|node| {
             program::node_index(&self.spec, node)
                 .is_some_and(|index| program.node_op[index as usize].is_none())
@@ -1666,8 +1828,9 @@ pub trait GraphPreparedSourceSetDriver: Send {
     }
 }
 
-/// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
-/// the planes `begin_block` played, handed to [`runtime::Runtime::execute`] after the copy loop.
+/// The source set as a bank's gather (issue #918) and the Output op's fused reduction (issue #927)
+/// see it during the unit loop: a shared view of the planes `begin_block` played, handed to
+/// [`runtime::Runtime::execute`] after the copy loop.
 pub(crate) trait GraphSourcePlanes {
     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
     /// checks.
@@ -1763,8 +1926,8 @@ impl GraphPreparedSourceSet {
 impl GraphSourcePlanes for GraphPreparedSourceSet {
     /// The same claim-index check `copy_track_input` makes, then the driver's planes, each held to
     /// the quantum `copy_track_input` holds its destinations to. A plane of any other length is a
-    /// driver fault; it is refused as `None`, which the gather serves as silence, rather than
-    /// handed to a gather that would index past it.
+    /// driver fault; it is refused as `None`, which the reader serves as silence, rather than
+    /// handed to a reader that would index past it.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
         if claim_index >= self.claims.len() {
             return None;
@@ -2193,10 +2356,11 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
-        // that lends its played planes offers any, and `build_sequential` decides which of them
-        // are bound in place. `test_only_set_source_in_place_declined` offers none, which binds
-        // the path every claim took before the issue.
+        // Issue #918: the claims a bank's gather, or the Output op's fused reduction (issue #927),
+        // may read in place, in claim order. Only a driver that lends its played planes offers
+        // any, and `build_sequential` decides which of them are bound in place.
+        // `test_only_set_source_in_place_declined` offers none, which binds the path every claim
+        // took before issue #918.
         let lent_claims: Vec<GraphNodeId> = source_set
             .as_ref()
             .filter(|set| set.driver.provides_played_planes())
@@ -2234,6 +2398,14 @@ impl GraphExecutor {
             source_set,
             source_input_buffers,
         }
+    }
+
+    /// Routes this bind retired into the session Output op's fused reduction (issue #926). A
+    /// count, like `bank_route_folds`: the fold renders the same bits, so only a count can say
+    /// whether it fired.
+    #[cfg(test)]
+    fn output_route_folds(&self) -> u64 {
+        self.runtime.output_route_folds()
     }
 }
 
@@ -2299,6 +2471,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
         } = self;
+        #[cfg(any(test, feature = "test-support"))]
+        let mut probe = test_only_phase_profile::Probe::start();
         let (left, right) = output.stereo_planes_mut()?;
         let Some(mut host) = runtime::HostMaster::new(left, right, runtime.lease.frames()) else {
             return Err(RenderError::InvalidEnvelope);
@@ -2308,6 +2482,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         runtime.begin_observation_block(time.absolute_sample);
         let selective_observation = runtime.has_observation_activation();
         let active_observation = runtime.has_active_observation();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(probe) = probe.as_mut() {
+            probe.enter(test_only_phase_profile::SOURCE);
+        }
         let source_validity = if let Some(source_set) = source_set.as_mut() {
             if let Err(error) =
                 source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
@@ -2316,8 +2494,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(error);
             }
-            // A claim bound in place is not in this list: its bank's gather reads the played
-            // block's planes (issue #918).
+            // A claim bound in place is not in this list: its bank's gather (issue #918) or the
+            // Output op's fused reduction (issue #927) reads the played block's planes.
             for &(claim, buffer) in source_input_buffers.iter() {
                 #[cfg(any(test, feature = "test-support"))]
                 runtime::test_only_count_source_copy();
@@ -2338,6 +2516,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         // next render's.
         let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
         for unit in 0..runtime.units.len() {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(probe) = probe.as_mut() {
+                probe.unit(runtime.test_only_unit_phase(unit));
+            }
             if let Err(error) =
                 runtime.execute(unit, time.absolute_sample, host.reborrow(), sources)
             {
@@ -2385,6 +2567,10 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(probe) = probe {
+            probe.finish();
         }
         Ok(())
     }
@@ -5553,17 +5739,25 @@ mod tests {
             }
             // `PostFader` scales in place, so the buffer the three internal boundaries alias is
             // rewritten by the very next op: a tap that fires late reads the scaled value.
+            //
+            // The other two builtin stages are listed and acknowledged with the identity, which
+            // is what keeps their ops: since issue #925 an unlisted builtin stage is an alias
+            // too, and this fixture is about the three rack boundaries alone.
             let bindings = vec![
                 GraphNodeBinding::new(
                     node(TrackStage::Input),
                     Box::new(SeededSource { state: 0x51ED_0007 }),
                 ),
+                GraphNodeBinding::identity(node(TrackStage::PostInputBuiltins)),
                 GraphNodeBinding::new(node(TrackStage::PostFader), Box::new(Scale(0.375))),
+                GraphNodeBinding::identity(node(TrackStage::PostMatrix)),
                 GraphNodeBinding::new(output.clone(), Box::new(Noop)),
             ];
             let required = vec![
                 node(TrackStage::Input),
+                node(TrackStage::PostInputBuiltins),
                 node(TrackStage::PostFader),
+                node(TrackStage::PostMatrix),
                 output.clone(),
             ];
             let levels = levels_for(&nodes, &edges);
@@ -5761,6 +5955,354 @@ mod tests {
             seen, left_only,
             "the next op rewrites that buffer, so a late tap would be detectable"
         );
+    }
+
+    /// SplitMix64, frozen here so the #925 corpus does not depend on host RNG state.
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A hostile finite sample: `+0.0` and `-0.0`, signed subnormals, and signed normals whose
+    /// magnitude spans `2^-24 .. 2^25`, each with a random mantissa.
+    fn hostile_sample(state: &mut u64) -> f32 {
+        let bits = splitmix(state);
+        let sign = ((bits >> 63) as u32) << 31;
+        let mantissa = (bits as u32) & 0x007f_ffff;
+        match (bits >> 32) % 8 {
+            0 => f32::from_bits(sign),
+            1 => f32::from_bits(sign | mantissa.max(1)),
+            _ => {
+                // Biased exponents 103..=151 are the unbiased -24..=24.
+                let exponent = 103 + ((bits >> 40) % 49) as u32;
+                f32::from_bits(sign | (exponent << 23) | mantissa)
+            }
+        }
+    }
+
+    /// A bound track input that writes a fresh hostile block every call, left and right drawn
+    /// independently.
+    struct HostileSource(u64);
+    impl GraphRuntimeProcessor for HostileSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                *left = hostile_sample(&mut self.0);
+                *right = hostile_sample(&mut self.0);
+            }
+            Ok(())
+        }
+    }
+
+    /// Every observation one observer saw: first sample, then the left and right words.
+    struct PlaneRecorder(Arc<std::sync::Mutex<Vec<u64>>>);
+    impl GraphRuntimeObserver for PlaneRecorder {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            let mut sink = self.0.lock().expect("plane sink");
+            sink.push(block.first_sample);
+            sink.extend(block.left.iter().map(|sample| u64::from(sample.to_bits())));
+            sink.extend(block.right.iter().map(|sample| u64::from(sample.to_bits())));
+            Ok(())
+        }
+    }
+
+    /// Issue #925, gate 1: a builtins-less plan's three builtin stages, unlisted and therefore
+    /// lowered as aliases, render the same words as the same plan with them listed and bound to
+    /// the identity -- the shape every builtins-less plan had before #925 -- on the host planes
+    /// and in every observer window.
+    ///
+    /// Three tracks, each `Input -> seven stages -> Route -> Output`, the shape
+    /// `GraphCompiler::compile` builds for a session with no effects. The input is hostile: signed
+    /// zeros, subnormals and magnitudes over `2^-24 .. 2^25`, fresh every block. Every route
+    /// carries a hostile 2x2 and gain, and the hostile *input* carries signed zeros and
+    /// subnormals, which is what would expose a copy that flipped a sign or flushed a subnormal:
+    /// an identity op's only work is the byte copy in `reduce_plane`'s single-input arm, so the
+    /// alias holds the same words, `-0.0` included. Class A is the claim: an identity copy
+    /// moves no bit and an in-place identity computes nothing, so removing them must leave every
+    /// word where it was.
+    ///
+    /// An observer on each of track 1's three builtin stages records every window it sees. With the
+    /// stages listed they fire after their own ops; unlisted they are taps on the input's buffer,
+    /// firing right after the input op. The words must be the same words either way.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`, #925): keep the post-input stage out of the alias
+    /// predicate, or alias only `PostMatrix`, and the op count below fails.
+    #[test]
+    fn identity_bound_builtin_stages_alias_without_moving_a_bit() {
+        const FRAMES: usize = 16;
+        const BLOCKS: u64 = 16;
+        const TRACKS: usize = 3;
+        const OBSERVED: usize = 1;
+        let stages = [
+            TrackStage::Input,
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostSimd1,
+            TrackStage::PostDynamic,
+            TrackStage::PostSimd2PreFader,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let builtin_stages = [
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let stage_node = |track: usize, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&format!("t{track}")).expect("track ID"),
+            stage,
+        };
+        let route_node = |track: usize| GraphNodeId::Route {
+            route_id: StableGraphId::parse(&format!("r{track}")).expect("route ID"),
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let edge = |id: GraphEdgeId, source: &GraphNodeId, destination: &GraphNodeId| GraphEdge {
+            id,
+            source: GraphPortId {
+                node: source.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: destination.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.main".to_owned(),
+        };
+        // Hostile route constants, drawn once so both arms fold the same words: a gain in
+        // `[2^-2, 2^2)` and a 2x2 of signed normals, with track 1's `lr` exactly `-0.0`.
+        let mut constants = 0x925_u64;
+        let mut hostile_constant = || {
+            let bits = splitmix(&mut constants);
+            let sign = ((bits >> 63) as u32) << 31;
+            let exponent = 125 + ((bits >> 40) % 4) as u32;
+            f32::from_bits(sign | (exponent << 23) | ((bits as u32) & 0x007f_ffff))
+        };
+        let transforms: Vec<RouteTransform> = (0..TRACKS)
+            .map(|track| RouteTransform {
+                gain: hostile_constant().abs(),
+                ll: hostile_constant(),
+                lr: if track == 1 { -0.0 } else { hostile_constant() },
+                rl: hostile_constant(),
+                rr: hostile_constant(),
+            })
+            .collect();
+        assert_eq!(transforms[1].lr.to_bits(), (-0.0_f32).to_bits());
+
+        let build = |listed: bool, sinks: &[Arc<std::sync::Mutex<Vec<u64>>>]| {
+            let mut nodes = vec![output.clone()];
+            let mut edges = Vec::new();
+            let mut routes = Vec::new();
+            let mut required = Vec::new();
+            let mut bindings = Vec::new();
+            for (track, transform) in transforms.iter().enumerate() {
+                let chain: Vec<GraphNodeId> = stages
+                    .iter()
+                    .map(|stage| stage_node(track, *stage))
+                    .collect();
+                for pair in chain.windows(2) {
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: pair[1].clone(),
+                        },
+                        &pair[0],
+                        &pair[1],
+                    ));
+                }
+                let route = route_node(track);
+                let route_id = StableGraphId::parse(&format!("r{track}")).expect("route ID");
+                edges.push(edge(
+                    GraphEdgeId::RouteSource {
+                        route_id: route_id.clone(),
+                    },
+                    &chain[6],
+                    &route,
+                ));
+                edges.push(edge(
+                    GraphEdgeId::RouteDestination { route_id },
+                    &route,
+                    &output,
+                ));
+                routes.push(PreparedRoute {
+                    node: route.clone(),
+                    transform: *transform,
+                });
+                nodes.extend(chain);
+                nodes.push(route);
+                required.push(stage_node(track, TrackStage::Input));
+                bindings.push(GraphNodeBinding::new(
+                    stage_node(track, TrackStage::Input),
+                    Box::new(HostileSource(0x925_0000 + track as u64)),
+                ));
+                if listed {
+                    for stage in builtin_stages {
+                        required.push(stage_node(track, stage));
+                        bindings.push(GraphNodeBinding::identity(stage_node(track, stage)));
+                    }
+                }
+            }
+            required.push(output.clone());
+            bindings.push(GraphNodeBinding::identity(output.clone()));
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+            let levels = levels_for(&nodes, &edges);
+            let schedule: Vec<GraphNodeId> = levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect();
+            let observers = builtin_stages
+                .iter()
+                .zip(sinks)
+                .enumerate()
+                .map(|(handle, (stage, sink))| {
+                    GraphNodeObserverBinding::new(
+                        stage_node(OBSERVED, *stage),
+                        handle as u64 + 1,
+                        Box::new(PlaneRecorder(Arc::clone(sink))),
+                    )
+                })
+                .collect();
+            let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 925 + u64::from(listed),
+                spec: GraphSpec {
+                    nodes: sorted_nodes(
+                        nodes
+                            .iter()
+                            .cloned()
+                            .map(|id| GraphNode {
+                                id,
+                                latency: LatencySamples(0),
+                                tail: TailSamples::Finite(0),
+                            })
+                            .collect(),
+                    ),
+                    ports: Vec::new(),
+                    edges,
+                },
+                sequential_schedule: schedule,
+                dependency_levels: levels,
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: empty_estimate(),
+                envelope,
+                required_bindings: required,
+                routes,
+                track_delays: Vec::new(),
+                effects: Vec::new(),
+                effect_controls: Vec::new(),
+                effect_observations: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers,
+            });
+            (
+                plan,
+                GraphRuntimeBindings {
+                    envelope,
+                    nodes: bindings,
+                    observers: Vec::new(),
+                },
+            )
+        };
+        let sinks = |_: ()| -> Vec<Arc<std::sync::Mutex<Vec<u64>>>> {
+            (0..builtin_stages.len())
+                .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+                .collect()
+        };
+
+        let unlisted_sinks = sinks(());
+        let (unlisted, unlisted_bindings) = build(false, &unlisted_sinks);
+        let program = unlisted.program().expect("lowered");
+        // `Input` and `Route` per track and the output: the three stages are aliases.
+        assert_eq!(program.ops.len(), 2 * TRACKS + 1);
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &unlisted.spec.nodes[op.node as usize].id)
+            .collect();
+        assert!(op_nodes.iter().all(|id| matches!(
+            id,
+            GraphNodeId::TrackStage {
+                stage: TrackStage::Input,
+                ..
+            } | GraphNodeId::Route { .. }
+                | GraphNodeId::Output { .. }
+        )));
+        // The only dedicated storage by kind is the session output's (`program::is_dedicated`:
+        // the post-input stage, SIMD-rack effects and the output), and every route runs in place
+        // over its input's buffer: one slot per track and the output's.
+        let dedicated = op_nodes
+            .iter()
+            .filter(|id| {
+                matches!(
+                    id,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins,
+                        ..
+                    } | GraphNodeId::Effect(_)
+                        | GraphNodeId::Output { .. }
+                )
+            })
+            .count();
+        assert_eq!(dedicated, 1, "only the output is dedicated storage");
+        for op in program.ops.iter() {
+            if matches!(
+                unlisted.spec.nodes[op.node as usize].id,
+                GraphNodeId::Route { .. }
+            ) {
+                assert!(op.in_place, "a route reads its input's buffer in place");
+            }
+        }
+        assert_eq!(program.buffers as usize, TRACKS + 1);
+        assert_eq!(program.taps.len(), 6 * TRACKS);
+
+        let listed_sinks = sinks(());
+        let (listed, listed_bindings) = build(true, &listed_sinks);
+        assert_eq!(
+            listed.program().expect("lowered").ops.len(),
+            5 * TRACKS + 1,
+            "the old shape: Input, the three stages and the route per track, and the output"
+        );
+
+        let mut unlisted_plan = unlisted
+            .bind(unlisted_bindings)
+            .unwrap_or_else(|failure| panic!("unlisted bind: {}", failure.code));
+        let mut listed_plan = listed
+            .bind(listed_bindings)
+            .unwrap_or_else(|failure| panic!("listed bind: {}", failure.code));
+        let unlisted_bits = render_blocks(&mut unlisted_plan, FRAMES, BLOCKS);
+        let listed_bits = render_blocks(&mut listed_plan, FRAMES, BLOCKS);
+        assert!(unlisted_bits.iter().any(|bits| *bits != 0));
+        assert_eq!(
+            unlisted_bits, listed_bits,
+            "eliding identity stages must not move one bit of the host planes"
+        );
+        for (stage, (unlisted, listed)) in builtin_stages
+            .iter()
+            .zip(unlisted_sinks.iter().zip(&listed_sinks))
+        {
+            let unlisted = unlisted.lock().expect("sink").clone();
+            let listed = listed.lock().expect("sink").clone();
+            assert_eq!(
+                unlisted.len(),
+                BLOCKS as usize * (1 + 2 * FRAMES),
+                "{stage:?}: one window per block"
+            );
+            assert_eq!(
+                unlisted, listed,
+                "{stage:?}: an observer window moved a bit"
+            );
+        }
     }
 
     /// The #98 F2 corpus: fifty seeded random DAGs -- stage chains, rack effects with sidechains,

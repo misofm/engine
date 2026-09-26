@@ -124,8 +124,8 @@ use bench_support::metadata::Metadata;
 use bench_support::stats::{Percentiles, format_f64, microseconds};
 use bench_support::timing;
 use console_workload::{
-    ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WINDOW_BLOCKS, WORKLOADS,
-    Workload,
+    DRIVER_FED_WORKLOADS, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
+    WINDOW_BLOCKS, WORKLOADS, Workload,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -139,6 +139,13 @@ use lane::Backend;
 
 const OBSERVATIONS: usize = 1_000;
 const ISSUE: u32 = 149;
+
+/// The bound-feed plumbing row and its driver-fed twin (issue #928): one session, one frozen tone,
+/// two feeds. Their digests must agree, and the run asserts it before it emits either record.
+const PLUMBING_FEED_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackPlumbingOnly,
+    Workload::SixtyFourTrackPlumbingRing,
+];
 
 pub(crate) fn main() {
     // #104 F4: prove the shared audited allocator is the one serving this process. A global
@@ -161,11 +168,29 @@ pub(crate) fn main() {
     // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
-    let sessions: Vec<SessionMeasurement> = WORKLOADS.map(SessionMeasurement::run).into();
-    for (workload, session) in WORKLOADS.iter().zip(&sessions) {
+    // The standing rows, then the driver-fed rows (issue #928), which `WORKLOADS` does not carry
+    // because the wasm arm addresses it by index. One list, so the floor subtraction below finds a
+    // control wherever it sits.
+    let rows: Vec<Workload> = WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS).collect();
+    let sessions: Vec<SessionMeasurement> =
+        rows.iter().copied().map(SessionMeasurement::run).collect();
+    // The class-A statement of the driver-fed row, asserted in-run like the facility arms' before
+    // a number is published: the two feeds deliver the same frozen words, so the two plumbing
+    // rows render the same bits. A difference is a harness defect, never a finding.
+    let [bound, driver_fed] = PLUMBING_FEED_PAIR.map(|workload| {
+        rows.iter()
+            .position(|row| *row == workload)
+            .map(|index| &sessions[index].output_sha256)
+            .expect("both plumbing rows are measured")
+    });
+    assert_eq!(
+        driver_fed, bound,
+        "the driver-fed plumbing row rendered different output from the bound-feed row"
+    );
+    for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
             .and_then(|row| row.control)
-            .and_then(|control| WORKLOADS.iter().position(|row| *row == control))
+            .and_then(|control| rows.iter().position(|row| *row == control))
             .map(|index| sessions[index].p50_ns());
         println!(
             "{}",
@@ -208,6 +233,9 @@ fn round_from_runner() -> u32 {
 // ---------------------------------------------------------------------------------------------
 
 struct SessionMeasurement {
+    /// Timed observations. [`OBSERVATIONS`] in every run the runner launches; the record states
+    /// this rather than the constant, so a shortened run cannot pass for the frozen one.
+    observations: usize,
     ns_per_block: Vec<u64>,
     output_sha256: String,
     audit: audit::AuditSnapshot,
@@ -216,8 +244,15 @@ struct SessionMeasurement {
 
 impl SessionMeasurement {
     fn run(workload: Workload) -> Self {
+        Self::run_for(workload, OBSERVATIONS)
+    }
+
+    /// [`SessionMeasurement::run`] over `observations` timed blocks. Only the unit test below
+    /// passes anything but [`OBSERVATIONS`], and the record it produces says so in its
+    /// `observations` field, which the validator pins to the frozen count.
+    fn run_for(workload: Workload, observations: usize) -> Self {
         let mut runtime = SessionRuntime::new(workload);
-        let mut durations = Vec::with_capacity(OBSERVATIONS);
+        let mut durations = Vec::with_capacity(observations);
         let mut output_hash = Sha256Sink::new();
         let mut render_errors = 0_u64;
         // Untimed settling. Only the idle row asks for any, and it asks for a lot: see
@@ -227,7 +262,7 @@ impl SessionMeasurement {
         }
         audit::warm_up();
         audit::reset();
-        for observation in 0..OBSERVATIONS {
+        for observation in 0..observations {
             // The timed region is one block of the production render entry and nothing else. The
             // output identity is taken outside it, which `timing::timed` enforces structurally.
             let (elapsed_ns, result) = timing::timed(|| runtime.render(observation as u64));
@@ -238,6 +273,7 @@ impl SessionMeasurement {
             durations.push(elapsed_ns);
         }
         Self {
+            observations,
             ns_per_block: durations,
             output_sha256: output_hash.finish_hex(),
             audit: audit::snapshot(),
@@ -266,7 +302,7 @@ impl SessionMeasurement {
                 "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_session\",",
                 "\"workload_kind\":\"{kind}\",\"tracks\":{tracks},\"synthetic_fixture\":{synthetic},",
                 "\"strip_content\":\"{strip}\",\"strip_layout\":\"{layout}\",",
-                "\"input_signal\":\"{signal}\",",
+                "\"input_signal\":\"{signal}\",\"source_feed\":\"{feed}\",",
                 "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
                 "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},\"observations\":{obs},",
                 "\"units\":\"us_per_block\",\"percentile_method\":\"nearest_rank\",",
@@ -289,12 +325,13 @@ impl SessionMeasurement {
             strip = workload.strip_content(),
             layout = workload.strip_layout(),
             signal = workload.input_signal(),
+            feed = workload.source_feed().name(),
             fixture = json_escape(workload.fixture_id()),
             round = round,
             backend = backend_name(backend),
             rate = SAMPLE_RATE_HZ,
             quantum = QUANTUM,
-            obs = OBSERVATIONS,
+            obs = self.observations,
             min = microseconds(percentiles.min),
             p50 = microseconds(percentiles.p50),
             p95 = microseconds(percentiles.p95),
@@ -1824,6 +1861,148 @@ mod tests {
         assert!(
             record.contains(&format!("\"observations\":{SHORT_RUN_OBSERVATIONS},")),
             "a shortened run must say it was shortened"
+        );
+    }
+
+    /// Whether the strict record validator (`scripts/console-benchmark-record-validator.jq`)
+    /// accepts `record` after the jq edit `edit`.
+    ///
+    /// Panics when jq did not run or did not return a verdict, so a broken invocation cannot read
+    /// as a refusal: exit 0 is an accepted record and exit 1 a refused one, and nothing else is
+    /// either.
+    fn record_validator_accepts(record: &str, edit: &str) -> bool {
+        let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let jq = |arguments: &[&str], input: &str| {
+            let mut child = std::process::Command::new("jq")
+                .args(arguments)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("jq runs");
+            std::io::Write::write_all(&mut child.stdin.take().expect("jq stdin"), input.as_bytes())
+                .expect("jq takes the record");
+            child.wait_with_output().expect("jq finishes")
+        };
+        let edited = jq(&["-c", edit], record);
+        assert!(
+            edited.status.success(),
+            "the edit {edit:?} did not apply: {}",
+            String::from_utf8_lossy(&edited.stderr)
+        );
+        let edited = String::from_utf8(edited.stdout).expect("jq writes UTF-8");
+        let library = scripts.to_str().expect("a UTF-8 scripts path");
+        let validator = scripts.join("console-benchmark-record-validator.jq");
+        let verdict = jq(
+            &[
+                "-e",
+                "-L",
+                library,
+                "-f",
+                validator.to_str().expect("a UTF-8 validator path"),
+            ],
+            &edited,
+        );
+        match verdict.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            status => panic!(
+                "the record validator returned no verdict ({status:?}): {}",
+                String::from_utf8_lossy(&verdict.stderr)
+            ),
+        }
+    }
+
+    /// Issue #928: the driver-fed plumbing row, run short through the real subject, renders the
+    /// bound-feed row's bits with no forbidden operation, prints its record with its feed, and the
+    /// record validator pins that feed.
+    ///
+    /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
+    /// thousand (`cargo test -p bench the_driver_fed_plumbing_row -- --nocapture` prints the
+    /// record). Its timings are not to be read, and its `observations` field says eight, which the
+    /// validator refuses as a frozen measurement -- so the validator is asked about the two
+    /// records with that one field set to the frozen count, and then with the feed removed or
+    /// swapped. `render_total_forbidden_operations` is the realtime audit of the render path, the
+    /// driver's `begin_block` and `copy_track_input` included, and the audited allocator would
+    /// have aborted this process on an allocation inside it.
+    ///
+    /// Red mutations: emit the feed of the other row, or drop `source_feed` from the format string
+    /// -- the feed assertions fail; drop `source_feed` from `session_keys` in the validator
+    /// library -- the removed-feed cases are accepted; unpin the per-kind feed -- the swapped-feed
+    /// cases are accepted.
+    #[test]
+    fn the_driver_fed_plumbing_row_prints_its_feed_and_the_validator_pins_it() {
+        let measured = PLUMBING_FEED_PAIR
+            .map(|workload| SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS));
+        assert_eq!(
+            measured[1].output_sha256, measured[0].output_sha256,
+            "the driver-fed row must render the bound-feed row's bits"
+        );
+        for (workload, measurement) in PLUMBING_FEED_PAIR.iter().zip(&measured) {
+            assert_eq!(measurement.render_errors, 0, "{}", workload.kind());
+            assert_eq!(
+                measurement.audit.total(),
+                0,
+                "{}: a forbidden operation on the render path",
+                workload.kind()
+            );
+        }
+        let [bound, ring] = [0, 1].map(|index| {
+            measured[index].record(
+                PLUMBING_FEED_PAIR[index],
+                1,
+                Backend::current(),
+                Metadata::gather(),
+                None,
+                None,
+            )
+        });
+        println!("{ring}");
+        for (record, feed) in [(&bound, "bound"), (&ring, "played_planes")] {
+            assert_eq!(
+                record.matches("\"source_feed\":").count(),
+                1,
+                "the feed is stated exactly once"
+            );
+            assert!(
+                record.contains(&format!("\"source_feed\":\"{feed}\",")),
+                "the record must state the {feed} feed"
+            );
+            assert!(
+                record.contains(&format!("\"observations\":{SHORT_RUN_OBSERVATIONS},")),
+                "a shortened run must say it was shortened"
+            );
+        }
+        assert!(
+            ring.contains("\"workload_kind\":\"sixty_four_track_plumbing_ring\","),
+            "the driver-fed row names itself"
+        );
+
+        let frozen = ".observations = 1000";
+        assert!(
+            !record_validator_accepts(&ring, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        for record in [&bound, &ring] {
+            assert!(
+                record_validator_accepts(record, frozen),
+                "the record at the frozen count"
+            );
+            assert!(
+                !record_validator_accepts(record, &format!("{frozen} | del(.source_feed)")),
+                "a record missing source_feed"
+            );
+        }
+        assert!(
+            !record_validator_accepts(&ring, &format!("{frozen} | .source_feed = \"bound\"")),
+            "a driver-fed row claiming the bound feed"
+        );
+        assert!(
+            !record_validator_accepts(
+                &bound,
+                &format!("{frozen} | .source_feed = \"played_planes\"")
+            ),
+            "the bound-feed row claiming the driver's feed"
         );
     }
 }

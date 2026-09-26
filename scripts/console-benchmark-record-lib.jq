@@ -17,7 +17,7 @@ def positive_integer: type == "number" and floor == . and . > 0;
 # The eleven runner-supplied metadata names, as they appear in a record.
 def metadata_names: ["background_load_note","candidate_commit","cpu_affinity","cpu_model","governor_or_power_mode","llvm_version","measurement_control","profile","rust_version","target_features","target_triple"];
 
-def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","source_feed","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -127,6 +127,12 @@ def floor_pins:
     # interesting number -- unfolded plumbing against four lane-ops -- and it is nobody's control.
     "sixty_four_track_plumbing_only":
       [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
+    # Its driver-fed twin (#928): the same session with its track inputs claimed by a prepared
+    # source set. Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does
+    # it, so the inventory is the plumbing row's -- equal to the floor, not below it -- and like the
+    # plumbing row it names no control.
+    "sixty_four_track_plumbing_ring":
+      [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
     # The three mono rows carry the whole intended strip, so they carry its inventory. Their
     # fixture differs from the standing one in per-channel values only -- one source channel
     # instead of two, and the left channel's designed words on both sides -- and a floor is an
@@ -176,8 +182,22 @@ def floor_shape:
    end);
 
 
-# The sixteen session workloads, sorted (`WORKLOADS` itself is append-only and in emission order).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only"];
+# The seventeen session workloads, sorted: `WORKLOADS`'s sixteen (append-only, in emission order)
+# and the driver-fed plumbing row the bench emits after them (#928, `DRIVER_FED_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only","sixty_four_track_plumbing_ring"];
+
+# #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
+# processor per track input, dispatched once per track per block; `played_planes` is a prepared
+# source set whose driver copies each claim's block on request and lends its played planes in
+# place -- the production feed. Exactly one row is driver-fed, and the feed is pinned per kind for
+# the reason every other row fact is: a record claiming the production feed over bound processors,
+# or the reverse, would attribute the feed's cost to the wrong row. The field is required on every
+# session record, so a record from before it existed is refused; the driver-fed row's digest
+# partner is pinned by the aggregate.
+def driver_fed_kinds: ["sixty_four_track_plumbing_ring"];
+def session_source_feed:
+  .workload_kind as $kind |
+  .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
 
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
@@ -268,6 +288,12 @@ def session_kind_shape:
   # is exactly what the row measures, so a record that called it `builtins` would be naming the
   # thing it is defined by not having.
   elif .workload_kind == "sixty_four_track_plumbing_only" then
+    .tracks == 64 and .synthetic_fixture == true and
+    .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
+    .fixture_id == console_fixture
+  # Its driver-fed twin (#928) states the same six facts: one session, fed two ways. What separates
+  # the two records is `source_feed`, pinned by `session_source_feed`, and nothing else.
+  elif .workload_kind == "sixty_four_track_plumbing_ring" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
     .fixture_id == console_fixture
@@ -376,6 +402,7 @@ def session_record_valid:
   .sample_rate_hz == 48000 and .quantum_frames == 128 and
   .units == "us_per_block" and
   session_kind_shape and
+  session_source_feed and
   ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
   ([.min_us_per_block,.p50_us_per_block,.p95_us_per_block,.p99_us_per_block,.max_us_per_block,.p50_us_per_block_per_track] | all(type == "number" and . > 0)) and
   (.output_sha256 | sha256) and
