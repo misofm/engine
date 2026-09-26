@@ -1,0 +1,925 @@
+From 9da3a4a13c215d540015c5ae1cfb66591e695e94 Mon Sep 17 00:00:00 2001
+From: BL <bl@unconfirmed.com>
+Date: Sat, 26 Sep 2026 14:11:39 +0000
+Subject: [PATCH] test: add the gain/pan diagnosis harnesses the draft spec
+ cites
+
+Two ignored measurement tests in console-workload: gain_pan_profile
+(graph phase profile of the plumbing, gain/pan, dispatch-only and
+builtins-only rows, plus 64-block digests of every standing workload)
+and gain_pan_replicas (the row's banked stages through the real builtins
+bank API and lane kernels, the class-A candidates asserted bit-identical,
+and settled-versus-ramping costs). They assert nothing about time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../tests/gain_pan_profile.rs                 | 182 +++++
+ .../tests/gain_pan_replicas.rs                | 707 ++++++++++++++++++
+ 2 files changed, 889 insertions(+)
+ create mode 100644 tools/console-workload/tests/gain_pan_profile.rs
+ create mode 100644 tools/console-workload/tests/gain_pan_replicas.rs
+
+diff --git a/tools/console-workload/tests/gain_pan_profile.rs b/tools/console-workload/tests/gain_pan_profile.rs
+new file mode 100644
+index 00000000..3763aace
+--- /dev/null
++++ b/tools/console-workload/tests/gain_pan_profile.rs
+@@ -0,0 +1,182 @@
++//! Gain/pan row diagnosis harness (`.github/ISSUE_SPECS/DRAFT-banked-parameter-smoothing.md`).
++//!
++//! Ignored by default: it prints measurements and asserts nothing about time. Run it pinned:
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 cargo test --release -p console-workload --test gain_pan_profile --no-run
++//! taskset -c 31 target/release/deps/gain_pan_profile-<hash> --ignored --nocapture --test-threads 1
++//! ```
++//!
++//! * `phase_profile_rows` renders the plumbing, gain/pan, dispatch-only and builtins-only rows
++//!   through the real plan with `graph::test_only_phase_profile` on and off, the instrument
++//!   `plumbing_profile.rs` introduced, and reports nanoseconds and derived core cycles per block.
++//! * `digests` prints the 64-block output digest of every standing console workload, so a class-A
++//!   change can be checked against the base commit's bits in one command.
++//!
++//! Cycles are derived, not counted: the core clock is calibrated from a dependent chain of scalar
++//! `f32` adds at three cycles each (Zen 3), timed by the same monotonic clock.
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use console_workload::{PlanConfig, QUANTUM, SessionRuntime, WORKLOADS, Workload};
++use graph::test_only_phase_profile as profile;
++
++const WARMUP_BLOCKS: u64 = 512;
++const PROFILED_BLOCKS: u64 = 4000;
++const REPEATS: usize = 3;
++const TRACKS: usize = 64;
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++/// Median cost of one `Instant::now()` pair, the unit of probe overhead.
++fn probe_cost_ns() -> f64 {
++    let mut deltas: Vec<u64> = (0..20_000)
++        .map(|_| {
++            let a = Instant::now();
++            let b = Instant::now();
++            u64::try_from(b.duration_since(a).as_nanos()).unwrap_or(u64::MAX)
++        })
++        .collect();
++    deltas.sort_unstable();
++    deltas[deltas.len() / 2] as f64
++}
++
++/// Core clock from a dependent `f32` add chain: `FADD_LATENCY_CYCLES` cycles per add.
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++const PHASE_SHORT: [&str; profile::COUNT] = [
++    "enter",
++    "source",
++    "bound",
++    "route",
++    "output",
++    "identity-copy",
++    "identity-alias",
++    "other",
++    "bank",
++    "exit",
++];
++
++fn profile_row(workload: Workload, hz: f64) {
++    println!("==== {}", workload.kind());
++    let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
++    println!(
++        "bank_shape [chains, slots] = {:?}, units = {}, route folds = {}",
++        runtime.bank_shape(),
++        runtime.unit_eligibility().len(),
++        runtime.bank_route_folds()
++    );
++    let mut observation = 0_u64;
++    profile::enable(false);
++    for _ in 0..WARMUP_BLOCKS {
++        runtime.render(observation).expect("warmup block");
++        observation += 1;
++    }
++    for repeat in 0..REPEATS {
++        let mut samples = Vec::with_capacity(PROFILED_BLOCKS as usize);
++        for _ in 0..PROFILED_BLOCKS {
++            let start = Instant::now();
++            let result = runtime.render(observation);
++            let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
++            result.expect("block");
++            observation += 1;
++            samples.push(elapsed);
++        }
++        samples.sort_unstable();
++        let min = samples[0];
++        let p50 = bench_support::stats::per_mille(&samples, 500);
++        let p95 = bench_support::stats::per_mille(&samples, 950);
++        println!(
++            "repeat {repeat}: probes off  min {min} ns  p50 {p50} ns  p95 {p95} ns  \
++             (p50 = {:.0} cycles/block, {:.3} cycles/lane-sample)",
++            p50 as f64 * hz / 1e9,
++            p50 as f64 * hz / 1e9 / (TRACKS * QUANTUM * 2) as f64
++        );
++        profile::enable(true);
++        profile::reset();
++        let start = Instant::now();
++        for _ in 0..PROFILED_BLOCKS {
++            runtime.render(observation).expect("block");
++            observation += 1;
++        }
++        let total_ns = start.elapsed().as_nanos() as f64 / PROFILED_BLOCKS as f64;
++        profile::enable(false);
++        let (nanos, blocks, probes) = profile::snapshot();
++        if repeat == 0 {
++            let runs: Vec<String> = profile::runs()
++                .iter()
++                .filter(|(kind, units)| *kind < profile::COUNT && *units > 0)
++                .map(|(kind, units)| format!("{units} x {}", PHASE_SHORT[*kind]))
++                .collect();
++            println!("unit runs in schedule order: {}", runs.join(", "));
++        }
++        let sum: u64 = nanos.iter().sum();
++        println!(
++            "repeat {repeat}: probes on mean {total_ns:.0} ns/block, {:.1} probes/block, \
++             phases sum {:.0} ns",
++            probes as f64 / blocks as f64,
++            sum as f64 / blocks as f64
++        );
++        for (index, name) in PHASE_SHORT.iter().enumerate() {
++            let ns = nanos[index] as f64 / blocks as f64;
++            if ns == 0.0 {
++                continue;
++            }
++            println!(
++                "  {:<16} {:>10.1} ns {:>10.0} cycles {:>6.1}%",
++                name,
++                ns,
++                ns * hz / 1e9,
++                100.0 * nanos[index] as f64 / sum as f64
++            );
++        }
++    }
++}
++
++#[test]
++#[ignore = "measurement harness; run pinned with --ignored --nocapture"]
++fn phase_profile_rows() {
++    let hz = core_hz();
++    println!(
++        "core clock {:.3} GHz, probe {:.1} ns",
++        hz / 1e9,
++        probe_cost_ns()
++    );
++    for workload in [
++        Workload::SixtyFourTrackPlumbingOnly,
++        Workload::SixtyFourTrackGainPanOnly,
++        Workload::SixtyFourTrackDispatchOnly,
++        Workload::SixtyFourTrackBuiltinsOnly,
++    ] {
++        profile_row(workload, hz);
++    }
++}
++
++#[test]
++#[ignore = "measurement harness; run pinned with --ignored --nocapture"]
++fn digests() {
++    for workload in WORKLOADS {
++        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
++        let mut digest = bench_support::digest::Sha256Sink::new();
++        for block in 0..64 {
++            runtime.render(block).expect("render");
++            runtime.hash_output(&mut digest);
++        }
++        println!("{:<44} {}", workload.kind(), digest.finish_hex());
++    }
++}
+diff --git a/tools/console-workload/tests/gain_pan_replicas.rs b/tools/console-workload/tests/gain_pan_replicas.rs
+new file mode 100644
+index 00000000..d7154640
+--- /dev/null
++++ b/tools/console-workload/tests/gain_pan_replicas.rs
+@@ -0,0 +1,707 @@
++//! Gain/pan row kernel replicas (`.github/ISSUE_SPECS/DRAFT-banked-parameter-smoothing.md`).
++//!
++//! Ignored by default: it prints measurements and asserts only bit-identity. Run it pinned:
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 cargo test --release -p console-workload --test gain_pan_replicas --no-run
++//! taskset -c 31 target/release/deps/gain_pan_replicas-<hash> --ignored --nocapture --test-threads 1
++//! ```
++//!
++//! The row's banked working set: eight banks of eight tracks, each an AoSoA scratch of 128 frames
++//! per plane, gathered from sixty-four planar sources. `replicas` times each stage of today's chain
++//! through the real `builtins` bank API (`BuiltinInputBank`, `BuiltinFaderBank`,
++//! `BuiltinMatrixBank`), the raw `lane` kernels, a verbatim replica of the graph's
++//! `fold_resident_tiles`, and the class-A candidates, and asserts every candidate bit-identical to
++//! today's chain before timing it. `ramps` times the fader and matrix banks with every lane
++//! mid-ramp against the same banks settled. An in-place stage is always timed after a fresh gather
++//! (whose own time is subtracted), so repeated gains never walk the data into subnormals.
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use builtins::{
++    BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
++    BuiltinParameters, ChannelParameters, Matrix2x2, pan_matrix,
++};
++use console_workload::{QUANTUM, source_block};
++use effect_contract::{BankWidth, transpose_tile_8};
++use lane::kernels::builtins::{
++    Matrix2x2Coef, fader_matrix_block, gain_mute_block, mask_from_flags, matrix2x2_block,
++};
++use lane::{Backend, Lane, Simd8};
++
++const TRACKS: usize = 64;
++const W: usize = 8;
++const BANKS: usize = TRACKS / W;
++const WORDS: usize = QUANTUM * W;
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++fn time_min(batches: usize, per_batch: usize, mut body: impl FnMut()) -> f64 {
++    let mut best = f64::MAX;
++    for _ in 0..batches {
++        let start = Instant::now();
++        for _ in 0..per_batch {
++            body();
++        }
++        best = best.min(start.elapsed().as_nanos() as f64 / per_batch as f64);
++    }
++    best
++}
++
++fn unit(seed: u32) -> f32 {
++    let hashed = seed.wrapping_mul(2_654_435_761).rotate_left(13) ^ 0x9E37_79B9;
++    (hashed >> 8) as f32 / (1u32 << 24) as f32
++}
++
++/// Per-track parameters shaped like the fixture: fader -3..+2 dB, pan positions 0.5..1.0.
++fn track_parameters(track: usize) -> BuiltinParameters {
++    let t = track as u32;
++    let left_db = -3.0 + 5.0 * unit(7 * t);
++    let right_db = -3.0 + 5.0 * unit(7 * t + 1);
++    let pan_left = 0.5 + 0.5 * unit(7 * t + 2);
++    let pan_right = 0.5 + 0.5 * unit(7 * t + 3);
++    BuiltinParameters {
++        left: ChannelParameters {
++            fader_db: left_db,
++            ..ChannelParameters::default()
++        },
++        right: ChannelParameters {
++            fader_db: right_db,
++            ..ChannelParameters::default()
++        },
++        matrix: pan_matrix(pan_left, pan_right).expect("pan"),
++        smoothing_samples: 16,
++    }
++}
++
++fn route_coefficients(track: usize) -> [f32; 4] {
++    let t = track as u32;
++    [
++        0.5 + 0.4 * unit(4 * t + 100),
++        0.2 * unit(4 * t + 101) - 0.1,
++        0.2 * unit(4 * t + 102) - 0.1,
++        0.5 + 0.4 * unit(4 * t + 103),
++    ]
++}
++
++struct Bank {
++    input: BuiltinInputBank,
++    fader: BuiltinFaderBank,
++    matrix: BuiltinMatrixBank,
++    /// Raw kernel words for the same settled state.
++    gain: [Simd8; 2],
++    mute: [<Simd8 as Lane>::Mask; 2],
++    coef: Matrix2x2Coef<Simd8>,
++    route: [[f32; 4]; W],
++}
++
++struct Row {
++    /// 64 planar sources: (left, right), the arena after the bound copies.
++    sources: Vec<([f32; QUANTUM], [f32; QUANTUM])>,
++    banks: Vec<Bank>,
++    /// One AoSoA scratch per bank (the engine shares one per chain; eight chains, eight scratches).
++    left: Vec<Vec<f32>>,
++    right: Vec<Vec<f32>>,
++    master_left: Vec<f32>,
++    master_right: Vec<f32>,
++}
++
++impl Row {
++    fn new() -> Self {
++        let sources = (0..TRACKS)
++            .map(|track| {
++                let block = source_block(track, false);
++                let mut left = [0.0; QUANTUM];
++                let mut right = [0.0; QUANTUM];
++                left.copy_from_slice(&block[..QUANTUM]);
++                right.copy_from_slice(&block[QUANTUM..2 * QUANTUM]);
++                (left, right)
++            })
++            .collect();
++        let banks = (0..BANKS)
++            .map(|bank| {
++                let params: Vec<BuiltinParameters> = (0..W)
++                    .map(|lane| track_parameters(bank * W + lane))
++                    .collect();
++                let inputs = params
++                    .iter()
++                    .map(|p| {
++                        BuiltinChain::new(48_000, *p)
++                            .expect("chain")
++                            .into_input_builtins()
++                    })
++                    .collect();
++                let input =
++                    BuiltinInputBank::new(Backend::Simd8, BankWidth::Eight, inputs).expect("in");
++                let fader = BuiltinFaderBank::new(Backend::Simd8, BankWidth::Eight, params.clone())
++                    .expect("fader");
++                let matrix = BuiltinMatrixBank::new(
++                    Backend::Simd8,
++                    BankWidth::Eight,
++                    params
++                        .iter()
++                        .map(|p| (p.matrix, p.smoothing_samples))
++                        .collect(),
++                )
++                .expect("matrix");
++                let gains: [[f32; W]; 2] = core::array::from_fn(|c| {
++                    core::array::from_fn(|lane| fader.target_gain(lane, c))
++                });
++                let zeros = [0.0_f32; W];
++                let m: Vec<Matrix2x2> =
++                    params.iter().map(|p| p.matrix.checked().unwrap()).collect();
++                let pick = |f: fn(&Matrix2x2) -> f32| -> Simd8 {
++                    let words: [f32; W] = core::array::from_fn(|lane| f(&m[lane]));
++                    Simd8::load(&words)
++                };
++                Bank {
++                    input,
++                    fader,
++                    matrix,
++                    gain: [Simd8::load(&gains[0]), Simd8::load(&gains[1])],
++                    mute: [
++                        mask_from_flags::<Simd8>(&zeros),
++                        mask_from_flags::<Simd8>(&zeros),
++                    ],
++                    coef: Matrix2x2Coef {
++                        ll: pick(|m| m.ll),
++                        lr: pick(|m| m.lr),
++                        rl: pick(|m| m.rl),
++                        rr: pick(|m| m.rr),
++                        identity: mask_from_flags::<Simd8>(&zeros),
++                    },
++                    route: core::array::from_fn(|lane| route_coefficients(bank * W + lane)),
++                }
++            })
++            .collect();
++        Self {
++            sources,
++            banks,
++            left: vec![vec![0.0; WORDS]; BANKS],
++            right: vec![vec![0.0; WORDS]; BANKS],
++            master_left: vec![0.0; QUANTUM],
++            master_right: vec![0.0; QUANTUM],
++        }
++    }
++
++    /// `tile_gather` verbatim, both planes, every bank.
++    fn gather(&mut self) {
++        for bank in 0..BANKS {
++            for (plane, dest) in [(0, &mut self.left[bank]), (1, &mut self.right[bank])] {
++                let planes: [&[f32]; W] = core::array::from_fn(|lane| {
++                    let s = &self.sources[bank * W + lane];
++                    if plane == 0 { &s.0[..] } else { &s.1[..] }
++                });
++                for (tile, block) in dest.chunks_exact_mut(W * W).enumerate() {
++                    let base = tile * W;
++                    let mut rows = [[0.0_f32; W]; W];
++                    for (row, plane) in rows.iter_mut().zip(planes.iter()) {
++                        row.copy_from_slice(&plane[base..base + W]);
++                    }
++                    for (chunk, row) in block.chunks_exact_mut(W).zip(transpose_tile_8(rows)) {
++                        chunk.copy_from_slice(&row);
++                    }
++                }
++            }
++        }
++    }
++
++    fn input(&mut self) {
++        for bank in 0..BANKS {
++            black_box(self.banks[bank].input.process(
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM as u32,
++            ));
++        }
++    }
++
++    fn fader(&mut self) {
++        for bank in 0..BANKS {
++            self.banks[bank].fader.process(
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM as u32,
++            );
++        }
++    }
++
++    fn matrix(&mut self) {
++        for bank in 0..BANKS {
++            self.banks[bank].matrix.process(
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM as u32,
++            );
++        }
++    }
++
++    fn fused_fader_matrix(&mut self) {
++        for bank in 0..BANKS {
++            let Bank { fader, matrix, .. } = &mut self.banks[bank];
++            assert!(fader.try_process_settled_with_matrix(
++                matrix,
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM as u32,
++            ));
++        }
++    }
++
++    fn raw_gain_mute(&mut self) {
++        for bank in 0..BANKS {
++            let b = &self.banks[bank];
++            gain_mute_block::<Simd8>(&mut self.left[bank], QUANTUM, b.gain[0], b.mute[0]);
++            gain_mute_block::<Simd8>(&mut self.right[bank], QUANTUM, b.gain[1], b.mute[1]);
++        }
++    }
++
++    fn raw_matrix(&mut self) {
++        for bank in 0..BANKS {
++            matrix2x2_block::<Simd8>(
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM,
++                &self.banks[bank].coef,
++            );
++        }
++    }
++
++    /// Candidate: the settled matrix with no identity lane, i.e. the second arm of the select
++    /// verbatim (`ll * l + lr * r`, `rl * l + rr * r`), with no select at all.
++    fn raw_matrix_general(&mut self) {
++        for bank in 0..BANKS {
++            let c = &self.banks[bank].coef;
++            matrix2x2_general_block(&mut self.left[bank], &mut self.right[bank], c);
++        }
++    }
++
++    /// Candidate: today's kernel with the two stores swapped (right first).
++    fn raw_matrix_swapped(&mut self) {
++        for bank in 0..BANKS {
++            let c = &self.banks[bank].coef;
++            for (left_frame, right_frame) in self.left[bank]
++                .chunks_exact_mut(W)
++                .zip(self.right[bank].chunks_exact_mut(W))
++            {
++                let l = Simd8::load(left_frame);
++                let r = Simd8::load(right_frame);
++                let yl = Simd8::select(c.identity, l, c.ll.mul(l).add(c.lr.mul(r)));
++                let yr = Simd8::select(c.identity, r, c.rl.mul(l).add(c.rr.mul(r)));
++                yr.store(right_frame);
++                yl.store(left_frame);
++            }
++        }
++    }
++
++    fn raw_fader_matrix(&mut self) {
++        for bank in 0..BANKS {
++            let b = &self.banks[bank];
++            fader_matrix_block::<Simd8>(
++                &mut self.left[bank],
++                &mut self.right[bank],
++                QUANTUM,
++                b.gain[0],
++                b.mute[0],
++                b.gain[1],
++                b.mute[1],
++                &b.coef,
++            );
++        }
++    }
++
++    /// `fold_resident_tiles::<8, Simd8>` verbatim: transpose each tile back, route each lane, and
++    /// accumulate every lane into the master in ascending lane order; bank 0 lane 0 stores.
++    fn fold(&mut self) {
++        for bank in 0..BANKS {
++            let initial_store = bank == 0;
++            let constants = self.banks[bank].route;
++            let splats: [[Simd8; 4]; W] =
++                core::array::from_fn(|lane| constants[lane].map(Simd8::splat));
++            for (tile, (block_left, block_right)) in self.left[bank]
++                .chunks_exact(W * W)
++                .zip(self.right[bank].chunks_exact(W * W))
++                .enumerate()
++            {
++                let base = tile * W;
++                let rows_left = transpose_tile_8(tile_rows(block_left));
++                let rows_right = transpose_tile_8(tile_rows(block_right));
++                fold_words(
++                    &splats,
++                    initial_store,
++                    &mut self.master_left[base..base + W],
++                    &mut self.master_right[base..base + W],
++                    |lane| {
++                        (
++                            Simd8::load(&rows_left[lane]),
++                            Simd8::load(&rows_right[lane]),
++                        )
++                    },
++                );
++            }
++        }
++    }
++
++    /// Candidate: the settled fader and matrix applied inside the fold pass, on the AoSoA frame
++    /// rows before the transpose (the `fader_matrix_block` frame body, verbatim), so the resident
++    /// block is read once for fader + matrix + route + accumulate and never rewritten.
++    fn fold_with_fader_matrix(&mut self) {
++        for bank in 0..BANKS {
++            let initial_store = bank == 0;
++            let b = &self.banks[bank];
++            let constants = b.route;
++            let splats: [[Simd8; 4]; W] =
++                core::array::from_fn(|lane| constants[lane].map(Simd8::splat));
++            for (tile, (block_left, block_right)) in self.left[bank]
++                .chunks_exact(W * W)
++                .zip(self.right[bank].chunks_exact(W * W))
++                .enumerate()
++            {
++                let base = tile * W;
++                let mut out_left = [[0.0_f32; W]; W];
++                let mut out_right = [[0.0_f32; W]; W];
++                for frame in 0..W {
++                    let left_input = Simd8::load(&block_left[frame * W..frame * W + W]);
++                    let right_input = Simd8::load(&block_right[frame * W..frame * W + W]);
++                    let l = left_input.mul(b.gain[0]).andnot(b.mute[0]);
++                    let r = right_input.mul(b.gain[1]).andnot(b.mute[1]);
++                    let c = &b.coef;
++                    let yl = Simd8::select(c.identity, l, c.ll.mul(l).add(c.lr.mul(r)));
++                    let yr = Simd8::select(c.identity, r, c.rl.mul(l).add(c.rr.mul(r)));
++                    yl.store(&mut out_left[frame]);
++                    yr.store(&mut out_right[frame]);
++                }
++                let rows_left = transpose_tile_8(out_left);
++                let rows_right = transpose_tile_8(out_right);
++                fold_words(
++                    &splats,
++                    initial_store,
++                    &mut self.master_left[base..base + W],
++                    &mut self.master_right[base..base + W],
++                    |lane| {
++                        (
++                            Simd8::load(&rows_left[lane]),
++                            Simd8::load(&rows_right[lane]),
++                        )
++                    },
++                );
++            }
++        }
++    }
++}
++
++#[inline(never)]
++fn matrix2x2_general_block(left: &mut [f32], right: &mut [f32], c: &Matrix2x2Coef<Simd8>) {
++    for (left_frame, right_frame) in left.chunks_exact_mut(W).zip(right.chunks_exact_mut(W)) {
++        let l = Simd8::load(left_frame);
++        let r = Simd8::load(right_frame);
++        let yl = c.ll.mul(l).add(c.lr.mul(r));
++        let yr = c.rl.mul(l).add(c.rr.mul(r));
++        yl.store(left_frame);
++        yr.store(right_frame);
++    }
++}
++
++#[inline(always)]
++fn tile_rows(block: &[f32]) -> [[f32; W]; W] {
++    let mut rows = [[0.0_f32; W]; W];
++    for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
++        row.copy_from_slice(chunk);
++    }
++    rows
++}
++
++#[inline(always)]
++fn fold_words(
++    constants: &[[Simd8; 4]; W],
++    initial_store: bool,
++    master_left: &mut [f32],
++    master_right: &mut [f32],
++    lane_words: impl Fn(usize) -> (Simd8, Simd8),
++) {
++    let route = |[ll, lr, rl, rr]: [Simd8; 4], left: Simd8, right: Simd8| {
++        (lr.fma(right, ll.mul(left)), rr.fma(right, rl.mul(left)))
++    };
++    let (left, right) = lane_words(0);
++    let (routed_left, routed_right) = route(constants[0], left, right);
++    let (mut sum_left, mut sum_right) = if initial_store {
++        (routed_left, routed_right)
++    } else {
++        (
++            Simd8::load(master_left).add(routed_left),
++            Simd8::load(master_right).add(routed_right),
++        )
++    };
++    for (lane, constant) in constants.iter().enumerate().skip(1) {
++        let (left, right) = lane_words(lane);
++        let (routed_left, routed_right) = route(*constant, left, right);
++        sum_left = sum_left.add(routed_left);
++        sum_right = sum_right.add(routed_right);
++    }
++    sum_left.store(master_left);
++    sum_right.store(master_right);
++}
++
++fn bits(v: &[f32]) -> Vec<u32> {
++    v.iter().map(|x| x.to_bits()).collect()
++}
++
++#[test]
++#[ignore = "measurement harness"]
++fn replicas() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let lane_samples = (TRACKS * QUANTUM * 2) as f64;
++    let report = |name: &str, ns: f64| {
++        println!(
++            "  {:<62} {:>8.0} ns {:>8.0} cycles/block {:>6.0} cycles/bank {:>6.3} c/ls",
++            name,
++            ns,
++            ns * hz / 1e9,
++            ns * hz / 1e9 / BANKS as f64,
++            ns * hz / 1e9 / lane_samples
++        );
++    };
++    let mut row = Row::new();
++
++    // Reference: gather, input, fader, matrix, fold.
++    row.gather();
++    row.input();
++    row.fader();
++    row.matrix();
++    row.fold();
++    let reference = (bits(&row.master_left), bits(&row.master_right));
++    // Raw kernels must equal the public bank path.
++    row.gather();
++    row.input();
++    row.raw_gain_mute();
++    row.raw_matrix();
++    row.fold();
++    assert_eq!(
++        (bits(&row.master_left), bits(&row.master_right)),
++        reference,
++        "raw kernels"
++    );
++    row.gather();
++    row.input();
++    row.fused_fader_matrix();
++    row.fold();
++    assert_eq!(
++        (bits(&row.master_left), bits(&row.master_right)),
++        reference,
++        "fused pair"
++    );
++    row.gather();
++    row.input();
++    row.fold_with_fader_matrix();
++    assert_eq!(
++        (bits(&row.master_left), bits(&row.master_right)),
++        reference,
++        "fader+matrix inside the fold"
++    );
++    row.gather();
++    row.input();
++    row.fader();
++    row.raw_matrix_general();
++    row.fold();
++    assert_eq!(
++        (bits(&row.master_left), bits(&row.master_right)),
++        reference,
++        "select-free matrix on an identity-free bank"
++    );
++    row.gather();
++    row.input();
++    row.fader();
++    row.raw_matrix_swapped();
++    row.fold();
++    assert_eq!(
++        (bits(&row.master_left), bits(&row.master_right)),
++        reference,
++        "swapped stores"
++    );
++    println!("every candidate is bit-identical to gather, input, fader, matrix, fold");
++
++    const BATCHES: usize = 30;
++    const PER_BATCH: usize = 200;
++    for repeat in 0..3 {
++        println!("repeat {repeat}:");
++        let gather = time_min(BATCHES, PER_BATCH, || row.gather());
++        report("gather (8 banks, tile transpose planar->AoSoA)", gather);
++        let g_in = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.input();
++        });
++        report(
++            "input bank (identity sections), gather subtracted",
++            g_in - gather,
++        );
++        let g_f = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.fader();
++        });
++        report(
++            "fader bank process (settled), gather subtracted",
++            g_f - gather,
++        );
++        let g_m = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.matrix();
++        });
++        report(
++            "matrix bank process (settled), gather subtracted",
++            g_m - gather,
++        );
++        let g_fm = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.fused_fader_matrix();
++        });
++        report(
++            "fused fader+matrix (try_process_settled), gather subtracted",
++            g_fm - gather,
++        );
++        let g_rg = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.raw_gain_mute();
++        });
++        report("raw gain_mute_block x2, gather subtracted", g_rg - gather);
++        let g_rm = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.raw_matrix();
++        });
++        report("raw matrix2x2_block, gather subtracted", g_rm - gather);
++        let g_rfm = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.raw_fader_matrix();
++        });
++        report("raw fader_matrix_block, gather subtracted", g_rfm - gather);
++        let g_gen = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.raw_matrix_general();
++        });
++        report(
++            "select-free matrix (identity-free bank), gather subtracted",
++            g_gen - gather,
++        );
++        let g_sw = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.raw_matrix_swapped();
++        });
++        report(
++            "matrix with swapped stores, gather subtracted",
++            g_sw - gather,
++        );
++        let chain_general = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.input();
++            row.fader();
++            row.raw_matrix_general();
++            row.fold();
++        });
++        report(
++            "gather, input, fader, select-free matrix, fold",
++            chain_general,
++        );
++        let fold = time_min(BATCHES, PER_BATCH, || row.fold());
++        report("fold (transpose + route + accumulate)", fold);
++        let fold_fm = time_min(BATCHES, PER_BATCH, || row.fold_with_fader_matrix());
++        report("fold with fader+matrix inside", fold_fm);
++        let chain = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.input();
++            row.fader();
++            row.matrix();
++            row.fold();
++        });
++        report("today's chain: gather, input, fader, matrix, fold", chain);
++        let chain_pair = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.input();
++            row.fused_fader_matrix();
++            row.fold();
++        });
++        report("paired: gather, input, fader+matrix, fold", chain_pair);
++        let chain_fold = time_min(BATCHES, PER_BATCH, || {
++            row.gather();
++            row.input();
++            row.fold_with_fader_matrix();
++        });
++        report("gather, input, fold{fader+matrix}", chain_fold);
++    }
++    let _ = BuiltinLaneSelector::Both;
++}
++
++/// Ramp cost: every lane of every bank mid-ramp for the whole measurement (window 2^23 samples),
++/// against the same banks settled.
++#[test]
++#[ignore = "measurement harness"]
++fn ramps() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let report = |name: &str, ns: f64| {
++        println!(
++            "  {:<62} {:>8.0} ns {:>8.0} cycles/block {:>6.0} cycles/bank",
++            name,
++            ns,
++            ns * hz / 1e9,
++            ns * hz / 1e9 / BANKS as f64,
++        );
++    };
++    let mut row = Row::new();
++    let mut ramping = Row::new();
++    for (bank, b) in ramping.banks.iter_mut().enumerate() {
++        for lane in 0..W {
++            let t = (bank * W + lane) as u32;
++            b.fader
++                .set_fader_db(lane, BuiltinLaneSelector::Both, -12.0 + unit(t), 1 << 23)
++                .expect("fader");
++            b.matrix
++                .set_target_smoothed(
++                    lane,
++                    pan_matrix(-0.5 + 0.1 * unit(t + 9), 0.3).expect("pan"),
++                    1 << 23,
++                )
++                .expect("matrix");
++        }
++    }
++    const BATCHES: usize = 30;
++    const PER_BATCH: usize = 200;
++    for repeat in 0..3 {
++        println!("repeat {repeat}:");
++        let gather = time_min(BATCHES, PER_BATCH, || row.gather());
++        for (name, rows) in [("settled", &mut row), ("ramping", &mut ramping)] {
++            let f = time_min(BATCHES, PER_BATCH, || {
++                rows.gather();
++                rows.fader();
++            });
++            report(
++                &format!("{name}: fader bank, gather subtracted"),
++                f - gather,
++            );
++            let m = time_min(BATCHES, PER_BATCH, || {
++                rows.gather();
++                rows.matrix();
++            });
++            report(
++                &format!("{name}: matrix bank, gather subtracted"),
++                m - gather,
++            );
++        }
++    }
++}
+-- 
+2.43.0
+
