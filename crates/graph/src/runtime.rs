@@ -15067,6 +15067,11 @@ mod tests {
         DelayedEdge,
         /// `K`'s input feeds a submix, whose route feeds the Output (clause (b')).
         SubmixReader,
+        /// `K`'s input feeds its bound `PostFader`, a processor ([`ScalarTilt`]) that runs in place
+        /// over the input's buffer, and the fader's route feeds the Output. The Output's input is
+        /// then the claim's own slot, holding the fader's words (clause (b'): the reader is the
+        /// fader, not a retired route).
+        BoundStage,
         /// `K`'s edge into its own route carries a compensation delay: the route is staged, not in
         /// place, so issue #926's fold declines outright and every claim keeps the copy.
         RouteEdgeDelayed,
@@ -15081,7 +15086,7 @@ mod tests {
     }
 
     impl RingShape {
-        const ALL: [Self; 11] = [
+        const ALL: [Self; 12] = [
             Self::Plain,
             Self::FoldDeclined,
             Self::TrackDelayed,
@@ -15090,6 +15095,7 @@ mod tests {
             Self::SendTap,
             Self::DelayedEdge,
             Self::SubmixReader,
+            Self::BoundStage,
             Self::RouteEdgeDelayed,
             Self::LateInput,
             Self::DeadClaim,
@@ -15209,7 +15215,10 @@ mod tests {
         };
         let bound_fader = matches!(
             shape,
-            RingShape::SendTap | RingShape::DelayedEdge | RingShape::DeadClaim
+            RingShape::SendTap
+                | RingShape::DelayedEdge
+                | RingShape::DeadClaim
+                | RingShape::BoundStage
         );
         for track in 0..RING_TRACKS {
             let input = stage(track, TrackStage::Input);
@@ -15239,7 +15248,7 @@ mod tests {
                     ));
                     nodes.push(fader.clone());
                     route(track_route(track), &fader, &output, &mut nodes, &mut edges);
-                    if shape != RingShape::DelayedEdge {
+                    if matches!(shape, RingShape::SendTap | RingShape::DeadClaim) {
                         route("sendroute".to_owned(), &input, &bus, &mut nodes, &mut edges);
                         route("busroute".to_owned(), &bus, &output, &mut nodes, &mut edges);
                         nodes.push(bus.clone());
@@ -15449,7 +15458,7 @@ mod tests {
         ];
         match shape {
             RingShape::ObservedInput => observers.push(meter(stage(special, TrackStage::Input), 1)),
-            RingShape::ObservedAlias => observers.push(meter(fader, 1)),
+            RingShape::ObservedAlias => observers.push(meter(fader.clone(), 1)),
             _ => {}
         }
         let source_set = crate::GraphPreparedSourceSet::new(
@@ -15470,7 +15479,16 @@ mod tests {
             plan,
             crate::GraphRuntimeBindings {
                 envelope,
-                nodes: bound.into_iter().map(GraphNodeBinding::identity).collect(),
+                nodes: bound
+                    .into_iter()
+                    .map(|node| {
+                        if shape == RingShape::BoundStage && node == fader {
+                            GraphNodeBinding::new(node, Box::new(ScalarTilt))
+                        } else {
+                            GraphNodeBinding::identity(node)
+                        }
+                    })
+                    .collect(),
                 observers,
             },
             source_set,
@@ -15486,7 +15504,7 @@ mod tests {
     /// the copy was the only path of a bankless plan). Equal pairs are expected: a declined fold
     /// is issue #926's class A, the two observed shapes meter the same words, and the dead claim
     /// contributes nothing.
-    const RING_PRE_CHANGE: [(RingShape, u64); 11] = [
+    const RING_PRE_CHANGE: [(RingShape, u64); 12] = [
         (RingShape::Plain, 0xf2d8_ff22_1c55_f760),
         (RingShape::FoldDeclined, 0xf2d8_ff22_1c55_f760),
         (RingShape::TrackDelayed, 0x75f7_f01f_6f68_5c7e),
@@ -15495,6 +15513,7 @@ mod tests {
         (RingShape::SendTap, 0xfeac_93e4_a545_cd95),
         (RingShape::DelayedEdge, 0xf6ae_27a3_c2f2_9571),
         (RingShape::SubmixReader, 0xa8e2_329f_9960_1a18),
+        (RingShape::BoundStage, 0xa490_bc87_d515_7d79),
         (RingShape::RouteEdgeDelayed, 0xb08a_7a66_19e1_9459),
         (RingShape::LateInput, 0x98a4_f2f7_67bb_628b),
         (RingShape::DeadClaim, 0xfeac_93e4_a545_cd95),
@@ -15831,7 +15850,8 @@ mod tests {
     /// Per [`RingShape`], at frames `{1, 7, 16, 128}` ([`assert_ring_shape`]): the brief's three --
     /// a send tap reader ([`RingShape::SendTap`]), a delayed edge ([`RingShape::DelayedEdge`]) and a
     /// submix reader ([`RingShape::SubmixReader`]) -- each copy track `K`'s claim alone (one copy
-    /// per block) while the other sixty-three are read in place. Then the other clauses: a
+    /// per block) while the other sixty-three are read in place, and so does a bound stage running
+    /// in place over the input ([`RingShape::BoundStage`]). Then the other clauses: a
     /// `TrackDelay` input (a), an observed input and an observed alias of it (c), and a late input
     /// whose slot an earlier op overwrites (e), each copying `K` alone; a delay on `K`'s own route
     /// edge and a declined Output fold, where no input is read in place at all because there is no
