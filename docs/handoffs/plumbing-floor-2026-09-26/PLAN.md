@@ -1,5 +1,15 @@
 # Plumbing-floor cycle plan (2026-09-26)
 
+## Issue numbers
+
+| issue | draft slug | title |
+|---|---|---|
+| #925 | lower-identity-bound-track-stages-as-aliases | Lower identity-bound track stages as aliases |
+| #926 | fuse-in-place-routes-into-the-output-reduction-in-pairs | Fuse in-place routes into the Output reduction in pairs |
+| #927 | read-plain-strip-sources-in-place-from-the-played-transfer-block | Read plain-strip sources in place from the played transfer block |
+| #928 | add-a-driver-fed-plumbing-row-to-the-console-benchmark | Add a driver-fed plumbing row to the console benchmark |
+
+
 Owner goal, verbatim: *"Let's work on the no-effects plumbing. The goal is still to get that to
 theoretical floor."* The row is `sixty_four_track_plumbing_only` (`tools/bench/src/console.rs`;
 `tools/console-workload/src/lib.rs:242`). This cycle started from a **measured** breakdown, not a
