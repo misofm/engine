@@ -2074,6 +2074,138 @@ mod tests {
         );
     }
 
+    /// Issue #936 gate 1: the executor dispatches only the units that do work.
+    ///
+    /// Both plumbing rows bind the same sixty-five units, sixty-four track inputs and the Output
+    /// op (the census, `unit_eligibility`, is unchanged by the issue). On the bound-feed row every
+    /// input is a host processor (`NodeKind::Bound`) that writes its buffer, so all sixty-five are
+    /// dispatched every block. On the driver-fed row every input is a claim the fused Output reads
+    /// in place (issue #927): a plain, unobserved `SourceInput` op whose dispatch would return at
+    /// once, which bind leaves out of the dispatched-unit table. So the loop dispatches the Output
+    /// op alone, once per block (`graph::test_only_unit_dispatches`, reset before every block),
+    /// and the row still renders the bound row's bits (gate 4,
+    /// `the_driver_fed_plumbing_row_renders_the_bound_rows_bits`).
+    #[test]
+    fn the_driver_fed_plumbing_row_dispatches_only_its_output_unit() {
+        const BLOCKS: u64 = 64;
+        for (workload, dispatched) in [
+            (Workload::SixtyFourTrackPlumbingRing, 1_u64),
+            (Workload::SixtyFourTrackPlumbingOnly, 65),
+        ] {
+            let mut runtime = SessionRuntime::new(workload);
+            assert_eq!(
+                runtime.unit_eligibility().len(),
+                65,
+                "{}: the census keeps every unit",
+                workload.kind()
+            );
+            for block in 0..BLOCKS {
+                graph::test_only_unit_dispatch_reset();
+                runtime.render(block).expect("console render");
+                assert_eq!(
+                    graph::test_only_unit_dispatches(),
+                    dispatched,
+                    "{}, block {block}: units dispatched",
+                    workload.kind()
+                );
+            }
+        }
+    }
+
+    /// Issue #936 gate 5: on the driver-fed plumbing row, the runtime metadata the compile charges
+    /// grows by exactly the byte lengths it charges for the executor's two bind-sized tables, and
+    /// the tables the row binds fit in them.
+    ///
+    /// The builtins-less compile prepares no effect, bank or scalar owner, so the retained
+    /// estimate's graph metadata exceeds the semantic estimate's by exactly the runtime metadata,
+    /// which is recomputed here from the compile's own inputs: one emitted op per scheduled node
+    /// and one response owner per track (its id, `input-filters` and
+    /// `miso.builtin.input-filters`). That metadata is the terms it carried before the issue --
+    /// the split-table field, the per-op layout delta, the observation state and the response
+    /// owners, none of which the issue moved (`graph`'s
+    /// `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow` pins that the executor's
+    /// layout witnesses carry the new table) -- plus the two tables, each at one entry per emitted
+    /// op. The row binds one dispatched unit (4 bytes) and copies no claim.
+    #[test]
+    fn the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables() {
+        let workload = Workload::SixtyFourTrackPlumbingRing;
+        let model = console_model(workload);
+        let session = compile_session(&model, compile_caps()).expect("compiled console session");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+            .expect("prepared console effects");
+        let Ok(artifact) = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: Backend::current(),
+            plan_id: PLAN_ID,
+            effects,
+            caps: graph_caps(),
+        }) else {
+            panic!("builtins-less console graph");
+        };
+        let emitted = artifact
+            .graph
+            .dependency_levels
+            .iter()
+            .map(|level| level.nodes.len() as u64)
+            .sum::<u64>();
+        let fixed = ["input-filters".len(), "miso.builtin.input-filters".len()];
+        let (strings, largest) =
+            model
+                .tracks
+                .iter()
+                .fold((0_u64, 0_u64), |(total, largest), track| {
+                    let id = track.id.as_str().len() as u64;
+                    (
+                        total + id + (fixed[0] + fixed[1]) as u64,
+                        largest.max(id).max(fixed[0] as u64).max(fixed[1] as u64),
+                    )
+                });
+        let resource =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
+                emitted,
+                model.tracks.len() as u64,
+                strings,
+                largest,
+            )
+            .expect("runtime metadata");
+        let report = &artifact.report;
+        assert_eq!(
+            report.estimate.graph_metadata_bytes - report.semantic_estimate.graph_metadata_bytes,
+            resource.total_bytes,
+            "the runtime metadata is the row's only charge past the semantic estimate"
+        );
+        let tables = [
+            emitted * core::mem::size_of::<u32>() as u64,
+            emitted * core::mem::size_of::<(usize, u32)>() as u64,
+        ];
+        assert_eq!(
+            [
+                resource.active_unit_table_bytes,
+                resource.source_input_table_bytes
+            ],
+            tables,
+            "each table at one entry per emitted op"
+        );
+        let before = resource.runtime_field_bytes
+            + resource.emitted_op_layout_delta_bytes * emitted
+            + resource.observation_runtime_state_bytes
+            + resource.response_binding_table_bytes
+            + resource.response_binding_string_bytes;
+        assert_eq!(
+            resource.total_bytes,
+            before + tables[0] + tables[1],
+            "the charge grows by exactly the two tables"
+        );
+        let _ring = SessionRuntime::new(workload);
+        let bound = graph::test_only_executor_table_bytes();
+        assert_eq!(
+            bound,
+            [core::mem::size_of::<u32>() as u64, 0],
+            "the row dispatches one unit and copies no claim"
+        );
+        assert!(bound[0] <= tables[0] && bound[1] <= tables[1]);
+    }
+
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
     /// exactly the words `copy_track_input` copies, claim by claim, and both are the claimed
     /// track's frozen block through that track's declared channel mapping.
