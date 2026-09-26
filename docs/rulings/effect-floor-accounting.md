@@ -500,7 +500,13 @@ The row *below* it — `sixty_four_track_plumbing_only`, added by the strip roun
 that prepares nothing: `prepare_session_builtins` is never called for it, so the graph is built
 through `GraphCompiler::compile`, every `TrackStage` lowers to an elided alias, and no bank chain is
 bound at all (`[chains, slots] == [0, 0]`, and therefore no planar/AoSoA round-trip and no route
-fold — the chain-shape gate pins all three). Per lane-sample:
+fold — the chain-shape gate pins all three). *Correction, 2026-09-26 (issue #925):* the "elided
+alias" clause was false until #925. The builtins-less compile listed `PostInputBuiltins`,
+`PostFader` and `PostMatrix` as required bindings, the harness bound them to the identity, and each
+lowered to an identity op: two block copies and one do-nothing dispatch per track, 192 of the
+row's 321 units. Since #925 the builtins-less compile leaves them unbound and they lower as aliases,
+so the row's chain is `Input -> Route -> Output` (129 units) and the sentence holds. Per
+lane-sample:
 
 | stage | lane-ops |
 |---|---:|

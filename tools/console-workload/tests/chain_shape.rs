@@ -873,6 +873,38 @@ fn the_plumbing_row_binds_no_strip_at_all() {
     );
 }
 
+/// The plumbing row is `Input -> Route -> Output` per track, and renders the bits it rendered
+/// when every track also ran three identity stages (issue #925).
+///
+/// `GraphCompiler::compile` lists no builtin stage as bindable, so a builtins-less plan's
+/// `PostInputBuiltins`, `PostFader` and `PostMatrix` lower as aliases of the input's buffer
+/// instead of two identity copies and a dispatch that computed nothing. The row's units fall from
+/// 321 (`64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output`) to 129 (`64 bound,
+/// 64 route, 1 output`), and the census from `[257, 321]` to `[65, 129]`: the 192 identity units
+/// it loses were all eligible, vacuously. Class A: the digest over 64 blocks is pinned at the
+/// value the base commit of #925 (`3c93469d`) renders, before any of this existed.
+#[test]
+fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
+    const BASE_DIGEST: &str = "57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800";
+    let (digest, shape, transposes) = render(
+        Workload::SixtyFourTrackPlumbingOnly,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    assert_eq!(digest, BASE_DIGEST, "eliding identity stages moved a bit");
+    assert_eq!(shape, [0, 0], "the plumbing row binds no bank");
+    assert_eq!(transposes, 0);
+    let runtime = SessionRuntime::build(Workload::SixtyFourTrackPlumbingOnly, PlanConfig::BASELINE);
+    let rows = runtime.unit_eligibility();
+    assert_eq!(
+        rows.len(),
+        129,
+        "64 bound inputs, 64 routes and the output: no identity-stage unit is left"
+    );
+    assert!(rows.iter().all(|row| !row.banked && row.lanes() == 1));
+    assert_eq!(runtime.symmetry_counters(), [65, 129]);
+}
+
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
 /// so.
 ///
