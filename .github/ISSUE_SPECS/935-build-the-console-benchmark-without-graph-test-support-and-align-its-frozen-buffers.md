@@ -252,3 +252,78 @@ current = warm = simd4 on that row.
    this change does not touch the host. The runner's frozen `CARGO_PROFILE_RELEASE_*` environment
    was not applied to these builds, so the guest hashes above are informational before/after
    evidence, not runner hashes.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol (Claude Opus 5.5), adversarial review of `git diff 14f2917b..e2569f58`. I re-ran
+every gate myself in this worktree. I did not edit the implementation and ran no timed benchmark.
+
+### Gates, re-run independently
+
+| # | What was re-run | Result |
+|---|---|---|
+| 1 | `cargo tree --locked -p bench -e features -i graph` with `--target x86_64-unknown-linux-gnu` and `--target all` | 0 `test-support` (base `14f2917b`: 1, parent `bench`). No crate in bench's whole feature tree enables any `test-support` (0 over `--target all`) |
+| 1 | The runner's exact build (`scripts/run-console-benchmark.sh:428`: `cargo build --locked --release -p bench` alone, under its frozen `CARGO_PROFILE_RELEASE_*` env) | Builds. Every `target/release` graph fingerprint records `features: []`. No `test_only`/`TEST_ONLY` symbol or string in the binary. The runner selects `bench` only, so no other workspace member's features unify in. The `test-support` that `console-workload` needs stays under its `[dev-dependencies]` (`tools/console-workload/Cargo.toml:34`), which Cargo never resolves for a dependent |
+| 1 | `cargo test --locked -p bench` | 64/64. Nothing loses a test-only API: `tools/bench` names none and has no `tests/` directory, and console-workload's 4 unit and 35 integration tests (2 ignored) still build with `graph/test-support` through the dev-dependency |
+| 2 | `cargo test -p console-workload` | Passes. **Mutation:** with `align(64)` dropped from both types *and* the two `align_of` asserts removed, the pointer checks alone fail (`ring claim 0` at 32 mod 64). The test catches the defect, not just the layout |
+| 3 | My own sweep: a scratch `tools/bench/tests` test, deleted afterwards, built with bench's own feature resolution. It covers all 17 rows (no warmup, row warmup, `Simd4`) and the four facility arms. It ran against the base files (graph `test-support` on, old layout) and against HEAD | 21/21 lines identical. The values match the attempt 1 table. `BASE_DIGEST` passes in `chain_shape.rs` |
+| 4 | simd128 guest release build | Module hash reproduces `41288cd2…72ade2` |
+| 4 | Other wasm builds: the `nightly.yml` check form, a scalar-guest check, the `--cfg miso_wasm_simd8` check, and the `wasm-console` release build | All pass. `wasm-console` has 0 tests |
+| 4 | Wasm host refusals and `scripts/test-wasm-console-benchmark.sh` | All four refusals exit 1. The validator suite passes with 0/0 invocations |
+| 4 | Search for a committed wasm digest pin | None in the scripts, validators or sources. No pin moved |
+| 5 | Preflight run exactly as checked in | Refuses at `scripts/operator/preflight-console-benchmark.sh:102`. This is not caused by this change: all 41 of its arms have occupied artifact directories |
+| 5 | Preflight with `artifacts/issue149` set aside, then restored | PASS, `workload_launches: 0`. `binary_sha256` `a6d1944b…1b1d` reproduces the attempt 1 value. Afterwards the tree is clean, and the directory's 3 tracked files match HEAD (`git diff --quiet HEAD -- artifacts`) |
+| 6 | `cargo fmt --all --check`, workspace clippy (`--all-targets --all-features -D warnings`), `-p bench -p console-workload --all-targets` clippy, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`, and the realtime, bench and workspace policy scripts | All pass |
+
+**Scope.** Three paths changed: `tools/bench/Cargo.toml`, `tools/console-workload/src/lib.rs`, and
+this spec. `Cargo.lock` is unchanged. No engine source changed, and the diff adds no `unsafe`. The
+new names carry no version suffix. The `REALTIME_POLICY` region is untouched.
+
+**Alignment.** The alignment is real and safe on every path.
+- Bound feed: `bound_track_source` (`lib.rs:1799`) returns a `Box<FrozenGraphSource>`. It
+  unsize-coerces into the `Box<dyn GraphRuntimeProcessor>` that `GraphNodeBinding::new` stores,
+  so the allocation stays the same one.
+- Driver claims: `Box<[FrozenGraphSource]>` (`lib.rs:1843`) is collected through a `Vec` whose
+  layout carries align 64. `Box::new(driver)` moves only the fat pointer.
+- Render path: the harness never copies the frozen words into another container. The bound
+  processor copies them into the engine's arena, and the driver lends them in place. The only
+  unaligned `Vec<f32>` left, `SourceSignal::block`, is build-time only.
+- Sizes: `size_of` stays 1024 bytes, so `resource_report` is unchanged.
+- Output: `Box<OutputPlanes>` (`lib.rs:1113`) lends the same 256-word slice in the same order.
+
+### Findings, most severe first
+
+None blocks the verdict.
+
+1. **Low, coordinator action.** Gate 5 cannot pass for anyone as the preflight is checked in.
+   - All 41 arms refuse at `preflight-console-benchmark.sh:102` because their artifact
+     directories are occupied.
+   - The preflight also lacks 8 of the runner's arms: `--pure-path` and `--pure-path-baseline`,
+     `--copy-removal`, `--copy-removal-baseline` and `--copy-removal-without-920`,
+     `--plumbing-floor` and `--plumbing-floor-baseline`, and `--issue388-lane4-evidence`.
+
+   The gate is met in substance, and I reproduced it. Before the timed run, the coordinator must
+   register the batch's arm in the preflight and run it there.
+2. **Low, accepted.** The gate 2 checks for the ring row (`lib.rs:2253`) and the bound row
+   (`lib.rs:2272`) inspect instances rebuilt through the product constructors, not the plan's own
+   instances. The output planes, by contrast, are the real runtimes'.
+
+   This satisfies gate 2, for three reasons:
+   - The asserted `align_of`, `offset_of` and `size_of` facts, together with the allocator
+     contract, fix every heap instance of the type.
+   - The plan's instances are exactly such instances, built by the same two functions
+     (`lib.rs:1019` and `lib.rs:1821`).
+   - Reaching the plan's own instances would need a `graph` test hook, which is outside the
+     authorized paths.
+
+   The remaining gap is regression coverage only: a later `build_full` or `source_binding` that
+   stops using those constructors would escape the test.
+3. **Low, coordinator action at merge.** Merging into `origin/main` gives an add/add conflict on
+   this spec. `git merge-tree` shows it. `65671c21` (#939) added the same brief about 2 minutes
+   after the branch was cut. The branch's copy is a strict superset, so take the branch version.
+4. **Informational.** Two small departures, neither needing action:
+   - The test uses `.is_multiple_of(64)` rather than the literal `% 64 == 0`. The two are
+     equivalent, and clippy under `-D warnings` requires the method.
+   - Three other bench commands, `rack.rs:577`, `builtins.rs:541` and `input_symmetry.rs:217`,
+     still render into unaligned `Vec`s. They are not the console benchmark and are outside this
+     brief.
